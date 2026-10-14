@@ -4,6 +4,7 @@
 //! enrichment. Additionally, wrappers for R are provided
 
 pub mod blitzgsea;
+#[cfg(feature = "r")]
 pub mod enrichment_r_wrapper;
 pub mod gsea;
 pub mod gsva;

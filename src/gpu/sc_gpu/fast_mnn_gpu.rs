@@ -3,7 +3,7 @@
 //! device; centring, MNN pairing and the tricube correction are the CPU code,
 //! shared via `fast_mnn_embedding`.
 
-use cubecl::Runtime;
+use cubecl::Device;
 use faer::{Mat, MatRef};
 
 use crate::gpu::sc_gpu::knn_gpu::{KnnParamsGpu, dispatch_knn_query_gpu};
@@ -82,16 +82,16 @@ impl Default for FastMnnParamsGpu {
 /// ### References
 ///
 /// Haghverdi, et al., Nat Biotechnol, 2018
-pub fn fast_mnn_gpu<R: Runtime>(
+pub fn fast_mnn_gpu(
     embd: MatRef<f32>,
     batch_labels: &[usize],
     params: &FastMnnParamsGpu,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors>
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let verbosity = parse_verbosity_level(verbose);
 
@@ -100,7 +100,7 @@ where
     }
 
     let search = |query: MatRef<f32>, reference: MatRef<f32>, k: usize| -> ScKnnResults {
-        let (indices, dist) = dispatch_knn_query_gpu::<R>(
+        let (indices, dist) = dispatch_knn_query_gpu(
             reference,
             query,
             k,
@@ -134,12 +134,12 @@ where
 mod tests {
     use super::*;
     use crate::single_cell::sc_batch_correction::batch_utils::batch_knn_search;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -178,8 +178,15 @@ mod tests {
         let (embd, labels) = batched_data(900, 16, 3);
         let params = FastMnnParamsGpu::new();
 
-        let gpu =
-            fast_mnn_gpu::<WgpuRuntime>(embd.as_ref(), &labels, &params, 42, device, 0).unwrap();
+        let gpu = fast_mnn_gpu(
+            embd.as_ref(),
+            &labels,
+            &params,
+            42,
+            device.clone().into(),
+            0,
+        )
+        .unwrap();
 
         let mut cpu_knn = KnnParams::new();
         cpu_knn.knn_method = "exhaustive".to_string();
@@ -215,12 +222,12 @@ mod tests {
 
         let (embd, _) = batched_data(60, 8, 1);
         let labels = vec![0; 60];
-        let res = fast_mnn_gpu::<WgpuRuntime>(
+        let res = fast_mnn_gpu(
             embd.as_ref(),
             &labels,
             &FastMnnParamsGpu::new(),
             42,
-            device,
+            device.clone().into(),
             0,
         );
         assert!(matches!(

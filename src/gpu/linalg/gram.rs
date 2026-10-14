@@ -224,8 +224,8 @@ pub fn gram_symmetric<F: Float>(
         r_end = n;
     }
 
-    let mut sa = SharedMemory::<F>::new((GRAM_BK * GRAM_SMEM_STRIDE) as usize);
-    let mut sb = SharedMemory::<F>::new((GRAM_BK * GRAM_SMEM_STRIDE) as usize);
+    let mut sa = Shared::<[F]>::new_slice((GRAM_BK * GRAM_SMEM_STRIDE) as usize);
+    let mut sb = Shared::<[F]>::new_slice((GRAM_BK * GRAM_SMEM_STRIDE) as usize);
 
     let mut acc = Array::<F>::new((GRAM_RT * GRAM_RT) as usize);
     #[unroll]
@@ -371,15 +371,14 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, total: u32
 ///
 /// * `CubeclUtils` if either grid is over the device limit, or the partials
 ///   buffer busts the per-binding size limit.
-pub fn gram_aat<R, F>(
-    client: &ComputeClient<R>,
-    a: &GpuTensor<R, F>,
-    g: &GpuTensor<R, F>,
+pub fn gram_aat<F>(
+    client: &Client,
+    a: &GpuTensor<F>,
+    g: &GpuTensor<F>,
     n: usize,
     d: usize,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -391,13 +390,13 @@ where
     // the output in place, which skips both the partials allocation and the
     // reduce launch.
     let partials = (n_chunks > 1)
-        .then(|| GpuTensor::<R, F>::empty(vec![n_chunks, d, d], client))
+        .then(|| GpuTensor::<F>::empty(vec![n_chunks, d, d], client))
         .transpose()?;
     let target = partials.as_ref().unwrap_or(g);
 
     let count = checked_cube_count("gram_symmetric", tiles, tiles, n_chunks as u32, &limits)?;
     unsafe {
-        gram_symmetric::launch_unchecked::<F, R>(
+        gram_symmetric::launch_unchecked::<F>(
             client,
             count,
             CubeDim::new_1d(GRAM_THREADS),
@@ -414,7 +413,7 @@ where
         let (gx, gy) = grid_2d(total.div_ceil(GRAM_REDUCE_WG), &limits)?;
         let count = checked_cube_count("gram_reduce", gx, gy, 1, &limits)?;
         unsafe {
-            gram_reduce::launch_unchecked::<F, R>(
+            gram_reduce::launch_unchecked::<F>(
                 client,
                 count,
                 CubeDim::new_1d(GRAM_REDUCE_WG),
@@ -436,14 +435,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -482,13 +481,13 @@ mod tests {
     /// Run `gram_aat` and read the result back.
     fn run(n: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
         let device = try_device().expect("no device");
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let a_host = build_a(n, d);
-        let a = GpuTensor::<WgpuRuntime, f32>::from_slice(&a_host, vec![d, n], &client).unwrap();
-        let g = GpuTensor::<WgpuRuntime, f32>::empty(vec![d, d], &client).unwrap();
+        let a = GpuTensor::<f32>::from_slice(&a_host, vec![d, n], &client).unwrap();
+        let g = GpuTensor::<f32>::empty(vec![d, d], &client).unwrap();
 
-        gram_aat::<WgpuRuntime, f32>(&client, &a, &g, n, d).unwrap();
+        gram_aat::<f32>(&client, &a, &g, n, d).unwrap();
 
         let got = g.read(&client).unwrap();
         (got, gram_host(&a_host, n, d))
@@ -612,7 +611,12 @@ mod tests {
     // client surfaces an unrelated CallError.
     #[test]
     fn test_gram_reduce_grid_within_dispatch_limit() {
-        let (max_x, max_y, _) = WgpuRuntime::max_cube_count();
+        // WebGPU's portable per-dimension dispatch limit.
+        let (max_x, max_y, _) = (
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+        );
 
         // The threshold is real, not hypothetical.
         assert!((20_000u32 * 20_000).div_ceil(GRAM_REDUCE_WG) > max_x);
@@ -632,7 +636,7 @@ mod tests {
     #[test]
     fn test_gram_shared_memory_within_budget() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
         let budget = client.properties().hardware.max_shared_memory_size;
 
         let footprint = 2 * GRAM_BK as usize * GRAM_SMEM_STRIDE as usize * size_of::<f32>();

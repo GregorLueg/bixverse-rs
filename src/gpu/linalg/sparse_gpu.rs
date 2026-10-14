@@ -6,7 +6,6 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
-use cubecl::Runtime;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use rayon::prelude::*;
@@ -33,18 +32,17 @@ const CSR_BUILD_BUDGET_BYTES: usize = 256 << 20;
 
 /// GPU version of CompressedSparseData. Same general idea as
 /// [CompressedSparseData2] with a single data layer.
-pub struct GpuCompressedSparseData<R, F>
+pub struct GpuCompressedSparseData<F>
 where
-    R: Runtime,
     F: cubecl::CubeElement + cubecl::prelude::Numeric,
 {
     /// Indptr of the data. Stored as `u32`
-    pub indptr: GpuTensor<R, u32>,
+    pub indptr: GpuTensor<u32>,
     /// Indices of the data. Stored as `u32`
-    pub indices: GpuTensor<R, u32>,
+    pub indices: GpuTensor<u32>,
     /// Values of the data. Can be `u32` for raw counts or `fp32` for normalised
     /// counts.
-    pub values: GpuTensor<R, F>,
+    pub values: GpuTensor<F>,
     /// Enum defining if the data is stored in CSC or CSR, see
     /// [CompressedSparseFormat]
     pub cs_type: CompressedSparseFormat,
@@ -55,9 +53,8 @@ where
 }
 
 /// Clone implementation for the [GpuCompressedSparseData]
-impl<R, F> Clone for GpuCompressedSparseData<R, F>
+impl<F> Clone for GpuCompressedSparseData<F>
 where
-    R: Runtime,
     F: cubecl::CubeElement + cubecl::prelude::Numeric,
 {
     fn clone(&self) -> Self {
@@ -72,9 +69,8 @@ where
     }
 }
 
-impl<R, F> GpuCompressedSparseData<R, F>
+impl<F> GpuCompressedSparseData<F>
 where
-    R: Runtime,
     F: cubecl::CubeElement + cubecl::prelude::Numeric,
 {
     /// Upload pre-built host parts. Use when values have already been
@@ -100,7 +96,7 @@ where
         indptr: &[u32],
         cs_type: CompressedSparseFormat,
         shape: (usize, usize),
-        client: &ComputeClient<R>,
+        client: &Client,
     ) -> Result<Self, BixverseErrors> {
         let nnz = values.len();
         Ok(Self {
@@ -130,7 +126,7 @@ where
     pub fn from_compressed_sparse_data_2<T, U>(
         src: &CompressedSparseData2<T, U>,
         use_second_layer: bool,
-        client: &ComputeClient<R>,
+        client: &Client,
     ) -> Result<Self, BixverseErrors>
     where
         T: BixverseNumeric + Into<F>,
@@ -425,14 +421,13 @@ fn csr_indptr_from_csc_rows(row_idx: &[u32], n_rows: usize) -> Vec<u32> {
 /// * `SparseLayoutMismatch` if `csc` is not CSC.
 /// * `CubeclUtils` if a buffer busts the per-binding size limit or a grid is
 ///   over the device limit.
-pub fn csc_to_csr_gpu<R, F>(
-    csc: &GpuCompressedSparseData<R, F>,
+pub fn csc_to_csr_gpu<F>(
+    csc: &GpuCompressedSparseData<F>,
     host_col_indptr: &[u32],
     host_row_idx: &[u32],
-    client: &ComputeClient<R>,
-) -> Result<GpuCompressedSparseData<R, F>, BixverseErrors>
+    client: &Client,
+) -> Result<GpuCompressedSparseData<F>, BixverseErrors>
 where
-    R: Runtime,
     F: cubecl::CubeElement + Numeric,
 {
     if !csc.cs_type.is_csc() {
@@ -464,30 +459,29 @@ where
 /// ### Returns
 ///
 /// The CSR of A on the device.
-fn csc_to_csr_gpu_grouped<R, F>(
-    csc: &GpuCompressedSparseData<R, F>,
+fn csc_to_csr_gpu_grouped<F>(
+    csc: &GpuCompressedSparseData<F>,
     host_col_indptr: &[u32],
     host_row_idx: &[u32],
     budget_bytes: usize,
-    client: &ComputeClient<R>,
-) -> Result<GpuCompressedSparseData<R, F>, BixverseErrors>
+    client: &Client,
+) -> Result<GpuCompressedSparseData<F>, BixverseErrors>
 where
-    R: Runtime,
     F: cubecl::CubeElement + Numeric,
 {
     let (n, m) = csc.shape;
     let limits = GpuLimits::from_client(client);
 
     let row_ptr = csr_indptr_from_csc_rows(host_row_idx, n);
-    let indptr = GpuTensor::<R, u32>::from_slice(&row_ptr, vec![n + 1], client)?;
-    let cursor = GpuTensor::<R, u32>::from_slice(&row_ptr[..n], vec![n], client)?;
-    let indices = GpuTensor::<R, u32>::empty(vec![csc.nnz], client)?;
-    let values = GpuTensor::<R, F>::empty(vec![csc.nnz], client)?;
+    let indptr = GpuTensor::<u32>::from_slice(&row_ptr, vec![n + 1], client)?;
+    let cursor = GpuTensor::<u32>::from_slice(&row_ptr[..n], vec![n], client)?;
+    let indices = GpuTensor::<u32>::empty(vec![csc.nnz], client)?;
+    let values = GpuTensor::<F>::empty(vec![csc.nnz], client)?;
 
     let total_words = m.div_ceil(MASK_BITS);
     let group_words = (budget_bytes / (8 * n.max(1))).clamp(1, total_words.max(1));
-    let mask = GpuTensor::<R, u32>::empty(vec![group_words * n.max(1)], client)?;
-    let base = GpuTensor::<R, u32>::empty(vec![group_words * n.max(1)], client)?;
+    let mask = GpuTensor::<u32>::empty(vec![group_words * n.max(1)], client)?;
+    let base = GpuTensor::<u32>::empty(vec![group_words * n.max(1)], client)?;
     let wg = CubeDim::new_1d(WORKGROUP_256);
 
     for first_word in (0..total_words).step_by(group_words) {
@@ -509,14 +503,14 @@ where
         let row_count = checked_cube_count("csr_rank_rows", rx, ry, 1, &limits)?;
 
         unsafe {
-            csr_zero_masks::launch_unchecked::<R>(
+            csr_zero_masks::launch_unchecked(
                 client,
                 zero_count,
                 wg,
                 mask.clone().into_tensor_arg(),
                 mask_len,
             );
-            csr_mark_columns::launch_unchecked::<R>(
+            csr_mark_columns::launch_unchecked(
                 client,
                 nnz_count.clone(),
                 wg,
@@ -529,7 +523,7 @@ where
                 nnz_len,
                 n as u32,
             );
-            csr_rank_rows::launch_unchecked::<R>(
+            csr_rank_rows::launch_unchecked(
                 client,
                 row_count,
                 wg,
@@ -539,7 +533,7 @@ where
                 n as u32,
                 words as u32,
             );
-            csr_scatter_group::launch_unchecked::<F, R>(
+            csr_scatter_group::launch_unchecked::<F>(
                 client,
                 nnz_count,
                 wg,
@@ -577,12 +571,12 @@ where
 mod tests {
     use super::*;
     use crate::core::math::sparse::transpose_sparse_single_layer;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -592,7 +586,7 @@ mod tests {
     /// under `budget_bytes`, and compare it with the host transpose.
     fn check_csc_to_csr(n: usize, m: usize, budget_bytes: usize) {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let mut values = Vec::new();
         let mut indices = Vec::new();
@@ -616,7 +610,7 @@ mod tests {
         );
         let want = transpose_sparse_single_layer(&csc, true).unwrap();
 
-        let csc_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+        let csc_gpu = GpuCompressedSparseData::<f32>::from_parts(
             &values,
             &indices,
             &indptr,

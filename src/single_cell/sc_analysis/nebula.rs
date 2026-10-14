@@ -166,43 +166,34 @@ fn subject_order(cells_to_keep: &[usize], subject_ids: &[usize]) -> Vec<usize> {
     order
 }
 
-/// Concatenates gene chunks into the gene-major matrix `edge-rs` reads.
+/// Read a gene batch as NEBULA's gene-major `CompressedSparse`.
 ///
-/// The chunks have already been filtered to the cell selection, which remaps
-/// their indices into `0..n_cells` in selection order and leaves them
-/// ascending. So each chunk is a finished CSR row and this is a copy, not a
-/// conversion.
+/// The fused CSC over `(cells, genes)` and a CSR over `(genes, cells)` are the
+/// same three buffers, so this only relabels them.
 ///
 /// ### Params
 ///
-/// * `chunks` - One filtered chunk per gene, in the requested order
-/// * `n_cells` - Number of cells in the selection
+/// * `reader` - Gene-major store
+/// * `genes` - Genes in the batch, in row order
+/// * `cell_set` - Cells to keep, in column order
 ///
 /// ### Returns
 ///
-/// The counts as CSR over `(chunks.len(), n_cells)`.
-fn chunks_to_csr(
-    chunks: &[CscGeneChunk],
-    n_cells: usize,
+/// Raw counts as `f64`, one row per gene.
+fn genes_to_csr<S: SingleCellReading>(
+    reader: &S,
+    genes: &[usize],
+    cell_set: &IndexSet<u32>,
 ) -> Result<CompressedSparse<f64>, BixverseErrors> {
-    let nnz: usize = chunks.iter().map(|c| c.data_raw.len()).sum();
-    let mut data = Vec::with_capacity(nnz);
-    let mut indices = Vec::with_capacity(nnz);
-    let mut indptr = Vec::with_capacity(chunks.len() + 1);
-    indptr.push(0u32);
-
-    for chunk in chunks {
-        data.extend(chunk.data_raw.iter().map(|v| v as f64));
-        indices.extend_from_slice(&chunk.indices);
-        indptr.push(data.len() as u32);
-    }
+    let csc: CompressedSparseData2<f64, f32> =
+        reader.read_genes_sparse(genes, Some(cell_set), &DataLayerReturn::Raw)?;
 
     Ok(CompressedSparse::from_parts(
-        data,
-        indices,
-        indptr,
+        csc.data,
+        csc.indices,
+        csc.indptr,
         SparseFormat::Csr,
-        (chunks.len(), n_cells),
+        (genes.len(), cell_set.len()),
     )?)
 }
 
@@ -414,8 +405,7 @@ where
         let batch_genes = &gene_indices[start..end];
 
         let start_loading = Instant::now();
-        let chunks = gene_reader.read_gene_parallel_filtered(batch_genes, &cell_set)?;
-        let sparse = chunks_to_csr(&chunks, n_cells)?;
+        let sparse = genes_to_csr(gene_reader, batch_genes, &cell_set)?;
         if verbosity.detailed_verbosity() {
             println!("   Loaded batch in: {:.2?}.", start_loading.elapsed());
         }
@@ -441,7 +431,7 @@ where
 
         if let Some(fit) = fit {
             for &row in &fit.gene_index {
-                gene_idx.push(chunks[row].original_index);
+                gene_idx.push(batch_genes[row]);
                 let (_, values) = sparse.outer(row);
                 mean_count.push(values.iter().sum::<f64>() / n_cells as f64);
             }

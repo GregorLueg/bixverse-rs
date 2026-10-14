@@ -13,11 +13,11 @@
 //! HVG selection, doublet simulation, scoring and Otsu thresholding stay on
 //! the CPU and are reused unchanged from the CPU module.
 
+use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use faer::{Mat, concat};
 use indexmap::IndexSet;
-use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::compute_pc_scores;
@@ -228,7 +228,7 @@ fn resolve_oversampling(n_cells: usize, n_genes: usize, no_pcs: usize) -> usize 
 /// returned standard deviations carry the `MIN_GENE_STD` floor, so the
 /// downstream projection divides by the same values the SVD used.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_observed_gpu<R, S>(
+pub fn pca_observed_gpu<S>(
     reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -239,11 +239,10 @@ pub fn pca_observed_gpu<R, S>(
     normalise_variance: bool,
     no_pcs: usize,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<DoubletPcaRes, BixverseErrors>
 where
-    R: Runtime,
     S: SingleCellReading,
 {
     let verbosity = parse_verbosity_level(verbose);
@@ -254,28 +253,19 @@ where
     let n_genes = gene_indices.len();
 
     let start_reading = Instant::now();
-    let mut gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+    let csc = read_hvg_normalised(
+        reader,
+        &cell_set,
+        gene_indices,
+        hvg_library_sizes,
+        target_size,
+        log_transform,
+    )?;
     if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
     let start_prep = Instant::now();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        for (i, &pos) in chunk.indices.iter().enumerate() {
-            let raw_count = chunk.data_raw.get(i) as f32;
-            let lib_size = hvg_library_sizes[pos as usize] as f32;
-            let val = if log_transform {
-                ((raw_count / lib_size) * target_size).ln_1p()
-            } else {
-                (raw_count / lib_size) * target_size
-            };
-            chunk.data_norm[i] = F16::from(half::f16::from_f32(val.clamp(-65504.0, 65504.0)));
-        }
-    });
-
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let real_col_means: Vec<f64> = sparse_csc_column_means(&csc, true, None)?;
 
@@ -303,7 +293,7 @@ where
     let oversampling = resolve_oversampling(n_cells, n_genes, no_pcs);
     let svd_params = RandSvdGpuParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
 
-    let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
+    let svd_res = randomised_sparse_svd_gpu::<f32, f32>(
         csc,
         &col_means,
         &col_stds,
@@ -352,13 +342,13 @@ where
 /// ### Returns
 ///
 /// The simulated doublet scores, `[n_sim, no_pcs]`.
-fn project_sim_gpu<R: Runtime>(
+fn project_sim_gpu(
     sim_chunks: &[CsrCellChunk],
     loadings: &Mat<f32>,
     gene_means: &[f32],
     gene_stds: &[f32],
     mean_center: bool,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<Mat<f32>, BixverseErrors> {
     let n_sim = sim_chunks.len();
     let n_genes = gene_means.len();
@@ -366,7 +356,7 @@ fn project_sim_gpu<R: Runtime>(
 
     let csr = from_cell_chunks::<f32>(sim_chunks, &DataLayerReturn::Norm, n_genes)?;
     let csr_gpu =
-        GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(&csr, true, client)?;
+        GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&csr, true, client)?;
     drop(csr);
 
     // Omega = V / sigma, rowwise. Row-major [n_genes, no_pcs] to match what
@@ -377,22 +367,20 @@ fn project_sim_gpu<R: Runtime>(
             (0..no_pcs).map(move |j| loadings[(g, j)] * inv_sd)
         })
         .collect();
-    let omega_gpu = GpuTensor::<R, f32>::from_slice(&omega, vec![n_genes, no_pcs], client)?;
+    let omega_gpu = GpuTensor::<f32>::from_slice(&omega, vec![n_genes, no_pcs], client)?;
 
     // Centring off means no correction term. `empty` does not zero the
     // buffer, so the uncentred arm has to upload zeros explicitly.
     let c_buf = if mean_center {
-        let c = GpuTensor::<R, f32>::empty(vec![no_pcs], client)?;
-        let mu_gpu = GpuTensor::<R, f32>::from_slice(gene_means, vec![n_genes], client)?;
-        launch_dense_column_weighted_sum::<R, f32>(
-            &mu_gpu, &omega_gpu, &c, n_genes, no_pcs, client,
-        )?;
+        let c = GpuTensor::<f32>::empty(vec![no_pcs], client)?;
+        let mu_gpu = GpuTensor::<f32>::from_slice(gene_means, vec![n_genes], client)?;
+        launch_dense_column_weighted_sum::<f32>(&mu_gpu, &omega_gpu, &c, n_genes, no_pcs, client)?;
         c
     } else {
-        GpuTensor::<R, f32>::from_slice(&vec![0.0f32; no_pcs], vec![no_pcs], client)?
+        GpuTensor::<f32>::from_slice(&vec![0.0f32; no_pcs], vec![no_pcs], client)?
     };
 
-    project_with_correction::<R>(&csr_gpu, &omega_gpu, &c_buf, n_sim, no_pcs, client)
+    project_with_correction(&csr_gpu, &omega_gpu, &c_buf, n_sim, no_pcs, client)
 }
 
 /// Run the SpMM and read the projection back to the host.
@@ -413,21 +401,21 @@ fn project_sim_gpu<R: Runtime>(
 /// ### Returns
 ///
 /// The projected scores, `[n_sim, no_pcs]`.
-fn project_with_correction<R: Runtime>(
-    csr_gpu: &GpuCompressedSparseData<R, f32>,
-    omega_gpu: &GpuTensor<R, f32>,
-    c_buf: &GpuTensor<R, f32>,
+fn project_with_correction(
+    csr_gpu: &GpuCompressedSparseData<f32>,
+    omega_gpu: &GpuTensor<f32>,
+    c_buf: &GpuTensor<f32>,
     n_sim: usize,
     no_pcs: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<Mat<f32>, BixverseErrors> {
     let zero_n = vec![0.0f32; n_sim];
     let zero_s = vec![0.0f32; no_pcs];
-    let row_offsets = GpuTensor::<R, f32>::from_slice(&zero_n, vec![n_sim], client)?;
-    let x_sum = GpuTensor::<R, f32>::from_slice(&zero_s, vec![no_pcs], client)?;
+    let row_offsets = GpuTensor::<f32>::from_slice(&zero_n, vec![n_sim], client)?;
+    let x_sum = GpuTensor::<f32>::from_slice(&zero_s, vec![no_pcs], client)?;
 
-    let y_buf = GpuTensor::<R, f32>::empty(vec![n_sim, no_pcs], client)?;
-    launch_spmm_csr_forward::<R, f32, f32>(
+    let y_buf = GpuTensor::<f32>::empty(vec![n_sim, no_pcs], client)?;
+    launch_spmm_csr_forward::<f32, f32>(
         csr_gpu,
         omega_gpu,
         c_buf,
@@ -485,20 +473,19 @@ fn project_with_correction<R: Runtime>(
 ///
 /// Wolock, et al., Cell Systems, 2019
 #[allow(clippy::too_many_arguments)]
-pub fn run_scrublet_gpu<R, S>(
+pub fn run_scrublet_gpu<S>(
     gene_reader: &S,
     cell_reader: &S,
     params: &ScrubletParamsGpu,
     cell_indices: &[usize],
     streaming: bool,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
     return_combined_pca: bool,
     return_pairs: bool,
 ) -> Result<FinalScrubletRes, BixverseErrors>
 where
-    R: Runtime,
     S: SingleCellReading,
 {
     let verbosity = parse_verbosity_level(verbose);
@@ -565,7 +552,7 @@ where
         println!("Running PCA (GPU-accelerated)...");
     }
 
-    let pca_res = pca_observed_gpu::<R, S>(
+    let pca_res = pca_observed_gpu::<S>(
         gene_reader,
         cell_indices,
         &hvg_genes,
@@ -586,8 +573,8 @@ where
     }
     let start_proj = Instant::now();
 
-    let client = R::client(&device);
-    let sim_pca = project_sim_gpu::<R>(
+    let client = device.client();
+    let sim_pca = project_sim_gpu(
         &sim_chunks,
         &pca_res.1,
         &pca_res.2,
@@ -622,7 +609,7 @@ where
             seed,
             verbosity.detailed_verbosity(),
         )?,
-        ScrubletKnnBackend::Gpu(knn_params) => dispatch_knn_gpu::<R>(
+        ScrubletKnnBackend::Gpu(knn_params) => dispatch_knn_gpu(
             combined_pca.as_ref(),
             k_adj,
             knn_params,
@@ -689,7 +676,7 @@ mod tests {
     use crate::single_cell::sc_processing::knn::KnnParams;
     use crate::single_cell::sc_processing::pca::PcaSolver;
     use crate::single_cell::sc_processing::scrublet::{Scrublet, ScrubletParams};
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     const TEST_CELLS: usize = 600;
     const TEST_GENES: usize = 150;
@@ -700,9 +687,9 @@ mod tests {
     const TEST_PCS: usize = 5;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -953,14 +940,14 @@ mod tests {
             ("cpu-knn", cpu_knn_exhaustive()),
             ("gpu-knn", gpu_knn_exhaustive()),
         ] {
-            let (gpu_res, gpu_pca, _, _) = run_scrublet_gpu::<WgpuRuntime, _>(
+            let (gpu_res, gpu_pca, _, _) = run_scrublet_gpu::<_>(
                 &gene_reader,
                 &cell_reader,
                 &gpu_params(backend),
                 &cell_indices,
                 false,
                 42,
-                device.clone(),
+                device.clone().into(),
                 0,
                 true,
                 false,
@@ -1060,7 +1047,7 @@ mod tests {
             compute_hvg_library_sizes(&cell_reader, &cell_indices, &gene_indices).expect("libs");
         let target_size = resolve_target_size(None, &lib_sizes);
 
-        let (scores, _, _, stds) = pca_observed_gpu::<WgpuRuntime, _>(
+        let (scores, _, _, stds) = pca_observed_gpu::<_>(
             &gene_reader,
             &cell_indices,
             &gene_indices,
@@ -1071,7 +1058,7 @@ mod tests {
             true,
             5,
             42,
-            device,
+            device.clone().into(),
             0,
         )
         .expect("gpu pca on a zero-variance column");

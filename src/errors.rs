@@ -2315,4 +2315,32 @@ pub enum BixverseErrors {
         /// Shared-memory bytes the device reports.
         limit: usize,
     },
+    // -- mlx --
+    /// An mlx-c call returned a non-zero code. mlx-c prints the reason to
+    /// stderr through the handler installed by `install_error_handler`.
+    #[cfg(mlx_available)]
+    #[error("MLX: {op} failed with code {code}")]
+    MlxError {
+        /// Name of the failing mlx-c call
+        op: &'static str,
+        /// Return code (or the offending dtype for a dtype mismatch)
+        code: i32,
+    },
+    /// The requested NMF rank is outside what the MLX HALS sweep stages in
+    /// threadgroup memory.
+    #[cfg(mlx_available)]
+    #[error(
+        "NMF MLX: rank k = {k} is outside the supported range 1..={max}; use the CPU entry point for ranks this large"
+    )]
+    MlxNmfRankTooLarge {
+        /// Requested number of components.
+        k: usize,
+        /// Largest rank the sweep tiers cover.
+        max: usize,
+    },
+    /// MLX Harmony only supports one co-variate (arrowhead ridge solve), as
+    /// the cubecl path.
+    #[cfg(mlx_available)]
+    #[error("Harmony MLX: Only a single co-variate is supported for the MLX path")]
+    MlxHarmonySupportsSingleCovariateOnly,
 }

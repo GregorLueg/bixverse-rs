@@ -135,6 +135,15 @@ impl FastLouvainParamsGpu {
             .get("multi_level_louvain")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.multi_level_louvain);
+        let cell_mediated = params
+            .get("cell_mediated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.cell_mediated);
+        let n_anchors = params
+            .get("n_anchors")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_anchors);
 
         Ok(Self {
             n_centroids,
@@ -144,6 +153,8 @@ impl FastLouvainParamsGpu {
             full_snn,
             pruning,
             snn_similarity,
+            cell_mediated,
+            n_anchors,
             louvain_iters,
             multi_level_louvain,
         })

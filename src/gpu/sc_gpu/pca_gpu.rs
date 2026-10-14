@@ -3,9 +3,7 @@
 //! leverage the GPU for the multiplication operations. Assumes that the host
 //! has enough GPU memory.
 
-use cubecl::Runtime;
-use indexmap::IndexSet;
-use rayon::prelude::*;
+use cubecl::Device;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::*;
@@ -32,8 +30,8 @@ use crate::single_cell::sc_processing::pca::*;
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
-/// * `random_svd` - Shall randomised sparse singular value decompostion be
-///   used. This has the advantage of speed-ups, but loses precision.
+/// * `clr_offsets` - Per-cell CLR offsets, required if `params_pca.clr`.
+/// * `params_pca` - The [SingleCellPcaParams] for this run.
 /// * `seed` - Seed for randomised SVD.
 /// * `device` - CubeCL runtime device
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -44,7 +42,7 @@ use crate::single_cell::sc_processing::pca::*;
 /// A tuple of the samples projected on the PC space, gene loadings and singular
 /// values.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse_gpu<R, S>(
+pub fn pca_on_sc_sparse_gpu<S>(
     reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -52,92 +50,25 @@ pub fn pca_on_sc_sparse_gpu<R, S>(
     clr_offsets: Option<&[f32]>,
     params_pca: &SingleCellPcaParams,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> SingleCellPcaRes
 where
-    R: Runtime,
     S: SingleCellReading,
 {
-    if params_pca.clr && clr_offsets.is_none() {
-        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
-    }
-    if params_pca.clr
-        && let Some(offs) = clr_offsets
-        && offs.len() != cell_indices.len()
-    {
-        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
-            len_offset: offs.len(),
-            n_cells: cell_indices.len(),
-        });
-    }
-
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
 
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-
-    let start_reading = Instant::now();
-
-    let mut gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-
-    if params_pca.clr {
-        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
-        gene_chunks
-            .par_iter_mut()
-            .for_each(|chunk| chunk.transform_to_clr(size_factor));
-    }
-
-    let row_offsets_f64: Option<Vec<f64>> = if params_pca.clr {
-        Some(clr_offsets.unwrap().iter().map(|&x| x as f64).collect())
-    } else {
-        None
-    };
-
-    let end_reading = start_reading.elapsed();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Sparse PCA (GPU-accelerated): Loaded in data in {:.2?}",
-            end_reading
-        );
-    }
-
-    let start_data_prep = Instant::now();
-
-    let n_cells = cell_set.len();
-
-    let csc: CompressedSparseData2<f32> =
-        from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
-
-    let end_data_prep = start_data_prep.elapsed();
-
-    let real_col_means: Vec<f64> = sparse_csc_column_means(&csc, true, row_offsets_f64.as_deref())?;
-
-    let col_stds: Vec<f64> = if params_pca.normalise_variance {
-        sparse_csc_column_stds(&csc, &real_col_means, true, row_offsets_f64.as_deref())?
-    } else {
-        vec![1.0; real_col_means.len()]
-    };
-
-    let col_means: Vec<f64> = if params_pca.mean_center {
-        real_col_means
-    } else {
-        vec![0.0; col_stds.len()]
-    };
-
-    // down cast here to avoid trait bound chaos
-    let col_means: Vec<f32> = col_means.iter().map(|x| *x as f32).collect();
-    let col_std: Vec<f32> = col_stds.iter().map(|x| *x as f32).collect();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Sparse PCA (GPU-accelerated): finished the data preparations in {:.2?}",
-            end_data_prep
-        );
-    }
+    let (csc, col_means, col_std) = sparse_pca_accelerator_input(
+        reader,
+        cell_indices,
+        gene_indices,
+        clr_offsets,
+        params_pca,
+        "GPU-accelerated",
+        verbose,
+    )?;
 
     let start_svd = Instant::now();
 
@@ -146,7 +77,7 @@ where
     let oversampling = std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs));
     let svd_params = RandSvdGpuParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
 
-    let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
+    let svd_res = randomised_sparse_svd_gpu::<f32, f32>(
         csc,
         &col_means,
         &col_std,

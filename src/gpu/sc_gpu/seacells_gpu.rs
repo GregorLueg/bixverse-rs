@@ -1,37 +1,37 @@
 //! GPU-accelerated SEACells fit.
 //!
-//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b` for the B
-//! update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
+//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b_tiled` for
+//! the B update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
 //! the same [SEACells::fit_with] loop the CPU path uses.
 //!
 //! Neither kernel dominates the fit. Each beats the CPU scan it replaces by
-//! several fold in isolation, but the whole fit moves by ~2.6x at 50k cells and
-//! 666 archetypes, which is Amdahl rather than anything wrong with them: the
-//! blocking readbacks around the kernels were about a fifth of wall-clock when
-//! last attributed, and the kernel construction, archetype initialisation, `K²B`
-//! maintenance and RSS all stay on the host.
+//! several fold in isolation, but the whole fit moves far less, which is
+//! Amdahl rather than anything wrong with them: the blocking readbacks around
+//! the kernels were about a fifth of wall-clock when last attributed, and the
+//! kernel construction, archetype initialisation, `K²B` maintenance and RSS all
+//! stay on the host.
 //!
 //! Nothing here holds an `n × k` dense buffer. `K²B`, `K²Aᵀ` and `B` stay
 //! sparse, and the A update's atom scratch is `[n, cap]` where `cap` is the
 //! widest `A` column plus `max_fw_iters`.
 //!
-//! `t1` stays sparse on both solves, paired with a `[k, wg + 1]` per-thread
-//! segment table so a thread reaches its own contiguous column block without
-//! searching. Nothing on the path is quadratic in `k`; it used to be densified
+//! `t1` stays sparse on both solves, paired with a segment table (per column
+//! tile for the B argmin, per thread for the A solve) so no thread searches. Nothing on the path is quadratic in `k`; it used to be densified
 //! to `4k²` bytes on both, which is 381 MB at k = 10 000.
 
+use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::sc_gpu::kernels::seacells_kernels::{
-    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, B_ARGMIN_WG_TIERS,
-    a_columns_capacity, a_columns_segments, a_columns_workgroup, b_argmin_workgroup,
-    launch_fw_argmin_b, launch_fw_columns_a,
+    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG_TIERS, B_TILED_GROUPS, a_columns_capacity,
+    a_columns_segments, a_columns_workgroup, b_tiled_layout, launch_fw_argmin_b_tiled,
+    launch_fw_columns_a,
 };
 use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::{
-    CpuFwArgminB, FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells,
+    FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells, csr_column_segments,
     fw_columns_a,
 };
 
@@ -39,9 +39,7 @@ use crate::single_cell::mc_generation::seacells::{
 // Types //
 ///////////
 
-/// Output of a SEACells fit: hard assignment per cell, the cells grouped by
-/// SEACell, the cell index of each archetype, and the RSS at each iteration.
-pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>);
+pub use crate::single_cell::mc_generation::seacells::SeacellsFitResult;
 
 //////////////
 // Back end //
@@ -54,57 +52,57 @@ pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>)
 /// quickly but the device pages are not backed until something writes them, so
 /// allocating per call would pay that fault repeatedly.
 ///
-/// `t1`, its segment table and `K²Aᵀ` are uploaded once per B update via
-/// [FwArgminB::begin]; `K²B` and `B` change every Frank-Wolfe iteration and are
-/// re-uploaded there. Their non-zero counts drift between iterations, so those
-/// two are the only buffers not pooled.
+/// `t1`, `K²Aᵀ` and their tile segment tables are uploaded once per B update
+/// via [FwArgminB::begin]; `K²B` and `B` change every Frank-Wolfe iteration and
+/// are re-uploaded there. Their non-zero counts drift between iterations, so
+/// those two are the only buffers not pooled.
 ///
-/// Either solve independently falls back to the CPU when no workgroup tier
-/// covers `k`, so a shape can run one on the device and the other on the host.
-pub struct GpuFwArgminB<R: Runtime> {
+/// The B argmin has no ceiling on `k`. The A solve falls back to the CPU when
+/// no workgroup tier covers `k`.
+pub struct GpuFwArgminB {
     /// Compute client
-    client: ComputeClient<R>,
+    client: Client,
     /// Number of cells
     n: usize,
     /// Number of archetypes
     k: usize,
-    /// Workgroups the kernel dispatches, and therefore the partial-buffer depth
-    blocks: usize,
+    /// Cubes per column tile, and therefore the partial-buffer depth
+    groups: usize,
+    /// Column tiles of the B argmin, see [b_tiled_layout]
+    n_tiles: usize,
     /// `A Aᵀ` as CSR `k × k`, rebound per B update
-    t1: Option<GpuCompressedSparseData<R, f32>>,
-    /// Per-thread column segments of `t1`, `[k, b_wg + 1]`, rebound with it
-    t1_seg: Option<GpuTensor<R, u32>>,
-    /// Workgroup width the B argmin was last bound for
-    b_wg: u32,
-    /// CPU back end for the B argmin, used when no workgroup tier covers `k`
-    b_cpu: Option<CpuFwArgminB>,
+    t1: Option<GpuCompressedSparseData<f32>>,
+    /// Tile segments of `t1`, `[k, n_tiles + 1]`, rebound with it
+    t1_seg: Option<GpuTensor<u32>>,
     /// `K² Aᵀ` as CSR `n × k`, rebound per B update
-    t2: Option<GpuCompressedSparseData<R, f32>>,
-    /// Per-block partial minima `[blocks, k]`
-    part_val: GpuTensor<R, f32>,
-    /// Per-block partial argmins `[blocks, k]`
-    part_idx: GpuTensor<R, u32>,
-    /// Per-block partial `sum(B * G)` `[blocks]`
-    gap_partial: GpuTensor<R, f32>,
+    t2: Option<GpuCompressedSparseData<f32>>,
+    /// Tile segments of `K² Aᵀ`, `[n, n_tiles + 1]`, rebound with it
+    t2_seg: Option<GpuTensor<u32>>,
+    /// Per-cube partial minima `[groups, k]`
+    part_val: GpuTensor<f32>,
+    /// Per-cube partial argmins `[groups, k]`
+    part_idx: GpuTensor<u32>,
+    /// Per-cube partial `sum(B * G)` `[n_tiles, groups]`
+    gap_partial: GpuTensor<f32>,
     /// Reduced minima `[k]`
-    out_val: GpuTensor<R, f32>,
+    out_val: GpuTensor<f32>,
     /// Reduced argmins `[k]`
-    out_idx: GpuTensor<R, u32>,
+    out_idx: GpuTensor<u32>,
     /// Atom capacity the A-update scratch below is sized for, `0` when unset
     a_cap: usize,
     /// Cell count the A-update scratch is sized for, `0` when unset
     a_n: usize,
     /// A-update atom indices `[n, a_cap]`
-    a_atom_idx: Option<GpuTensor<R, u32>>,
+    a_atom_idx: Option<GpuTensor<u32>>,
     /// A-update atom weights `[n, a_cap]`
-    a_atom_val: Option<GpuTensor<R, f32>>,
+    a_atom_val: Option<GpuTensor<f32>>,
     /// A-update atom counts `[n]`
-    a_atom_cnt: Option<GpuTensor<R, u32>>,
+    a_atom_cnt: Option<GpuTensor<u32>>,
     /// Verbosity, so a CPU fallback can announce itself
     verbose: usize,
 }
 
-impl<R: Runtime> GpuFwArgminB<R> {
+impl GpuFwArgminB {
     /// Allocate the device scratch for an `n × k` problem.
     ///
     /// ### Params
@@ -117,7 +115,7 @@ impl<R: Runtime> GpuFwArgminB<R> {
     ///
     /// Self, with all pooled buffers allocated, or `CubeclUtils` if one of them
     /// busts the device's per-binding size limit.
-    pub fn new(n: usize, k: usize, client: ComputeClient<R>) -> Result<Self, BixverseErrors> {
+    pub fn new(n: usize, k: usize, client: Client) -> Result<Self, BixverseErrors> {
         Self::with_verbosity(n, k, client, 0)
     }
 
@@ -139,27 +137,28 @@ impl<R: Runtime> GpuFwArgminB<R> {
     pub fn with_verbosity(
         n: usize,
         k: usize,
-        client: ComputeClient<R>,
+        client: Client,
         verbose: usize,
     ) -> Result<Self, BixverseErrors> {
-        let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
+        let groups = (B_TILED_GROUPS as usize).min(n.max(1));
+        let (_, n_tiles) = b_tiled_layout(k);
 
-        let part_val = GpuTensor::<R, f32>::empty(vec![blocks * k], &client)?;
-        let part_idx = GpuTensor::<R, u32>::empty(vec![blocks * k], &client)?;
-        let gap_partial = GpuTensor::<R, f32>::empty(vec![blocks], &client)?;
-        let out_val = GpuTensor::<R, f32>::empty(vec![k], &client)?;
-        let out_idx = GpuTensor::<R, u32>::empty(vec![k], &client)?;
+        let part_val = GpuTensor::<f32>::empty(vec![groups * k], &client)?;
+        let part_idx = GpuTensor::<u32>::empty(vec![groups * k], &client)?;
+        let gap_partial = GpuTensor::<f32>::empty(vec![n_tiles * groups], &client)?;
+        let out_val = GpuTensor::<f32>::empty(vec![k], &client)?;
+        let out_idx = GpuTensor::<u32>::empty(vec![k], &client)?;
 
         Ok(Self {
             client,
             n,
             k,
-            blocks,
+            groups,
+            n_tiles,
             t1: None,
             t1_seg: None,
-            b_wg: 0,
-            b_cpu: None,
             t2: None,
+            t2_seg: None,
             part_val,
             part_idx,
             gap_partial,
@@ -199,7 +198,7 @@ impl<R: Runtime> GpuFwArgminB<R> {
     }
 }
 
-impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
+impl FwArgminB for GpuFwArgminB {
     fn begin(
         &mut self,
         t1: &CompressedSparseData2<f32>,
@@ -218,49 +217,20 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             });
         }
 
-        // `t1` stays sparse, paired with a per-thread segment table so each
-        // thread reaches its own contiguous column block in one row without
-        // searching. It used to be densified to `k²` floats, which is 381 MB at
-        // k = 10 000 and grows quadratically; the inner loop then read a full
-        // `k`-float row for every non-zero of the `K²B` row.
-        // No tier means the register arrays would not fit and the dispatch
-        // would be rejected silently, so this solve runs on the CPU instead.
-        // The A solve still runs on the device; they are independent.
-        let Some(wg) = b_argmin_workgroup(self.k) else {
-            if parse_verbosity_level(self.verbose).detailed_verbosity() {
-                println!(
-                    "  B-gradient argmin on CPU: k {} fits no tier {:?}",
-                    self.k, B_ARGMIN_WG_TIERS
-                );
-            }
-            let mut cpu = CpuFwArgminB::default();
-            cpu.begin(t1, t2)?;
-            self.b_cpu = Some(cpu);
-            return Ok(());
-        };
-        self.b_cpu = None;
-        let seg_host = a_columns_segments(t1, wg, self.k.div_ceil(wg as usize));
-        self.t1_seg = Some(GpuTensor::<R, u32>::from_slice(
-            &seg_host,
-            vec![seg_host.len()],
-            &self.client,
-        )?);
-        drop(seg_host);
-        self.b_wg = wg;
-
-        self.t1 = Some(
-            GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-                t1,
-                false,
+        let (tile, n_tiles) = b_tiled_layout(self.k);
+        for (csr, slot) in [(t1, &mut self.t1_seg), (t2, &mut self.t2_seg)] {
+            let seg = csr_column_segments(csr, n_tiles, tile);
+            *slot = Some(GpuTensor::<u32>::from_slice(
+                &seg,
+                vec![seg.len()],
                 &self.client,
-            )?,
+            )?);
+        }
+        self.t1 = Some(
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, &self.client)?,
         );
         self.t2 = Some(
-            GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-                t2,
-                false,
-                &self.client,
-            )?,
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t2, false, &self.client)?,
         );
 
         Ok(())
@@ -271,10 +241,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         k2_b: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors> {
-        if let Some(cpu) = self.b_cpu.as_mut() {
-            return cpu.argmins(k2_b, b);
-        }
-
         // The kernel launches unchecked and indexes `indptr` up to `n`, so a
         // wrong shape here is an out-of-bounds device read rather than an
         // error.
@@ -299,29 +265,32 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             .t2
             .as_ref()
             .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
+        let t2_seg = self
+            .t2_seg
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
 
-        let k2b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let k2b_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             k2_b,
             false,
             &self.client,
         )?;
-        let b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-            b,
-            false,
-            &self.client,
-        )?;
+        let b_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(b, false, &self.client)?;
 
-        launch_fw_argmin_b(
+        launch_fw_argmin_b_tiled(
             &k2b_gpu,
             t1,
             t1_seg,
             t2,
+            t2_seg,
             &b_gpu,
             &self.part_val,
             &self.part_idx,
             &self.gap_partial,
             &self.out_val,
             &self.out_idx,
+            self.groups as u32,
             self.n,
             self.k,
             &self.client,
@@ -344,7 +313,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             .map_err(|e| BixverseErrors::GpuMatmul(e.to_string()))?;
 
         // gap = |sum(B * G) - sum_c min_c G[:, c]|, matching the CPU scan.
-        let g_dot_b: f32 = gaps.iter().take(self.blocks).sum();
+        let g_dot_b: f32 = gaps.iter().take(self.n_tiles * self.groups).sum();
         let g_dot_e: f32 = min_vals.iter().sum();
 
         Ok((
@@ -389,22 +358,18 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
         };
 
-        let t1_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-            t1,
-            false,
-            &self.client,
-        )?;
+        let t1_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, &self.client)?;
         let seg_host = a_columns_segments(t1, wg, k.div_ceil(wg as usize));
-        let t1_seg =
-            GpuTensor::<R, u32>::from_slice(&seg_host, vec![seg_host.len()], &self.client)?;
+        let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &self.client)?;
         drop(seg_host);
 
-        let a_prev_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let a_prev_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             a_prev_t,
             false,
             &self.client,
         )?;
-        let k2b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let k2b_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             k2_b,
             false,
             &self.client,
@@ -414,9 +379,9 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         if self.a_atom_idx.is_none() || self.a_n * self.a_cap < required || self.a_n < n {
             self.a_cap = cap;
             self.a_n = n;
-            self.a_atom_idx = Some(GpuTensor::<R, u32>::empty(vec![required], &self.client)?);
-            self.a_atom_val = Some(GpuTensor::<R, f32>::empty(vec![required], &self.client)?);
-            self.a_atom_cnt = Some(GpuTensor::<R, u32>::empty(vec![n], &self.client)?);
+            self.a_atom_idx = Some(GpuTensor::<u32>::empty(vec![required], &self.client)?);
+            self.a_atom_val = Some(GpuTensor::<f32>::empty(vec![required], &self.client)?);
+            self.a_atom_cnt = Some(GpuTensor::<u32>::empty(vec![n], &self.client)?);
         }
         let stride = self.a_cap;
         let atom_idx = self.a_atom_idx.as_ref().expect("just allocated").clone();
@@ -424,7 +389,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         let atom_cnt = self.a_atom_cnt.as_ref().expect("just allocated").clone();
 
         let threshold =
-            GpuTensor::<R, f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], &self.client)?;
+            GpuTensor::<f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], &self.client)?;
 
         launch_fw_columns_a(
             &t1_gpu,
@@ -529,27 +494,27 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 /// ### Errors
 ///
 /// * `CubeclUtils` if the pooled device scratch busts the per-binding size
-///   limit; `[blocks, k]` is the largest of them.
+///   limit; `[groups, k]` is the largest of them.
 /// * `GpuBindingTooLarge` if one of the sparse operands does, named per
 ///   buffer by the launcher.
-/// * Propagates the CPU fit's errors, which both solves fall back to when no
+/// * Propagates the CPU fit's errors, which the A solve falls back to when no
 ///   workgroup tier covers `k`.
 ///
 /// ### References
 ///
 /// Persad, et al., Nat. Biotechnol., 2023
 #[allow(clippy::too_many_arguments)]
-pub fn seacells_fit_gpu<R: Runtime>(
+pub fn seacells_fit_gpu(
     pca: faer::MatRef<f32>,
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     params: &SEACellsParams,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<SeacellsFitResult, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let client = R::client(&device);
+    let client = device.client();
 
     let n = pca.nrows();
 
@@ -574,7 +539,7 @@ pub fn seacells_fit_gpu<R: Runtime>(
     let archetypes = model.get_archetypes()?;
     let k = archetypes.len();
 
-    let mut backend = GpuFwArgminB::<R>::with_verbosity(n, k, client, verbose)?;
+    let mut backend = GpuFwArgminB::with_verbosity(n, k, client, verbose)?;
 
     if verbosity.detailed_verbosity() {
         println!(
@@ -601,7 +566,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "large-test")]
     use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_BLOCKS;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use rand::prelude::*;
     use rand::rngs::StdRng;
 
@@ -609,9 +574,9 @@ mod tests {
 
     /// Skip rather than fail where no GPU is available.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -690,7 +655,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         // Both axes have to be crossed at once.
         //
@@ -721,7 +686,7 @@ mod tests {
             // thresholds ascend. A back end that uploaded the threshold once and
             // pooled it would pass every call after the first with the wrong
             // value, and a fresh back end per iteration would hide that.
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
 
             for pruning in [None, Some(1e-7f32), Some(5e-2f32)] {
                 let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning);
@@ -801,7 +766,7 @@ mod tests {
             }
         }
     }
-    /// Parity above the old `k <= 2048` ceiling, across every workgroup tier.
+    /// Parity at large `k`, across every workgroup tier.
     ///
     /// Each `k` here selects a different tier and a different slot count, and
     /// none is a multiple of `wg * slots`, so the partial block at the end of
@@ -817,7 +782,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let n = 1_500usize;
         let n_iters = 12usize;
@@ -838,7 +803,7 @@ mod tests {
             let a_prev_t = random_csr(n, k, 6, true, false, &mut rng);
             let k2_b = random_csr(n, k, 10, false, false, &mut rng);
 
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
 
             for pruning in [None, Some(1e-7f32)] {
                 let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning);
@@ -973,34 +938,27 @@ mod tests {
         pruning: Option<f32>,
         use_plane: bool,
         wg: Option<u32>,
-        client: &ComputeClient<WgpuRuntime>,
+        client: &Client,
     ) -> (Vec<u32>, Vec<f32>, Vec<u32>, usize) {
         let cap = a_columns_capacity(a_prev_t, n_iters);
 
-        let t1_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            t1, false, client,
-        )
-        .expect("upload failed");
+        let t1_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, client)
+                .expect("upload failed");
         let width = wg.unwrap_or(A_COLUMNS_WG);
         let seg_host = a_columns_segments(t1, width, k.div_ceil(width as usize));
-        let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], client)
-                .unwrap();
-        let a_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            a_prev_t, false, client,
-        )
-        .expect("upload failed");
-        let k2b_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            k2_b, false, client,
-        )
-        .expect("upload failed");
+        let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], client).unwrap();
+        let a_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(a_prev_t, false, client)
+                .expect("upload failed");
+        let k2b_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(k2_b, false, client)
+                .expect("upload failed");
 
-        let atom_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], client).unwrap();
-        let atom_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![n * cap], client).unwrap();
-        let atom_cnt = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], client).unwrap();
-        let thr =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], client)
-                .unwrap();
+        let atom_idx = GpuTensor::<u32>::empty(vec![n * cap], client).unwrap();
+        let atom_val = GpuTensor::<f32>::empty(vec![n * cap], client).unwrap();
+        let atom_cnt = GpuTensor::<u32>::empty(vec![n], client).unwrap();
+        let thr = GpuTensor::<f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], client).unwrap();
 
         launch_fw_columns_a(
             &t1_gpu,
@@ -1044,13 +1002,7 @@ mod tests {
     /// * `n_iters` - Frank-Wolfe iterations
     /// * `seed` - RNG seed for the fixtures
     /// * `client` - Compute client
-    fn assert_reduction_arms_agree(
-        n: usize,
-        k: usize,
-        n_iters: usize,
-        seed: u64,
-        client: &ComputeClient<WgpuRuntime>,
-    ) {
+    fn assert_reduction_arms_agree(n: usize, k: usize, n_iters: usize, seed: u64, client: &Client) {
         let limits = GpuLimits::from_client(client);
         let plane_ok = plane_reduce_viable(A_COLUMNS_WG, &limits);
 
@@ -1122,7 +1074,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         assert_reduction_arms_agree(64, 32, 4, 5, &client);
     }
@@ -1136,7 +1088,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         assert_reduction_arms_agree(1_500, 300, 12, 5, &client);
     }
@@ -1155,7 +1107,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let n = 300usize;
         let k = 300usize;
@@ -1172,7 +1124,7 @@ mod tests {
             assert_eq!(cap, widest + n_iters);
 
             let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, Some(1e-7));
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
             let actual = backend
                 .columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, Some(1e-7))
                 .expect("column solve failed");

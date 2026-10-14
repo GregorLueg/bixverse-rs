@@ -588,12 +588,17 @@ fn orthonormalise<F: BixverseFloat>(y: Mat<F>) -> Mat<F> {
 // Dense covariance PCA //
 ///////////////////////////
 
-/// Exact PCA of an already centred and scaled dense matrix via `X^T X`
+/// Exact PCA of an already centred and scaled dense matrix via a Gram matrix
 ///
-/// One GEMM for the `m x m` cross-product, a symmetric eigendecomposition,
-/// and `U = X V / s`. Costs `2 n m^2`, so it only beats a randomised SVD when
-/// `m` is small relative to the sketch width times the number of passes.
-/// Stays in f64: the eigenvalues of the cross-product are the squared
+/// One GEMM for the smaller of the two cross-products, a symmetric
+/// eigendecomposition, and the other factor recovered by one more GEMM: with
+/// `n >= m`, `X^T X` (`m x m`) and `U = X V / s`; with `n < m`, `X X^T`
+/// (`n x n`) and `V = X^T U / s`. The second case matters for small cell
+/// subsets, where an `m x m` eigendecomposition over the HVGs would cost the
+/// same whatever the cell count. Costs `2 n m min(n, m)` plus a
+/// `min(n, m)`-sized eigendecomposition, so it only beats a randomised SVD
+/// when `min(n, m)` is small relative to the sketch width times the number of
+/// passes. Stays in f64: the eigenvalues of the cross-product are the squared
 /// singular values, which halves the usable precision.
 ///
 /// ### Params
@@ -612,20 +617,31 @@ pub fn dense_covariance_svd(
     let (n, m) = (x.nrows(), x.ncols());
     let rank = rank.min(m).min(n);
 
-    let gram = x.transpose() * x;
+    let wide = n < m;
+    let (gram, size) = if wide {
+        (x * x.transpose(), n)
+    } else {
+        (x.transpose() * x, m)
+    };
     let (eig_vals, eig_vecs) =
-        crate::core::math::sparse::symmetric_eigen_descending(gram.as_ref(), m)?;
+        crate::core::math::sparse::symmetric_eigen_descending(gram.as_ref(), size)?;
 
     let s: Vec<f64> = eig_vals[..rank]
         .iter()
         .map(|&l| l.max(0.0).sqrt())
         .collect();
-    let v = eig_vecs.subcols(0, rank).to_owned();
-    let mut u = x * &v;
+    let known = eig_vecs.subcols(0, rank).to_owned();
+    let mut other = if wide {
+        x.transpose() * &known
+    } else {
+        x * &known
+    };
     for (c, &s_c) in s.iter().enumerate() {
         let inv = if s_c > 0.0 { 1.0 / s_c } else { 0.0 };
-        u.col_mut(c).iter_mut().for_each(|x| *x *= inv);
+        other.col_mut(c).iter_mut().for_each(|x| *x *= inv);
     }
+
+    let (u, v) = if wide { (known, other) } else { (other, known) };
 
     Ok(RandomSvdResults { u, v, s })
 }
@@ -645,6 +661,11 @@ pub fn dense_covariance_svd(
 /// corrections applied afterwards in f64. Cost is `sum(r_i^2) / 2` plus an
 /// `m x m` eigendecomposition, so this pays off when `m` is a few thousand
 /// features and rows are sparse, as with HVG-restricted single cell data.
+///
+/// With fewer rows than features (small cell subsets) `Z` is densified instead
+/// and passed to [`dense_covariance_svd`], which eigendecomposes the `n x n`
+/// Gram. The dense `Z` is never larger than one per-thread `m x m`
+/// accumulator, so the switch costs no memory.
 ///
 /// ### Params
 ///
@@ -704,6 +725,31 @@ where
         Some(s) => s.iter().map(|x| x.to_f64().unwrap()).collect(),
         None => vec![1.0; m],
     };
+    let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
+
+    // fewer rows than features: the dense n x m Z is no larger than one of the
+    // m x m accumulators below, and its n x n Gram replaces the m x m eigen
+    if n < m {
+        let mut z = Mat::<f64>::zeros(n, m);
+        z.par_row_iter_mut().enumerate().for_each(|(i, mut row)| {
+            let oi = off.as_ref().map(|o| o[i]).unwrap_or(0.0);
+            for j in 0..m {
+                row[j] = -oi - shift[j];
+            }
+            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                row[csr.indices[idx] as usize] += val(idx);
+            }
+            for j in 0..m {
+                row[j] = if constant[j] { 0.0 } else { row[j] / sd[j] };
+            }
+        });
+        let res = dense_covariance_svd(z.as_ref(), rank)?;
+        return Ok(RandomSvdResults {
+            u: Mat::from_fn(n, rank, |i, c| F::from_f64(res.u[(i, c)]).unwrap()),
+            v: Mat::from_fn(m, rank, |j, c| F::from_f64(res.v[(j, c)]).unwrap()),
+            s: res.s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
+        });
+    }
 
     // relabel features by descending frequency: most pair updates then hit the
     // small, cache-resident top-left block of the accumulator
@@ -773,7 +819,6 @@ where
     //         + (1^T o)(1 c^T + c 1^T) + n c c^T, then scaled,
     // with s = A^T 1 and w = A^T o
     let gram_ref = &gram;
-    let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
     let cov_entry = |a: usize, b: usize| -> f64 {
         if constant[a] || constant[b] {
             return 0.0;
@@ -1076,6 +1121,119 @@ mod tests {
                 res.s[c]
             );
             assert_eq!(res.v[(constant, c)], 0.0);
+        }
+    }
+
+    /// With fewer rows than features the densified route must match `thin_svd`
+    /// of the explicitly shifted, centred and scaled matrix, constant feature
+    /// and row offsets included.
+    #[test]
+    fn test_sparse_covariance_svd_wide_matches_explicit() {
+        let (n, m) = (14, 30);
+        let constant = 3;
+        let dense = Mat::<f64>::from_fn(n, m, |i, j| {
+            let h = ((i * m + j) as f64 * 12.9898).sin() * 43_758.545_3 % 1.0;
+            // constant once the row offsets below are taken off
+            if j == constant {
+                1.5 + 0.1 * i as f64
+            } else if h.abs() > 0.4 {
+                h.abs() * 4.0
+            } else {
+                0.0
+            }
+        });
+
+        let (mut data, mut indices, mut indptr) = (Vec::new(), Vec::new(), vec![0u32]);
+        for j in 0..m {
+            for i in 0..n {
+                if dense[(i, j)] != 0.0 {
+                    data.push(dense[(i, j)]);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(data.len() as u32);
+        }
+
+        let offsets: Vec<f64> = (0..n).map(|i| 0.1 * i as f64).collect();
+        let means: Vec<f64> = (0..m)
+            .map(|j| (0..n).map(|i| dense[(i, j)] - offsets[i]).sum::<f64>() / n as f64)
+            .collect();
+        let sds: Vec<f64> = (0..m)
+            .map(|j| {
+                let ss: f64 = (0..n)
+                    .map(|i| (dense[(i, j)] - offsets[i] - means[j]).powi(2))
+                    .sum();
+                (ss / (n - 1) as f64).sqrt().max(f64::EPSILON)
+            })
+            .collect();
+        let explicit = Mat::<f64>::from_fn(n, m, |i, j| {
+            if sds[j] < COV_ZERO_SD {
+                0.0
+            } else {
+                (dense[(i, j)] - offsets[i] - means[j]) / sds[j]
+            }
+        });
+        let reference = explicit.thin_svd().unwrap();
+
+        let csc =
+            CompressedSparseData2::<f64, f64>::new_csc(&data, &indices, &indptr, None, (n, m));
+        let rank = 4;
+        let res = sparse_covariance_svd::<f64, f64>(
+            csc,
+            rank,
+            false,
+            Some(&means),
+            Some(&sds),
+            Some(&offsets),
+        )
+        .unwrap();
+
+        for c in 0..rank {
+            let expected = reference.S()[c];
+            assert!(
+                (res.s[c] - expected).abs() < 1e-8 * expected.max(1.0),
+                "s[{c}] = {} against {expected}",
+                res.s[c]
+            );
+            let dot_u: f64 = (0..n).map(|i| res.u[(i, c)] * reference.U()[(i, c)]).sum();
+            let dot_v: f64 = (0..m).map(|j| res.v[(j, c)] * reference.V()[(j, c)]).sum();
+            assert!((dot_u.abs() - 1.0).abs() < 1e-8, "u[{c}]");
+            assert!((dot_v.abs() - 1.0).abs() < 1e-8, "v[{c}]");
+            assert_eq!(res.v[(constant, c)], 0.0);
+        }
+    }
+
+    /// Both Gram orientations agree with `thin_svd`, singular vectors up to
+    /// sign, and `rank` clamps to the short side.
+    #[test]
+    fn test_dense_covariance_svd_wide_and_tall_match_thin_svd() {
+        for (n, m) in [(12, 40), (40, 12)] {
+            // full rank: a Gram route only resolves singular values down to
+            // about sqrt(eps) * s_max, so a rank-deficient fixture fails on noise
+            let x: Mat<f64> = Mat::from_fn(n, m, |i, j| {
+                ((i * m + j) as f64 * 12.9898).sin() * 43_758.545_3 % 1.0
+            });
+            let reference = x.thin_svd().unwrap();
+            let rank = 5;
+            let res = dense_covariance_svd(x.as_ref(), rank).unwrap();
+
+            for c in 0..rank {
+                let expected = reference.S()[c];
+                assert!(
+                    (res.s[c] - expected).abs() < 1e-8 * expected.max(1.0),
+                    "({n}, {m}) s[{c}] = {} against {expected}",
+                    res.s[c]
+                );
+                let dot_u: f64 = (0..n).map(|i| res.u[(i, c)] * reference.U()[(i, c)]).sum();
+                let dot_v: f64 = (0..m).map(|j| res.v[(j, c)] * reference.V()[(j, c)]).sum();
+                assert!((dot_u.abs() - 1.0).abs() < 1e-8, "({n}, {m}) u[{c}]");
+                assert!((dot_v.abs() - 1.0).abs() < 1e-8, "({n}, {m}) v[{c}]");
+            }
+
+            let clamped = dense_covariance_svd(x.as_ref(), 100).unwrap();
+            assert_eq!(clamped.s.len(), n.min(m));
+            assert_eq!(clamped.u.ncols(), n.min(m));
+            assert_eq!(clamped.v.ncols(), n.min(m));
         }
     }
 }

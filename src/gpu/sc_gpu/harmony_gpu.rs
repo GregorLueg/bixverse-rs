@@ -5,6 +5,7 @@
 #![allow(missing_docs)]
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
+use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use faer::{Mat, MatRef};
@@ -13,13 +14,16 @@ use std::time::Instant;
 use crate::gpu::linalg::spmm::launch_dense_column_sum;
 use crate::gpu::sc_gpu::kernels::harmony_kernels::*;
 use crate::gpu::{WORKGROUP_64, WORKGROUP_512};
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::harmony::{BatchInfo, create_batch_infos};
 use crate::single_cell::sc_batch_correction::harmony_core::{
     HARMONY_KMEANS_ITERS, RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge,
     to_row_major,
 };
-use crate::single_cell::sc_batch_correction::harmony_v2::{check_convergence, expand_theta};
+use crate::single_cell::sc_batch_correction::harmony_v2::{
+    HarmonyParamsV2, check_convergence, expand_theta,
+};
 
 ////////////
 // Consts //
@@ -146,6 +150,39 @@ impl Default for HarmonyParamsV2Gpu {
     }
 }
 
+/// Map the GPU parameters onto the CPU [`HarmonyParamsV2`], which is what the
+/// MLX port (`mlx::sc::harmony::harmony_v2_mlx`) takes.
+///
+/// `block_size` has no GPU counterpart and takes the CPU default; the MLX
+/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`
+/// and `balanced`. `fixed` and `quantise_to_f16` have no CPU counterpart and
+/// are dropped. A `None` k-means block maps to [`KMeansGpuParams::default`],
+/// matching what the GPU path does with `None`.
+impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
+    fn from(p: &HarmonyParamsV2Gpu) -> Self {
+        let km = p.kmeans_params.unwrap_or_default();
+        let kmeans_params =
+            KMeansParamsWrappers::new(km.iters, km.init, None).with_balancing(km.balanced);
+        Self {
+            k: p.k,
+            sigma: p.sigma.clone(),
+            theta: p.theta.clone(),
+            lambda: p.lambda.clone(),
+            max_iter_kmeans: p.max_iter_kmeans,
+            max_iter_harmony: p.max_iter_harmony,
+            epsilon_kmeans: p.epsilon_kmeans,
+            epsilon_harmony: p.epsilon_harmony,
+            window_size: p.window_size,
+            alpha: p.alpha,
+            tau: p.tau,
+            batch_proportion_cutoff: p.batch_proportion_cutoff,
+            use_dynamic_lambda: p.use_dynamic_lambda,
+            kmeans_params,
+            ..Self::default()
+        }
+    }
+}
+
 /////////
 // GPU //
 /////////
@@ -177,20 +214,20 @@ impl Default for HarmonyParamsV2Gpu {
 /// * `CubeclUtils` if the partials allocation busts the per-binding size
 ///   limit, or the read-back fails on the device.
 #[allow(clippy::too_many_arguments)]
-pub fn compute_objective_gpu<R: Runtime>(
-    client: &ComputeClient<R>,
-    r: &GpuTensor<R, f32>,
-    dist: &GpuTensor<R, f32>,
-    o: &GpuTensor<R, f32>,
-    r_sum: &GpuTensor<R, f32>,
-    sigma: &GpuTensor<R, f32>,
-    theta: &GpuTensor<R, f32>,
-    pr_b: &GpuTensor<R, f32>,
-    cell_to_level: &GpuTensor<R, u32>,
+pub fn compute_objective_gpu(
+    client: &Client,
+    r: &GpuTensor<f32>,
+    dist: &GpuTensor<f32>,
+    o: &GpuTensor<f32>,
+    r_sum: &GpuTensor<f32>,
+    sigma: &GpuTensor<f32>,
+    theta: &GpuTensor<f32>,
+    pr_b: &GpuTensor<f32>,
+    cell_to_level: &GpuTensor<u32>,
     n: usize,
     k: usize,
 ) -> Result<f32, BixverseErrors> {
-    let partials = GpuTensor::<R, f32>::empty(vec![WORKGROUP_512 as usize], client)?;
+    let partials = GpuTensor::<f32>::empty(vec![WORKGROUP_512 as usize], client)?;
 
     launch_objective_partials(
         r,
@@ -280,22 +317,21 @@ pub fn row_l2_normalise_into<F: Float>(
 ///
 /// `Ok(())`; `dst` holds the row-normalised copy. `CubeclUtils` if the grid is
 /// over the device's cube-count limit.
-pub fn launch_row_l2_normalise_into<R, F>(
-    src: &GpuTensor<R, F>,
-    dst: &GpuTensor<R, F>,
+pub fn launch_row_l2_normalise_into<F>(
+    src: &GpuTensor<F>,
+    dst: &GpuTensor<F>,
     n_rows: usize,
     dim: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n_rows as u32, &limits)?;
 
     unsafe {
-        row_l2_normalise_into::launch_unchecked::<F, R>(
+        row_l2_normalise_into::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_64),
@@ -334,14 +370,14 @@ where
 ///
 /// * `CubeclUtils` if a dispatch grid is over the device limit.
 #[allow(clippy::too_many_arguments)]
-fn observed_counts_gpu<R: Runtime>(
-    client: &ComputeClient<R>,
-    r: &GpuTensor<R, f32>,
-    run_bounds: &GpuTensor<R, u32>,
-    level_runs: &GpuTensor<R, u32>,
-    partial: &GpuTensor<R, f32>,
-    o: &GpuTensor<R, f32>,
-    r_sum: &GpuTensor<R, f32>,
+fn observed_counts_gpu(
+    client: &Client,
+    r: &GpuTensor<f32>,
+    run_bounds: &GpuTensor<u32>,
+    level_runs: &GpuTensor<u32>,
+    partial: &GpuTensor<f32>,
+    o: &GpuTensor<f32>,
+    r_sum: &GpuTensor<f32>,
     n: usize,
     n_runs: usize,
     b: usize,
@@ -386,16 +422,16 @@ fn observed_counts_gpu<R: Runtime>(
 /// ### Errors
 ///
 /// * Propagates k-means, read-back and device-limit (`CubeclUtils`) errors.
-pub fn harmony_v2_gpu<R: Runtime>(
+pub fn harmony_v2_gpu(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
     params: &HarmonyParamsV2Gpu,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors>
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let verbosity = parse_verbosity_level(verbose);
     let n = pca.nrows();
@@ -455,7 +491,7 @@ where
     if verbosity.normal_verbosity() {
         println!("GPU Harmony v2: running initial k-means");
     }
-    let (y_mat, _) = k_means_clusters_gpu::<f32, R>(
+    let (y_mat, _) = k_means_clusters_gpu::<f32>(
         (z_cos_host.as_slice(), n, d),
         "cosine",
         k,
@@ -471,33 +507,32 @@ where
         println!(" ... done in {:.2?}", start.elapsed());
     }
 
-    let client = R::client(&device);
+    let client = device.client();
 
     // resident buffers
-    let z_orig_gpu = GpuTensor::<R, f32>::from_slice(&z_orig, vec![n, d], &client)?;
-    let z_cos_gpu = GpuTensor::<R, f32>::from_slice(&z_cos_host, vec![n, d], &client)?;
-    let mut y_gpu = GpuTensor::<R, f32>::from_slice(&y_host, vec![k, d], &client)?;
-    let sigma_gpu = GpuTensor::<R, f32>::from_slice(&sigma, vec![k], &client)?;
-    let theta_gpu = GpuTensor::<R, f32>::from_slice(theta_levels, vec![b], &client)?;
-    let pr_b_gpu = GpuTensor::<R, f32>::from_slice(&info.pr_b, vec![b], &client)?;
+    let z_orig_gpu = GpuTensor::<f32>::from_slice(&z_orig, vec![n, d], &client)?;
+    let z_cos_gpu = GpuTensor::<f32>::from_slice(&z_cos_host, vec![n, d], &client)?;
+    let mut y_gpu = GpuTensor::<f32>::from_slice(&y_host, vec![k, d], &client)?;
+    let sigma_gpu = GpuTensor::<f32>::from_slice(&sigma, vec![k], &client)?;
+    let theta_gpu = GpuTensor::<f32>::from_slice(theta_levels, vec![b], &client)?;
+    let pr_b_gpu = GpuTensor::<f32>::from_slice(&info.pr_b, vec![b], &client)?;
     let cell_to_level_u32: Vec<u32> = runs.sorted_labels.iter().map(|&l| l as u32).collect();
-    let cell_to_level_gpu = GpuTensor::<R, u32>::from_slice(&cell_to_level_u32, vec![n], &client)?;
-    let run_bounds_gpu =
-        GpuTensor::<R, u32>::from_slice(&runs.run_bounds, vec![n_runs + 1], &client)?;
-    let level_runs_gpu = GpuTensor::<R, u32>::from_slice(&runs.level_runs, vec![b + 1], &client)?;
+    let cell_to_level_gpu = GpuTensor::<u32>::from_slice(&cell_to_level_u32, vec![n], &client)?;
+    let run_bounds_gpu = GpuTensor::<u32>::from_slice(&runs.run_bounds, vec![n_runs + 1], &client)?;
+    let level_runs_gpu = GpuTensor::<u32>::from_slice(&runs.level_runs, vec![b + 1], &client)?;
 
     // working buffers
-    let dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
-    let scale_dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
-    let r_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
-    let o_gpu = GpuTensor::<R, f32>::empty(vec![b, k], &client)?;
-    let r_sum_gpu = GpuTensor::<R, f32>::empty(vec![k], &client)?;
-    let z_corr_gpu = GpuTensor::<R, f32>::empty(vec![n, d], &client)?;
-    let partial_o_gpu = GpuTensor::<R, f32>::empty(vec![n_runs, k], &client)?;
-    let partial_s_gpu = GpuTensor::<R, f32>::empty(vec![n_runs * k * d], &client)?;
-    let s_gpu = GpuTensor::<R, f32>::empty(vec![b * k * d], &client)?;
+    let dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
+    let scale_dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
+    let r_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
+    let o_gpu = GpuTensor::<f32>::empty(vec![b, k], &client)?;
+    let r_sum_gpu = GpuTensor::<f32>::empty(vec![k], &client)?;
+    let z_corr_gpu = GpuTensor::<f32>::empty(vec![n, d], &client)?;
+    let partial_o_gpu = GpuTensor::<f32>::empty(vec![n_runs, k], &client)?;
+    let partial_s_gpu = GpuTensor::<f32>::empty(vec![n_runs * k * d], &client)?;
+    let s_gpu = GpuTensor::<f32>::empty(vec![b * k * d], &client)?;
 
-    let stats = |r: &GpuTensor<R, f32>| {
+    let stats = |r: &GpuTensor<f32>| {
         observed_counts_gpu(
             &client,
             r,
@@ -605,7 +640,7 @@ where
         )];
         let out = solve_ridge(&sums, &[], &batch_infos, ridge, k, d);
 
-        let c_gpu = GpuTensor::<R, f32>::from_slice(&out.corr[0], vec![b * k * d], &client)?;
+        let c_gpu = GpuTensor::<f32>::from_slice(&out.corr[0], vec![b * k * d], &client)?;
         launch_ridge_subtract(
             &z_orig_gpu,
             &r_gpu,
@@ -626,7 +661,7 @@ where
                 y_host[kk * d..(kk + 1) * d].copy_from_slice(&intercept_norm[kk * d..(kk + 1) * d]);
             }
         }
-        y_gpu = GpuTensor::<R, f32>::from_slice(&y_host, vec![k, d], &client)?;
+        y_gpu = GpuTensor::<f32>::from_slice(&y_host, vec![k, d], &client)?;
 
         // z_cos = normalise(z_corr) (out-of-place: z_corr is the returned value)
         launch_row_l2_normalise_into(&z_corr_gpu, &z_cos_gpu, n, d, &client)?;
@@ -688,18 +723,48 @@ where
 mod tests_harmony_gpu {
     use super::*;
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     use crate::single_cell::sc_batch_correction::harmony::create_batch_info;
     use crate::single_cell::sc_batch_correction::harmony_core::{Variant, objective};
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
+    }
+
+    /// The CPU parameters carry every shared field and the k-means block.
+    #[test]
+    fn test_harmony_params_gpu_into_cpu() {
+        let gpu = HarmonyParamsV2Gpu {
+            k: 7,
+            theta: vec![1.5],
+            max_iter_harmony: 3,
+            kmeans_params: Some(KMeansGpuParams::new(11, None, true, false).with_balancing(true)),
+            ..HarmonyParamsV2Gpu::default()
+        };
+        let cpu = HarmonyParamsV2::from(&gpu);
+        assert_eq!(cpu.k, 7);
+        assert_eq!(cpu.theta, vec![1.5]);
+        assert_eq!(cpu.max_iter_harmony, 3);
+        assert_eq!(cpu.sigma, gpu.sigma);
+        assert_eq!(cpu.block_size, HarmonyParamsV2::default().block_size);
+        let km = cpu.kmeans_params.get_data();
+        assert_eq!(km.iters, 11);
+        assert!(km.balanced);
+
+        let none = HarmonyParamsV2::from(&HarmonyParamsV2Gpu {
+            kmeans_params: None,
+            ..HarmonyParamsV2Gpu::default()
+        });
+        assert_eq!(
+            none.kmeans_params.get_data().iters,
+            KMeansGpuParams::default().iters
+        );
     }
 
     /// Sorting groups each level's cells contiguously and cuts runs at the
@@ -733,7 +798,7 @@ mod tests_harmony_gpu {
     #[test]
     fn test_compute_objective_gpu_matches_cpu_v2() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k) = (16, 4);
         let labels: Vec<usize> = (0..n).map(|i| i % 3).collect();
@@ -780,12 +845,11 @@ mod tests_harmony_gpu {
             n,
         );
 
-        let up = |x: &[f32], shape: Vec<usize>| {
-            GpuTensor::<WgpuRuntime, f32>::from_slice(x, shape, &client).unwrap()
-        };
+        let up =
+            |x: &[f32], shape: Vec<usize>| GpuTensor::<f32>::from_slice(x, shape, &client).unwrap();
         let ctl: Vec<u32> = info.cell_to_level.iter().map(|&l| l as u32).collect();
-        let ctl_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&ctl, vec![n], &client).unwrap();
-        let gpu_obj = compute_objective_gpu::<WgpuRuntime>(
+        let ctl_gpu = GpuTensor::<u32>::from_slice(&ctl, vec![n], &client).unwrap();
+        let gpu_obj = compute_objective_gpu(
             &client,
             &up(&r, vec![n, k]),
             &up(&dist, vec![n, k]),
@@ -807,13 +871,12 @@ mod tests_harmony_gpu {
     #[test]
     fn test_row_l2_normalise_into_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, dim) = (5, 6);
         let src: Vec<f32> = (0..n * dim).map(|i| (i as f32) * 0.1 - 1.0).collect();
-        let src_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&src, vec![n, dim], &client).unwrap();
-        let dst_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, dim], &client).unwrap();
+        let src_gpu = GpuTensor::<f32>::from_slice(&src, vec![n, dim], &client).unwrap();
+        let dst_gpu = GpuTensor::<f32>::empty(vec![n, dim], &client).unwrap();
 
         launch_row_l2_normalise_into(&src_gpu, &dst_gpu, n, dim, &client).unwrap();
         let dst = dst_gpu.read(&client).unwrap();
@@ -857,12 +920,12 @@ mod tests_harmony_gpu {
             max_iter_harmony: 3,
             ..HarmonyParamsV2Gpu::default()
         };
-        let result = harmony_v2_gpu::<WgpuRuntime>(
+        let result = harmony_v2_gpu(
             pca.as_ref(),
             std::slice::from_ref(&labels),
             &params,
             42,
-            device,
+            device.clone().into(),
             0,
         )
         .expect("harmony_v2_gpu should succeed");

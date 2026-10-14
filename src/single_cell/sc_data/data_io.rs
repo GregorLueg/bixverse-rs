@@ -3,7 +3,10 @@
 //! writers and readers.
 
 use bincode::{Decode, Encode, config, decode_from_slice, serde::encode_to_vec};
+use half::f16;
+use half::slice::HalfFloatSliceExt;
 use indexmap::IndexSet;
+use lz4_flex::block::{decompress_into, uncompressed_size};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use memmap2::MmapOptions;
 use num_traits::FromPrimitive;
@@ -390,6 +393,406 @@ pub fn norm_value(x: f32, lib_size: f32, target_size: f32) -> F16 {
     F16::from_f32((x / lib_size * target_size).ln_1p())
 }
 
+//////////////////
+// ChunkPayload //
+//////////////////
+
+/// Borrowed view over the three payload regions of one decompressed chunk.
+///
+/// Cell and gene chunks differ only in their headers; the payload is the same
+/// raw / norm / index run in both. This is the single parser for that run: the
+/// owned chunk types build their `Vec`s from it, and the fused batch readers
+/// walk it in place without allocating per chunk. Reads are byte-wise rather
+/// than pointer casts: the buffer is an lz4-decompressed `Vec<u8>`, so no
+/// region is guaranteed to be aligned.
+struct ChunkPayload<'a> {
+    /// Raw count bytes, at `raw_width` bytes per element.
+    data_raw: &'a [u8],
+    /// Number of raw count elements.
+    data_raw_len: usize,
+    /// Element width discriminant for `data_raw`, as stored in the header.
+    raw_elem_size: u8,
+    /// Bytes per raw count element, 2 or 4.
+    raw_width: usize,
+    /// Normalised count bytes, two per element.
+    data_norm: &'a [u8],
+    /// Index bytes, four per element.
+    indices: &'a [u8],
+}
+
+impl<'a> ChunkPayload<'a> {
+    /// Slice the payload regions that follow a chunk header.
+    ///
+    /// ### Params
+    ///
+    /// * `buffer` - One decompressed chunk, header included
+    /// * `header_len` - Length of the header the payload follows
+    /// * `lens` - The `(raw, norm, index)` element counts from the header
+    /// * `raw_elem_size` - Raw element width discriminant from the header
+    ///
+    /// ### Returns
+    ///
+    /// The payload, [`BixverseErrors::RawElemSizeInvalid`] for an unknown
+    /// width, or [`BixverseErrors::ChunkPayloadTruncated`] for a chunk shorter
+    /// than its own header claims.
+    fn slice(
+        buffer: &'a [u8],
+        header_len: usize,
+        lens: (usize, usize, usize),
+        raw_elem_size: u8,
+    ) -> Result<Self, BixverseErrors> {
+        let (data_raw_len, data_norm_len, indices_len) = lens;
+
+        // Zero covers legacy files where the discriminant byte was padding.
+        let raw_width = match raw_elem_size {
+            RAW_ELEM_U32 => 4,
+            RAW_ELEM_U16 | 0 => 2,
+            other => return Err(BixverseErrors::RawElemSizeInvalid(other)),
+        };
+
+        let data_end = header_len + data_raw_len * raw_width;
+        let norm_end = data_end + data_norm_len * 2;
+        let total_end = norm_end + indices_len * 4;
+
+        // The three length fields are untrusted, so validate the total payload
+        // before taking any slice.
+        if buffer.len() < total_end {
+            return Err(BixverseErrors::ChunkPayloadTruncated {
+                expected: total_end,
+                found: buffer.len(),
+            });
+        }
+
+        Ok(Self {
+            data_raw: &buffer[header_len..data_end],
+            data_raw_len,
+            raw_elem_size,
+            raw_width,
+            data_norm: &buffer[data_end..norm_end],
+            indices: &buffer[norm_end..total_end],
+        })
+    }
+
+    /// Iterate the normalised layer.
+    ///
+    /// ### Returns
+    ///
+    /// An iterator over the stored f16 values.
+    fn norm_iter(&self) -> impl Iterator<Item = F16> + '_ {
+        self.data_norm
+            .chunks_exact(2)
+            .map(|c| F16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")))
+    }
+
+    /// Iterate the indices.
+    ///
+    /// ### Returns
+    ///
+    /// An iterator over the stored indices.
+    fn index_iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.indices
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction")))
+    }
+
+    /// Copy the raw layer out as owned [`RawCounts`].
+    ///
+    /// ### Returns
+    ///
+    /// The raw counts at their stored width.
+    fn raw_counts(&self) -> Result<RawCounts, BixverseErrors> {
+        RawCounts::read_from_buffer(self.data_raw, self.data_raw_len, self.raw_elem_size)
+    }
+}
+
+///////////////
+// RunSource //
+///////////////
+
+/// Entries per stack block when widening f16 to f32 in bulk. Big enough for
+/// `half`'s slice conversion to run its vector path, small enough to stay on
+/// the stack.
+const F16_BLOCK: usize = 64;
+
+/// One stored run (a cell row or a gene column) as the fused readers consume
+/// it: random access for the filtered path, bulk extends for the unfiltered
+/// one.
+pub(crate) trait RunSource {
+    /// Number of stored entries.
+    ///
+    /// ### Returns
+    ///
+    /// The run length.
+    fn nnz(&self) -> usize;
+
+    /// Stored index of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The gene (cell run) or cell (gene run) index.
+    fn index_at(&self, i: usize) -> u32;
+
+    /// Raw count of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The count.
+    fn raw_at(&self, i: usize) -> u32;
+
+    /// Normalised value of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The value as f32.
+    fn norm_at(&self, i: usize) -> f32;
+
+    /// Append every stored index.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    fn extend_indices(&self, out: &mut Vec<u32>);
+
+    /// Append every raw count, converted to `T`.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for a count that does
+    /// not fit `T`. Nothing is appended on error.
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors>;
+
+    /// Append every normalised value.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    fn extend_norm(&self, out: &mut Vec<f32>);
+}
+
+/// Append raw counts converted to `T`, checking overflow once on the maximum.
+///
+/// Every `FromPrimitive` target used for counts (u16, u32, f32, f64) is
+/// monotone over `u32`, so if the maximum fits, every value does. That keeps
+/// the branch out of the copy loop.
+///
+/// ### Params
+///
+/// * `out` - Destination
+/// * `vals` - The counts, iterated twice
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for the maximum.
+#[inline]
+pub(crate) fn extend_raw_checked<T, I>(out: &mut Vec<T>, vals: I) -> Result<(), BixverseErrors>
+where
+    T: FromPrimitive,
+    I: Iterator<Item = u32> + Clone,
+{
+    raw_to::<T>(vals.clone().max().unwrap_or(0))?;
+    out.extend(vals.map(|v| T::from_u32(v).expect("the maximum fits, so every value does")));
+    Ok(())
+}
+
+impl RunSource for ChunkPayload<'_> {
+    #[inline]
+    fn nnz(&self) -> usize {
+        self.indices.len() / 4
+    }
+
+    #[inline(always)]
+    fn index_at(&self, i: usize) -> u32 {
+        let b = &self.indices[i * 4..i * 4 + 4];
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    }
+
+    #[inline(always)]
+    fn raw_at(&self, i: usize) -> u32 {
+        if self.raw_width == 4 {
+            let b = &self.data_raw[i * 4..i * 4 + 4];
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            let b = &self.data_raw[i * 2..i * 2 + 2];
+            u16::from_le_bytes([b[0], b[1]]) as u32
+        }
+    }
+
+    #[inline(always)]
+    fn norm_at(&self, i: usize) -> f32 {
+        let b = &self.data_norm[i * 2..i * 2 + 2];
+        F16::from_le_bytes([b[0], b[1]]).to_f32()
+    }
+
+    fn extend_indices(&self, out: &mut Vec<u32>) {
+        out.extend(self.index_iter());
+    }
+
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors> {
+        if self.raw_width == 4 {
+            extend_raw_checked(
+                out,
+                self.data_raw.chunks_exact(4).map(|c| {
+                    u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction"))
+                }),
+            )
+        } else {
+            extend_raw_checked(
+                out,
+                self.data_raw.chunks_exact(2).map(|c| {
+                    u16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")) as u32
+                }),
+            )
+        }
+    }
+
+    fn extend_norm(&self, out: &mut Vec<f32>) {
+        let start = out.len();
+        out.resize(start + self.data_norm.len() / 2, 0.0);
+        let mut block = [f16::ZERO; F16_BLOCK];
+        for (src, dst) in self
+            .data_norm
+            .chunks(2 * F16_BLOCK)
+            .zip(out[start..].chunks_mut(F16_BLOCK))
+        {
+            for (b, c) in block.iter_mut().zip(src.chunks_exact(2)) {
+                *b = f16::from_le_bytes(c.try_into().expect("2-byte chunk by construction"));
+            }
+            block[..dst.len()].convert_to_f32_slice(dst);
+        }
+    }
+}
+
+/// Read a little-endian `u32` length field from a chunk header.
+///
+/// ### Params
+///
+/// * `header` - The header bytes
+/// * `at` - Byte offset of the field
+///
+/// ### Returns
+///
+/// The field as `usize`.
+#[inline]
+fn header_u32(header: &[u8], at: usize) -> usize {
+    u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]) as usize
+}
+
+//////////////////
+// CsrChunkView //
+//////////////////
+
+/// Borrowed view over one decompressed CSR cell chunk.
+///
+/// The cell header fields plus the shared [`ChunkPayload`]. Every payload
+/// slice is bounds-checked against the buffer before it is taken, so the three
+/// untrusted length fields in the header cannot index out of range.
+struct CsrChunkView<'a> {
+    /// The raw / norm / gene index regions.
+    payload: ChunkPayload<'a>,
+    /// Total library size of the cell.
+    library_size: usize,
+    /// Original index of the cell in the experiment.
+    original_index: usize,
+    /// Whether the cell passed QC.
+    to_keep: bool,
+}
+
+impl<'a> CsrChunkView<'a> {
+    /// Parse the chunk header and slice out the three payload regions.
+    ///
+    /// ### Params
+    ///
+    /// * `buffer` - One decompressed chunk
+    ///
+    /// ### Returns
+    ///
+    /// The view, or [`BixverseErrors::ChunkBufferTooSmall`] /
+    /// [`BixverseErrors::ChunkPayloadTruncated`] for a chunk shorter than its
+    /// own header claims.
+    fn parse(buffer: &'a [u8]) -> Result<Self, BixverseErrors> {
+        if buffer.len() < CSR_CHUNK_HEADER_LEN {
+            return Err(BixverseErrors::ChunkBufferTooSmall {
+                expected: CSR_CHUNK_HEADER_LEN,
+                found: buffer.len(),
+            });
+        }
+
+        let header = &buffer[0..CSR_CHUNK_HEADER_LEN];
+        let lens = (
+            header_u32(header, 0),
+            header_u32(header, 4),
+            header_u32(header, 8),
+        );
+
+        Ok(Self {
+            payload: ChunkPayload::slice(buffer, CSR_CHUNK_HEADER_LEN, lens, header[29])?,
+            library_size: le_u64_at(header, 12) as usize,
+            original_index: le_u64_at(header, 20) as usize,
+            to_keep: header[28] != 0,
+        })
+    }
+}
+
+/// Parse a CSR cell chunk down to its payload.
+///
+/// ### Params
+///
+/// * `buffer` - One decompressed cell chunk
+///
+/// ### Returns
+///
+/// The payload, or the errors of [`CsrChunkView::parse`].
+fn csr_payload(buffer: &[u8]) -> Result<ChunkPayload<'_>, BixverseErrors> {
+    CsrChunkView::parse(buffer).map(|view| view.payload)
+}
+
+/// Parse a CSC gene chunk down to its payload.
+///
+/// The gene header fields (`avg_exp`, `nnz`, `original_index`, `to_keep`) are
+/// not needed by the fused readers, so they are skipped rather than decoded.
+///
+/// ### Params
+///
+/// * `buffer` - One decompressed gene chunk
+///
+/// ### Returns
+///
+/// The payload, or [`BixverseErrors::ChunkBufferTooSmall`] /
+/// [`BixverseErrors::ChunkPayloadTruncated`] for a chunk shorter than its own
+/// header claims.
+fn csc_payload(buffer: &[u8]) -> Result<ChunkPayload<'_>, BixverseErrors> {
+    if buffer.len() < CSC_CHUNK_HEADER_LEN {
+        return Err(BixverseErrors::ChunkBufferTooSmall {
+            expected: CSC_CHUNK_HEADER_LEN,
+            found: buffer.len(),
+        });
+    }
+
+    let lens = (
+        header_u32(buffer, 0),
+        header_u32(buffer, 4),
+        header_u32(buffer, 8),
+    );
+
+    ChunkPayload::slice(buffer, CSC_CHUNK_HEADER_LEN, lens, buffer[33])
+}
+
 /// CsrCellChunk
 ///
 /// This structure is designed to store the data of a single cell in a
@@ -554,77 +957,15 @@ impl CsrCellChunk {
     ///
     /// The `CsrCellChunk`
     pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, BixverseErrors> {
-        if buffer.len() < CSR_CHUNK_HEADER_LEN {
-            return Err(BixverseErrors::ChunkBufferTooSmall {
-                expected: CSR_CHUNK_HEADER_LEN,
-                found: buffer.len(),
-            });
-        }
-
-        let header = &buffer[0..CSR_CHUNK_HEADER_LEN];
-
-        let data_raw_len =
-            u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let data_norm_len =
-            u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-        let col_indices_len =
-            u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
-        let library_size = u64::from_le_bytes([
-            header[12], header[13], header[14], header[15], header[16], header[17], header[18],
-            header[19],
-        ]) as usize;
-        let original_index = u64::from_le_bytes([
-            header[20], header[21], header[22], header[23], header[24], header[25], header[26],
-            header[27],
-        ]) as usize;
-        let to_keep = header[28] != 0;
-        let raw_elem_size = header[29];
-
-        let data_start = CSR_CHUNK_HEADER_LEN;
-        let elem_size = if raw_elem_size == RAW_ELEM_U32 {
-            4usize
-        } else {
-            2usize
-        };
-        let data_end = data_start + data_raw_len * elem_size;
-        let norm_end = data_end + data_norm_len * 2;
-        let total_end = norm_end + col_indices_len * 4;
-
-        // The three length fields are untrusted, so validate the total payload
-        // before taking any slice.
-        if buffer.len() < total_end {
-            return Err(BixverseErrors::ChunkPayloadTruncated {
-                expected: total_end,
-                found: buffer.len(),
-            });
-        }
-
-        let data_raw = RawCounts::read_from_buffer(
-            &buffer[data_start..data_end],
-            data_raw_len,
-            raw_elem_size,
-        )?;
-
-        // Byte-wise reads rather than pointer casts: the buffer is an
-        // lz4-decompressed `Vec<u8>`, so `norm_end` is not guaranteed to be
-        // 4-byte aligned.
-        let data_norm: Vec<F16> = buffer[data_end..norm_end]
-            .chunks_exact(2)
-            .map(|c| F16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")))
-            .collect();
-
-        let indices: Vec<u32> = buffer[norm_end..total_end]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction")))
-            .collect();
+        let view = CsrChunkView::parse(buffer)?;
 
         Ok(Self {
-            data_raw,
-            data_norm,
-            library_size,
-            indices,
-            original_index,
-            to_keep,
+            data_raw: view.payload.raw_counts()?,
+            data_norm: view.payload.norm_iter().collect(),
+            library_size: view.library_size,
+            indices: view.payload.index_iter().collect(),
+            original_index: view.original_index,
+            to_keep: view.to_keep,
         })
     }
 
@@ -925,119 +1266,79 @@ impl CscGeneChunk {
     ///
     /// The `CscGeneChunk`
     pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, BixverseErrors> {
-        if buffer.len() < CSC_CHUNK_HEADER_LEN {
-            return Err(BixverseErrors::ChunkBufferTooSmall {
-                expected: CSC_CHUNK_HEADER_LEN,
-                found: buffer.len(),
-            });
-        }
-
-        let header = &buffer[0..CSC_CHUNK_HEADER_LEN];
-        let data_raw_len =
-            u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let data_norm_len =
-            u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-        let row_indices_len =
-            u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
-        let avg_exp = F16::from_le_bytes([header[12], header[13]]);
-        // skip 2 bytes padding
-        let nnz = u64::from_le_bytes([
-            header[16], header[17], header[18], header[19], header[20], header[21], header[22],
-            header[23],
-        ]) as usize;
-        let original_index = u64::from_le_bytes([
-            header[24], header[25], header[26], header[27], header[28], header[29], header[30],
-            header[31],
-        ]) as usize;
-        let to_keep = header[32] != 0;
-        let raw_elem_size = header[33];
-
-        let data_start = CSC_CHUNK_HEADER_LEN;
-        let elem_size = if raw_elem_size == RAW_ELEM_U32 {
-            4usize
-        } else {
-            2usize
-        };
-        let data_end = data_start + data_raw_len * elem_size;
-        let norm_end = data_end + data_norm_len * 2;
-        let total_end = norm_end + row_indices_len * 4;
-
-        // The three length fields are untrusted, so validate the total payload
-        // before taking any slice.
-        if buffer.len() < total_end {
-            return Err(BixverseErrors::ChunkPayloadTruncated {
-                expected: total_end,
-                found: buffer.len(),
-            });
-        }
-
-        let data_raw = RawCounts::read_from_buffer(
-            &buffer[data_start..data_end],
-            data_raw_len,
-            raw_elem_size,
-        )?;
-
-        // Byte-wise reads rather than pointer casts: the buffer is an
-        // lz4-decompressed `Vec<u8>`, so `norm_end` is not guaranteed to be
-        // 4-byte aligned.
-        let data_norm: Vec<F16> = buffer[data_end..norm_end]
-            .chunks_exact(2)
-            .map(|c| F16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")))
-            .collect();
-
-        let indices: Vec<u32> = buffer[norm_end..total_end]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction")))
-            .collect();
+        let payload = csc_payload(buffer)?;
 
         Ok(Self {
-            data_raw,
-            data_norm,
-            avg_exp,
-            nnz,
-            indices,
-            original_index,
-            to_keep,
+            data_raw: payload.raw_counts()?,
+            data_norm: payload.norm_iter().collect(),
+            avg_exp: F16::from_le_bytes([buffer[12], buffer[13]]),
+            nnz: le_u64_at(buffer, 16) as usize,
+            indices: payload.index_iter().collect(),
+            original_index: le_u64_at(buffer, 24) as usize,
+            to_keep: buffer[32] != 0,
         })
     }
 
     /// Helper function that allows to filter out cells
     ///
+    /// Kept cells are renumbered to their position in `cells_to_keep`, and the
+    /// output is ordered by that position (PCA and NEBULA rely on it).
+    ///
     /// ### Params
     ///
     /// * `cells_to_keep` - IndexSet with cell index positions to keep.
     pub fn filter_selected_cells(&mut self, cells_to_keep: &IndexSet<u32>) {
-        // build reverse mapping: cell_id -> position in this gene's data
-        let cell_positions: FxHashMap<u32, usize> = self
+        self.filter_cells_by(|cell| cells_to_keep.get_index_of(&cell).map(|i| i as u32));
+    }
+
+    /// Filter to the cells a dense index map keeps.
+    ///
+    /// Same result as [`Self::filter_selected_cells`], but each stored entry
+    /// costs an array load rather than a hash probe. Build the map once per
+    /// read with [`dense_index_map`] and share it across genes.
+    ///
+    /// ### Params
+    ///
+    /// * `cell_map` - `cell_map[cell] = output row`, [`INDEX_DROPPED`] or out
+    ///   of range for cells not kept.
+    pub fn filter_selected_cells_dense(&mut self, cell_map: &[u32]) {
+        self.filter_cells_by(|cell| match cell_map.get(cell as usize) {
+            Some(&row) if row != INDEX_DROPPED => Some(row),
+            _ => None,
+        });
+    }
+
+    /// Keep the entries whose cell maps to an output row, renumbered to it.
+    ///
+    /// One walk over this gene's non-zeros. Stored cell indices ascend, so the
+    /// kept rows only need sorting when the keep set itself is not ascending.
+    ///
+    /// ### Params
+    ///
+    /// * `row_of` - Output row for a cell, `None` to drop it.
+    #[inline]
+    fn filter_cells_by(&mut self, row_of: impl Fn(u32) -> Option<u32>) {
+        let mut kept: Vec<(u32, u32)> = self
             .indices
             .iter()
             .enumerate()
-            .map(|(pos, &cell_id)| (cell_id, pos))
+            .filter_map(|(pos, &cell)| row_of(cell).map(|row| (row, pos as u32)))
             .collect();
 
-        let mut new_data_norm = Vec::with_capacity(cells_to_keep.len());
-        let mut new_row_indices = Vec::with_capacity(cells_to_keep.len());
-        let mut keep_positions = Vec::new();
-
-        // iterate in cells_to_keep order (critical for PCA!)
-        for (new_row_idx, &cell_index) in cells_to_keep.iter().enumerate() {
-            if let Some(&pos) = cell_positions.get(&cell_index) {
-                keep_positions.push(pos);
-                new_data_norm.push(self.data_norm[pos]);
-                new_row_indices.push(new_row_idx as u32);
-            }
+        if !kept.is_sorted_by_key(|&(row, _)| row) {
+            kept.sort_unstable_by_key(|&(row, _)| row);
         }
 
-        let new_raw = match &self.data_raw {
-            RawCounts::U16(v) => RawCounts::U16(keep_positions.iter().map(|&p| v[p]).collect()),
-            RawCounts::U32(v) => RawCounts::U32(keep_positions.iter().map(|&p| v[p]).collect()),
+        self.data_norm = kept
+            .iter()
+            .map(|&(_, p)| self.data_norm[p as usize])
+            .collect();
+        self.data_raw = match &self.data_raw {
+            RawCounts::U16(v) => RawCounts::U16(kept.iter().map(|&(_, p)| v[p as usize]).collect()),
+            RawCounts::U32(v) => RawCounts::U32(kept.iter().map(|&(_, p)| v[p as usize]).collect()),
         };
-
-        let nnz = new_row_indices.len();
-        self.data_raw = new_raw;
-        self.data_norm = new_data_norm;
-        self.indices = new_row_indices;
-        self.nnz = nnz;
+        self.indices = kept.iter().map(|&(row, _)| row).collect();
+        self.nnz = kept.len();
     }
 
     /// Calculate the average gene expression given a set of cells
@@ -1610,6 +1911,20 @@ pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
     map
 }
 
+/// [`dense_index_map`] over a keep set, rows in the set's iteration order.
+///
+/// ### Params
+///
+/// * `cells_to_keep` - Cells to keep, in output order
+///
+/// ### Returns
+///
+/// `map[cell] = row`, [`INDEX_DROPPED`] for cells not kept.
+pub fn keep_set_index_map(cells_to_keep: &IndexSet<u32>) -> Vec<u32> {
+    let kept: Vec<usize> = cells_to_keep.iter().map(|&c| c as usize).collect();
+    dense_index_map(&kept)
+}
+
 /// Dense gene map from a per-file `local -> final` mapping.
 ///
 /// ### Params
@@ -1838,6 +2153,61 @@ pub trait SingleCellReading: Send + Sync {
     /// The `CscGeneChunk`s in the order given by `indices`.
     fn read_gene_parallel(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, BixverseErrors>;
 
+    /// Read a batch of cells straight into one CSR matrix.
+    ///
+    /// Same output as [`Self::read_cells_parallel`] followed by
+    /// [`from_cell_chunks`], without materialising a chunk per cell. Prefer it
+    /// whenever the consumer only needs the counts and indices.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, in output row order
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// CSR of shape `(indices.len(), total_genes)`, raw counts in `data` (empty
+    /// when not requested) and normalised counts in `data_2`, or
+    /// [`BixverseErrors::ReaderModeMismatch`] on a gene-major store and
+    /// [`BixverseErrors::RawCountOverflow`] for a count that does not fit `T`.
+    fn read_cells_sparse<T>(
+        &self,
+        indices: &[usize],
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive;
+
+    /// Read a batch of genes straight into one CSC matrix, optionally keeping
+    /// only a cell subset.
+    ///
+    /// Same output as [`Self::read_gene_parallel_filtered`] (or
+    /// [`Self::read_gene_parallel`] without a subset) followed by
+    /// [`from_gene_chunks`], without materialising a chunk per gene. Kept
+    /// cells are renumbered to their position in `cells_to_keep`.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene indices, in output column order
+    /// * `cells_to_keep` - Cells to keep, in output row order, or `None` for
+    ///   all cells
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// CSC of shape `(cells, indices.len())`, raw counts in `data` (empty when
+    /// not requested) and normalised counts in `data_2`, or
+    /// [`BixverseErrors::ReaderModeMismatch`] on a cell-major store and
+    /// [`BixverseErrors::RawCountOverflow`] for a count that does not fit `T`.
+    fn read_genes_sparse<T>(
+        &self,
+        indices: &[usize],
+        cells_to_keep: Option<&IndexSet<u32>>,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive;
+
     /// Return the header of the underlying store
     ///
     /// ### Returns
@@ -1963,9 +2333,10 @@ pub trait SingleCellReading: Send + Sync {
         cells_to_keep: &IndexSet<u32>,
     ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
         let mut chunks = self.read_gene_parallel(indices)?;
+        let cell_map = keep_set_index_map(cells_to_keep);
         chunks
             .par_iter_mut()
-            .for_each(|chunk| chunk.filter_selected_cells(cells_to_keep));
+            .for_each(|chunk| chunk.filter_selected_cells_dense(&cell_map));
         Ok(chunks)
     }
 
@@ -2109,6 +2480,8 @@ pub struct ParallelSparseReader {
     /// Byte offset in the mmap of the first library-size index entry, or
     /// `None` for files written without the index.
     library_index: Option<usize>,
+    /// Whether `index_map` is the identity, letting every lookup skip the hash.
+    identity_index_map: bool,
 }
 
 impl ParallelSparseReader {
@@ -2184,6 +2557,11 @@ impl ParallelSparseReader {
 
         let library_index =
             Self::check_library_index(&mmap, file_header.library_index_offset, &header)?;
+        let identity_index_map = header.index_map.len() == header.chunk_offsets.len()
+            && header
+                .index_map
+                .iter()
+                .all(|(&original, &chunk)| original == chunk);
 
         Ok(Self {
             header,
@@ -2191,6 +2569,7 @@ impl ParallelSparseReader {
             chunks_start: 64,
             target_size: file_header.target_size,
             library_index,
+            identity_index_map,
         })
     }
 
@@ -2270,6 +2649,62 @@ impl ParallelSparseReader {
         self.library_index.is_some()
     }
 
+    /// Resolve an original cell or gene index to its chunk ordinal.
+    ///
+    /// A store written in one pass has `index_map[i] == i`, which is the
+    /// overwhelmingly common case, so that is checked first and skips the hash
+    /// lookup entirely. The map is only consulted for stores whose chunks were
+    /// written out of order.
+    ///
+    /// ### Params
+    ///
+    /// * `original_index` - Original index of the cell or gene in the data
+    ///
+    /// ### Returns
+    ///
+    /// The chunk ordinal, or [`BixverseErrors::ChunkIndexNotFound`].
+    fn chunk_index_of(&self, original_index: usize) -> Result<usize, BixverseErrors> {
+        if self.identity_index_map {
+            return if original_index < self.header.chunk_offsets.len() {
+                Ok(original_index)
+            } else {
+                Err(BixverseErrors::ChunkIndexNotFound(original_index))
+            };
+        }
+
+        self.header
+            .index_map
+            .get(&original_index)
+            .copied()
+            .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))
+    }
+
+    /// Locate the compressed bytes of a single chunk in the mapping.
+    ///
+    /// ### Params
+    ///
+    /// * `original_index` - Original index of the cell or gene in the data
+    ///
+    /// ### Returns
+    ///
+    /// The compressed slice, still carrying lz4's own size prefix, and the
+    /// chunk's byte offset for error reporting.
+    fn locate_chunk(&self, original_index: usize) -> Result<(&[u8], usize), BixverseErrors> {
+        let chunk_index = self.chunk_index_of(original_index)?;
+        let chunk_offset = (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
+
+        let compressed_size = u64::from_le_bytes(
+            self.mmap[chunk_offset..chunk_offset + 8]
+                .try_into()
+                .expect("8-byte slice by construction"),
+        ) as usize;
+
+        Ok((
+            &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size],
+            chunk_offset,
+        ))
+    }
+
     /// Locate, decompress and return the raw bytes of a single chunk
     ///
     /// Shared by every read path: resolve the original index to a chunk offset
@@ -2283,23 +2718,421 @@ impl ParallelSparseReader {
     ///
     /// The decompressed chunk bytes.
     fn decompress_chunk(&self, original_index: usize) -> Result<Vec<u8>, BixverseErrors> {
-        let chunk_index = *self
-            .header
-            .index_map
-            .get(&original_index)
-            .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
-        let chunk_offset = (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
-
-        let compressed_size = u64::from_le_bytes(
-            self.mmap[chunk_offset..chunk_offset + 8]
-                .try_into()
-                .expect("8-byte slice by construction"),
-        ) as usize;
-
-        let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
+        let (compressed, chunk_offset) = self.locate_chunk(original_index)?;
 
         decompress_size_prepended(compressed)
             .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))
+    }
+
+    /// Decompress a chunk into a caller-owned buffer.
+    ///
+    /// The allocating [`Self::decompress_chunk`] costs one `Vec` plus one
+    /// zero-fill per chunk, which for a shuffled minibatch is a fresh
+    /// allocation per cell. Handing in a scratch buffer that is reused across
+    /// the cells a worker owns removes both: `resize` only zeroes on growth,
+    /// and after the first few cells it stops growing.
+    ///
+    /// ### Params
+    ///
+    /// * `original_index` - Original index of the cell or gene in the data
+    /// * `scratch` - Buffer to decompress into. Resized to the payload.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` with `scratch` holding exactly the decompressed chunk.
+    fn decompress_chunk_into(
+        &self,
+        original_index: usize,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), BixverseErrors> {
+        let (compressed, chunk_offset) = self.locate_chunk(original_index)?;
+
+        let (size, payload) = uncompressed_size(compressed)
+            .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
+
+        scratch.resize(size, 0);
+        let written = decompress_into(payload, scratch)
+            .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
+        scratch.truncate(written);
+
+        Ok(())
+    }
+}
+
+////////////////////////
+// Fused batch reads  //
+////////////////////////
+
+/// Pieces per rayon thread in [`read_fused`].
+///
+/// One piece per thread maximises scratch reuse but leaves no work to steal,
+/// so the slowest thread (an efficiency core, or the piece holding the
+/// heaviest genes) sets the wall time. Several pieces per thread restore
+/// stealing at the cost of a few more scratch buffers.
+const FUSED_PIECES_PER_THREAD: usize = 8;
+
+/// Convert one raw count exactly into `T`.
+///
+/// ### Params
+///
+/// * `val` - The stored count
+///
+/// ### Returns
+///
+/// The count as `T`, or [`BixverseErrors::RawCountOverflow`] when it does not
+/// fit.
+#[inline(always)]
+fn raw_to<T: FromPrimitive>(val: u32) -> Result<T, BixverseErrors> {
+    T::from_u32(val).ok_or(BixverseErrors::RawCountOverflow {
+        value: val,
+        target_type: std::any::type_name::<T>(),
+    })
+}
+
+/// One worker's share of a fused batch read, before the fragments are
+/// concatenated.
+///
+/// Runs are CSR rows (cell reads) or CSC columns (gene reads). The layers that
+/// were not requested stay `None` and cost nothing.
+pub(crate) struct SparseFragment<T> {
+    /// Raw counts, when requested.
+    data: Option<Vec<T>>,
+    /// Normalised counts, when requested.
+    data_2: Option<Vec<f32>>,
+    /// Minor-axis indices, renumbered when a row map is in play.
+    indices: Vec<u32>,
+    /// Entries per run, in order, for the prefix sum.
+    lengths: Vec<usize>,
+    /// Reused `(output row, entry position)` scratch for filtered runs.
+    kept: Vec<(u32, u32)>,
+}
+
+impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
+    /// Empty fragment.
+    ///
+    /// ### Params
+    ///
+    /// * `layers` - `(raw, norm)`: which layers to materialise
+    /// * `n_runs` - Runs this worker will append
+    ///
+    /// ### Returns
+    ///
+    /// The fragment.
+    fn new(layers: (bool, bool), n_runs: usize) -> Self {
+        Self {
+            data: layers.0.then(Vec::new),
+            data_2: layers.1.then(Vec::new),
+            indices: Vec::new(),
+            lengths: Vec::with_capacity(n_runs),
+            kept: Vec::new(),
+        }
+    }
+
+    /// Append one run.
+    ///
+    /// With a `row_map` the run is filtered and renumbered on the way in:
+    /// entries whose index maps to [`INDEX_DROPPED`] (or past the map) are
+    /// dropped, and the rest are reordered by output row. Stored indices
+    /// ascend, so the sort only runs when the map itself is not monotone. This
+    /// is the fused form of [`CscGeneChunk::filter_selected_cells_dense`] and
+    /// gives identical output.
+    ///
+    /// ### Params
+    ///
+    /// * `run` - The stored run
+    /// * `row_map` - Optional dense `index -> output row` map
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for a count that does
+    /// not fit `T`.
+    #[inline]
+    pub(crate) fn push_run(
+        &mut self,
+        run: &impl RunSource,
+        row_map: Option<&[u32]>,
+    ) -> Result<(), BixverseErrors> {
+        let Some(map) = row_map else {
+            if let Some(data) = self.data.as_mut() {
+                run.extend_raw(data)?;
+            }
+            if let Some(data_2) = self.data_2.as_mut() {
+                run.extend_norm(data_2);
+            }
+            run.extend_indices(&mut self.indices);
+            self.lengths.push(run.nnz());
+            return Ok(());
+        };
+
+        self.kept.clear();
+        self.kept.extend(
+            (0..run.nnz()).filter_map(|i| match map.get(run.index_at(i) as usize) {
+                Some(&row) if row != INDEX_DROPPED => Some((row, i as u32)),
+                _ => None,
+            }),
+        );
+        if !self.kept.is_sorted_by_key(|&(row, _)| row) {
+            self.kept.sort_unstable_by_key(|&(row, _)| row);
+        }
+
+        if let Some(data) = self.data.as_mut() {
+            for &(_, i) in &self.kept {
+                data.push(raw_to(run.raw_at(i as usize))?);
+            }
+        }
+        if let Some(data_2) = self.data_2.as_mut() {
+            data_2.extend(self.kept.iter().map(|&(_, i)| run.norm_at(i as usize)));
+        }
+        self.indices.extend(self.kept.iter().map(|&(row, _)| row));
+        self.lengths.push(self.kept.len());
+
+        Ok(())
+    }
+}
+
+/// Which layers a [`DataLayerReturn`] asks for.
+///
+/// ### Params
+///
+/// * `data_layer` - The requested layer(s)
+///
+/// ### Returns
+///
+/// `(raw, norm)`.
+fn wanted_layers(data_layer: &DataLayerReturn) -> (bool, bool) {
+    (
+        matches!(
+            data_layer,
+            DataLayerReturn::Raw | DataLayerReturn::BothLayers
+        ),
+        matches!(
+            data_layer,
+            DataLayerReturn::Norm | DataLayerReturn::BothLayers
+        ),
+    )
+}
+
+/// Read a batch of runs straight into one compressed sparse matrix.
+///
+/// The engine behind [`SingleCellReading::read_cells_sparse`] and
+/// [`SingleCellReading::read_genes_sparse`]. Work is split into one contiguous
+/// piece per rayon worker rather than per run, so each piece reuses one
+/// scratch buffer (and one [`SparseFragment`]) across all of its runs, and
+/// allocation scales with the thread count rather than the batch size. The
+/// pieces are concatenated in order, so the output run order follows
+/// `indices`.
+///
+/// ### Params
+///
+/// * `indices` - Runs to read, in output order
+/// * `data_layer` - Which layer(s) to materialise
+/// * `cs_type` - Layout of the output: CSR for cell runs, CSC for gene runs
+/// * `shape` - `(cells, genes)` of the output
+/// * `fill` - Appends run `indices[i]` to the fragment; the `Vec<u8>` is the
+///   worker's reusable scratch buffer
+///
+/// ### Returns
+///
+/// The batch, raw counts in `data` (empty when not requested) and normalised
+/// counts in `data_2`.
+pub(crate) fn read_fused<T, F>(
+    indices: &[usize],
+    data_layer: &DataLayerReturn,
+    cs_type: CompressedSparseFormat,
+    shape: (usize, usize),
+    fill: F,
+) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+where
+    T: BixverseNumeric + FromPrimitive,
+    F: Fn(usize, &mut Vec<u8>, &mut SparseFragment<T>) -> Result<(), BixverseErrors> + Sync,
+{
+    let layers = wanted_layers(data_layer);
+    let n_pieces = rayon::current_num_threads().max(1) * FUSED_PIECES_PER_THREAD;
+    let piece = indices.len().div_ceil(n_pieces).max(1);
+
+    let fragments: Vec<SparseFragment<T>> = indices
+        .par_chunks(piece)
+        .map(|runs| {
+            let mut scratch: Vec<u8> = Vec::new();
+            let mut fragment = SparseFragment::new(layers, runs.len());
+            for &run in runs {
+                fill(run, &mut scratch, &mut fragment)?;
+            }
+            Ok(fragment)
+        })
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+    // Concatenate in parallel: each fragment copies into its own disjoint
+    // slot of preallocated outputs. A serial append here costs more than the
+    // whole parallel decode.
+    let nnz_offsets: Vec<usize> = std::iter::once(0)
+        .chain(fragments.iter().scan(0, |acc, f| {
+            *acc += f.indices.len();
+            Some(*acc)
+        }))
+        .collect();
+    let run_offsets: Vec<usize> = std::iter::once(0)
+        .chain(fragments.iter().scan(0, |acc, f| {
+            *acc += f.lengths.len();
+            Some(*acc)
+        }))
+        .collect();
+    let nnz = *nnz_offsets.last().expect("seeded with 0");
+
+    let mut data: Vec<T> = if layers.0 {
+        vec![T::default(); nnz]
+    } else {
+        Vec::new()
+    };
+    let mut data_2: Option<Vec<f32>> = layers.1.then(|| vec![0.0; nnz]);
+    let mut out_indices: Vec<u32> = vec![0; nnz];
+    let mut indptr: Vec<u32> = vec![0; indices.len() + 1];
+
+    let data_parts = split_at_offsets(&mut data, &nnz_offsets, layers.0);
+    let data_2_parts = split_at_offsets(
+        data_2.as_deref_mut().unwrap_or_default(),
+        &nnz_offsets,
+        layers.1,
+    );
+    let index_parts = split_at_offsets(&mut out_indices, &nnz_offsets, true);
+    let indptr_parts = split_at_offsets(&mut indptr[1..], &run_offsets, true);
+
+    fragments
+        .par_iter()
+        .zip(data_parts)
+        .zip(data_2_parts)
+        .zip(index_parts)
+        .zip(indptr_parts)
+        .zip(nnz_offsets.par_iter())
+        .for_each(|(((((fragment, d), d2), idx), ptr), &base)| {
+            if let Some(src) = fragment.data.as_ref() {
+                d.copy_from_slice(src);
+            }
+            if let Some(src) = fragment.data_2.as_ref() {
+                d2.copy_from_slice(src);
+            }
+            idx.copy_from_slice(&fragment.indices);
+            let mut offset = base;
+            for (out, &len) in ptr.iter_mut().zip(&fragment.lengths) {
+                offset += len;
+                *out = offset as u32;
+            }
+        });
+
+    Ok(CompressedSparseData2 {
+        data,
+        indices: out_indices,
+        indptr,
+        cs_type,
+        data_2,
+        shape,
+    })
+}
+
+/// Split a slice into consecutive parts at the given offsets.
+///
+/// ### Params
+///
+/// * `buf` - The slice to split
+/// * `offsets` - Prefix offsets with a leading 0, one more than the parts
+/// * `active` - `false` for a layer that was not requested: `buf` is empty and
+///   every part comes back empty, so the parts still zip one per fragment
+///
+/// ### Returns
+///
+/// The parts, in order.
+fn split_at_offsets<'a, X>(buf: &'a mut [X], offsets: &[usize], active: bool) -> Vec<&'a mut [X]> {
+    let n_parts = offsets.len().saturating_sub(1);
+    if !active {
+        return (0..n_parts).map(|_| &mut [][..]).collect();
+    }
+    let mut parts = Vec::with_capacity(n_parts);
+    let mut rest = buf;
+    for w in offsets.windows(2) {
+        let (head, tail) = rest.split_at_mut(w[1] - w[0]);
+        parts.push(head);
+        rest = tail;
+    }
+    parts
+}
+
+/////////////////////
+// Cell row subset //
+/////////////////////
+
+/// Dense map and output row count for a cell subset.
+///
+/// ### Params
+///
+/// * `cells_to_keep` - Cells to keep, in output order, or `None` for all
+/// * `total_cells` - Cells in the store
+///
+/// ### Returns
+///
+/// `(map, n_rows)`: the map is `None` when no filtering is asked for.
+pub(crate) fn cell_row_map(
+    cells_to_keep: Option<&IndexSet<u32>>,
+    total_cells: usize,
+) -> (Option<Vec<u32>>, usize) {
+    match cells_to_keep {
+        Some(set) => (Some(keep_set_index_map(set)), set.len()),
+        None => (None, total_cells),
+    }
+}
+
+//////////////
+// CsrBatch //
+//////////////
+
+/// A batch of cells as one CSR matrix.
+///
+/// The layout a training loop wants: contiguous `data`, `indices` and `indptr`
+/// that hand straight to `scipy.sparse.csr_matrix` or `torch.sparse_csr_tensor`
+/// without another pass. Whichever layer was not requested is `None`; both
+/// share one sparsity pattern, so `indices` and `indptr` are never duplicated.
+#[derive(Clone, Debug)]
+pub struct CsrBatch {
+    /// Raw counts as `f32`, in CSR order, when requested.
+    pub data_raw: Option<Vec<f32>>,
+    /// Normalised counts as `f32`, in CSR order, when requested.
+    pub data_norm: Option<Vec<f32>>,
+    /// Gene indices, one per non-zero.
+    pub indices: Vec<u32>,
+    /// Row pointers, of length `shape.0 + 1`.
+    pub indptr: Vec<u32>,
+    /// `(cells in the batch, total genes)`.
+    pub shape: (usize, usize),
+}
+
+impl ParallelSparseReader {
+    /// Read a batch of cells straight into CSR, as `f32`.
+    ///
+    /// [`SingleCellReading::read_cells_sparse`] with `T = f32`, unpacked into
+    /// the [`CsrBatch`] the Python loader hands to scipy or torch.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Original cell indices, in the order the batch wants them
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSR, or [`BixverseErrors::ReaderModeMismatch`] on a
+    /// gene-major store.
+    pub fn read_cells_csr(
+        &self,
+        indices: &[usize],
+        data_layer: &DataLayerReturn,
+    ) -> Result<CsrBatch, BixverseErrors> {
+        let csr = self.read_cells_sparse::<f32>(indices, data_layer)?;
+
+        Ok(CsrBatch {
+            data_raw: wanted_layers(data_layer).0.then_some(csr.data),
+            data_norm: csr.data_2,
+            indices: csr.indices,
+            indptr: csr.indptr,
+            shape: csr.shape,
+        })
     }
 }
 
@@ -2333,6 +3166,93 @@ impl SingleCellReading for ParallelSparseReader {
                 CsrCellChunk::read_from_buffer(&decompressed)
             })
             .collect()
+    }
+
+    /// Read a batch of cells straight into CSR
+    ///
+    /// Decompresses each cell into the worker's scratch buffer and appends
+    /// its payload in place, see [`read_fused`].
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, in output row order
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSR.
+    fn read_cells_sparse<T>(
+        &self,
+        indices: &[usize],
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        if !self.is_cell_based() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
+
+        read_fused(
+            indices,
+            data_layer,
+            CompressedSparseFormat::Csr,
+            (indices.len(), self.header.total_genes),
+            |cell, scratch, fragment| {
+                self.decompress_chunk_into(cell, scratch)?;
+                let p = csr_payload(scratch)?;
+                fragment.push_run(&p, None)
+            },
+        )
+    }
+
+    /// Read a batch of genes straight into CSC, optionally filtering cells
+    ///
+    /// Decompresses each gene into the worker's scratch buffer and appends
+    /// its payload in place, filtering through a dense cell map built once
+    /// per call, see [`read_fused`].
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene indices, in output column order
+    /// * `cells_to_keep` - Cells to keep, in output row order, or `None`
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSC.
+    fn read_genes_sparse<T>(
+        &self,
+        indices: &[usize],
+        cells_to_keep: Option<&IndexSet<u32>>,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        if !self.is_gene_based() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        let (row_map, n_rows) = cell_row_map(cells_to_keep, self.header.total_cells);
+
+        read_fused(
+            indices,
+            data_layer,
+            CompressedSparseFormat::Csc,
+            (n_rows, indices.len()),
+            |gene, scratch, fragment| {
+                self.decompress_chunk_into(gene, scratch)?;
+                let p = csc_payload(scratch)?;
+                fragment.push_run(&p, row_map.as_deref())
+            },
+        )
     }
 
     /// Read in genes by indices in a multi-threaded manner
@@ -2387,6 +3307,8 @@ impl SingleCellReading for ParallelSparseReader {
             });
         }
 
+        let cell_map = keep_set_index_map(cells_to_keep);
+
         indices
             .par_iter()
             .map(|&original_index| {
@@ -2394,7 +3316,7 @@ impl SingleCellReading for ParallelSparseReader {
 
                 let mut chunk = CscGeneChunk::read_from_buffer(&decompressed)?;
 
-                chunk.filter_selected_cells(cells_to_keep);
+                chunk.filter_selected_cells_dense(&cell_map);
 
                 Ok(chunk)
             })
@@ -2788,6 +3710,34 @@ mod tests {
     }
 
     ////////////////////
+    // Cell filtering //
+    ////////////////////
+
+    /// Kept cells are renumbered to their keep-set position and ordered by it,
+    /// also when the keep set is not ascending; both filter paths agree.
+    #[test]
+    fn test_filter_selected_cells_follows_keep_order() {
+        let keep: IndexSet<u32> = [7_u32, 1, 4, 900].into_iter().collect();
+
+        let mut by_set = gene_chunk(&[10, 30, 50, 70], &[1, 3, 5, 7], 0);
+        by_set.filter_selected_cells(&keep);
+        assert_eq!(by_set.indices, vec![0, 1]);
+        assert_eq!(by_set.data_raw.iter().collect::<Vec<u32>>(), vec![70, 10]);
+        assert_eq!(by_set.data_norm[0].to_f32(), 70.0);
+        assert_eq!(by_set.nnz, 2);
+
+        // cell 900 sizes the map; cells past it must drop, not index out
+        let mut by_map = gene_chunk(&[10, 30, 50, 70, 90], &[1, 3, 5, 7, 2_000], 0);
+        by_map.filter_selected_cells_dense(&keep_set_index_map(&keep));
+        assert_eq!(by_map.indices, by_set.indices);
+        assert_eq!(
+            by_map.data_raw.iter().collect::<Vec<u32>>(),
+            by_set.data_raw.iter().collect::<Vec<u32>>()
+        );
+        assert_eq!(by_map.data_norm, by_set.data_norm);
+    }
+
+    ////////////////////
     // Chunk codec //
     ////////////////////
 
@@ -2970,6 +3920,302 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].data_raw.iter().collect::<Vec<_>>(), vec![5, 70_000]);
         assert_eq!(back[1].indices, vec![0, 1, 2]);
+    }
+
+    /// Write a small cell-major store and hand back the guard and reader.
+    ///
+    /// The chunks deliberately differ in length and include a count above
+    /// `u16::MAX`, so the `u32` raw element width is exercised alongside the
+    /// row-length bookkeeping.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Test-unique file suffix.
+    ///
+    /// ### Returns
+    ///
+    /// The temp guard and an open reader over it.
+    fn csr_test_store(name: &str) -> (TempBin, ParallelSparseReader) {
+        let temp = TempBin::new(name);
+        let chunks = vec![
+            cell_chunk(&[5, 70_000], &[0, 2], 0),
+            cell_chunk(&[1, 2, 3], &[0, 1, 2], 1),
+            cell_chunk(&[9], &[3], 2),
+        ];
+
+        let mut writer =
+            CellGeneSparseWriter::new(temp.path(), true, 3, 4, 1e4).expect("writer opens");
+        for chunk in chunks {
+            writer.write_cell_chunk(chunk).expect("write");
+        }
+        writer.finalise().expect("finalise");
+
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        (temp, reader)
+    }
+
+    #[test]
+    fn test_read_cells_csr_matches_chunk_path() {
+        let (_temp, reader) = csr_test_store("csr_matches_chunks");
+        let order = [2usize, 0, 1];
+
+        let batch = reader
+            .read_cells_csr(&order, &DataLayerReturn::BothLayers)
+            .expect("csr batch");
+        let chunks = reader.read_cells_parallel(&order).expect("chunk batch");
+
+        assert_eq!(batch.shape, (3, 4));
+        assert_eq!(batch.indptr.len(), order.len() + 1);
+        assert_eq!(batch.indptr[0], 0);
+        assert_eq!(
+            *batch.indptr.last().expect("non-empty"),
+            batch.indices.len() as u32
+        );
+
+        let raw = batch.data_raw.as_ref().expect("raw requested");
+        let norm = batch.data_norm.as_ref().expect("norm requested");
+
+        for (row, chunk) in chunks.iter().enumerate() {
+            let lo = batch.indptr[row] as usize;
+            let hi = batch.indptr[row + 1] as usize;
+
+            assert_eq!(&batch.indices[lo..hi], &chunk.indices[..]);
+            assert_eq!(
+                raw[lo..hi].to_vec(),
+                chunk.data_raw.iter().map(|v| v as f32).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                norm[lo..hi].to_vec(),
+                chunk
+                    .data_norm
+                    .iter()
+                    .map(|v| v.to_f32())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_read_cells_csr_layer_selection() {
+        let (_temp, reader) = csr_test_store("csr_layers");
+
+        let raw_only = reader
+            .read_cells_csr(&[0, 1, 2], &DataLayerReturn::Raw)
+            .expect("raw batch");
+        assert!(raw_only.data_raw.is_some());
+        assert!(raw_only.data_norm.is_none());
+
+        let norm_only = reader
+            .read_cells_csr(&[0, 1, 2], &DataLayerReturn::Norm)
+            .expect("norm batch");
+        assert!(norm_only.data_raw.is_none());
+        assert!(norm_only.data_norm.is_some());
+    }
+
+    #[test]
+    fn test_read_cells_csr_repeats_and_subsets() {
+        let (_temp, reader) = csr_test_store("csr_repeats");
+
+        // A cell may legitimately appear twice in one batch: sampling with
+        // replacement is a normal thing for a training loop to ask for.
+        let batch = reader
+            .read_cells_csr(&[1, 1], &DataLayerReturn::Raw)
+            .expect("csr batch");
+
+        assert_eq!(batch.shape.0, 2);
+        assert_eq!(batch.indptr, vec![0, 3, 6]);
+        assert_eq!(batch.indices, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn test_read_cells_csr_rejects_unknown_cell() {
+        let (_temp, reader) = csr_test_store("csr_unknown_cell");
+
+        let err = reader
+            .read_cells_csr(&[99], &DataLayerReturn::Raw)
+            .expect_err("index is out of range");
+        assert!(matches!(err, BixverseErrors::ChunkIndexNotFound(99)));
+    }
+
+    #[test]
+    fn test_read_cells_csr_rejects_gene_major_store() {
+        let temp = TempBin::new("csr_gene_major");
+        let mut writer =
+            CellGeneSparseWriter::new(temp.path(), false, 2, 1, 1e4).expect("writer opens");
+        writer
+            .write_gene_chunk(gene_chunk(&[1, 2], &[0, 1], 0))
+            .expect("write");
+        writer.finalise().expect("finalise");
+
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let err = reader
+            .read_cells_csr(&[0], &DataLayerReturn::Raw)
+            .expect_err("store is gene-major");
+        assert!(matches!(err, BixverseErrors::ReaderModeMismatch { .. }));
+    }
+
+    /// Write a small gene-major store over six cells.
+    ///
+    /// Gene 0 carries a count above `u16::MAX` (u32 raw width), gene 3 is
+    /// empty, and the rest differ in length.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Test-unique file suffix.
+    ///
+    /// ### Returns
+    ///
+    /// The temp guard and an open reader over it.
+    fn csc_test_store(name: &str) -> (TempBin, ParallelSparseReader) {
+        let temp = TempBin::new(name);
+        let chunks = vec![
+            gene_chunk(&[5, 70_000, 2], &[0, 3, 5], 0),
+            gene_chunk(&[1, 2, 3, 4, 5, 6], &[0, 1, 2, 3, 4, 5], 1),
+            gene_chunk(&[9, 11], &[1, 4], 2),
+            gene_chunk(&[], &[], 3),
+        ];
+
+        let mut writer =
+            CellGeneSparseWriter::new(temp.path(), false, 6, 4, 1e4).expect("writer opens");
+        for chunk in chunks {
+            writer.write_gene_chunk(chunk).expect("write");
+        }
+        writer.finalise().expect("finalise");
+
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        (temp, reader)
+    }
+
+    /// Assert two sparse matrices are identical, field by field.
+    ///
+    /// ### Params
+    ///
+    /// * `got` - Fused output
+    /// * `want` - Chunk-path reference
+    fn assert_same_sparse<T: BixverseNumeric + std::fmt::Debug + PartialEq>(
+        got: &CompressedSparseData2<T, f32>,
+        want: &CompressedSparseData2<T, f32>,
+    ) {
+        assert_eq!(got.shape, want.shape);
+        assert_eq!(got.cs_type.is_csc(), want.cs_type.is_csc());
+        assert_eq!(got.indptr, want.indptr);
+        assert_eq!(got.indices, want.indices);
+        assert_eq!(got.data, want.data);
+        assert_eq!(got.data_2, want.data_2);
+    }
+
+    /// Fused gene reads equal the chunk path for every layer, with and
+    /// without a cell subset, including a non-ascending, an empty and a
+    /// repeated-gene case.
+    #[test]
+    fn test_read_genes_sparse_matches_chunk_path() {
+        let (_temp, reader) = csc_test_store("csc_matches_chunks");
+        let genes = [2usize, 0, 3, 1, 0];
+
+        let subsets: Vec<Option<IndexSet<u32>>> = vec![
+            None,
+            Some([0_u32, 3, 4, 5].into_iter().collect()),
+            Some([5_u32, 1, 3].into_iter().collect()),
+            Some(IndexSet::new()),
+        ];
+
+        for layer in [
+            DataLayerReturn::Raw,
+            DataLayerReturn::Norm,
+            DataLayerReturn::BothLayers,
+        ] {
+            for subset in &subsets {
+                let (chunks, n_cells) = match subset {
+                    Some(set) => (
+                        reader
+                            .read_gene_parallel_filtered(&genes, set)
+                            .expect("chunks"),
+                        set.len(),
+                    ),
+                    None => (reader.read_gene_parallel(&genes).expect("chunks"), 6),
+                };
+                let want = from_gene_chunks::<u32>(chunks, &layer, n_cells).expect("reference");
+                let got = reader
+                    .read_genes_sparse::<u32>(&genes, subset.as_ref(), &layer)
+                    .expect("fused");
+                assert_same_sparse(&got, &want);
+            }
+        }
+    }
+
+    /// Fused cell reads equal the chunk path for a non-f32 target.
+    #[test]
+    fn test_read_cells_sparse_matches_chunk_path() {
+        let (_temp, reader) = csr_test_store("csr_sparse_matches_chunks");
+        let order = [2usize, 0, 1, 0];
+
+        for layer in [
+            DataLayerReturn::Raw,
+            DataLayerReturn::Norm,
+            DataLayerReturn::BothLayers,
+        ] {
+            let chunks = reader.read_cells_parallel(&order).expect("chunks");
+            let want = from_cell_chunks::<u32>(&chunks, &layer, 4).expect("reference");
+            let got = reader
+                .read_cells_sparse::<u32>(&order, &layer)
+                .expect("fused");
+            assert_same_sparse(&got, &want);
+        }
+    }
+
+    /// A count above the target type's range is an error, as on the chunk
+    /// path, on both the unfiltered (bulk) and filtered paths, also when it
+    /// sits past a dropped cell.
+    #[test]
+    fn test_read_genes_sparse_reports_overflow() {
+        let (_temp, reader) = csc_test_store("csc_overflow");
+        let keep: IndexSet<u32> = [3_u32].into_iter().collect();
+
+        for cells in [None, Some(&keep)] {
+            match reader.read_genes_sparse::<u16>(&[0], cells, &DataLayerReturn::Raw) {
+                Err(BixverseErrors::RawCountOverflow { value, .. }) => assert_eq!(value, 70_000),
+                other => panic!("expected RawCountOverflow, got {:?}", other.map(|_| ())),
+            }
+        }
+
+        // Dropping the offending cell makes the narrow type fine.
+        let keep: IndexSet<u32> = [0_u32, 5].into_iter().collect();
+        let csc = reader
+            .read_genes_sparse::<u16>(&[0], Some(&keep), &DataLayerReturn::Raw)
+            .expect("fits u16");
+        assert_eq!(csc.data, vec![5, 2]);
+    }
+
+    #[test]
+    fn test_read_genes_sparse_rejects_cell_major_store() {
+        let (_temp, reader) = csr_test_store("csc_cell_major");
+        let err = reader
+            .read_genes_sparse::<f32>(&[0], None, &DataLayerReturn::Raw)
+            .expect_err("store is cell-major");
+        assert!(matches!(err, BixverseErrors::ReaderModeMismatch { .. }));
+    }
+
+    #[test]
+    fn test_decompress_chunk_into_matches_allocating_path() {
+        let (_temp, reader) = csr_test_store("csr_scratch");
+
+        // A dirty buffer must be overwritten, not appended to: the scratch is
+        // reused across every cell a worker owns.
+        let mut scratch = vec![0xAAu8; 4096];
+        for cell in 0..3 {
+            reader
+                .decompress_chunk_into(cell, &mut scratch)
+                .expect("scratch decompress");
+            let owned = reader.decompress_chunk(cell).expect("owned decompress");
+            assert_eq!(scratch, owned);
+        }
+    }
+
+    #[test]
+    fn test_identity_index_map_is_detected() {
+        let (_temp, reader) = csr_test_store("csr_identity_map");
+        assert!(reader.identity_index_map);
+        assert_eq!(reader.chunk_index_of(2).expect("in range"), 2);
     }
 
     /// Rewrite the 64-byte header slot of an existing file, applying `edit` to

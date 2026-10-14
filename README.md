@@ -26,7 +26,7 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | --- | --- |
 | `core` | Correlations and pairwise similarity, PCA/SVD, randomised SVD, LOESS, RBF kernels, mutual information and entropy, scalar optimisation (R's `optimize`), linear mixed models (REML with Satterthwaite), E-distance and perturbation distances, sparse structures, synthetic data generators |
 | `enrichment` | GSEA (fgsea multi-level), blitzGSEA (gamma-approximated null), GSVA, ssGSEA, singscore, mitch, over-representation |
-| `graph` | Louvain, WalkTrap, spectral clustering, label propagation, personalised and constrained PageRank, connected components, Dijkstra (single and multi-source), Kruskal spanning forests, PAGA-style graph abstraction, graph metrics |
+| `graph` | Leiden, Louvain, WalkTrap, spectral clustering, label propagation, personalised and constrained PageRank, connected components, Dijkstra (single and multi-source), Kruskal spanning forests, PAGA-style graph abstraction, graph metrics |
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
@@ -51,6 +51,7 @@ pays for what it uses.
 | --- | --- |
 | *(always on)* | Bulk statistics, enrichment, graph, ontology, matrix factorisation |
 | `accelerate` | On by default. Dense CPU GEMM through Apple Accelerate on macOS, no effect elsewhere. See below |
+| `r` | On by default. The `extendr-api` conversions: every `*_r_wrapper` module and `utils::r_rust_interface`. Turn it off for anything that must not link libR, such as the Python wheel |
 | `single-cell` | The `single_cell` module, HDF5 and mmap I/O, the binary sparse format |
 | `multi-modal` | `single_cell::multi_modal` (WNN, ADT), implies `single-cell` |
 | `dge` | Negative binomial DGE via `edge-rs`: bulk edgeR and limma-voom. Implied by `single-cell`, usable on its own |
@@ -58,6 +59,7 @@ pays for what it uses.
 | `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load |
 | `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
+| `mlx` | Experimental, Apple Silicon only: an MLX backend via [`mlx-c`](https://github.com/ml-explore/mlx-c) (f32) for correlation, SpMM, randomised SVD, NMF (dense and sparse, consensus, k sweeps), and with `single-cell` PCA, Harmony and SEACells. Independent of `gpu`. Needs `brew install mlx-c` or `MLX_C_PREFIX`; without the library the build warns and skips it |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
 
@@ -67,7 +69,8 @@ On macOS the default `accelerate` feature sends every dense CPU GEMM
 (correlations, covariance, perturbation distances, NMF HALS, Hotspot, Markov
 chains, the landmark GP) through Apple's Accelerate framework. It ships with
 every macOS, so there is nothing to install. Turn it off with
-`default-features = false`. End to end on an M1 Max:
+`default-features = false`, which also drops `r`; add `features = ["r"]` back if
+you still want the R conversions. End to end on an M1 Max:
 
 | function | f32 | f64 |
 | --- | --- | --- |
@@ -80,7 +83,7 @@ every macOS, so there is nothing to install. Turn it off with
 
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.5", features = ["single-cell"] }
+bixverse-rs = { version = "0.7", features = ["single-cell"] }
 ```
 
 ```rust
@@ -101,6 +104,8 @@ Each top-level module carries a `*_r_wrapper.rs` sibling holding the R
 conversions: `from_r_list` deserialisers for the parameter structs and a handful
 of serialisers back to R lists. The `#[extendr]` entry points themselves live
 downstream in the R packages, so R types never touch the numerical surface.
+All of it sits behind the `r` feature, on by default; a consumer that builds
+with `default-features = false` never links libR.
 
 Two R packages consume the crate:
 
@@ -111,6 +116,26 @@ Two R packages consume the crate:
 
 Anything on the Rust side that never crosses into R works standalone, so the
 crate is equally usable from a pure Rust binary or behind a PyO3 layer.
+
+## Using it from Python
+
+The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
+Python package wraps the single cell streaming engine with PyO3 and maturin,
+built without the `r` feature, so the wheel needs no R install. It opens a
+bixverse binary store and streams shuffled minibatches out of it, with the
+decode in Rust and the GIL released, fast enough to keep a GPU training loop
+fed. First consumer is scVI in `bixverse.nn`, on torch or MLX, trained straight
+off the store.
+
+```bash
+uv pip install bixverse            # numpy only
+uv pip install "bixverse[torch]"   # scVI on torch
+uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
+```
+
+Docs live [here](https://gregorlueg.github.io/bixverse-rs/). The Python package
+is versioned on its own line, see its
+[changelog](https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md).
 
 ## Roadmap
 
@@ -142,8 +167,9 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 
 ### Python interface
 
-- [ ] Data loader to pull the counts out of the binary files and expose them to
-  Python-based deep learning frameworks (JAX, PyTorch).
+- [x] Data loader to pull the counts out of the binary files and expose them to
+  Python-based deep learning frameworks (PyTorch, MLX).
+- [x] scVI trained straight off the binary files, on torch and MLX.
 
 ## Updates
 

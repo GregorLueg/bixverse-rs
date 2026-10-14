@@ -34,7 +34,7 @@ use crate::prelude::*;
 ////////////////////
 
 /// The device-resident factor pair, `W` as `[m, k]` and `H^T` as `[n, k]`.
-type GpuFactors<R> = (GpuTensor<R, f32>, GpuTensor<R, f32>);
+type GpuFactors = (GpuTensor<f32>, GpuTensor<f32>);
 
 /// Flatten a faer `m x k` matrix into a row-major `[m, k]` buffer.
 ///
@@ -133,7 +133,7 @@ fn h_from_row_major(buf: &[f32], k: usize, n: usize) -> Mat<f32> {
 /// against a device loop of hundreds of iterations, and reusing the CPU
 /// decomposition keeps GPU and CPU runs starting from bit-identical factors,
 /// which is what makes the parity tests meaningful.
-pub trait GpuNmfData<R: Runtime> {
+pub trait GpuNmfData {
     /// Shape of `V`.
     ///
     /// ### Returns
@@ -164,11 +164,11 @@ pub trait GpuNmfData<R: Runtime> {
     /// `Ok(())`, with `a` holding `(W^T V)^T`.
     fn wt_v_gpu(
         &self,
-        w: &GpuTensor<R, f32>,
-        a: &GpuTensor<R, f32>,
+        w: &GpuTensor<f32>,
+        a: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        partials: &GpuTensor<R, f32>,
+        client: &Client,
+        partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors>;
 
     /// Compute `V H^T` into `c`.
@@ -187,11 +187,11 @@ pub trait GpuNmfData<R: Runtime> {
     /// `Ok(())`, with `c` holding `V H^T`.
     fn v_ht_gpu(
         &self,
-        h: &GpuTensor<R, f32>,
-        c: &GpuTensor<R, f32>,
+        h: &GpuTensor<f32>,
+        c: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        partials: &GpuTensor<R, f32>,
+        client: &Client,
+        partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors>;
 
     /// Top-k truncated SVD of `V`, on the host, for NNDSVD initialisation.
@@ -215,9 +215,9 @@ pub trait GpuNmfData<R: Runtime> {
 ///
 /// Holds the host matrix alongside the device copy so NNDSVD initialisation can
 /// reuse the CPU randomised SVD.
-pub struct GpuDenseNmfInput<'a, R: Runtime> {
+pub struct GpuDenseNmfInput<'a> {
     /// `V^T` as `[n, m]` row-major on device.
-    v_t: GpuTensor<R, f32>,
+    v_t: GpuTensor<f32>,
     /// Host-side view, for the initialisation SVD only.
     host: DenseInput<'a, f32>,
     /// Logical shape `(m, n)` of `V`.
@@ -226,7 +226,7 @@ pub struct GpuDenseNmfInput<'a, R: Runtime> {
     sq_frob: f32,
 }
 
-impl<'a, R: Runtime> GpuDenseNmfInput<'a, R> {
+impl<'a> GpuDenseNmfInput<'a> {
     /// Validate `V`, upload it, and cache its Frobenius norm.
     ///
     /// Non-negativity and finiteness are checked by [`DenseInput::new`]. The
@@ -243,7 +243,7 @@ impl<'a, R: Runtime> GpuDenseNmfInput<'a, R> {
     /// A [`GpuDenseNmfInput`], or `NmfNonFinite` / `NmfNonNegativeViolated` if
     /// validation fails, or `CubeclUtils` if `V` busts the device's per-binding
     /// size limit.
-    pub fn new(v: MatRef<'a, f32>, client: &ComputeClient<R>) -> Result<Self, BixverseErrors> {
+    pub fn new(v: MatRef<'a, f32>, client: &Client) -> Result<Self, BixverseErrors> {
         let host = DenseInput::new(v)?;
         let (m, n) = (v.nrows(), v.ncols());
 
@@ -263,7 +263,7 @@ impl<'a, R: Runtime> GpuDenseNmfInput<'a, R> {
         };
 
         let sq_frob = flat.iter().map(|&x| x as f64 * x as f64).sum::<f64>() as f32;
-        let v_t = GpuTensor::<R, f32>::from_slice(flat, vec![n, m], client)?;
+        let v_t = GpuTensor::<f32>::from_slice(flat, vec![n, m], client)?;
 
         Ok(Self {
             v_t,
@@ -274,7 +274,7 @@ impl<'a, R: Runtime> GpuDenseNmfInput<'a, R> {
     }
 }
 
-impl<R: Runtime> GpuNmfData<R> for GpuDenseNmfInput<'_, R> {
+impl GpuNmfData for GpuDenseNmfInput<'_> {
     fn shape(&self) -> (usize, usize) {
         self.shape
     }
@@ -285,30 +285,30 @@ impl<R: Runtime> GpuNmfData<R> for GpuDenseNmfInput<'_, R> {
 
     fn wt_v_gpu(
         &self,
-        w: &GpuTensor<R, f32>,
-        a: &GpuTensor<R, f32>,
+        w: &GpuTensor<f32>,
+        a: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        partials: &GpuTensor<R, f32>,
+        client: &Client,
+        partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors> {
         let (m, n) = self.shape;
         // a[n, k] = V^T[n, m] * W[m, k], reducing over m. `v_t` already is V^T,
         // so it is indexed as stored.
-        skinny_gemm::<R, f32>(client, &self.v_t, w, a, partials, n, k, m, false)
+        skinny_gemm::<f32>(client, &self.v_t, w, a, partials, n, k, m, false)
     }
 
     fn v_ht_gpu(
         &self,
-        h: &GpuTensor<R, f32>,
-        c: &GpuTensor<R, f32>,
+        h: &GpuTensor<f32>,
+        c: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        partials: &GpuTensor<R, f32>,
+        client: &Client,
+        partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors> {
         let (m, n) = self.shape;
         // c[m, k] = V[m, n] * H^T[n, k], reducing over n. V is `v_t` with its two
         // indices swapped, which is what the transposed flag selects.
-        skinny_gemm::<R, f32>(client, &self.v_t, h, c, partials, m, k, n, true)
+        skinny_gemm::<f32>(client, &self.v_t, h, c, partials, m, k, n, true)
     }
 
     fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors> {
@@ -321,11 +321,11 @@ impl<R: Runtime> GpuNmfData<R> for GpuDenseNmfInput<'_, R> {
 ///////////////////////
 
 /// Sparse `V` on device, uploaded once in both orientations.
-pub struct GpuSparseNmfInput<R: Runtime> {
+pub struct GpuSparseNmfInput {
     /// CSR of `V`, shape `(m, n)`.
-    v_csr: GpuCompressedSparseData<R, f32>,
+    v_csr: GpuCompressedSparseData<f32>,
     /// CSC of `V`, shape `(m, n)`.
-    v_csc: GpuCompressedSparseData<R, f32>,
+    v_csc: GpuCompressedSparseData<f32>,
     /// Host-side matched pair, for the initialisation SVD only.
     host: SparseInput<f32, f32>,
     /// Logical shape `(m, n)` of `V`.
@@ -334,7 +334,7 @@ pub struct GpuSparseNmfInput<R: Runtime> {
     sq_frob: f32,
 }
 
-impl<R: Runtime> GpuSparseNmfInput<R> {
+impl GpuSparseNmfInput {
     /// Build the matched pair on the host, validate it, and upload both layouts.
     ///
     /// ### Params
@@ -346,10 +346,7 @@ impl<R: Runtime> GpuSparseNmfInput<R> {
     ///
     /// A [`GpuSparseNmfInput`], or `CubeclUtils` if any of the six buffers busts
     /// the device's per-binding size limit.
-    pub fn new(
-        host: SparseInput<f32, f32>,
-        client: &ComputeClient<R>,
-    ) -> Result<Self, BixverseErrors> {
+    pub fn new(host: SparseInput<f32, f32>, client: &Client) -> Result<Self, BixverseErrors> {
         let shape = crate::methods::nmf_hals::NmfInput::shape(&host);
         let sq_frob = host
             .csr()
@@ -361,7 +358,7 @@ impl<R: Runtime> GpuSparseNmfInput<R> {
         let csr = host.csr();
         let csc = host.csc();
 
-        let v_csr = GpuCompressedSparseData::<R, f32>::from_parts(
+        let v_csr = GpuCompressedSparseData::<f32>::from_parts(
             &csr.data,
             &csr.indices,
             &csr.indptr,
@@ -369,7 +366,7 @@ impl<R: Runtime> GpuSparseNmfInput<R> {
             shape,
             client,
         )?;
-        let v_csc = GpuCompressedSparseData::<R, f32>::from_parts(
+        let v_csc = GpuCompressedSparseData::<f32>::from_parts(
             &csc.data,
             &csc.indices,
             &csc.indptr,
@@ -388,7 +385,7 @@ impl<R: Runtime> GpuSparseNmfInput<R> {
     }
 }
 
-impl<R: Runtime> GpuNmfData<R> for GpuSparseNmfInput<R> {
+impl GpuNmfData for GpuSparseNmfInput {
     fn shape(&self) -> (usize, usize) {
         self.shape
     }
@@ -399,28 +396,28 @@ impl<R: Runtime> GpuNmfData<R> for GpuSparseNmfInput<R> {
 
     fn wt_v_gpu(
         &self,
-        w: &GpuTensor<R, f32>,
-        a: &GpuTensor<R, f32>,
+        w: &GpuTensor<f32>,
+        a: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        _partials: &GpuTensor<R, f32>,
+        client: &Client,
+        _partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors> {
         // Z = A^T Q with A = V shaped (m, n): Q is W [m, k], Z is a [n, k]. The
         // SpMM accumulates per output row, so it needs no split-K scratch.
-        launch_spmm_csc_transpose_plain::<R, f32, f32>(&self.v_csc, w, a, k, client)
+        launch_spmm_csc_transpose_plain::<f32, f32>(&self.v_csc, w, a, k, client)
     }
 
     fn v_ht_gpu(
         &self,
-        h: &GpuTensor<R, f32>,
-        c: &GpuTensor<R, f32>,
+        h: &GpuTensor<f32>,
+        c: &GpuTensor<f32>,
         k: usize,
-        client: &ComputeClient<R>,
-        _partials: &GpuTensor<R, f32>,
+        client: &Client,
+        _partials: &GpuTensor<f32>,
     ) -> Result<(), BixverseErrors> {
         // Y = A X with A = V shaped (m, n): X is H^T [n, k], Y is c [m, k]. The
         // SpMM accumulates per output row, so it needs no split-K scratch.
-        launch_spmm_csr_plain::<R, f32, f32>(&self.v_csr, h, c, k, client)
+        launch_spmm_csr_plain::<f32, f32>(&self.v_csr, h, c, k, client)
     }
 
     fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors> {
@@ -443,40 +440,40 @@ impl<R: Runtime> GpuNmfData<R> for GpuSparseNmfInput<R> {
 /// once per restart, and CubeCL has no write-into-existing-buffer path, so they
 /// are created per solve. The allocator pools same-sized requests, so the page
 /// faults are paid on the first restart rather than on every one.
-pub struct NmfGpuScratch<R: Runtime> {
+pub struct NmfGpuScratch {
     /// `(W^T V)^T`, `[n, k_max]`.
-    a: GpuTensor<R, f32>,
+    a: GpuTensor<f32>,
     /// `V H^T`, `[m, k_max]`.
-    c: GpuTensor<R, f32>,
+    c: GpuTensor<f32>,
     /// `W^T W`, `[k_max, k_max]`.
-    b: GpuTensor<R, f32>,
+    b: GpuTensor<f32>,
     /// `H H^T`, `[k_max, k_max]`.
-    d: GpuTensor<R, f32>,
+    d: GpuTensor<f32>,
     /// Split-K Gram partials, sized for the longer of the two reductions.
-    gram_partials: GpuTensor<R, f32>,
+    gram_partials: GpuTensor<f32>,
     /// Split-K partials for the dense data products, sized for whichever of the
     /// two splits further. Allocated even for the sparse backend, where it is one
     /// element, so the trait signature does not have to be optional.
-    gemm_partials: GpuTensor<R, f32>,
+    gemm_partials: GpuTensor<f32>,
     /// Per-component sums of squares of `W`, `[k_max]`.
-    sq: GpuTensor<R, f32>,
+    sq: GpuTensor<f32>,
     /// Per-component L2 norms of `W`, `[k_max]`.
-    norm: GpuTensor<R, f32>,
+    norm: GpuTensor<f32>,
     /// Reciprocals of `norm`, `[k_max]`.
-    inv_norm: GpuTensor<R, f32>,
+    inv_norm: GpuTensor<f32>,
     /// Per-row partials for the objective, `[max(m, n)]`.
     ///
     /// Sized for both axes because the two frozen-factor refits reduce over
     /// opposite ones: `H` frozen pairs `W` against `V H^T` over `m` rows, and
     /// `W` frozen pairs `H^T` against `(W^T V)^T` over `n`.
-    obj_partials: GpuTensor<R, f32>,
+    obj_partials: GpuTensor<f32>,
     /// The non-negativity floor, as a one-element tensor.
-    eps: GpuTensor<R, f32>,
+    eps: GpuTensor<f32>,
     /// Largest rank this scratch covers.
     k_max: usize,
 }
 
-impl<R: Runtime> NmfGpuScratch<R> {
+impl NmfGpuScratch {
     /// Allocate the scratch for a problem of shape `(m, n)` up to rank `k_max`.
     ///
     /// ### Params
@@ -497,7 +494,7 @@ impl<R: Runtime> NmfGpuScratch<R> {
         n: usize,
         k_max: usize,
         eps: f32,
-        client: &ComputeClient<R>,
+        client: &Client,
     ) -> Result<Self, BixverseErrors> {
         if sweep_tier(k_max).is_none() {
             return Err(BixverseErrors::GpuNmfRankTooLarge {
@@ -513,17 +510,17 @@ impl<R: Runtime> NmfGpuScratch<R> {
             .max(1);
 
         Ok(Self {
-            a: GpuTensor::<R, f32>::empty(vec![n, k_max], client)?,
-            c: GpuTensor::<R, f32>::empty(vec![m, k_max], client)?,
-            b: GpuTensor::<R, f32>::empty(vec![k_max, k_max], client)?,
-            d: GpuTensor::<R, f32>::empty(vec![k_max, k_max], client)?,
-            gram_partials: GpuTensor::<R, f32>::empty(vec![chunks, k_max, k_max], client)?,
-            gemm_partials: GpuTensor::<R, f32>::empty(vec![gemm_elems], client)?,
-            sq: GpuTensor::<R, f32>::empty(vec![k_max], client)?,
-            norm: GpuTensor::<R, f32>::empty(vec![k_max], client)?,
-            inv_norm: GpuTensor::<R, f32>::empty(vec![k_max], client)?,
-            obj_partials: GpuTensor::<R, f32>::empty(vec![m.max(n)], client)?,
-            eps: GpuTensor::<R, f32>::from_slice(&[eps], vec![1], client)?,
+            a: GpuTensor::<f32>::empty(vec![n, k_max], client)?,
+            c: GpuTensor::<f32>::empty(vec![m, k_max], client)?,
+            b: GpuTensor::<f32>::empty(vec![k_max, k_max], client)?,
+            d: GpuTensor::<f32>::empty(vec![k_max, k_max], client)?,
+            gram_partials: GpuTensor::<f32>::empty(vec![chunks, k_max, k_max], client)?,
+            gemm_partials: GpuTensor::<f32>::empty(vec![gemm_elems], client)?,
+            sq: GpuTensor::<f32>::empty(vec![k_max], client)?,
+            norm: GpuTensor::<f32>::empty(vec![k_max], client)?,
+            inv_norm: GpuTensor::<f32>::empty(vec![k_max], client)?,
+            obj_partials: GpuTensor::<f32>::empty(vec![m.max(n)], client)?,
+            eps: GpuTensor::<f32>::from_slice(&[eps], vec![1], client)?,
             k_max,
         })
     }
@@ -602,25 +599,24 @@ fn relative_denominator(sq_frob: f32) -> f32 {
 ///
 /// The reconstruction error, clamped at zero, with `b`, `d` and `a` left
 /// holding the freshly computed products.
-fn objective_gpu<R, In>(
+fn objective_gpu<In>(
     v: &In,
-    w: &GpuTensor<R, f32>,
-    h: &GpuTensor<R, f32>,
-    scratch: &NmfGpuScratch<R>,
+    w: &GpuTensor<f32>,
+    h: &GpuTensor<f32>,
+    scratch: &NmfGpuScratch,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<f32, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     let (m, n) = v.shape();
 
-    gram::<R, f32>(client, w, &scratch.b, &scratch.gram_partials, m, k)?;
+    gram::<f32>(client, w, &scratch.b, &scratch.gram_partials, m, k)?;
     v.wt_v_gpu(w, &scratch.a, k, client, &scratch.gemm_partials)?;
-    gram::<R, f32>(client, h, &scratch.d, &scratch.gram_partials, n, k)?;
+    gram::<f32>(client, h, &scratch.d, &scratch.gram_partials, n, k)?;
 
-    launch_row_dot_partials::<R, f32>(&scratch.a, h, &scratch.obj_partials, n, k, client)?;
+    launch_row_dot_partials::<f32>(&scratch.a, h, &scratch.obj_partials, n, k, client)?;
 
     let partials = scratch.obj_partials.clone().read(client)?;
     let b_host = scratch.b.clone().read(client)?;
@@ -653,19 +649,19 @@ where
 /// ### Returns
 ///
 /// `Ok(())`, with `W H` unchanged and `W`'s columns unit length.
-fn normalise_gpu<R: Runtime>(
-    w: &GpuTensor<R, f32>,
-    h: &GpuTensor<R, f32>,
-    scratch: &NmfGpuScratch<R>,
+fn normalise_gpu(
+    w: &GpuTensor<f32>,
+    h: &GpuTensor<f32>,
+    scratch: &NmfGpuScratch,
     m: usize,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors> {
-    launch_dense_column_sq_norm::<R, f32>(w, &scratch.sq, m, k, client)?;
-    launch_hals_norm_factors::<R, f32>(&scratch.sq, &scratch.norm, &scratch.inv_norm, k, client)?;
-    launch_scale_columns::<R, f32>(w, &scratch.inv_norm, m, k, client)?;
-    launch_scale_columns::<R, f32>(h, &scratch.norm, n, k, client)?;
+    launch_dense_column_sq_norm::<f32>(w, &scratch.sq, m, k, client)?;
+    launch_hals_norm_factors::<f32>(&scratch.sq, &scratch.norm, &scratch.inv_norm, k, client)?;
+    launch_scale_columns::<f32>(w, &scratch.inv_norm, m, k, client)?;
+    launch_scale_columns::<f32>(h, &scratch.norm, n, k, client)?;
     Ok(())
 }
 
@@ -682,12 +678,12 @@ fn normalise_gpu<R: Runtime>(
 ///
 /// The device pair `(w, h)` as `[m, k]` and `[n, k]` row-major, see
 /// [`GpuFactors`].
-fn upload_factors<R: Runtime>(
+fn upload_factors(
     w_host: MatRef<f32>,
     h_host: MatRef<f32>,
     k_max: usize,
-    client: &ComputeClient<R>,
-) -> Result<GpuFactors<R>, BixverseErrors> {
+    client: &Client,
+) -> Result<GpuFactors, BixverseErrors> {
     let (m, k) = (w_host.nrows(), w_host.ncols());
     let n = h_host.ncols();
     debug_assert!(k <= k_max, "rank above what the scratch was sized for");
@@ -695,8 +691,8 @@ fn upload_factors<R: Runtime>(
     let w_flat = w_to_row_major(w_host);
     let h_flat = h_to_row_major(h_host);
 
-    let w = GpuTensor::<R, f32>::from_slice(&w_flat, vec![m, k], client)?;
-    let h = GpuTensor::<R, f32>::from_slice(&h_flat, vec![n, k], client)?;
+    let w = GpuTensor::<f32>::from_slice(&w_flat, vec![m, k], client)?;
+    let h = GpuTensor::<f32>::from_slice(&h_flat, vec![n, k], client)?;
     Ok((w, h))
 }
 
@@ -737,17 +733,16 @@ fn upload_factors<R: Runtime>(
 /// * `NmfRankTooLarge` if NNDSVD is requested and `V` has fewer than `k`
 ///   singular values.
 /// * `CubeclUtils` or `GpuMatmul` from the device path.
-pub fn nmf_hals_gpu<R, In>(
+pub fn nmf_hals_gpu<In>(
     v: &In,
     k: usize,
     opts: &HalsOpts<f32>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
     verbose: usize,
 ) -> Result<NmfResult<f32>, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     if sweep_tier(k).is_none() || k > scratch.k_max {
         return Err(BixverseErrors::GpuNmfRankTooLarge {
@@ -768,7 +763,7 @@ where
         NmfInit::Random { seed } => random_init(m, n, k, sq_frob, *seed),
     };
 
-    let (w, h) = upload_factors::<R>(w_host.as_ref(), h_host.as_ref(), scratch.k_max, client)?;
+    let (w, h) = upload_factors(w_host.as_ref(), h_host.as_ref(), scratch.k_max, client)?;
 
     let denom = relative_denominator(sq_frob);
     let mut final_loss = f32::INFINITY;
@@ -779,15 +774,15 @@ where
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
 
-        gram::<R, f32>(client, &w, &scratch.b, &scratch.gram_partials, m, k)?;
+        gram::<f32>(client, &w, &scratch.b, &scratch.gram_partials, m, k)?;
         v.wt_v_gpu(&w, &scratch.a, k, client, &scratch.gemm_partials)?;
-        launch_hals_sweep::<R, f32>(&h, &scratch.b, &scratch.a, &scratch.eps, n, k, client)?;
+        launch_hals_sweep::<f32>(&h, &scratch.b, &scratch.a, &scratch.eps, n, k, client)?;
 
-        gram::<R, f32>(client, &h, &scratch.d, &scratch.gram_partials, n, k)?;
+        gram::<f32>(client, &h, &scratch.d, &scratch.gram_partials, n, k)?;
         v.v_ht_gpu(&h, &scratch.c, k, client, &scratch.gemm_partials)?;
-        launch_hals_sweep::<R, f32>(&w, &scratch.d, &scratch.c, &scratch.eps, m, k, client)?;
+        launch_hals_sweep::<f32>(&w, &scratch.d, &scratch.c, &scratch.eps, m, k, client)?;
 
-        normalise_gpu::<R>(&w, &h, scratch, m, n, k, client)?;
+        normalise_gpu(&w, &h, scratch, m, n, k, client)?;
 
         if n_iter.is_multiple_of(opts.check_every) {
             let loss = objective_gpu(v, &w, &h, scratch, k, client)?;
@@ -861,19 +856,18 @@ where
 /// A [`StabilisedNmfResult`] with column-bound `W`, per-run `H`, per-run losses
 /// and convergence flags, and the index of the lowest-loss run.
 #[allow(clippy::too_many_arguments)]
-pub fn stabilised_nmf_gpu<R, In>(
+pub fn stabilised_nmf_gpu<In>(
     v: &In,
     k: usize,
     n_runs: usize,
     base_seed: u64,
     opts: &HalsOpts<f32>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
     verbose: usize,
 ) -> Result<StabilisedNmfResult<f32>, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     assert!(n_runs >= 1, "n_runs must be >= 1");
 
@@ -955,16 +949,15 @@ where
 ///
 /// * `NmfDimensionMismatch` if `w_host` does not match `v`.
 /// * `GpuNmfRankTooLarge` if the rank is above what the sweep is compiled for.
-pub fn nmf_refit_h_gpu<R, In>(
+pub fn nmf_refit_h_gpu<In>(
     v: &In,
     w_host: MatRef<f32>,
     opts: &HalsOpts<f32>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
 ) -> Result<(Mat<f32>, f32), BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     let (m, n) = v.shape();
     if w_host.nrows() != m {
@@ -985,12 +978,12 @@ where
     let denom = relative_denominator(sq_frob);
 
     let w_flat = w_to_row_major(w_host);
-    let w = GpuTensor::<R, f32>::from_slice(&w_flat, vec![m, k], client)?;
-    let h = GpuTensor::<R, f32>::empty(vec![n, k], client)?;
-    launch_fill_constant::<R, f32>(&h, &scratch.eps, n * k, client)?;
+    let w = GpuTensor::<f32>::from_slice(&w_flat, vec![m, k], client)?;
+    let h = GpuTensor::<f32>::empty(vec![n, k], client)?;
+    launch_fill_constant::<f32>(&h, &scratch.eps, n * k, client)?;
 
     // Both loop invariants, because W never changes.
-    gram::<R, f32>(client, &w, &scratch.b, &scratch.gram_partials, m, k)?;
+    gram::<f32>(client, &w, &scratch.b, &scratch.gram_partials, m, k)?;
     v.wt_v_gpu(&w, &scratch.a, k, client, &scratch.gemm_partials)?;
 
     let mut final_loss = f32::INFINITY;
@@ -999,7 +992,7 @@ where
 
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
-        launch_hals_sweep::<R, f32>(&h, &scratch.b, &scratch.a, &scratch.eps, n, k, client)?;
+        launch_hals_sweep::<f32>(&h, &scratch.b, &scratch.a, &scratch.eps, n, k, client)?;
 
         if n_iter.is_multiple_of(opts.check_every) {
             let loss = objective_fixed_w_gpu(v, &h, scratch, n, k, client)?;
@@ -1041,16 +1034,15 @@ where
 ///
 /// * `NmfDimensionMismatch` if `h_host` does not match `v`.
 /// * `GpuNmfRankTooLarge` if the rank is above what the sweep is compiled for.
-pub fn nmf_refit_w_gpu<R, In>(
+pub fn nmf_refit_w_gpu<In>(
     v: &In,
     h_host: MatRef<f32>,
     opts: &HalsOpts<f32>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
 ) -> Result<(Mat<f32>, f32), BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     let (m, n) = v.shape();
     if h_host.ncols() != n {
@@ -1071,12 +1063,12 @@ where
     let denom = relative_denominator(sq_frob);
 
     let h_flat = h_to_row_major(h_host);
-    let h = GpuTensor::<R, f32>::from_slice(&h_flat, vec![n, k], client)?;
-    let w = GpuTensor::<R, f32>::empty(vec![m, k], client)?;
-    launch_fill_constant::<R, f32>(&w, &scratch.eps, m * k, client)?;
+    let h = GpuTensor::<f32>::from_slice(&h_flat, vec![n, k], client)?;
+    let w = GpuTensor::<f32>::empty(vec![m, k], client)?;
+    launch_fill_constant::<f32>(&w, &scratch.eps, m * k, client)?;
 
     // Both loop invariants, because H never changes.
-    gram::<R, f32>(client, &h, &scratch.d, &scratch.gram_partials, n, k)?;
+    gram::<f32>(client, &h, &scratch.d, &scratch.gram_partials, n, k)?;
     v.v_ht_gpu(&h, &scratch.c, k, client, &scratch.gemm_partials)?;
 
     let mut final_loss = f32::INFINITY;
@@ -1085,7 +1077,7 @@ where
 
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
-        launch_hals_sweep::<R, f32>(&w, &scratch.d, &scratch.c, &scratch.eps, m, k, client)?;
+        launch_hals_sweep::<f32>(&w, &scratch.d, &scratch.c, &scratch.eps, m, k, client)?;
 
         if n_iter.is_multiple_of(opts.check_every) {
             let loss = objective_fixed_h_gpu(v, &w, scratch, m, k, client)?;
@@ -1123,20 +1115,19 @@ where
 /// ### Returns
 ///
 /// The reconstruction error, clamped at zero.
-fn objective_fixed_w_gpu<R, In>(
+fn objective_fixed_w_gpu<In>(
     v: &In,
-    h: &GpuTensor<R, f32>,
-    scratch: &NmfGpuScratch<R>,
+    h: &GpuTensor<f32>,
+    scratch: &NmfGpuScratch,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<f32, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
-    gram::<R, f32>(client, h, &scratch.d, &scratch.gram_partials, n, k)?;
-    launch_row_dot_partials::<R, f32>(&scratch.a, h, &scratch.obj_partials, n, k, client)?;
+    gram::<f32>(client, h, &scratch.d, &scratch.gram_partials, n, k)?;
+    launch_row_dot_partials::<f32>(&scratch.a, h, &scratch.obj_partials, n, k, client)?;
 
     let partials = scratch.obj_partials.clone().read(client)?;
     let b_host = scratch.b.clone().read(client)?;
@@ -1168,22 +1159,21 @@ where
 /// ### Returns
 ///
 /// The reconstruction error, clamped at zero.
-fn objective_fixed_h_gpu<R, In>(
+fn objective_fixed_h_gpu<In>(
     v: &In,
-    w: &GpuTensor<R, f32>,
-    scratch: &NmfGpuScratch<R>,
+    w: &GpuTensor<f32>,
+    scratch: &NmfGpuScratch,
     m: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<f32, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
-    gram::<R, f32>(client, w, &scratch.b, &scratch.gram_partials, m, k)?;
+    gram::<f32>(client, w, &scratch.b, &scratch.gram_partials, m, k)?;
     // `c` and `w` are both `[m, k]`, so this reduction runs over m rather than n.
     // `obj_partials` is sized for whichever axis is longer, so it serves both.
-    launch_row_dot_partials::<R, f32>(w, &scratch.c, &scratch.obj_partials, m, k, client)?;
+    launch_row_dot_partials::<f32>(w, &scratch.c, &scratch.obj_partials, m, k, client)?;
 
     let partials = scratch.obj_partials.clone().read(client)?;
     let b_host = scratch.b.clone().read(client)?;
@@ -1203,7 +1193,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     use crate::core::math::sparse::CompressedSparseData2;
     use crate::methods::nmf_hals::{NmfInput, compute_objective, gram_h_ht, gram_wt_w, nmf_hals};
@@ -1212,9 +1202,9 @@ mod tests {
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -1353,12 +1343,12 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (43usize, 29usize, 6usize);
         let v = build_v(m, n, k);
         let cpu = DenseInput::new(v.as_ref()).unwrap();
-        let gpu = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
+        let gpu = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
 
         assert_eq!(GpuNmfData::shape(&gpu), NmfInput::shape(&cpu));
         assert!(
@@ -1370,24 +1360,16 @@ mod tests {
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
         let h = Mat::<f32>::from_fn(k, n, |r, j| (((r * 7 + j * 5) % 9) as f32) * 0.2 + 0.1);
 
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &w_to_row_major(w.as_ref()),
-            vec![m, k],
-            &client,
-        )
-        .unwrap();
-        let h_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &h_to_row_major(h.as_ref()),
-            vec![n, k],
-            &client,
-        )
-        .unwrap();
-        let a = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
-        let c = GpuTensor::<WgpuRuntime, f32>::empty(vec![m, k], &client).unwrap();
+        let w_gpu =
+            GpuTensor::<f32>::from_slice(&w_to_row_major(w.as_ref()), vec![m, k], &client).unwrap();
+        let h_gpu =
+            GpuTensor::<f32>::from_slice(&h_to_row_major(h.as_ref()), vec![n, k], &client).unwrap();
+        let a = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
+        let c = GpuTensor::<f32>::empty(vec![m, k], &client).unwrap();
 
         // Sized the way the solver sizes it, so the split-K arm is reached
         // exactly when it would be in a real solve.
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, 1e-10, &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, 1e-10, &client).unwrap();
         gpu.wt_v_gpu(&w_gpu, &a, k, &client, &scratch.gemm_partials)
             .unwrap();
         gpu.v_ht_gpu(&h_gpu, &c, k, &client, &scratch.gemm_partials)
@@ -1417,7 +1399,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (48usize, 32usize, 16usize);
         let v = build_v(m, n, k);
@@ -1427,7 +1409,7 @@ mod tests {
         );
 
         let cpu = DenseInput::new(v.as_ref()).unwrap();
-        let gpu = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
+        let gpu = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
 
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
         let h = Mat::<f32>::from_fn(k, n, |r, j| (((r * 7 + j * 5) % 9) as f32) * 0.2 + 0.1);
@@ -1436,24 +1418,16 @@ mod tests {
             "this H was supposed to take the borrow arm"
         );
 
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &w_to_row_major(w.as_ref()),
-            vec![m, k],
-            &client,
-        )
-        .unwrap();
-        let h_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &h_to_row_major(h.as_ref()),
-            vec![n, k],
-            &client,
-        )
-        .unwrap();
-        let a = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
-        let c = GpuTensor::<WgpuRuntime, f32>::empty(vec![m, k], &client).unwrap();
+        let w_gpu =
+            GpuTensor::<f32>::from_slice(&w_to_row_major(w.as_ref()), vec![m, k], &client).unwrap();
+        let h_gpu =
+            GpuTensor::<f32>::from_slice(&h_to_row_major(h.as_ref()), vec![n, k], &client).unwrap();
+        let a = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
+        let c = GpuTensor::<f32>::empty(vec![m, k], &client).unwrap();
 
         // Sized the way the solver sizes it, so the split-K arm is reached
         // exactly when it would be in a real solve.
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, 1e-10, &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, 1e-10, &client).unwrap();
         gpu.wt_v_gpu(&w_gpu, &a, k, &client, &scratch.gemm_partials)
             .unwrap();
         gpu.v_ht_gpu(&h_gpu, &c, k, &client, &scratch.gemm_partials)
@@ -1477,12 +1451,12 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (37usize, 23usize, 5usize);
         let (csr, dense) = build_sparse_v(m, n);
         let cpu = SparseInput::<f32, f32>::from_primary(&csr).unwrap();
-        let gpu = GpuSparseNmfInput::<WgpuRuntime>::new(
+        let gpu = GpuSparseNmfInput::new(
             SparseInput::<f32, f32>::from_primary(&csr).unwrap(),
             &client,
         )
@@ -1499,24 +1473,16 @@ mod tests {
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
         let h = Mat::<f32>::from_fn(k, n, |r, j| (((r * 7 + j * 5) % 9) as f32) * 0.2 + 0.1);
 
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &w_to_row_major(w.as_ref()),
-            vec![m, k],
-            &client,
-        )
-        .unwrap();
-        let h_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &h_to_row_major(h.as_ref()),
-            vec![n, k],
-            &client,
-        )
-        .unwrap();
-        let a = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
-        let c = GpuTensor::<WgpuRuntime, f32>::empty(vec![m, k], &client).unwrap();
+        let w_gpu =
+            GpuTensor::<f32>::from_slice(&w_to_row_major(w.as_ref()), vec![m, k], &client).unwrap();
+        let h_gpu =
+            GpuTensor::<f32>::from_slice(&h_to_row_major(h.as_ref()), vec![n, k], &client).unwrap();
+        let a = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
+        let c = GpuTensor::<f32>::empty(vec![m, k], &client).unwrap();
 
         // Sized the way the solver sizes it, so the split-K arm is reached
         // exactly when it would be in a real solve.
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, 1e-10, &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, 1e-10, &client).unwrap();
         gpu.wt_v_gpu(&w_gpu, &a, k, &client, &scratch.gemm_partials)
             .unwrap();
         gpu.v_ht_gpu(&h_gpu, &c, k, &client, &scratch.gemm_partials)
@@ -1542,35 +1508,27 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (97usize, 61usize, 8usize);
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
         let h = Mat::<f32>::from_fn(k, n, |r, j| (((r * 7 + j * 5) % 9) as f32) * 0.2 + 0.1);
 
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &w_to_row_major(w.as_ref()),
-            vec![m, k],
-            &client,
-        )
-        .unwrap();
-        let h_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &h_to_row_major(h.as_ref()),
-            vec![n, k],
-            &client,
-        )
-        .unwrap();
-        let g = GpuTensor::<WgpuRuntime, f32>::empty(vec![k, k], &client).unwrap();
+        let w_gpu =
+            GpuTensor::<f32>::from_slice(&w_to_row_major(w.as_ref()), vec![m, k], &client).unwrap();
+        let h_gpu =
+            GpuTensor::<f32>::from_slice(&h_to_row_major(h.as_ref()), vec![n, k], &client).unwrap();
+        let g = GpuTensor::<f32>::empty(vec![k, k], &client).unwrap();
         let chunks = gram_chunks(m).max(gram_chunks(n));
-        let partials = GpuTensor::<WgpuRuntime, f32>::empty(vec![chunks, k, k], &client).unwrap();
+        let partials = GpuTensor::<f32>::empty(vec![chunks, k, k], &client).unwrap();
 
-        gram::<WgpuRuntime, f32>(&client, &w_gpu, &g, &partials, m, k).unwrap();
+        gram::<f32>(&client, &w_gpu, &g, &partials, m, k).unwrap();
         let mut wtw = Mat::<f32>::zeros(k, k);
         gram_wt_w(w.as_ref(), &mut wtw);
         assert_close(&g.read(&client).unwrap(), &to_row_major(wtw.as_ref()), 1e-4);
 
-        let g2 = GpuTensor::<WgpuRuntime, f32>::empty(vec![k, k], &client).unwrap();
-        gram::<WgpuRuntime, f32>(&client, &h_gpu, &g2, &partials, n, k).unwrap();
+        let g2 = GpuTensor::<f32>::empty(vec![k, k], &client).unwrap();
+        gram::<f32>(&client, &h_gpu, &g2, &partials, n, k).unwrap();
         let mut hht = Mat::<f32>::zeros(k, k);
         gram_h_ht(h.as_ref(), &mut hht);
         assert_close(
@@ -1585,19 +1543,18 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (53usize, 41usize, 6usize);
         let v = build_v(m, n, k);
         let cpu = DenseInput::new(v.as_ref()).unwrap();
-        let gpu = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, 1e-10, &client).unwrap();
+        let gpu = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, 1e-10, &client).unwrap();
 
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
         let h = Mat::<f32>::from_fn(k, n, |r, j| (((r * 7 + j * 5) % 9) as f32) * 0.2 + 0.1);
 
-        let (w_gpu, h_gpu) =
-            upload_factors::<WgpuRuntime>(w.as_ref(), h.as_ref(), k, &client).unwrap();
+        let (w_gpu, h_gpu) = upload_factors(w.as_ref(), h.as_ref(), k, &client).unwrap();
         let got = objective_gpu(&gpu, &w_gpu, &h_gpu, &scratch, k, &client).unwrap();
 
         let mut wtv = Mat::<f32>::zeros(k, n);
@@ -1633,7 +1590,7 @@ mod tests {
         max_iter: usize,
     ) -> (NmfResult<f32>, NmfResult<f32>, f32) {
         let device = try_device().expect("no device");
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let v = build_v(m, n, k);
         let opts = HalsOpts::<f32> {
@@ -1647,8 +1604,8 @@ mod tests {
         let cpu_in = DenseInput::new(v.as_ref()).unwrap();
         let cpu = nmf_hals(&cpu_in, k, &opts, 0).unwrap();
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let gpu = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
 
         (cpu, gpu, NmfInput::sq_frob(&cpu_in))
@@ -1705,7 +1662,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (60usize, 40usize, 3usize);
         let v = build_v(m, n, k);
@@ -1717,8 +1674,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let res = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
 
         let rel = res.final_loss / GpuNmfData::sq_frob(&gpu_in);
@@ -1735,7 +1692,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (48usize, 32usize, 3usize);
         let (csr, dense) = build_sparse_v(m, n);
@@ -1748,13 +1705,13 @@ mod tests {
         };
 
         let host = SparseInput::<f32, f32>::from_primary(&csr).unwrap();
-        let gpu_in = GpuSparseNmfInput::<WgpuRuntime>::new(host, &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuSparseNmfInput::new(host, &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let sparse_res = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
 
         // The sparse and dense backends see the same matrix, so they must reach
         // the same reconstruction from the same seed.
-        let dense_in = GpuDenseNmfInput::<WgpuRuntime>::new(dense.as_ref(), &client).unwrap();
+        let dense_in = GpuDenseNmfInput::new(dense.as_ref(), &client).unwrap();
         let dense_res = nmf_hals_gpu(&dense_in, k, &opts, &scratch, &client, 0).unwrap();
 
         let sq_frob = GpuNmfData::sq_frob(&gpu_in);
@@ -1774,7 +1731,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (40usize, 28usize, 4usize);
         let v = build_v(m, n, k);
@@ -1786,8 +1743,8 @@ mod tests {
             init: NmfInit::Random { seed: 11 },
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let first = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
         let second = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
 
@@ -1813,7 +1770,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (20_000usize, 2_000usize, 24usize);
         let v = build_v(m, n, k);
@@ -1828,8 +1785,8 @@ mod tests {
         let cpu_in = DenseInput::new(v.as_ref()).unwrap();
         let cpu = nmf_hals(&cpu_in, k, &opts, 0).unwrap();
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let gpu = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
 
         assert_eq!(cpu.n_iter, gpu.n_iter);
@@ -1862,12 +1819,12 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n) = (20usize, 15usize);
         let v = build_v(m, n, 3);
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, 4, 1e-10, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, 4, 1e-10, &client).unwrap();
         let opts = HalsOpts::<f32>::default();
 
         assert!(matches!(
@@ -1875,7 +1832,7 @@ mod tests {
             Err(BixverseErrors::GpuNmfRankTooLarge { k: 8, .. })
         ));
         assert!(matches!(
-            NmfGpuScratch::<WgpuRuntime>::new(m, n, NMF_MAX_RANK + 1, 1e-10, &client),
+            NmfGpuScratch::new(m, n, NMF_MAX_RANK + 1, 1e-10, &client),
             Err(BixverseErrors::GpuNmfRankTooLarge { .. })
         ));
     }
@@ -1889,7 +1846,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k, n_runs) = (40usize, 26usize, 4usize, 3usize);
         let v = build_v(m, n, k);
@@ -1901,8 +1858,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let res = stabilised_nmf_gpu(&gpu_in, k, n_runs, 100, &opts, &scratch, &client, 0).unwrap();
 
         assert_eq!(res.w_all.nrows(), m);
@@ -1931,7 +1888,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (36usize, 24usize, 4usize);
         let v = build_v(m, n, k);
@@ -1943,8 +1900,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let a = stabilised_nmf_gpu(&gpu_in, k, 3, 42, &opts, &scratch, &client, 0).unwrap();
         let b = stabilised_nmf_gpu(&gpu_in, k, 3, 42, &opts, &scratch, &client, 0).unwrap();
 
@@ -1966,7 +1923,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (50usize, 34usize, 3usize);
         let w_true =
@@ -1983,8 +1940,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let (h_fit, loss) =
             nmf_refit_h_gpu(&gpu_in, w_true.as_ref(), &opts, &scratch, &client).unwrap();
 
@@ -2010,7 +1967,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (50usize, 34usize, 3usize);
         let w_true =
@@ -2027,8 +1984,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let (w_fit, loss) =
             nmf_refit_w_gpu(&gpu_in, h_true.as_ref(), &opts, &scratch, &client).unwrap();
 
@@ -2053,12 +2010,12 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (20usize, 14usize, 3usize);
         let v = build_v(m, n, k);
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, 1e-10, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, 1e-10, &client).unwrap();
         let opts = HalsOpts::<f32>::default();
 
         let bad_w = Mat::<f32>::full(m + 1, k, 0.5);
@@ -2079,7 +2036,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (24usize, 18usize, 3usize);
         let v = build_v(m, n, k);
@@ -2091,8 +2048,8 @@ mod tests {
             init: NmfInit::Nndsvd,
         };
 
-        let gpu_in = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).unwrap();
-        let scratch = NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).unwrap();
+        let gpu_in = GpuDenseNmfInput::new(v.as_ref(), &client).unwrap();
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).unwrap();
         let res = nmf_hals_gpu(&gpu_in, k, &opts, &scratch, &client, 0).unwrap();
         assert!(res.final_loss.is_finite(), "loss was left at infinity");
         assert_eq!(res.n_iter, 0);

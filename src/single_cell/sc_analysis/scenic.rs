@@ -3146,14 +3146,9 @@ fn run_scenic_multi_output<S: SingleCellReading>(
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(cell_set);
-        });
-
-        for gc in gene_chunks.iter() {
-            all_sparse_cols.push(gc.to_sparse_axis(n_cells));
-        }
+        let csc: CompressedSparseData2<u32, f32> =
+            reader.read_genes_sparse(chunk, Some(cell_set), &DataLayerReturn::BothLayers)?;
+        all_sparse_cols.extend(csc.to_sparse_axes());
 
         if verbosity.detailed_verbosity() {
             println!(
@@ -3308,14 +3303,9 @@ fn run_scenic_gbm<S: SingleCellReading>(
     }
 
     for (iter, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(cell_set);
-        });
-
-        for gc in &gene_chunks {
-            all_sparse_cols.push(gc.to_sparse_axis(n_cells));
-        }
+        let csc: CompressedSparseData2<u32, f32> =
+            reader.read_genes_sparse(chunk, Some(cell_set), &DataLayerReturn::BothLayers)?;
+        all_sparse_cols.extend(csc.to_sparse_axes());
 
         if verbosity.detailed_verbosity() {
             println!(
@@ -3474,16 +3464,10 @@ fn run_scenic_multi_output_streaming<S: SingleCellReading>(
 
         // read and filter chunk
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(&io_chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(cell_set);
-        });
-
-        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
-            .iter()
-            .map(|c| c.to_sparse_axis(n_cells))
-            .collect();
-        drop(gene_chunks);
+        let csc: CompressedSparseData2<u32, f32> =
+            reader.read_genes_sparse(&io_chunk, Some(cell_set), &DataLayerReturn::BothLayers)?;
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = csc.to_sparse_axes();
+        drop(csc);
 
         if verbosity.normal_verbosity() {
             println!(
@@ -3633,16 +3617,10 @@ fn run_scenic_gbm_streaming<S: SingleCellReading>(
         let start_chunk = Instant::now();
 
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(cell_set);
-        });
-
-        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
-            .iter()
-            .map(|c| c.to_sparse_axis(n_cells))
-            .collect();
-        drop(gene_chunks);
+        let csc: CompressedSparseData2<u32, f32> =
+            reader.read_genes_sparse(io_chunk, Some(cell_set), &DataLayerReturn::BothLayers)?;
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = csc.to_sparse_axes();
+        drop(csc);
 
         if verbosity.normal_verbosity() {
             println!(
@@ -3815,13 +3793,8 @@ pub(crate) fn scenic_common_setup<'a, S: SingleCellReading>(
 
     let start_reading = Instant::now();
 
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
-    tf_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
     let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells)?;
+        reader.read_genes_sparse(tf_indices, Some(&cell_set), &DataLayerReturn::Norm)?;
     let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
     drop(tf_csc);
 

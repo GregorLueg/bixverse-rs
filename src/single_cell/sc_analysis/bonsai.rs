@@ -32,7 +32,7 @@ use indexmap::IndexSet;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{RawCounts, SingleCellReading};
+use crate::single_cell::sc_data::data_io::SingleCellReading;
 
 ///////////////
 // Constants //
@@ -170,34 +170,26 @@ pub fn read_count_chunk<G: SingleCellReading>(
     genes: &[usize],
     cell_set: &IndexSet<u32>,
 ) -> Result<Option<(CountMatrix, Vec<usize>)>, BixverseErrors> {
-    let mut indices: Vec<u32> = Vec::new();
-    let mut values: Vec<u32> = Vec::new();
+    // filtering renumbers cells by their position in `cell_set`, in ascending
+    // order, which is the layout `CountMatrix` requires
+    let csc: CompressedSparseData2<u32, f32> =
+        gene_reader.read_genes_sparse(genes, Some(cell_set), &DataLayerReturn::Raw)?;
+
+    // An empty gene owns no entries, so dropping it only drops its pointer.
     let mut indptr: Vec<usize> = vec![0];
     let mut kept: Vec<usize> = Vec::with_capacity(genes.len());
-
-    for (&gene, chunk) in genes
-        .iter()
-        .zip(gene_reader.read_gene_parallel_filtered(genes, cell_set)?)
-    {
-        if chunk.indices.is_empty() {
-            continue;
+    for (&gene, w) in genes.iter().zip(csc.indptr.windows(2)) {
+        if w[1] > w[0] {
+            indptr.push(w[1] as usize);
+            kept.push(gene);
         }
-        // filtering renumbers cells by their position in `cell_set`, in
-        // ascending order, which is the layout `CountMatrix` requires
-        indices.extend_from_slice(&chunk.indices);
-        match chunk.data_raw {
-            RawCounts::U16(v) => values.extend(v.into_iter().map(u32::from)),
-            RawCounts::U32(v) => values.extend(v),
-        }
-        indptr.push(indices.len());
-        kept.push(gene);
     }
 
     if kept.is_empty() {
         return Ok(None);
     }
     Ok(Some((
-        CountMatrix::new(indices, values, indptr, cell_set.len())?,
+        CountMatrix::new(csc.indices, csc.data, indptr, cell_set.len())?,
         kept,
     )))
 }

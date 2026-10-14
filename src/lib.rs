@@ -8,6 +8,14 @@
 #![allow(clippy::needless_range_loop)]
 #![warn(missing_docs)]
 
+/// Version of this crate.
+///
+/// Exposed so a dependent can report which version of the numerics it was
+/// built against. The Python bindings version independently of this crate and
+/// vendor its source through a path dependency, so their own version number
+/// says nothing about what is inside the wheel; this does.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod core;
 pub mod enrichment;
 pub mod errors;
@@ -23,3 +31,10 @@ pub mod single_cell;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
+
+#[cfg(mlx_available)]
+pub mod mlx;
+
+/// Whether the MLX backend was compiled in: the `mlx` feature is on and the
+/// build script found `libmlxc`.
+pub const MLX_AVAILABLE: bool = cfg!(mlx_available);

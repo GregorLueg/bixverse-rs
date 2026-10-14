@@ -1,0 +1,39 @@
+[package]
+name = "bixverse-py"
+version = "0.1.0"
+edition = "2024"
+authors = ["Gregor Lueg <gregorlueg@me.com>"]
+license = "MIT"
+description = "Python bindings for bixverse-rs"
+publish = false
+
+# Own workspace root, deliberately. The parent crate is published to crates.io
+# and its release job runs `cargo publish`, which must not see a path-dependent
+# sibling. This also keeps a root `cargo test` from building pyo3.
+[workspace]
+
+[lib]
+name = "_bixverse"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `default-features = false` drops the `r` feature, and with it `extendr-api`.
+# Without that the extension links libR and the wheel only loads on a machine
+# with a matching R install. `hdf5-static` compiles the bundled HDF5 C library
+# instead of linking a system one, for the same reason.
+bixverse-rs = { path = "..", default-features = false, features = [
+    "single-cell",
+    "hdf5-static",
+] }
+crossbeam-channel = "0.5"
+numpy = "0.29"
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+rand = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
+[profile.dev]
+opt-level = 2

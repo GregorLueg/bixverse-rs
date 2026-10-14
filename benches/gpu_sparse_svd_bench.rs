@@ -15,10 +15,11 @@
 //! cargo bench --features gpu --bench gpu_sparse_svd_bench
 //! ```
 
+use cubecl::Device;
 use std::time::Instant;
 
-use cubecl::prelude::Runtime;
 use cubecl::wgpu::WgpuRuntime;
+use cubecl_utils_rs::prelude::Runtime;
 
 use bixverse_rs::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use bixverse_rs::prelude::*;
@@ -267,9 +268,9 @@ fn guard_singular_values(s: &[f32]) {
 ///
 /// * `shape` - Problem dimensions
 /// * `device` - CubeCL device
-fn bench_shape<R: Runtime>(shape: SvdShape, device: &R::Device)
+fn bench_shape(shape: SvdShape, device: &Device)
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let s_width = N_COMPONENTS + OVERSAMPLING;
     let build_start = Instant::now();
@@ -301,7 +302,7 @@ where
         );
 
         let start = Instant::now();
-        let svd = randomised_sparse_svd_gpu::<R, f32, f32>(
+        let svd = randomised_sparse_svd_gpu::<f32, f32>(
             csc,
             &means,
             &stds,
@@ -336,10 +337,10 @@ fn main() {
         N_COMPONENTS, OVERSAMPLING, N_POWER_ITERS
     );
 
-    bench_shape::<WgpuRuntime>(DEFAULT_SHAPE, &device);
+    bench_shape(DEFAULT_SHAPE, &cubecl::Device::from(device.clone()));
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
-        bench_shape::<WgpuRuntime>(BIG_SHAPE, &device);
+        bench_shape(BIG_SHAPE, &cubecl::Device::from(device.clone()));
     } else {
         println!("Set BIXVERSE_BENCH_BIG=1 to also run the 1M x 2000 production shape.");
     }

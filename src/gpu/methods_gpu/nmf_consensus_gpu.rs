@@ -13,6 +13,7 @@
 //! every restart and every rank in a sweep. On the CPU each of the
 //! `k_range.len() * n_runs` solves pays full memory traffic over `V` again.
 
+use cubecl::Device;
 use cubecl::prelude::*;
 use faer::MatRef;
 
@@ -110,20 +111,19 @@ fn error_denominator(sq_frob: f32) -> f32 {
 ///   factor would carry a zero row and the refit would be degenerate.
 /// * Anything the solve or the consensus step raises.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_consensus_gpu<R, In>(
+pub fn nmf_consensus_gpu<In>(
     v: &In,
     k: usize,
     n_runs: usize,
     base_seed: u64,
     opts: &HalsOpts<f32>,
     params: Option<ConsensusParams<f32>>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
     verbose: usize,
 ) -> Result<ConsensusNmfResult<f32>, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     let params = params.unwrap_or_default();
     if k < 2 {
@@ -196,20 +196,19 @@ where
 /// * `NmfConsensusTooFewRuns` if `n_runs < 2`, `NmfConsensusInvalidK` if any
 ///   rank is below two.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_k_sweep_gpu<R, In>(
+pub fn nmf_k_sweep_gpu<In>(
     v: &In,
     k_range: &[usize],
     n_runs: usize,
     base_seed: u64,
     opts: &HalsOpts<f32>,
     params: Option<ConsensusParams<f32>>,
-    scratch: &NmfGpuScratch<R>,
-    client: &ComputeClient<R>,
+    scratch: &NmfGpuScratch,
+    client: &Client,
     verbose: usize,
 ) -> Result<Vec<KSweepEntry<f32>>, BixverseErrors>
 where
-    R: Runtime,
-    In: GpuNmfData<R>,
+    In: GpuNmfData,
 {
     if k_range.is_empty() {
         return Err(BixverseErrors::NmfKSweepEmptyRange);
@@ -302,21 +301,21 @@ where
 /// ### Returns
 ///
 /// An [`NmfResult`], or errors from validation or the device path.
-pub fn nmf_single_run_gpu<R: Runtime>(
+pub fn nmf_single_run_gpu(
     data: MatRef<f32>,
     k: usize,
     preprocessing: &str,
     nmf_hals_params: Option<HalsOpts<f32>>,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<NmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
     let processed = nmf_process_dense(data, &resolve_preprocessing(preprocessing));
-    let input = GpuDenseNmfInput::<R>::new(processed.as_ref(), &client)?;
+    let input = GpuDenseNmfInput::new(processed.as_ref(), &client)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     nmf_hals_gpu(&input, k, &opts, &scratch, &client, verbose)
 }
@@ -340,23 +339,23 @@ pub fn nmf_single_run_gpu<R: Runtime>(
 ///
 /// A [`StabilisedNmfResult`], or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_multiple_run_gpu<R: Runtime>(
+pub fn nmf_multiple_run_gpu(
     data: MatRef<f32>,
     k: usize,
     preprocessing: &str,
     nmf_hals_params: Option<HalsOpts<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<StabilisedNmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
     let processed = nmf_process_dense(data, &resolve_preprocessing(preprocessing));
-    let input = GpuDenseNmfInput::<R>::new(processed.as_ref(), &client)?;
+    let input = GpuDenseNmfInput::new(processed.as_ref(), &client)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     stabilised_nmf_gpu(
         &input,
@@ -388,7 +387,7 @@ pub fn nmf_multiple_run_gpu<R: Runtime>(
 ///
 /// A [`ConsensusNmfResult`], or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_consensus_run_gpu<R: Runtime>(
+pub fn nmf_consensus_run_gpu(
     data: MatRef<f32>,
     k: usize,
     preprocessing: &str,
@@ -396,16 +395,16 @@ pub fn nmf_consensus_run_gpu<R: Runtime>(
     consensus_params: Option<ConsensusParams<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<ConsensusNmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
     let processed = nmf_process_dense(data, &resolve_preprocessing(preprocessing));
-    let input = GpuDenseNmfInput::<R>::new(processed.as_ref(), &client)?;
+    let input = GpuDenseNmfInput::new(processed.as_ref(), &client)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     nmf_consensus_gpu(
         &input,
@@ -441,7 +440,7 @@ pub fn nmf_consensus_run_gpu<R: Runtime>(
 ///
 /// One [`KSweepEntry`] per rank, or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_k_sweep_run_gpu<R: Runtime>(
+pub fn nmf_k_sweep_run_gpu(
     data: MatRef<f32>,
     k_range: &[usize],
     preprocessing: &str,
@@ -449,20 +448,20 @@ pub fn nmf_k_sweep_run_gpu<R: Runtime>(
     consensus_params: Option<ConsensusParams<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<Vec<KSweepEntry<f32>>, BixverseErrors> {
     if k_range.is_empty() {
         return Err(BixverseErrors::NmfKSweepEmptyRange);
     }
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
     let processed = nmf_process_dense(data, &resolve_preprocessing(preprocessing));
-    let input = GpuDenseNmfInput::<R>::new(processed.as_ref(), &client)?;
+    let input = GpuDenseNmfInput::new(processed.as_ref(), &client)?;
     let (m, n) = GpuNmfData::shape(&input);
     let k_max = k_range.iter().copied().max().unwrap_or(0);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k_max, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k_max, opts.eps, &client)?;
 
     nmf_k_sweep_gpu(
         &input,
@@ -497,13 +496,13 @@ pub fn nmf_k_sweep_run_gpu<R: Runtime>(
 /// ### Returns
 ///
 /// The uploaded [`GpuSparseNmfInput`].
-fn build_sparse_input<R: Runtime>(
+fn build_sparse_input(
     data: CompressedSparseData2<f32>,
     preprocessing: &str,
     use_second_layer: bool,
-    client: &ComputeClient<R>,
+    client: &Client,
     verbose: usize,
-) -> Result<GpuSparseNmfInput<R>, BixverseErrors> {
+) -> Result<GpuSparseNmfInput, BixverseErrors> {
     let csc = ensure_csc(data, parse_verbosity_level(verbose));
     let processed = nmf_process_sparse(
         &csc,
@@ -517,7 +516,7 @@ fn build_sparse_input<R: Runtime>(
         SparseInput::<f32, f32>::from_primary(&processed)?
     };
 
-    GpuSparseNmfInput::<R>::new(host, client)
+    GpuSparseNmfInput::new(host, client)
 }
 
 /// Run GPU NMF on a sparse matrix (single run).
@@ -536,21 +535,21 @@ fn build_sparse_input<R: Runtime>(
 ///
 /// An [`NmfResult`], or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_single_run_sparse_gpu<R: Runtime>(
+pub fn nmf_single_run_sparse_gpu(
     data: CompressedSparseData2<f32>,
     k: usize,
     preprocessing: &str,
     use_second_layer: bool,
     nmf_hals_params: Option<HalsOpts<f32>>,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<NmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
-    let input = build_sparse_input::<R>(data, preprocessing, use_second_layer, &client, verbose)?;
+    let input = build_sparse_input(data, preprocessing, use_second_layer, &client, verbose)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     nmf_hals_gpu(&input, k, &opts, &scratch, &client, verbose)
 }
@@ -573,7 +572,7 @@ pub fn nmf_single_run_sparse_gpu<R: Runtime>(
 ///
 /// A [`StabilisedNmfResult`], or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_multiple_run_sparse_gpu<R: Runtime>(
+pub fn nmf_multiple_run_sparse_gpu(
     data: CompressedSparseData2<f32>,
     k: usize,
     preprocessing: &str,
@@ -581,15 +580,15 @@ pub fn nmf_multiple_run_sparse_gpu<R: Runtime>(
     nmf_hals_params: Option<HalsOpts<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<StabilisedNmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
-    let input = build_sparse_input::<R>(data, preprocessing, use_second_layer, &client, verbose)?;
+    let input = build_sparse_input(data, preprocessing, use_second_layer, &client, verbose)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     stabilised_nmf_gpu(
         &input,
@@ -622,7 +621,7 @@ pub fn nmf_multiple_run_sparse_gpu<R: Runtime>(
 ///
 /// A [`ConsensusNmfResult`], or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_consensus_run_sparse_gpu<R: Runtime>(
+pub fn nmf_consensus_run_sparse_gpu(
     data: CompressedSparseData2<f32>,
     k: usize,
     preprocessing: &str,
@@ -631,15 +630,15 @@ pub fn nmf_consensus_run_sparse_gpu<R: Runtime>(
     consensus_params: Option<ConsensusParams<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<ConsensusNmfResult<f32>, BixverseErrors> {
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
-    let input = build_sparse_input::<R>(data, preprocessing, use_second_layer, &client, verbose)?;
+    let input = build_sparse_input(data, preprocessing, use_second_layer, &client, verbose)?;
     let (m, n) = GpuNmfData::shape(&input);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client)?;
 
     nmf_consensus_gpu(
         &input,
@@ -676,7 +675,7 @@ pub fn nmf_consensus_run_sparse_gpu<R: Runtime>(
 ///
 /// One [`KSweepEntry`] per rank, or errors from validation or the device path.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_k_sweep_run_sparse_gpu<R: Runtime>(
+pub fn nmf_k_sweep_run_sparse_gpu(
     data: CompressedSparseData2<f32>,
     k_range: &[usize],
     preprocessing: &str,
@@ -685,19 +684,19 @@ pub fn nmf_k_sweep_run_sparse_gpu<R: Runtime>(
     consensus_params: Option<ConsensusParams<f32>>,
     n_runs: usize,
     base_seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<Vec<KSweepEntry<f32>>, BixverseErrors> {
     if k_range.is_empty() {
         return Err(BixverseErrors::NmfKSweepEmptyRange);
     }
     let opts = nmf_hals_params.unwrap_or_default();
-    let client = R::client(&device);
+    let client = device.client();
 
-    let input = build_sparse_input::<R>(data, preprocessing, use_second_layer, &client, verbose)?;
+    let input = build_sparse_input(data, preprocessing, use_second_layer, &client, verbose)?;
     let (m, n) = GpuNmfData::shape(&input);
     let k_max = k_range.iter().copied().max().unwrap_or(0);
-    let scratch = NmfGpuScratch::<R>::new(m, n, k_max, opts.eps, &client)?;
+    let scratch = NmfGpuScratch::new(m, n, k_max, opts.eps, &client)?;
 
     nmf_k_sweep_gpu(
         &input,
@@ -719,7 +718,7 @@ pub fn nmf_k_sweep_run_sparse_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::Mat;
 
     use crate::methods::nmf_hals::NmfInit;
@@ -727,9 +726,9 @@ mod tests {
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -759,7 +758,7 @@ mod tests {
         let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
         let v = rank_k_input(m, n, k);
 
-        let res = nmf_consensus_run_gpu::<WgpuRuntime>(
+        let res = nmf_consensus_run_gpu(
             v.as_ref(),
             k,
             "none",
@@ -767,7 +766,7 @@ mod tests {
             None,
             n_runs,
             0,
-            WgpuDevice::DefaultDevice,
+            WgpuDevice::default().clone().into(),
             0,
         )
         .unwrap();
@@ -815,7 +814,7 @@ mod tests {
         let v = rank_k_input(m, n, k);
         let params = ConsensusParams::<f32>::new(ConsensusTarget::WColumns, None, None, 100, 3, 42);
 
-        let res = nmf_consensus_run_gpu::<WgpuRuntime>(
+        let res = nmf_consensus_run_gpu(
             v.as_ref(),
             k,
             "none",
@@ -823,7 +822,7 @@ mod tests {
             Some(params),
             n_runs,
             0,
-            WgpuDevice::DefaultDevice,
+            WgpuDevice::default().clone().into(),
             0,
         )
         .unwrap();
@@ -846,7 +845,7 @@ mod tests {
         let v = rank_k_input(m, n, 3);
         let k_range = [2usize, 3, 4];
 
-        let rows = nmf_k_sweep_run_gpu::<WgpuRuntime>(
+        let rows = nmf_k_sweep_run_gpu(
             v.as_ref(),
             &k_range,
             "none",
@@ -854,7 +853,7 @@ mod tests {
             None,
             3,
             0,
-            WgpuDevice::DefaultDevice,
+            WgpuDevice::default().clone().into(),
             0,
         )
         .unwrap();
@@ -876,10 +875,10 @@ mod tests {
             return;
         }
         let v = rank_k_input(20, 14, 2);
-        let dev = || WgpuDevice::DefaultDevice;
+        let dev = || WgpuDevice::default();
 
         assert!(matches!(
-            nmf_consensus_run_gpu::<WgpuRuntime>(
+            nmf_consensus_run_gpu(
                 v.as_ref(),
                 1,
                 "none",
@@ -887,13 +886,13 @@ mod tests {
                 None,
                 4,
                 0,
-                dev(),
+                dev().clone().into(),
                 0
             ),
             Err(BixverseErrors::NmfConsensusInvalidK { k: 1 })
         ));
         assert!(matches!(
-            nmf_consensus_run_gpu::<WgpuRuntime>(
+            nmf_consensus_run_gpu(
                 v.as_ref(),
                 2,
                 "none",
@@ -901,13 +900,13 @@ mod tests {
                 None,
                 1,
                 0,
-                dev(),
+                dev().clone().into(),
                 0
             ),
             Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs: 1 })
         ));
         assert!(matches!(
-            nmf_k_sweep_run_gpu::<WgpuRuntime>(
+            nmf_k_sweep_run_gpu(
                 v.as_ref(),
                 &[],
                 "none",
@@ -915,13 +914,13 @@ mod tests {
                 None,
                 3,
                 0,
-                dev(),
+                dev().clone().into(),
                 0
             ),
             Err(BixverseErrors::NmfKSweepEmptyRange)
         ));
         assert!(matches!(
-            nmf_k_sweep_run_gpu::<WgpuRuntime>(
+            nmf_k_sweep_run_gpu(
                 v.as_ref(),
                 &[2, 1],
                 "none",
@@ -929,7 +928,7 @@ mod tests {
                 None,
                 3,
                 0,
-                dev(),
+                dev().clone().into(),
                 0
             ),
             Err(BixverseErrors::NmfConsensusInvalidK { k: 1 })
@@ -953,22 +952,22 @@ mod tests {
 
         let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Random { seed: 5 });
 
-        let dense = nmf_single_run_gpu::<WgpuRuntime>(
+        let dense = nmf_single_run_gpu(
             v.as_ref(),
             k,
             "none",
             Some(opts.clone()),
-            WgpuDevice::DefaultDevice,
+            WgpuDevice::default().clone().into(),
             0,
         )
         .unwrap();
-        let sparse = nmf_single_run_sparse_gpu::<WgpuRuntime>(
+        let sparse = nmf_single_run_sparse_gpu(
             csr,
             k,
             "none",
             false,
             Some(opts),
-            WgpuDevice::DefaultDevice,
+            WgpuDevice::default().clone().into(),
             0,
         )
         .unwrap();

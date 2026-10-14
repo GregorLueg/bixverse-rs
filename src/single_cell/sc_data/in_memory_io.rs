@@ -20,13 +20,16 @@
 //! default avoids. Worth it for metacells, which is what asks for it; do not
 //! reach for it on a raw-cell matrix.
 
+use indexmap::IndexSet;
+use num_traits::FromPrimitive;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{
-    CscGeneChunk, CsrCellChunk, RawCounts, SingleCellReading, SparseDataHeader,
+    CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts, RunSource,
+    SingleCellReading, SparseDataHeader, cell_row_map, extend_raw_checked, read_fused,
 };
 use crate::single_cell::sc_traits::F16;
 
@@ -233,6 +236,98 @@ impl<'a> InMemorySparseReader<'a> {
     }
 }
 
+/// One run of an in-memory store, borrowed straight from the matrix.
+struct SliceRun<'a> {
+    /// Stored indices of the run.
+    indices: &'a [u32],
+    /// Raw counts of the run.
+    raw: &'a [u32],
+    /// Normalised values of the run.
+    norm: &'a [f32],
+}
+
+impl RunSource for SliceRun<'_> {
+    #[inline]
+    fn nnz(&self) -> usize {
+        self.indices.len()
+    }
+
+    #[inline(always)]
+    fn index_at(&self, i: usize) -> u32 {
+        self.indices[i]
+    }
+
+    #[inline(always)]
+    fn raw_at(&self, i: usize) -> u32 {
+        self.raw[i]
+    }
+
+    #[inline(always)]
+    fn norm_at(&self, i: usize) -> f32 {
+        self.norm[i]
+    }
+
+    fn extend_indices(&self, out: &mut Vec<u32>) {
+        out.extend_from_slice(self.indices);
+    }
+
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors> {
+        extend_raw_checked(out, self.raw.iter().copied())
+    }
+
+    fn extend_norm(&self, out: &mut Vec<f32>) {
+        out.extend_from_slice(self.norm);
+    }
+}
+
+/// Copy a batch of runs out of an in-memory store into one sparse matrix.
+///
+/// The in-memory counterpart of the decompress-and-append fill in
+/// [`ParallelSparseReader`]: each run is a slice of `store`, appended through
+/// the same [`read_fused`] engine and filter.
+///
+/// ### Params
+///
+/// * `store` - The matrix whose major axis the runs index
+/// * `indices` - Runs to read, in output order
+/// * `row_map` - Optional dense `index -> output row` map
+/// * `data_layer` - Which layer(s) to materialise
+/// * `cs_type` - Layout of the output
+/// * `shape` - `(cells, genes)` of the output
+///
+/// ### Returns
+///
+/// The batch, or [`BixverseErrors::ChunkIndexNotFound`] for a run past the
+/// major axis.
+fn read_runs<T>(
+    store: &CompressedSparseData2<u32, f32>,
+    indices: &[usize],
+    row_map: Option<&[u32]>,
+    data_layer: &DataLayerReturn,
+    cs_type: CompressedSparseFormat,
+    shape: (usize, usize),
+) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+where
+    T: BixverseNumeric + FromPrimitive,
+{
+    let norm = store.data_2.as_ref().expect("checked in `new`");
+    let n_runs = store.indptr.len() - 1;
+
+    read_fused(indices, data_layer, cs_type, shape, |run, _, fragment| {
+        if run >= n_runs {
+            return Err(BixverseErrors::ChunkIndexNotFound(run));
+        }
+        let lo = store.indptr[run] as usize;
+        let hi = store.indptr[run + 1] as usize;
+        let run = SliceRun {
+            indices: &store.indices[lo..hi],
+            raw: &store.data[lo..hi],
+            norm: &norm[lo..hi],
+        };
+        fragment.push_run(&run, row_map)
+    })
+}
+
 /// Total raw counts per cell of a gene-major matrix.
 ///
 /// A CSC matrix has no per-cell run to sum, so this is a scatter-add over every
@@ -280,6 +375,90 @@ fn cell_library_sizes(matrix: &CompressedSparseData2<u32, f32>, n_cells: usize) 
     totals.into_iter().map(|x| x as usize).collect()
 }
 
+/////////////////
+// Cell subset //
+/////////////////
+
+/// Largest share of the store's cells for which reading the subset from the
+/// cell-major store beats the gene-major sweep.
+///
+/// Measured on a 985k-cell, 36.5k-gene store (10 threads, warm page cache):
+/// VST HVG breaks even near 12 % of cells, the scTransform fit near 20 %. 10 %
+/// sits inside both. A cold cache only pushes the crossover out, since the
+/// gene-major path reads the whole file whatever the subset.
+pub const CELL_SUBSET_MAX_FRACTION: f64 = 0.10;
+
+/// Largest subset ever materialised in memory, whatever the fraction.
+///
+/// At ~1.2k non-zeros per cell, 100k cells is ~1.4 GB of CSR, with the same
+/// again briefly during the transpose to CSC.
+pub const CELL_SUBSET_MAX_CELLS: usize = 100_000;
+
+/// Should a subset go through [`read_cell_subset_csc`] rather than the
+/// gene-major store?
+///
+/// ### Params
+///
+/// * `n_selected` - Cells in the subset
+/// * `n_total` - Cells in the store
+///
+/// ### Returns
+///
+/// `true` when the subset is within both [`CELL_SUBSET_MAX_FRACTION`] of the
+/// store and [`CELL_SUBSET_MAX_CELLS`].
+pub fn prefer_cell_subset(n_selected: usize, n_total: usize) -> bool {
+    n_selected <= CELL_SUBSET_MAX_CELLS
+        && (n_selected as f64) <= CELL_SUBSET_MAX_FRACTION * n_total as f64
+}
+
+/// Read a cell subset from the cell-major store into a gene-major matrix.
+///
+/// The gene-major drivers (HVG, scTransform) decompress every gene chunk in
+/// full and drop the unwanted cells afterwards, so their cost follows the
+/// store's non-zeros, not the subset's. For a small subset it is cheaper to
+/// read just its cells and run the same drivers over an
+/// [`InMemorySparseReader`] built on the result.
+///
+/// Every gene is kept, so gene indices stay store indices. Cells are
+/// renumbered `0..cell_indices.len()` in the given order. The normalised layer
+/// is F16 on disk in both stores, so the F16 -> f32 -> F16 round trip through
+/// the reader is exact.
+///
+/// ### Params
+///
+/// * `cell_reader` - Reader over the cell-major store
+/// * `cell_indices` - Cells to read, in the order they should appear
+///
+/// ### Returns
+///
+/// The subset as CSC with shape `(cell_indices.len(), total_genes)`, raw
+/// counts in `data` and normalised counts in `data_2`.
+pub fn read_cell_subset_csc(
+    cell_reader: &ParallelSparseReader,
+    cell_indices: &[usize],
+) -> Result<CompressedSparseData2<u32, f32>, BixverseErrors> {
+    let batch = cell_reader.read_cells_csr(cell_indices, &DataLayerReturn::BothLayers)?;
+
+    // Raw counts come back as f32, exact for anything below 2^24.
+    let data: Vec<u32> = batch
+        .data_raw
+        .expect("requested both layers")
+        .par_iter()
+        .map(|&v| v as u32)
+        .collect();
+
+    let csr = CompressedSparseData2::from_parts(
+        data,
+        batch.indices,
+        batch.indptr,
+        batch.data_norm,
+        CompressedSparseFormat::Csr,
+        batch.shape,
+    );
+
+    Ok(transpose_sparse(&csr))
+}
+
 impl SingleCellReading for InMemorySparseReader<'_> {
     /// Read cells by index in a multi-threaded manner
     ///
@@ -300,6 +479,89 @@ impl SingleCellReading for InMemorySparseReader<'_> {
             .par_iter()
             .map(|&cell| self.cell_chunk(cell))
             .collect()
+    }
+
+    /// Read a batch of cells straight into CSR
+    ///
+    /// Slices the CSR twin directly, so no chunk is built and the normalised
+    /// layer stays `f32` rather than passing through the chunks' F16.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, in output row order
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSR, or [`BixverseErrors::ReaderModeMismatch`] in
+    /// gene-major mode.
+    fn read_cells_sparse<T>(
+        &self,
+        indices: &[usize],
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        let transposed = self
+            .transposed
+            .as_ref()
+            .ok_or(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            })?;
+
+        read_runs(
+            transposed,
+            indices,
+            None,
+            data_layer,
+            CompressedSparseFormat::Csr,
+            (indices.len(), self.matrix.shape.1),
+        )
+    }
+
+    /// Read a batch of genes straight into CSC, optionally filtering cells
+    ///
+    /// Slices the matrix directly, so no chunk is built and the normalised
+    /// layer stays `f32` rather than passing through the chunks' F16.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene indices, in output column order
+    /// * `cells_to_keep` - Cells to keep, in output row order, or `None`
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSC, or [`BixverseErrors::ReaderModeMismatch`] in
+    /// cell-major mode.
+    fn read_genes_sparse<T>(
+        &self,
+        indices: &[usize],
+        cells_to_keep: Option<&IndexSet<u32>>,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        if self.transposed.is_some() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        let (row_map, n_rows) = cell_row_map(cells_to_keep, self.matrix.shape.0);
+
+        read_runs(
+            self.matrix,
+            indices,
+            row_map.as_deref(),
+            data_layer,
+            CompressedSparseFormat::Csc,
+            (n_rows, indices.len()),
+        )
     }
 
     /// Read genes by index in a multi-threaded manner
@@ -533,5 +795,289 @@ mod tests {
         let reader = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
 
         assert!(reader.read_cells_parallel(&[4]).is_err());
+    }
+
+    /// Reading every gene in order hands back the matrix itself, norm layer
+    /// still `f32`.
+    #[test]
+    fn test_read_genes_sparse_is_the_matrix() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+
+        let csc = reader
+            .read_genes_sparse::<u32>(&[0, 1, 2], None, &DataLayerReturn::BothLayers)
+            .unwrap();
+
+        assert_eq!(csc.shape, matrix.shape);
+        assert_eq!(csc.indptr, matrix.indptr);
+        assert_eq!(csc.indices, matrix.indices);
+        assert_eq!(csc.data, matrix.data);
+        assert_eq!(csc.data_2, matrix.data_2);
+    }
+
+    /// A filtered read agrees with the chunk path: raw and pattern exactly,
+    /// norm once narrowed to the chunks' F16.
+    #[test]
+    fn test_read_genes_sparse_filtered_matches_chunk_path() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let genes = [2usize, 1, 0];
+        let keep: IndexSet<u32> = [3_u32, 0, 2].into_iter().collect();
+
+        let want = from_gene_chunks::<u32>(
+            reader.read_gene_parallel_filtered(&genes, &keep).unwrap(),
+            &DataLayerReturn::BothLayers,
+            keep.len(),
+        )
+        .unwrap();
+        let got = reader
+            .read_genes_sparse::<u32>(&genes, Some(&keep), &DataLayerReturn::BothLayers)
+            .unwrap();
+
+        assert_eq!(got.shape, want.shape);
+        assert_eq!(got.indptr, want.indptr);
+        assert_eq!(got.indices, want.indices);
+        assert_eq!(got.data, want.data);
+        let narrowed: Vec<f32> = got
+            .data_2
+            .unwrap()
+            .iter()
+            .map(|&v| F16::from_f32(v).to_f32())
+            .collect();
+        assert_eq!(narrowed, want.data_2.unwrap());
+    }
+
+    /// Reading every cell from the CSR twin is the twin itself; each mode
+    /// refuses the other axis and out-of-range runs error.
+    #[test]
+    fn test_read_sparse_modes_and_bounds() {
+        let matrix = toy_csc();
+        let gene_major = InMemorySparseReader::new(&matrix, None).unwrap();
+        let cell_major = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
+
+        let csr = cell_major
+            .read_cells_sparse::<u32>(&[0, 1, 2, 3], &DataLayerReturn::BothLayers)
+            .unwrap();
+        let twin = transpose_sparse(&matrix);
+        assert_eq!(csr.shape, twin.shape);
+        assert_eq!(csr.indptr, twin.indptr);
+        assert_eq!(csr.indices, twin.indices);
+        assert_eq!(csr.data, twin.data);
+        assert_eq!(csr.data_2, twin.data_2);
+
+        let layer = DataLayerReturn::Raw;
+        assert!(gene_major.read_cells_sparse::<u32>(&[0], &layer).is_err());
+        assert!(
+            cell_major
+                .read_genes_sparse::<u32>(&[0], None, &layer)
+                .is_err()
+        );
+        assert!(
+            gene_major
+                .read_genes_sparse::<u32>(&[3], None, &layer)
+                .is_err()
+        );
+        assert!(cell_major.read_cells_sparse::<u32>(&[4], &layer).is_err());
+    }
+
+    /////////////////
+    // Cell subset //
+    /////////////////
+
+    mod cell_subset {
+        use half::f16;
+
+        use super::*;
+        use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
+        use crate::single_cell::sc_processing::hvg::get_hvg_vst;
+        use crate::single_cell::sc_processing::sctransform::model::{SctCovariates, SctParams};
+        use crate::single_cell::sc_processing::sctransform::stream::{
+            SctStreamOpts, fit_sctransform,
+        };
+
+        const N_CELLS: usize = 300;
+        const N_GENES: usize = 60;
+        const SIZE_FACTOR: f32 = 1e4;
+
+        /// Removes the scratch store on drop; errors ignored, this runs during
+        /// unwind.
+        struct TempStore(std::path::PathBuf);
+
+        impl Drop for TempStore {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        impl TempStore {
+            /// Reserve a uniquely named scratch store.
+            fn new(name: &str) -> Self {
+                Self(std::env::temp_dir().join(format!(
+                    "bixverse_cell_subset_{name}_{}.bin",
+                    std::process::id()
+                )))
+            }
+
+            /// Path of the guarded store.
+            fn path(&self) -> &str {
+                self.0.to_str().expect("temp path is valid UTF-8")
+            }
+        }
+
+        /// Sparse `dense[gene][cell]` counts from an LCG, mean rising with the
+        /// gene index so the mean-variance trend has range.
+        fn synthetic_counts() -> Vec<Vec<u32>> {
+            let mut state = 0x2545_F491_4F6C_DD1Du64;
+            (0..N_GENES)
+                .map(|gene| {
+                    (0..N_CELLS)
+                        .map(|_| {
+                            state = state
+                                .wrapping_mul(6_364_136_223_846_793_005)
+                                .wrapping_add(1);
+                            let draw = (state >> 33) as u32;
+                            if draw % 10 < 6 {
+                                0
+                            } else {
+                                draw % (gene as u32 + 3)
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+
+        /// Write the gene-major and cell-major stores for the same counts.
+        fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
+            let lib: Vec<f32> = (0..N_CELLS)
+                .map(|c| dense.iter().map(|g| g[c] as f32).sum::<f32>().max(1.0))
+                .collect();
+
+            let mut gene_writer =
+                CellGeneSparseWriter::new(genes.path(), false, N_CELLS, N_GENES, SIZE_FACTOR)
+                    .expect("gene writer opens");
+            for (gene_idx, gene) in dense.iter().enumerate() {
+                let (mut raw, mut idx, mut norms) = (Vec::new(), Vec::new(), Vec::new());
+                for (cell, &value) in gene.iter().enumerate() {
+                    if value > 0 {
+                        raw.push(value);
+                        idx.push(cell);
+                        let norm = (value as f32 / lib[cell] * SIZE_FACTOR).ln_1p();
+                        norms.push(F16::from(f16::from_f32(norm)));
+                    }
+                }
+                gene_writer
+                    .write_gene_chunk(CscGeneChunk::from_conversion(
+                        RawCounts::from_u32_auto(&raw),
+                        &norms,
+                        &idx,
+                        gene_idx,
+                        true,
+                    ))
+                    .expect("write gene chunk");
+            }
+            gene_writer.finalise().expect("finalise genes");
+
+            let mut cell_writer =
+                CellGeneSparseWriter::new(cells.path(), true, N_CELLS, N_GENES, SIZE_FACTOR)
+                    .expect("cell writer opens");
+            for cell in 0..N_CELLS {
+                let (mut raw, mut idx) = (Vec::new(), Vec::new());
+                for (gene_idx, gene) in dense.iter().enumerate() {
+                    if gene[cell] > 0 {
+                        raw.push(gene[cell]);
+                        idx.push(gene_idx as u32);
+                    }
+                }
+                cell_writer
+                    .write_cell_chunk(CsrCellChunk::from_data(&raw, &idx, cell, SIZE_FACTOR, true))
+                    .expect("write cell chunk");
+            }
+            cell_writer.finalise().expect("finalise cells");
+        }
+
+        /// An unordered subset, so the row order of both paths is exercised.
+        fn subset() -> Vec<usize> {
+            let mut cells: Vec<usize> = (0..N_CELLS).filter(|c| c % 3 != 1).collect();
+            cells.reverse();
+            cells.swap(0, 50);
+            cells
+        }
+
+        /// The in-memory subset holds exactly what the filtered gene read sees.
+        #[test]
+        fn test_cell_subset_matches_filtered_gene_read() {
+            let (genes, cells) = (TempStore::new("read_g"), TempStore::new("read_c"));
+            let dense = synthetic_counts();
+            write_stores(&dense, &genes, &cells);
+            let gene_reader = ParallelSparseReader::new(genes.path()).unwrap();
+            let cell_reader = ParallelSparseReader::new(cells.path()).unwrap();
+
+            let subset = subset();
+            let csc = read_cell_subset_csc(&cell_reader, &subset).unwrap();
+            assert_eq!(csc.shape, (subset.len(), N_GENES));
+
+            let keep: indexmap::IndexSet<u32> = subset.iter().map(|&c| c as u32).collect();
+            let all: Vec<usize> = (0..N_GENES).collect();
+            for chunk in gene_reader
+                .read_gene_parallel_filtered(&all, &keep)
+                .unwrap()
+            {
+                let g = chunk.original_index;
+                let (lo, hi) = (csc.indptr[g] as usize, csc.indptr[g + 1] as usize);
+                assert_eq!(&csc.indices[lo..hi], &chunk.indices[..]);
+                assert_eq!(
+                    csc.data[lo..hi].to_vec(),
+                    chunk.data_raw.iter().collect::<Vec<u32>>()
+                );
+            }
+        }
+
+        /// VST HVG and the scTransform fit give identical results on both paths.
+        #[test]
+        fn test_cell_subset_hvg_and_sct_match_gene_path() {
+            let (genes, cells) = (TempStore::new("fit_g"), TempStore::new("fit_c"));
+            let dense = synthetic_counts();
+            write_stores(&dense, &genes, &cells);
+            let gene_reader = ParallelSparseReader::new(genes.path()).unwrap();
+            let cell_reader = ParallelSparseReader::new(cells.path()).unwrap();
+
+            let subset = subset();
+            let local: Vec<usize> = (0..subset.len()).collect();
+            let csc = read_cell_subset_csc(&cell_reader, &subset).unwrap();
+            let mem = InMemorySparseReader::new(&csc, cell_reader.target_size()).unwrap();
+
+            let hvg_gene = get_hvg_vst(&gene_reader, &subset, 0.3, None, 0).unwrap();
+            let hvg_cell = get_hvg_vst(&mem, &local, 0.3, None, 0).unwrap();
+            assert_eq!(hvg_gene.var_std, hvg_cell.var_std);
+            assert_eq!(hvg_gene.mean, hvg_cell.mean);
+
+            let lib: Vec<f64> = cell_reader
+                .read_cell_library_sizes(&subset)
+                .unwrap()
+                .into_iter()
+                .map(|s| s as f64)
+                .collect();
+            let (params, opts, cov) = (
+                SctParams::default(),
+                SctStreamOpts::default(),
+                SctCovariates::default(),
+            );
+            let (m_gene, _) =
+                fit_sctransform(&gene_reader, &subset, &lib, &cov, &params, None, None, opts)
+                    .unwrap();
+            let (m_cell, _) =
+                fit_sctransform(&mem, &local, &lib, &cov, &params, None, None, opts).unwrap();
+            assert_eq!(format!("{m_gene:?}"), format!("{m_cell:?}"));
+        }
+
+        /// Both limits bind: the fraction on small stores, the cap on big ones.
+        #[test]
+        fn test_prefer_cell_subset_boundaries() {
+            assert!(prefer_cell_subset(100, 1_000));
+            assert!(!prefer_cell_subset(101, 1_000));
+            assert!(prefer_cell_subset(CELL_SUBSET_MAX_CELLS, 10_000_000));
+            assert!(!prefer_cell_subset(CELL_SUBSET_MAX_CELLS + 1, 10_000_000));
+        }
     }
 }

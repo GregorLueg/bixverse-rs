@@ -254,6 +254,21 @@ impl CscGeneChunk {
     }
 }
 
+/// [`CscGeneChunk::transform_to_clr`] over an `f32` layer, without the F16
+/// round trip.
+///
+/// ### Params
+///
+/// * `values` - Normalised counts on the `log1p(u * sf)` scale, rewritten in
+///   place to `log1p(u)`
+/// * `size_factor` - The size factor used in the original normalisation
+fn clr_rescale(values: &mut [f32], size_factor: f32) {
+    let sf_inv = 1.0_f32 / size_factor;
+    values
+        .par_iter_mut()
+        .for_each(|v| *v = (v.exp_m1() * sf_inv).ln_1p());
+}
+
 /// Resolve which size factor to undo a file's normalisation with.
 ///
 /// [`CscGeneChunk::transform_to_clr`] has to be handed the exact factor the
@@ -1260,14 +1275,15 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_reading = Instant::now();
 
-    let mut gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+    let mut csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?;
 
     if params_pca.clr {
         let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
-        gene_chunks
-            .par_iter_mut()
-            .for_each(|chunk| chunk.transform_to_clr(size_factor));
+        clr_rescale(
+            csc.data_2.as_mut().expect("norm layer requested"),
+            size_factor,
+        );
     }
 
     let end_reading = start_reading.elapsed();
@@ -1278,14 +1294,10 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_data_prep = Instant::now();
 
-    let n_cells = cell_set.len();
-
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
-
-    let end_data_prep = start_data_prep.elapsed();
-
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, clr_offsets)?;
     let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, clr_offsets)?;
+
+    let end_data_prep = start_data_prep.elapsed();
 
     if verbosity.normal_verbosity() {
         println!(
@@ -1333,7 +1345,7 @@ fn sparse_pca<S: SingleCellReading>(
         }
     };
     let scores_f64 = compute_pc_scores(&svd_res);
-    let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+    let scores = Mat::<f32>::from_fn(cell_set.len(), no_pcs, |i, j| scores_f64[(i, j)] as f32);
     let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
         svd_res.v()[(i, j)] as f32
     });
@@ -1449,4 +1461,131 @@ pub fn pca_on_sc_sparse_stats<S: SingleCellReading>(
     )?;
 
     Ok(res)
+}
+
+////////////////////////////
+// Accelerator PCA inputs //
+////////////////////////////
+
+/// Prepared input for the GPU and MLX sparse PCA
+///
+/// ### Fields
+///
+/// * `0` - CSC, cells x genes
+/// * `1` - Column means, zeros if centring is off
+/// * `2` - Column standard deviations, ones if scaling is off
+#[cfg(any(feature = "gpu", mlx_available))]
+pub(crate) type SparsePcaAcceleratorInput =
+    Result<(CompressedSparseData2<f32>, Vec<f32>, Vec<f32>), BixverseErrors>;
+
+/// Load and prepare the sparse PCA input for the GPU and MLX backends.
+///
+/// Shared prefix of `pca_on_sc_sparse_gpu` and `pca_on_sc_sparse_mlx`: checks
+/// the CLR offsets, streams the genes in, applies the CLR transform if asked
+/// for, builds the cells x genes CSC and computes the column statistics in
+/// f64 before casting them down to f32. The centring and scaling flags of
+/// `params_pca` are applied here, so a disabled step comes back as zeros or
+/// ones.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `clr_offsets` - Per-cell CLR offsets, required if `params_pca.clr`.
+/// * `params_pca` - The [SingleCellPcaParams] for this run.
+/// * `backend` - Backend label for the timing messages.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Tuple of the CSC (cells x genes), the column means and the column standard
+/// deviations, both of length `gene_indices.len()`.
+///
+/// ### Errors
+///
+/// * `OffsetsNotProvidedForClrPCA` if CLR is requested without offsets
+/// * `OffsetsLengthDoesNotMatchNCells` if the offsets do not match the cells
+/// * Anything the reader or the CSC construction raises
+#[cfg(any(feature = "gpu", mlx_available))]
+pub(crate) fn sparse_pca_accelerator_input<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    clr_offsets: Option<&[f32]>,
+    params_pca: &SingleCellPcaParams,
+    backend: &str,
+    verbose: usize,
+) -> SparsePcaAcceleratorInput {
+    if params_pca.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != cell_indices.len()
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+
+    let start_reading = Instant::now();
+
+    let mut csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?;
+
+    if params_pca.clr {
+        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
+        clr_rescale(
+            csc.data_2.as_mut().expect("norm layer requested"),
+            size_factor,
+        );
+    }
+
+    let row_offsets_f64: Option<Vec<f64>> = clr_offsets
+        .filter(|_| params_pca.clr)
+        .map(|offs| offs.iter().map(|&x| x as f64).collect());
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA ({}): Loaded in data in {:.2?}",
+            backend,
+            start_reading.elapsed()
+        );
+    }
+
+    let start_data_prep = Instant::now();
+
+    let real_col_means: Vec<f64> = sparse_csc_column_means(&csc, true, row_offsets_f64.as_deref())?;
+
+    let col_stds: Vec<f32> = if params_pca.normalise_variance {
+        sparse_csc_column_stds(&csc, &real_col_means, true, row_offsets_f64.as_deref())?
+            .iter()
+            .map(|&x| x as f32)
+            .collect()
+    } else {
+        vec![1.0; real_col_means.len()]
+    };
+
+    let col_means: Vec<f32> = if params_pca.mean_center {
+        real_col_means.iter().map(|&x| x as f32).collect()
+    } else {
+        vec![0.0; real_col_means.len()]
+    };
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA ({}): finished the data preparations in {:.2?}",
+            backend,
+            start_data_prep.elapsed()
+        );
+    }
+
+    Ok((csc, col_means, col_stds))
 }

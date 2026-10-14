@@ -41,8 +41,7 @@
 
 use std::time::Instant;
 
-use cubecl::Runtime;
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 use cubecl_utils_rs::prelude::GpuLimits;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -263,9 +262,9 @@ fn rf_config(n_trees: usize) -> RandomForestConfig {
 
 /// Open the default wgpu device, or `None` when no adapter is available.
 fn try_device() -> Option<WgpuDevice> {
-    let device = WgpuDevice::DefaultDevice;
+    let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        WgpuRuntime::client(&device);
+        cubecl::Device::from(device.clone()).client();
     }))
     .ok()
     .map(|_| device)
@@ -327,20 +326,28 @@ fn bench_cell(
         fit_multi_trees_sparse(axes, x, n_samples, config, SEED).expect("CPU fit failed");
     });
 
-    fit_multi_trees_gpu::<WgpuRuntime>(axes, x, n_samples, warmup, SEED, device.clone(), &params)
-        .expect("GPU warmup failed");
+    fit_multi_trees_gpu(
+        axes,
+        x,
+        n_samples,
+        warmup,
+        SEED,
+        device.clone().into(),
+        &params,
+    )
+    .expect("GPU warmup failed");
 
     let mut gpu = f32::MAX;
     let mut checksum = 0.0f64;
     for _ in 0..N_REPEATS {
         let t0 = Instant::now();
-        let imp = fit_multi_trees_gpu::<WgpuRuntime>(
+        let imp = fit_multi_trees_gpu(
             axes,
             x,
             n_samples,
             config,
             SEED,
-            device.clone(),
+            device.clone().into(),
             &params,
         )
         .expect("GPU fit failed");
@@ -402,20 +409,28 @@ fn bench_multi_batch_cell(
         }
     });
 
-    fit_multi_trees_gpu::<WgpuRuntime>(axes, x, n_samples, warmup, SEED, device.clone(), &params)
-        .expect("GPU warmup failed");
+    fit_multi_trees_gpu(
+        axes,
+        x,
+        n_samples,
+        warmup,
+        SEED,
+        device.clone().into(),
+        &params,
+    )
+    .expect("GPU warmup failed");
 
     let mut gpu = f32::MAX;
     let mut checksum = 0.0f64;
     for _ in 0..N_REPEATS {
         let t0 = Instant::now();
-        let imp = fit_multi_trees_gpu::<WgpuRuntime>(
+        let imp = fit_multi_trees_gpu(
             axes,
             x,
             n_samples,
             config,
             SEED,
-            device.clone(),
+            device.clone().into(),
             &params,
         )
         .expect("GPU fit failed");
@@ -469,7 +484,7 @@ fn selected(filter: &[String], label: &str) -> bool {
 /// * `n_samples` - Cell count
 /// * `device` - wgpu device
 fn report_shape(n_samples: usize, device: &WgpuDevice) {
-    let client = WgpuRuntime::client(device);
+    let client = cubecl::Device::from(device.clone()).client();
     let limits = GpuLimits::from_client(&client);
     let max_binding = limits.max_binding_bytes as usize;
     let max_smem = limits.max_shared_bytes;

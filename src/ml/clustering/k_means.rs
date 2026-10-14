@@ -74,6 +74,20 @@ impl KMeansParamsWrappers {
         Self(internal_params)
     }
 
+    /// Turn size balancing on or off, see
+    /// [`KMeansTrainingParams::with_balancing`].
+    ///
+    /// ### Params
+    ///
+    /// * `balanced` - Whether to reseed starved centroids each iteration
+    ///
+    /// ### Returns
+    ///
+    /// `self` with the flag set.
+    pub fn with_balancing(self, balanced: bool) -> Self {
+        Self(self.0.with_balancing(balanced))
+    }
+
     /// Returns the parameters and consumes self
     ///
     /// ### Returns

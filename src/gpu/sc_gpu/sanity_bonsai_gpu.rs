@@ -5,7 +5,7 @@
 //! CPU in [`run_bonsai_sc`].
 
 use bonsai_rs::sanity_sc_rs::gpu::sanity_gpu_select;
-use cubecl::Runtime;
+use cubecl::Device;
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -39,22 +39,21 @@ use crate::single_cell::sc_data::data_io::SingleCellReading;
 /// ### Returns
 ///
 /// The tree, its layout, and the genes it was built on.
-pub fn sanity_bonsai_sc_gpu<R, G, C>(
+pub fn sanity_bonsai_sc_gpu<G, C>(
     gene_reader: &G,
     cell_reader: &C,
     cell_indices: &[usize],
     gene_indices: &[usize],
     params: &BonsaiScParams,
-    device: R::Device,
+    device: Device,
     verbosity: Verbosity,
 ) -> Result<BonsaiScResult, BixverseErrors>
 where
-    R: Runtime,
     G: SingleCellReading,
     C: SingleCellReading,
 {
     let started = Instant::now();
-    let client = R::client(&device);
+    let client = device.client();
     let sanity_params = chunk_sanity_params(params);
     let keep = keep_for_bonsai(params);
     let post = stream_sanity(
@@ -99,15 +98,15 @@ where
 ///
 /// The tree over the metacells, in their row order, its layout, and the genes
 /// it was built on.
-pub fn sanity_bonsai_mc_gpu<R: Runtime>(
+pub fn sanity_bonsai_mc_gpu(
     counts: &CompressedSparseData2<u32, f32>,
     gene_indices: &[usize],
     params: &BonsaiScParams,
-    device: R::Device,
+    device: Device,
     verbosity: Verbosity,
 ) -> Result<BonsaiScResult, BixverseErrors> {
     let started = Instant::now();
-    let client = R::client(&device);
+    let client = device.client();
     let csc = as_csc(counts);
     let totals = mc_totals(&csc);
     let sanity_params = chunk_sanity_params(params);

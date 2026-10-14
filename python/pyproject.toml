@@ -1,0 +1,85 @@
+[build-system]
+requires = ["maturin>=1.15,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bixverse"
+description = "Single-cell streaming and numerics for Python, in Rust."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Gregor Lueg", email = "gregorlueg@me.com" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23", "beartype>=0.19"]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Repository = "https://github.com/GregorLueg/bixverse-rs"
+Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"
+
+[project.optional-dependencies]
+# `scipy_csr` on a batch, and nothing else.
+sparse = ["scipy>=1.9"]
+# `bixverse.nn` on torch: scVI and the `IterableDataset` adapter.
+torch = ["torch>=2.4"]
+# `bixverse.nn` on MLX. Apple Silicon only, so the marker keeps
+# `--all-extras` installable everywhere else.
+mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.15,<2.0",
+    "pytest>=8",
+    "ruff>=0.9",
+    "ty>=0.0.1",
+    "scipy>=1.9",
+]
+# mkdocstrings reads the installed package, so a docs build needs the compiled
+# extension present: `maturin develop --release` before `mkdocs build`.
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+]
+# The scVI reference oracle. Never a runtime dependency, and not installed by
+# CI: the parity tests skip without it. `uv sync --group validation`.
+validation = [
+    # 1.5.1 needs Python 3.12; the marker keeps the lock solvable for 3.10.
+    "scvi-tools==1.5.1; python_version >= '3.12'",
+    "anndata>=0.10",
+]
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "bixverse._bixverse"
+python-source = "."
+strip = true
+include = ["bixverse/py.typed", "bixverse/*.pyi"]
+# A local build otherwise packs whatever bytecode the dev venv left behind.
+exclude = ["**/__pycache__/**"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bixverse"]
+
+[tool.ty.analysis]
+# The mlx extra only installs on Apple Silicon, so Linux CI never sees it.
+allowed-unresolved-imports = ["mlx.**"]
+
+[tool.ty.rules]
+# torch declares `nn.Module.forward` as a mutable `Callable` attribute, so every
+# module that defines `forward` trips this.
+invalid-mutable-override = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

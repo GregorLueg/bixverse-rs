@@ -59,10 +59,9 @@ impl Pile {
         reader: &S,
         cell_indices: &[usize],
     ) -> Result<Self, BixverseErrors> {
-        let chunks = reader.read_cells_parallel(cell_indices)?;
-        let n_genes = reader.get_header().total_genes;
-
-        let raw = from_cell_chunks::<u32>(&chunks, &DataLayerReturn::Raw, n_genes)?;
+        let raw: CompressedSparseData2<u32, f32> =
+            reader.read_cells_sparse(cell_indices, &DataLayerReturn::Raw)?;
+        let n_genes = raw.shape.1;
         let umis_per_cell = sum_rows_csr(&raw);
 
         Ok(Self {

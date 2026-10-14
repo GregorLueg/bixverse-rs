@@ -13,8 +13,7 @@
 
 #![cfg(all(feature = "single-cell", feature = "gpu", feature = "large-test"))]
 
-use cubecl::prelude::*;
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 use faer::Mat;
 use rand::prelude::*;
 use rand_distr::{Distribution, Normal};
@@ -51,9 +50,9 @@ const SEED: usize = 42;
 ///
 /// The default device, or `None` if a client cannot be created.
 fn try_device() -> Option<WgpuDevice> {
-    let device = WgpuDevice::DefaultDevice;
+    let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        WgpuRuntime::client(&device);
+        cubecl::Device::from(device.clone()).client();
     }))
     .ok()
     .map(|_| device)
@@ -149,13 +148,13 @@ fn test_seacells_gpu_matches_cpu() {
             .expect("assignments failed");
         let cpu_rss = cpu_model.get_rss_history().to_vec();
 
-        let (gpu_assign, gpu_metacells, _, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
+        let (gpu_assign, gpu_metacells, _, gpu_rss) = seacells_fit_gpu(
             embedding.as_ref(),
             &knn_indices,
             &knn_distances,
             &p,
             SEED,
-            device.clone(),
+            device.clone().into(),
             0,
         )
         .expect("GPU fit failed");

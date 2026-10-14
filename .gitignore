@@ -10,3 +10,11 @@
 # Planning docs and review reports (local only)
 /plans
 /adversarial_review.md
+
+# Python bindings
+python/.venv
+python/bixverse/*.so
+python/bixverse/*.pyd
+__pycache__/
+.pytest_cache/
+.ruff_cache/

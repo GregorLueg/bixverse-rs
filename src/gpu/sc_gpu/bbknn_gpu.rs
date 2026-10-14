@@ -6,7 +6,7 @@
 #![allow(missing_docs)]
 
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
-use cubecl::Runtime;
+use cubecl::Device;
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -93,16 +93,16 @@ impl Default for BbknnParamsGpu {
 /// ### Returns
 ///
 /// A tuple with (nearest_neighbour_indices, nearest_neighbour_distances)
-fn get_batch_balanced_knn_gpu<R: Runtime>(
+fn get_batch_balanced_knn_gpu(
     mat: MatRef<f32>,
     batch_labels: &[usize],
     bbknn_params: &BbknnParamsGpu,
-    device: R::Device,
+    device: Device,
     seed: usize,
     verbose: usize,
 ) -> ScKnnResults
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let verbosity = parse_verbosity_level(verbose);
 
@@ -141,7 +141,7 @@ where
 
         let sub_matrix = MatSliceView::new(mat, &batch_cell_indices, &col_indices).to_owned();
 
-        let (neighbour_indices, _) = dispatch_knn_query_gpu::<R>(
+        let (neighbour_indices, _) = dispatch_knn_query_gpu(
             sub_matrix.as_ref(),
             mat,
             n_per_batch + 1,
@@ -213,16 +213,16 @@ where
 /// ### References
 ///
 /// Polański, et al., Bioinformatics, 2019
-pub fn bbknn_gpu<R: Runtime>(
+pub fn bbknn_gpu(
     mat: MatRef<f32>,
     batch_labels: &[usize],
     params: &BbknnParamsGpu,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors>
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let verbosity = parse_verbosity_level(verbose);
 
@@ -231,7 +231,7 @@ where
     }
 
     let (mut knn_indices, mut knn_dists) =
-        get_batch_balanced_knn_gpu::<R>(mat, batch_labels, params, device, seed, verbose)?;
+        get_batch_balanced_knn_gpu(mat, batch_labels, params, device, seed, verbose)?;
 
     bbknn_graph_from_knn(
         &mut knn_indices,
@@ -253,13 +253,13 @@ mod tests {
     use super::*;
     use crate::single_cell::sc_batch_correction::bbknn::{BbknnParams, bbknn};
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -316,9 +316,15 @@ mod tests {
             },
         };
 
-        let (dist_gpu, conn_gpu) =
-            bbknn_gpu::<WgpuRuntime>(mat.as_ref(), &batch_labels, &params_gpu, 42, device, 0)
-                .unwrap();
+        let (dist_gpu, conn_gpu) = bbknn_gpu(
+            mat.as_ref(),
+            &batch_labels,
+            &params_gpu,
+            42,
+            device.clone().into(),
+            0,
+        )
+        .unwrap();
         let (dist_cpu, conn_cpu) = bbknn(mat.as_ref(), &batch_labels, &params_cpu, 42, 0).unwrap();
 
         assert_eq!(conn_gpu.indptr, conn_cpu.indptr);
@@ -348,7 +354,14 @@ mod tests {
         batch_labels[1] = 1;
 
         let params = BbknnParamsGpu::default();
-        let res = bbknn_gpu::<WgpuRuntime>(mat.as_ref(), &batch_labels, &params, 42, device, 0);
+        let res = bbknn_gpu(
+            mat.as_ref(),
+            &batch_labels,
+            &params,
+            42,
+            device.clone().into(),
+            0,
+        );
 
         assert!(matches!(
             res,
@@ -365,7 +378,14 @@ mod tests {
         let batch_labels = vec![0usize; 60];
 
         let params = BbknnParamsGpu::default();
-        let res = bbknn_gpu::<WgpuRuntime>(mat.as_ref(), &batch_labels, &params, 42, device, 0);
+        let res = bbknn_gpu(
+            mat.as_ref(),
+            &batch_labels,
+            &params,
+            42,
+            device.clone().into(),
+            0,
+        );
 
         assert!(matches!(
             res,
@@ -391,12 +411,12 @@ mod tests {
                 ..Default::default()
             };
 
-            let (_, conn) = bbknn_gpu::<WgpuRuntime>(
+            let (_, conn) = bbknn_gpu(
                 mat.as_ref(),
                 &batch_labels,
                 &params,
                 42,
-                device.clone(),
+                device.clone().into(),
                 0,
             )
             .unwrap();
