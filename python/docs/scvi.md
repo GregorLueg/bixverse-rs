@@ -84,9 +84,10 @@ Means over three seeds. Held-out ELBO is the per-cell negative ELBO on the 584
 held-out cells, every arm scored by the same code (scvi-tools weights loaded
 into ours); its seed-to-seed range is about 2. kBET and iLISI come from
 bixverse's `calculate_integration_metrics_sc` and `calculate_lisi_sc`. The
-network is the same on both sides, so the MPS gap sits outside the maths;
-where scvi-tools spends it (Lightning, the AnnData loader) hasn't been
-profiled.
+network is the same on both sides, so the MPS gap sits outside the maths:
+mostly `torch.distributions` argument checks that stall the GPU queue every
+step, plus Lightning's per-step bookkeeping. Data loading costs the same on
+both sides.
 
 VAE latents aren't identifiable, so two seeds of scvi-tools already disagree
 with each other. The fair comparison is ours against scvi-tools, read against
