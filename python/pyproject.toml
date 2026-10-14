@@ -72,6 +72,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["bixverse"]
 
+[tool.ty.analysis]
+# The mlx extra only installs on Apple Silicon, so Linux CI never sees it.
+allowed-unresolved-imports = ["mlx.**"]
+
 [tool.ty.rules]
 # torch declares `nn.Module.forward` as a mutable `Callable` attribute, so every
 # module that defines `forward` trips this.
