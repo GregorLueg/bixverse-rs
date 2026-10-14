@@ -51,7 +51,7 @@ jobs:
 
       # ARMED. A dispatch still takes the form's value, so a rehearsal can opt
       # out; anything else tags, which is what a version bump on main should do.
-      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || true }}
+      tag: ${{ github.event_name != 'workflow_dispatch' || inputs.tag }}
       repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi') && 'https://test.pypi.org/legacy/' || '' }}
 
       # The sdist would carry a `path` dependency on the parent crate, which is
