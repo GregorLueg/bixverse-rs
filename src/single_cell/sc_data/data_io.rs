@@ -3,6 +3,8 @@
 //! writers and readers.
 
 use bincode::{Decode, Encode, config, decode_from_slice, serde::encode_to_vec};
+use half::f16;
+use half::slice::HalfFloatSliceExt;
 use indexmap::IndexSet;
 use lz4_flex::block::{decompress_into, uncompressed_size};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
@@ -471,66 +473,6 @@ impl<'a> ChunkPayload<'a> {
         })
     }
 
-    /// Number of stored entries.
-    ///
-    /// ### Returns
-    ///
-    /// The count of indices, which is the CSR row or CSC column length.
-    #[inline]
-    fn nnz(&self) -> usize {
-        self.indices.len() / 4
-    }
-
-    /// Raw count at position `i`, whatever width it is stored at.
-    ///
-    /// ### Params
-    ///
-    /// * `i` - Entry position, below `data_raw_len`
-    ///
-    /// ### Returns
-    ///
-    /// The count.
-    #[inline(always)]
-    fn raw_at(&self, i: usize) -> u32 {
-        if self.raw_width == 4 {
-            let b = &self.data_raw[i * 4..i * 4 + 4];
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            let b = &self.data_raw[i * 2..i * 2 + 2];
-            u16::from_le_bytes([b[0], b[1]]) as u32
-        }
-    }
-
-    /// Normalised value at position `i`.
-    ///
-    /// ### Params
-    ///
-    /// * `i` - Entry position
-    ///
-    /// ### Returns
-    ///
-    /// The stored f16 value.
-    #[inline(always)]
-    fn norm_at(&self, i: usize) -> F16 {
-        let b = &self.data_norm[i * 2..i * 2 + 2];
-        F16::from_le_bytes([b[0], b[1]])
-    }
-
-    /// Index at position `i`.
-    ///
-    /// ### Params
-    ///
-    /// * `i` - Entry position
-    ///
-    /// ### Returns
-    ///
-    /// The gene (cell chunk) or cell (gene chunk) index.
-    #[inline(always)]
-    fn index_at(&self, i: usize) -> u32 {
-        let b = &self.indices[i * 4..i * 4 + 4];
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    }
-
     /// Iterate the normalised layer.
     ///
     /// ### Returns
@@ -560,6 +502,179 @@ impl<'a> ChunkPayload<'a> {
     /// The raw counts at their stored width.
     fn raw_counts(&self) -> Result<RawCounts, BixverseErrors> {
         RawCounts::read_from_buffer(self.data_raw, self.data_raw_len, self.raw_elem_size)
+    }
+}
+
+///////////////
+// RunSource //
+///////////////
+
+/// Entries per stack block when widening f16 to f32 in bulk. Big enough for
+/// `half`'s slice conversion to run its vector path, small enough to stay on
+/// the stack.
+const F16_BLOCK: usize = 64;
+
+/// One stored run (a cell row or a gene column) as the fused readers consume
+/// it: random access for the filtered path, bulk extends for the unfiltered
+/// one.
+pub(crate) trait RunSource {
+    /// Number of stored entries.
+    ///
+    /// ### Returns
+    ///
+    /// The run length.
+    fn nnz(&self) -> usize;
+
+    /// Stored index of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The gene (cell run) or cell (gene run) index.
+    fn index_at(&self, i: usize) -> u32;
+
+    /// Raw count of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The count.
+    fn raw_at(&self, i: usize) -> u32;
+
+    /// Normalised value of entry `i`.
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Entry position
+    ///
+    /// ### Returns
+    ///
+    /// The value as f32.
+    fn norm_at(&self, i: usize) -> f32;
+
+    /// Append every stored index.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    fn extend_indices(&self, out: &mut Vec<u32>);
+
+    /// Append every raw count, converted to `T`.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for a count that does
+    /// not fit `T`. Nothing is appended on error.
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors>;
+
+    /// Append every normalised value.
+    ///
+    /// ### Params
+    ///
+    /// * `out` - Destination
+    fn extend_norm(&self, out: &mut Vec<f32>);
+}
+
+/// Append raw counts converted to `T`, checking overflow once on the maximum.
+///
+/// Every `FromPrimitive` target used for counts (u16, u32, f32, f64) is
+/// monotone over `u32`, so if the maximum fits, every value does. That keeps
+/// the branch out of the copy loop.
+///
+/// ### Params
+///
+/// * `out` - Destination
+/// * `vals` - The counts, iterated twice
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for the maximum.
+#[inline]
+pub(crate) fn extend_raw_checked<T, I>(out: &mut Vec<T>, vals: I) -> Result<(), BixverseErrors>
+where
+    T: FromPrimitive,
+    I: Iterator<Item = u32> + Clone,
+{
+    raw_to::<T>(vals.clone().max().unwrap_or(0))?;
+    out.extend(vals.map(|v| T::from_u32(v).expect("the maximum fits, so every value does")));
+    Ok(())
+}
+
+impl RunSource for ChunkPayload<'_> {
+    #[inline]
+    fn nnz(&self) -> usize {
+        self.indices.len() / 4
+    }
+
+    #[inline(always)]
+    fn index_at(&self, i: usize) -> u32 {
+        let b = &self.indices[i * 4..i * 4 + 4];
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    }
+
+    #[inline(always)]
+    fn raw_at(&self, i: usize) -> u32 {
+        if self.raw_width == 4 {
+            let b = &self.data_raw[i * 4..i * 4 + 4];
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            let b = &self.data_raw[i * 2..i * 2 + 2];
+            u16::from_le_bytes([b[0], b[1]]) as u32
+        }
+    }
+
+    #[inline(always)]
+    fn norm_at(&self, i: usize) -> f32 {
+        let b = &self.data_norm[i * 2..i * 2 + 2];
+        F16::from_le_bytes([b[0], b[1]]).to_f32()
+    }
+
+    fn extend_indices(&self, out: &mut Vec<u32>) {
+        out.extend(self.index_iter());
+    }
+
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors> {
+        if self.raw_width == 4 {
+            extend_raw_checked(
+                out,
+                self.data_raw.chunks_exact(4).map(|c| {
+                    u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction"))
+                }),
+            )
+        } else {
+            extend_raw_checked(
+                out,
+                self.data_raw.chunks_exact(2).map(|c| {
+                    u16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")) as u32
+                }),
+            )
+        }
+    }
+
+    fn extend_norm(&self, out: &mut Vec<f32>) {
+        let start = out.len();
+        out.resize(start + self.data_norm.len() / 2, 0.0);
+        let mut block = [f16::ZERO; F16_BLOCK];
+        for (src, dst) in self
+            .data_norm
+            .chunks(2 * F16_BLOCK)
+            .zip(out[start..].chunks_mut(F16_BLOCK))
+        {
+            for (b, c) in block.iter_mut().zip(src.chunks_exact(2)) {
+                *b = f16::from_le_bytes(c.try_into().expect("2-byte chunk by construction"));
+            }
+            block[..dst.len()].convert_to_f32_slice(dst);
+        }
     }
 }
 
@@ -2724,10 +2839,7 @@ impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
     ///
     /// ### Params
     ///
-    /// * `nnz` - Entries in the run
-    /// * `index_at` - Stored index of entry `i`
-    /// * `raw_at` - Raw count of entry `i`
-    /// * `norm_at` - Normalised value of entry `i`
+    /// * `run` - The stored run
     /// * `row_map` - Optional dense `index -> output row` map
     ///
     /// ### Returns
@@ -2737,30 +2849,24 @@ impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
     #[inline]
     pub(crate) fn push_run(
         &mut self,
-        nnz: usize,
-        index_at: impl Fn(usize) -> u32,
-        raw_at: impl Fn(usize) -> u32,
-        norm_at: impl Fn(usize) -> f32,
+        run: &impl RunSource,
         row_map: Option<&[u32]>,
     ) -> Result<(), BixverseErrors> {
         let Some(map) = row_map else {
             if let Some(data) = self.data.as_mut() {
-                data.reserve(nnz);
-                for i in 0..nnz {
-                    data.push(raw_to(raw_at(i))?);
-                }
+                run.extend_raw(data)?;
             }
             if let Some(data_2) = self.data_2.as_mut() {
-                data_2.extend((0..nnz).map(&norm_at));
+                run.extend_norm(data_2);
             }
-            self.indices.extend((0..nnz).map(&index_at));
-            self.lengths.push(nnz);
+            run.extend_indices(&mut self.indices);
+            self.lengths.push(run.nnz());
             return Ok(());
         };
 
         self.kept.clear();
         self.kept.extend(
-            (0..nnz).filter_map(|i| match map.get(index_at(i) as usize) {
+            (0..run.nnz()).filter_map(|i| match map.get(run.index_at(i) as usize) {
                 Some(&row) if row != INDEX_DROPPED => Some((row, i as u32)),
                 _ => None,
             }),
@@ -2771,11 +2877,11 @@ impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
 
         if let Some(data) = self.data.as_mut() {
             for &(_, i) in &self.kept {
-                data.push(raw_to(raw_at(i as usize))?);
+                data.push(raw_to(run.raw_at(i as usize))?);
             }
         }
         if let Some(data_2) = self.data_2.as_mut() {
-            data_2.extend(self.kept.iter().map(|&(_, i)| norm_at(i as usize)));
+            data_2.extend(self.kept.iter().map(|&(_, i)| run.norm_at(i as usize)));
         }
         self.indices.extend(self.kept.iter().map(|&(row, _)| row));
         self.lengths.push(self.kept.len());
@@ -3098,13 +3204,7 @@ impl SingleCellReading for ParallelSparseReader {
             |cell, scratch, fragment| {
                 self.decompress_chunk_into(cell, scratch)?;
                 let p = csr_payload(scratch)?;
-                fragment.push_run(
-                    p.nnz(),
-                    |i| p.index_at(i),
-                    |i| p.raw_at(i),
-                    |i| p.norm_at(i).to_f32(),
-                    None,
-                )
+                fragment.push_run(&p, None)
             },
         )
     }
@@ -3150,13 +3250,7 @@ impl SingleCellReading for ParallelSparseReader {
             |gene, scratch, fragment| {
                 self.decompress_chunk_into(gene, scratch)?;
                 let p = csc_payload(scratch)?;
-                fragment.push_run(
-                    p.nnz(),
-                    |i| p.index_at(i),
-                    |i| p.raw_at(i),
-                    |i| p.norm_at(i).to_f32(),
-                    row_map.as_deref(),
-                )
+                fragment.push_run(&p, row_map.as_deref())
             },
         )
     }
@@ -4070,15 +4164,18 @@ mod tests {
     }
 
     /// A count above the target type's range is an error, as on the chunk
-    /// path, also when it sits past a dropped cell.
+    /// path, on both the unfiltered (bulk) and filtered paths, also when it
+    /// sits past a dropped cell.
     #[test]
     fn test_read_genes_sparse_reports_overflow() {
         let (_temp, reader) = csc_test_store("csc_overflow");
         let keep: IndexSet<u32> = [3_u32].into_iter().collect();
 
-        match reader.read_genes_sparse::<u16>(&[0], Some(&keep), &DataLayerReturn::Raw) {
-            Err(BixverseErrors::RawCountOverflow { value, .. }) => assert_eq!(value, 70_000),
-            other => panic!("expected RawCountOverflow, got {:?}", other.map(|_| ())),
+        for cells in [None, Some(&keep)] {
+            match reader.read_genes_sparse::<u16>(&[0], cells, &DataLayerReturn::Raw) {
+                Err(BixverseErrors::RawCountOverflow { value, .. }) => assert_eq!(value, 70_000),
+                other => panic!("expected RawCountOverflow, got {:?}", other.map(|_| ())),
+            }
         }
 
         // Dropping the offending cell makes the narrow type fine.

@@ -900,7 +900,11 @@ mod tests {
         }];
         let obs = cellphonedb_observed::<f64, _>(&reader, &inter, &clusters, None, 0.1).unwrap();
         let mean = |g: usize, k: usize| {
-            clusters[k].iter().map(|&c| columns[g][c] as f64).sum::<f64>() / sizes[k] as f64
+            clusters[k]
+                .iter()
+                .map(|&c| columns[g][c] as f64)
+                .sum::<f64>()
+                / sizes[k] as f64
         };
         for (p, &(a, b)) in obs.pairs.iter().enumerate() {
             let x = mean(0, a).min(mean(1, a));

@@ -28,8 +28,8 @@ use rustc_hash::FxHashMap;
 use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{
-    CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts,
-    SingleCellReading, SparseDataHeader, cell_row_map, read_fused,
+    CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts, RunSource,
+    SingleCellReading, SparseDataHeader, cell_row_map, extend_raw_checked, read_fused,
 };
 use crate::single_cell::sc_traits::F16;
 
@@ -236,6 +236,50 @@ impl<'a> InMemorySparseReader<'a> {
     }
 }
 
+/// One run of an in-memory store, borrowed straight from the matrix.
+struct SliceRun<'a> {
+    /// Stored indices of the run.
+    indices: &'a [u32],
+    /// Raw counts of the run.
+    raw: &'a [u32],
+    /// Normalised values of the run.
+    norm: &'a [f32],
+}
+
+impl RunSource for SliceRun<'_> {
+    #[inline]
+    fn nnz(&self) -> usize {
+        self.indices.len()
+    }
+
+    #[inline(always)]
+    fn index_at(&self, i: usize) -> u32 {
+        self.indices[i]
+    }
+
+    #[inline(always)]
+    fn raw_at(&self, i: usize) -> u32 {
+        self.raw[i]
+    }
+
+    #[inline(always)]
+    fn norm_at(&self, i: usize) -> f32 {
+        self.norm[i]
+    }
+
+    fn extend_indices(&self, out: &mut Vec<u32>) {
+        out.extend_from_slice(self.indices);
+    }
+
+    fn extend_raw<T: FromPrimitive>(&self, out: &mut Vec<T>) -> Result<(), BixverseErrors> {
+        extend_raw_checked(out, self.raw.iter().copied())
+    }
+
+    fn extend_norm(&self, out: &mut Vec<f32>) {
+        out.extend_from_slice(self.norm);
+    }
+}
+
 /// Copy a batch of runs out of an in-memory store into one sparse matrix.
 ///
 /// The in-memory counterpart of the decompress-and-append fill in
@@ -275,8 +319,12 @@ where
         }
         let lo = store.indptr[run] as usize;
         let hi = store.indptr[run + 1] as usize;
-        let (idx, raw, nrm) = (&store.indices[lo..hi], &store.data[lo..hi], &norm[lo..hi]);
-        fragment.push_run(hi - lo, |i| idx[i], |i| raw[i], |i| nrm[i], row_map)
+        let run = SliceRun {
+            indices: &store.indices[lo..hi],
+            raw: &store.data[lo..hi],
+            norm: &norm[lo..hi],
+        };
+        fragment.push_run(&run, row_map)
     })
 }
 
