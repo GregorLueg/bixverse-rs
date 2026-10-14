@@ -11,6 +11,13 @@ extra, `bixverse[torch]` or `bixverse[mlx]`.
 """
 
 from ._api import scvi_elbo, scvi_latent, train_scvi
-from ._params import ScviFit, ScviParams
+from ._params import ScviFit, ScviHistory, ScviParams
 
-__all__ = ["ScviFit", "ScviParams", "scvi_elbo", "scvi_latent", "train_scvi"]
+__all__ = [
+    "ScviFit",
+    "ScviHistory",
+    "ScviParams",
+    "scvi_elbo",
+    "scvi_latent",
+    "train_scvi",
+]

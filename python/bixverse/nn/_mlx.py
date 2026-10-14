@@ -30,6 +30,7 @@ from ._data import iterate_counts
 from ._params import (
     MIN_TRAIN_BATCH,
     ScviFit,
+    ScviHistory,
     ScviParams,
     kl_weight,
     resolve_max_epochs,
@@ -472,12 +473,7 @@ def train(
         return loss, terms
 
     n_epochs = resolve_max_epochs(params, len(cells))
-    history: dict[str, list[float]] = {
-        "loss": [],
-        "reconstruction": [],
-        "kl": [],
-        "kl_weight": [],
-    }
+    history = ScviHistory()
 
     model.train()
     for epoch in range(n_epochs):
@@ -502,10 +498,10 @@ def train(
             mx.eval(state, totals)
             n_seen += n
         loss, recon, kl = (np.array(totals) / max(n_seen, 1)).tolist()
-        history["loss"].append(loss)
-        history["reconstruction"].append(recon)
-        history["kl"].append(kl)
-        history["kl_weight"].append(kl_w)
+        history.loss.append(loss)
+        history.reconstruction.append(recon)
+        history.kl.append(kl)
+        history.kl_weight.append(kl_w)
         logger.info("epoch %d/%d: loss %.2f", epoch + 1, n_epochs, loss)
 
     model.eval()

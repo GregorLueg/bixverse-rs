@@ -62,6 +62,23 @@ class ScviParams:
 
 
 @dataclass
+class ScviHistory:
+    """Per-epoch training means, one entry per epoch.
+
+    Attributes:
+        loss: Minibatch loss, reconstruction plus weighted KL.
+        reconstruction: Negative log likelihood per cell.
+        kl: KL divergence of z per cell.
+        kl_weight: The KL weight used that epoch.
+    """
+
+    loss: list[float] = field(default_factory=list)
+    reconstruction: list[float] = field(default_factory=list)
+    kl: list[float] = field(default_factory=list)
+    kl_weight: list[float] = field(default_factory=list)
+
+
+@dataclass
 class ScviFit:
     """A trained scVI model plus what is needed to use it again.
 
@@ -72,8 +89,8 @@ class ScviFit:
         genes: Store gene indices the model was trained on, in column order.
         batch_categories: Batch labels, in the order of the one-hot columns.
         device: Torch device string, or `"gpu"` for MLX.
-        history: Per-epoch training means of `loss`, `reconstruction`, `kl`
-            and the `kl_weight` used.
+        history: Per-epoch training means. Empty for a fit wrapped around
+            weights trained elsewhere.
     """
 
     model: Any  # torch.nn.Module or mlx.nn.Module; neither is importable here
@@ -82,7 +99,7 @@ class ScviFit:
     genes: np.ndarray
     batch_categories: np.ndarray
     device: str
-    history: dict[str, list[float]] = field(default_factory=dict)
+    history: ScviHistory = field(default_factory=ScviHistory)
 
 
 @beartype

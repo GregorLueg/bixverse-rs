@@ -36,8 +36,8 @@ def test_train_then_embed_every_cell(store, backend, batch):
     assert latent.shape == (N_CELLS, SHORT.n_latent)
     assert np.isfinite(latent).all()
     assert list(fit.batch_categories) == ["a", "b"]
-    assert len(fit.history["loss"]) == 5
-    assert fit.history["kl_weight"][0] == 0.0
+    assert len(fit.history.loss) == 5
+    assert fit.history.kl_weight[0] == 0.0
 
 
 def test_latent_rows_follow_the_requested_cells(store, backend, batch):

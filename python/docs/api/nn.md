@@ -10,3 +10,4 @@ scVI trained straight off a bixverse store, on torch or MLX.
         - scvi_elbo
         - ScviParams
         - ScviFit
+        - ScviHistory
