@@ -1095,41 +1095,64 @@ impl CscGeneChunk {
 
     /// Helper function that allows to filter out cells
     ///
+    /// Kept cells are renumbered to their position in `cells_to_keep`, and the
+    /// output is ordered by that position (PCA and NEBULA rely on it).
+    ///
     /// ### Params
     ///
     /// * `cells_to_keep` - IndexSet with cell index positions to keep.
     pub fn filter_selected_cells(&mut self, cells_to_keep: &IndexSet<u32>) {
-        // build reverse mapping: cell_id -> position in this gene's data
-        let cell_positions: FxHashMap<u32, usize> = self
+        self.filter_cells_by(|cell| cells_to_keep.get_index_of(&cell).map(|i| i as u32));
+    }
+
+    /// Filter to the cells a dense index map keeps.
+    ///
+    /// Same result as [`Self::filter_selected_cells`], but each stored entry
+    /// costs an array load rather than a hash probe. Build the map once per
+    /// read with [`dense_index_map`] and share it across genes.
+    ///
+    /// ### Params
+    ///
+    /// * `cell_map` - `cell_map[cell] = output row`, [`INDEX_DROPPED`] or out
+    ///   of range for cells not kept.
+    pub fn filter_selected_cells_dense(&mut self, cell_map: &[u32]) {
+        self.filter_cells_by(|cell| match cell_map.get(cell as usize) {
+            Some(&row) if row != INDEX_DROPPED => Some(row),
+            _ => None,
+        });
+    }
+
+    /// Keep the entries whose cell maps to an output row, renumbered to it.
+    ///
+    /// One walk over this gene's non-zeros. Stored cell indices ascend, so the
+    /// kept rows only need sorting when the keep set itself is not ascending.
+    ///
+    /// ### Params
+    ///
+    /// * `row_of` - Output row for a cell, `None` to drop it.
+    #[inline]
+    fn filter_cells_by(&mut self, row_of: impl Fn(u32) -> Option<u32>) {
+        let mut kept: Vec<(u32, u32)> = self
             .indices
             .iter()
             .enumerate()
-            .map(|(pos, &cell_id)| (cell_id, pos))
+            .filter_map(|(pos, &cell)| row_of(cell).map(|row| (row, pos as u32)))
             .collect();
 
-        let mut new_data_norm = Vec::with_capacity(cells_to_keep.len());
-        let mut new_row_indices = Vec::with_capacity(cells_to_keep.len());
-        let mut keep_positions = Vec::new();
-
-        // iterate in cells_to_keep order (critical for PCA!)
-        for (new_row_idx, &cell_index) in cells_to_keep.iter().enumerate() {
-            if let Some(&pos) = cell_positions.get(&cell_index) {
-                keep_positions.push(pos);
-                new_data_norm.push(self.data_norm[pos]);
-                new_row_indices.push(new_row_idx as u32);
-            }
+        if !kept.is_sorted_by_key(|&(row, _)| row) {
+            kept.sort_unstable_by_key(|&(row, _)| row);
         }
 
-        let new_raw = match &self.data_raw {
-            RawCounts::U16(v) => RawCounts::U16(keep_positions.iter().map(|&p| v[p]).collect()),
-            RawCounts::U32(v) => RawCounts::U32(keep_positions.iter().map(|&p| v[p]).collect()),
+        self.data_norm = kept
+            .iter()
+            .map(|&(_, p)| self.data_norm[p as usize])
+            .collect();
+        self.data_raw = match &self.data_raw {
+            RawCounts::U16(v) => RawCounts::U16(kept.iter().map(|&(_, p)| v[p as usize]).collect()),
+            RawCounts::U32(v) => RawCounts::U32(kept.iter().map(|&(_, p)| v[p as usize]).collect()),
         };
-
-        let nnz = new_row_indices.len();
-        self.data_raw = new_raw;
-        self.data_norm = new_data_norm;
-        self.indices = new_row_indices;
-        self.nnz = nnz;
+        self.indices = kept.iter().map(|&(row, _)| row).collect();
+        self.nnz = kept.len();
     }
 
     /// Calculate the average gene expression given a set of cells
@@ -1702,6 +1725,20 @@ pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
     map
 }
 
+/// [`dense_index_map`] over a keep set, rows in the set's iteration order.
+///
+/// ### Params
+///
+/// * `cells_to_keep` - Cells to keep, in output order
+///
+/// ### Returns
+///
+/// `map[cell] = row`, [`INDEX_DROPPED`] for cells not kept.
+pub fn keep_set_index_map(cells_to_keep: &IndexSet<u32>) -> Vec<u32> {
+    let kept: Vec<usize> = cells_to_keep.iter().map(|&c| c as usize).collect();
+    dense_index_map(&kept)
+}
+
 /// Dense gene map from a per-file `local -> final` mapping.
 ///
 /// ### Params
@@ -2055,9 +2092,10 @@ pub trait SingleCellReading: Send + Sync {
         cells_to_keep: &IndexSet<u32>,
     ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
         let mut chunks = self.read_gene_parallel(indices)?;
+        let cell_map = keep_set_index_map(cells_to_keep);
         chunks
             .par_iter_mut()
-            .for_each(|chunk| chunk.filter_selected_cells(cells_to_keep));
+            .for_each(|chunk| chunk.filter_selected_cells_dense(&cell_map));
         Ok(chunks)
     }
 
@@ -2711,6 +2749,8 @@ impl SingleCellReading for ParallelSparseReader {
             });
         }
 
+        let cell_map = keep_set_index_map(cells_to_keep);
+
         indices
             .par_iter()
             .map(|&original_index| {
@@ -2718,7 +2758,7 @@ impl SingleCellReading for ParallelSparseReader {
 
                 let mut chunk = CscGeneChunk::read_from_buffer(&decompressed)?;
 
-                chunk.filter_selected_cells(cells_to_keep);
+                chunk.filter_selected_cells_dense(&cell_map);
 
                 Ok(chunk)
             })
@@ -3109,6 +3149,34 @@ mod tests {
             original_index,
             to_keep: true,
         }
+    }
+
+    ////////////////////
+    // Cell filtering //
+    ////////////////////
+
+    /// Kept cells are renumbered to their keep-set position and ordered by it,
+    /// also when the keep set is not ascending; both filter paths agree.
+    #[test]
+    fn test_filter_selected_cells_follows_keep_order() {
+        let keep: IndexSet<u32> = [7_u32, 1, 4, 900].into_iter().collect();
+
+        let mut by_set = gene_chunk(&[10, 30, 50, 70], &[1, 3, 5, 7], 0);
+        by_set.filter_selected_cells(&keep);
+        assert_eq!(by_set.indices, vec![0, 1]);
+        assert_eq!(by_set.data_raw.iter().collect::<Vec<u32>>(), vec![70, 10]);
+        assert_eq!(by_set.data_norm[0].to_f32(), 70.0);
+        assert_eq!(by_set.nnz, 2);
+
+        // cell 900 sizes the map; cells past it must drop, not index out
+        let mut by_map = gene_chunk(&[10, 30, 50, 70, 90], &[1, 3, 5, 7, 2_000], 0);
+        by_map.filter_selected_cells_dense(&keep_set_index_map(&keep));
+        assert_eq!(by_map.indices, by_set.indices);
+        assert_eq!(
+            by_map.data_raw.iter().collect::<Vec<u32>>(),
+            by_set.data_raw.iter().collect::<Vec<u32>>()
+        );
+        assert_eq!(by_map.data_norm, by_set.data_norm);
     }
 
     ////////////////////
