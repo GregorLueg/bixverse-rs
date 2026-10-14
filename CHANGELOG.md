@@ -45,6 +45,12 @@
   consensus) and, with `single-cell`, Harmony and SEACells. It turns on
   `ann-search-rs/mlx`, which finds and links `libmlxc`; without the library
   the build warns and the module is absent.
+- Small cell subsets can skip the gene-major sweep:
+  `read_cell_subset_csc()` reads them from the cell-major file into a CSC
+  matrix for `InMemorySparseReader`, and `prefer_cell_subset()` decides when
+  to use it (at most 10 % of the store and 100k cells). HVG and the
+  scTransform fit give identical results on either path, with HVG on 6k of
+  985k cells going from 0.82 s to 43 ms.
 
 ### Performance
 
@@ -53,6 +59,10 @@
 - `sparse_add_csr` merges rows in parallel, which speeds up the SEACells B
   update and every other caller.
 - The parallel CSC/CSR transpose scatters in bands of rows.
+- `filter_selected_cells()` and `read_gene_parallel_filtered()` drop the
+  per-gene hash map for a single walk over the gene's non-zeros. A filtered
+  read of a 985k-cell store goes from 1.5 s to 0.6 s, and the scTransform fit
+  on a small subset roughly halves.
 
 ## 0.6.4
 
