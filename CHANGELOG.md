@@ -1,5 +1,55 @@
 # News
 
+## 0.8.0 (unreleased)
+
+### Breaking
+
+- The crate is now a workspace of crates under `crates/`, on one shared
+  version: `bixverse-core` (`core`, `utils`, `ml`), `bixverse-methods`
+  (`enrichment`, `graph`, `methods`, `ontology`), `bixverse-sc-data` (the
+  single cell data layer), `bixverse-sc` (the rest of `single_cell`),
+  `bixverse-gpu`, `bixverse-sc-gpu`, `bixverse-mlx` and `bixverse-r`.
+  `bixverse-rs` stays as a facade that re-exports them under the old module
+  paths, so most `bixverse_rs::...` imports keep working.
+- `BixverseErrors` is gone. Each crate has its own enum (`CoreErrors`,
+  `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`,
+  `MlxErrors`, `RErrors`), and each wraps the ones below it through
+  `#[from]`. Code that matches on variants has to go through the wrapper,
+  e.g. `ScErrors::ScData(ScDataErrors::ReaderModeMismatch { .. })`.
+- The `r` feature is gone. The R conversions moved to `bixverse-r`, the only
+  crate that links libR. It re-exports the facade and mirrors its features.
+  The `*_r_wrapper` modules now sit at `bixverse_r::...`, and the inherent
+  `from_r_list` constructors became impls of `FromRList`, plus `FromRMap` for
+  already flattened lists and `ToRList` for serialisers. All three are in
+  `bixverse_r::prelude`. The `KMeansGpuParamsFromR`, `NebulaParamsFromR`,
+  `ScTestedFromR` and `TestedFromR` extension traits were folded into them.
+  Constructors that take extra arguments are free functions now:
+  `hals_opts_from_r_list()`, `lda_params_from_r_list()`,
+  `dsb_params_from_r_list()`, `kmeans_params_from_r_list_with_iters()`,
+  `cell_sweep_fit_to_r_list()` and `named_matrix_from_r_matrix()`.
+- `single-cell` no longer pulls in HDF5. The h5ad and 10x h5 readers sit
+  behind a new `h5` feature, which `hdf5-static` and `hdf5-filters` imply.
+- `gpu` now covers the bulk GPU methods only. The single cell GPU methods
+  (`gpu::sc_gpu`) need the new `sc-gpu` feature. `mlx` implies
+  `single-cell`.
+- The 10x ADT reader moved from `single_cell::multi_modal::adt::h5_10x_adt_io`
+  to `single_cell::sc_data::h5_10x_adt_io`.
+- `FwArgminB` has an associated `type Error`, and the fastMNN drivers
+  (`fast_mnn_embedding()` and friends) are generic over the search closure's
+  error type, so a GPU or MLX backend can return its own errors.
+  `ScKnnResults<E>` and `SingleCellPcaRes<E>` take the error as a parameter,
+  defaulting to `ScErrors`.
+
+### Feature
+
+- Each layer can be used on its own: `bixverse-sc-data` without HDF5 or any
+  analysis code (the Python bindings now depend on nothing else), the single
+  cell suite and its GPU kernels without HDF5, the core layer without
+  petgraph, edge-rs or extendr.
+- A few items another crate now needs went from `pub(crate)` to `pub`, e.g.
+  `ScatterPtr`, `UnionFind`, `sparse_pca_accelerator_input()` and
+  `scenic_common_setup()`.
+
 ## 0.7.0
 
 ### Breaking

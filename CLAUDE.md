@@ -46,8 +46,8 @@ Features live on the crate that owns the dependency; the facade and `bixverse-r`
 - `bixverse-sc`: `multi-modal`, `bonsai` (pulls in `bonsai-rs` with `sanity`; Sanity is only ever named through `bonsai_rs::sanity_sc_rs`)
 - `bixverse-sc-gpu`: `bonsai` (the GPU Sanity to Bonsai path)
 - `bixverse-mlx`: none. Apple Silicon only. `ann-search-rs/mlx` owns `links = "mlxc"` and exports `DEP_MLXC_AVAILABLE`; this crate's `build.rs` turns that into `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. Without `libmlxc` the crate compiles to nothing but that constant. The FFI bindings stay local because `ann_search_rs::mlx::ffi` is private
-- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge` and `bixverse-sc-data/h5`), `hdf5-static`, `hdf5-filters`, `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`
-- `bixverse-r`: the facade's features plus nothing else
+- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge`; no HDF5), `h5` (implies `single-cell`, turns on `bixverse-sc-data/h5`), `hdf5-static` and `hdf5-filters` (imply `h5`), `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`. A consumer that never reads h5ad or 10x h5 (bixverse.gpu) leaves `h5` off and has no HDF5 in its tree
+- `bixverse-r`: the facade's features plus nothing else. The h5 parameter impls (`H5adFileTask`, `TenxFileTask`) sit behind its `h5`
 - `large-test` and `large_scale_diagnostics` exist on every crate that has gated tests (methods, sc, gpu, sc-gpu, mlx, facade); the facade forwards them. `large-test` is for slow tests that assert; `large_scale_diagnostics` for unasserted sweeps that print tables. No CI job enables either
 
 ## Common commands
@@ -58,8 +58,11 @@ cargo test -p bixverse-core
 cargo test -p bixverse-methods --features dge
 cargo test -p bixverse-sc-data --features h5
 cargo test -p bixverse-sc --features multi-modal
+cargo test -p bixverse-rs --features single-cell,multi-modal               # no HDF5
 cargo test -p bixverse-rs --features single-cell,multi-modal,hdf5-static
-cargo test -p bixverse-r --features single-cell,multi-modal,hdf5-static   # needs R
+cargo test -p bixverse-r                                                    # needs R
+cargo test -p bixverse-r --features single-cell,multi-modal
+cargo test -p bixverse-r --features single-cell,multi-modal,hdf5-static
 cargo test -p bixverse-gpu
 cargo test -p bixverse-sc-gpu
 cargo test -p bixverse-rs --features sc-gpu,hdf5-static
@@ -133,7 +136,7 @@ The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaul
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file. A unit test that needs a crate above its own moves up: `crates/bixverse-sc/tests/in_memory_cell_subset.rs` exists because those tests use `sc_processing`
-- Integration tests and benches that span crates live in the facade, `crates/bixverse-rs/{tests,benches}`, under the old module paths, each gated by a file-level `#![cfg(...)]` on facade features (`single-cell`, `dge`, `bonsai`, `sc-gpu`, `large-test`, ...). The MLX ones live in `crates/bixverse-mlx/{tests,benches}`, because `cfg(mlx_available)` only exists in that crate. `r_ffi_bench` lives in `crates/bixverse-r/benches`
+- Integration tests and benches that span crates live in the facade, `crates/bixverse-rs/{tests,benches}`, under the old module paths, each gated by a file-level `#![cfg(...)]` on facade features (`single-cell`, `h5`, `dge`, `bonsai`, `sc-gpu`, `large-test`, ...). The MLX ones live in `crates/bixverse-mlx/{tests,benches}`, because `cfg(mlx_available)` only exists in that crate. `r_ffi_bench` lives in `crates/bixverse-r/benches`
 - Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `crates/bixverse-rs/tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `crates/bixverse-rs/tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text. Run the generators from the repository root
 - CI matrix: Ubuntu / macOS / Windows for the CPU and R lanes (Windows uses msvc on the CPU lane and gnu on the R lane); Ubuntu / macOS for GPU (Linux uses Vulkan via `WGPU_BACKEND=vulkan`); plus a per-member `cargo check` on Ubuntu
 
