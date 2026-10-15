@@ -6,7 +6,7 @@
 //! build. These tests pin what the build can actually decode: gzip always, LZF
 //! and Blosc under the `hdf5-filters` feature, and a named error otherwise.
 
-#![cfg(feature = "single-cell")]
+#![cfg(feature = "h5")]
 
 use hdf5::File;
 use hdf5::filters::Filter;

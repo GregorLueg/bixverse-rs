@@ -7,6 +7,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 categories.workspace = true
 
 # The only crate in the workspace that links libR. Its features mirror the
@@ -20,9 +21,11 @@ dge = ["bixverse-rs/dge", "dep:edge-rs"]
 ## See `bixverse-rs`.
 single-cell = ["dge", "bixverse-rs/single-cell"]
 ## See `bixverse-rs`.
-hdf5-static = ["bixverse-rs/hdf5-static"]
+h5 = ["single-cell", "bixverse-rs/h5"]
 ## See `bixverse-rs`.
-hdf5-filters = ["bixverse-rs/hdf5-filters"]
+hdf5-static = ["h5", "bixverse-rs/hdf5-static"]
+## See `bixverse-rs`.
+hdf5-filters = ["h5", "bixverse-rs/hdf5-filters"]
 ## See `bixverse-rs`.
 multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
 ## See `bixverse-rs`.

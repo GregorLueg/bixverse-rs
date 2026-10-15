@@ -7,6 +7,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 categories.workspace = true
 exclude = ["tests/"]
 
@@ -26,13 +27,16 @@ accelerate = ["bixverse-core/accelerate"]
 ## The negative binomial differential expression methods built on `edge-rs`.
 ## Implied by `single-cell`, but usable on its own for the bulk half.
 dge = ["bixverse-methods/dge"]
-## The single cell suite, including the h5ad and 10x h5 readers
-single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data", "bixverse-sc-data/h5"]
+## The single cell suite and the bixverse binary store. No HDF5: add `h5`
+## for the h5ad and 10x h5 readers.
+single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data"]
+## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
+h5 = ["single-cell", "bixverse-sc-data/h5"]
 ## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
-hdf5-static = ["single-cell", "bixverse-sc-data/hdf5-static"]
+hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
 ## Compile the LZF and Blosc filters into the HDF5 build. See
 ## `bixverse-sc-data`.
-hdf5-filters = ["single-cell", "bixverse-sc-data/hdf5-filters"]
+hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
 ## Multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
 ## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
@@ -166,4 +170,4 @@ required-features = ["single-cell"]
 #################
 
 [package.metadata.docs.rs]
-features = ["single-cell", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]
+features = ["single-cell", "h5", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]

@@ -34,7 +34,6 @@ use bixverse_rs::single_cell::sc_analysis::{
     },
     vision::SignatureGenes,
 };
-use bixverse_rs::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 use bixverse_rs::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
 use bixverse_rs::single_cell::sc_processing::residuals::{
     assert_ascending, validate_clip_range, validate_groups,
@@ -53,11 +52,16 @@ use bixverse_rs::single_cell::sc_batch_correction::{
     harmony_core::HARMONY_KMEANS_ITERS, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
     seurat_rpca::SeuratRpcaParams,
 };
-use bixverse_rs::single_cell::sc_data::h5ad_io::RawDataSlot;
 use bixverse_rs::single_cell::sc_data::{
-    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5_10x_io::parse_tenx_version,
-    h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
-    mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
+    bin_merge_io::BinMergeTask, data_io::MinCellQuality, mtx_multifile_io::MtxFileTask,
+    sc_synthetic_data::CellTypeConfig,
+};
+#[cfg(feature = "h5")]
+use bixverse_rs::single_cell::sc_data::{
+    h5_10x_io::parse_tenx_version,
+    h5_10x_multifile_io::TenxFileTask,
+    h5ad_io::{RawDataSlot, parse_h5ad_format, parse_raw_slot},
+    h5ad_multifile_io::H5adFileTask,
 };
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{AprModel, AprParams};
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::stream::AprGroupedFit;
@@ -2206,6 +2210,7 @@ impl FromRList for ScenicParams {
 // H5adFileTask //
 //////////////////
 
+#[cfg(feature = "h5")]
 impl FromRList for H5adFileTask {
     /// Generate an H5adFileTask from an R list
     ///
@@ -2405,6 +2410,7 @@ impl FromRList for MtxFileTask {
 // TenxFileTask //
 //////////////////
 
+#[cfg(feature = "h5")]
 impl FromRList for TenxFileTask {
     /// Generate a TenxFileTask from an R list
     ///
