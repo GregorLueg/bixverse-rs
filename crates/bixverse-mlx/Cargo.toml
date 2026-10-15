@@ -1,0 +1,65 @@
+[package]
+name = "bixverse-mlx"
+description = "Experimental MLX backend for bixverse on Apple Silicon, via mlx-c. f32 only."
+keywords = ["bioinformatics", "mlx", "apple-silicon", "gpu"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+exclude = ["tests/"]
+build = "build.rs"
+
+# Needs `brew install mlx-c` (or `MLX_C_PREFIX` pointing at an install prefix).
+# `ann-search-rs/mlx` owns `links = "mlxc"` and exports `DEP_MLXC_AVAILABLE`;
+# without the library the build warns and this crate compiles to nothing but
+# `MLX_AVAILABLE = false`.
+
+[features]
+## Slow but asserting tests. Run in release.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = []
+
+[dependencies]
+ann-search-rs = { workspace = true, features = ["mlx"] }
+approx.workspace = true
+bixverse-core.workspace = true
+bixverse-methods.workspace = true
+bixverse-sc.workspace = true
+bixverse-sc-data.workspace = true
+faer.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Parity tests against the cubecl paths
+bixverse-gpu.workspace = true
+bixverse-sc-gpu.workspace = true
+cubecl.workspace = true
+
+###########
+# Benches #
+###########
+
+[[bench]]
+name = "mlx_corr_bench"
+harness = false
+
+[[bench]]
+name = "mlx_nmf_bench"
+harness = false
+
+[[bench]]
+name = "mlx_sparse_svd_bench"
+harness = false
+
+[[bench]]
+name = "mlx_harmony_bench"
+harness = false
+
+[[bench]]
+name = "mlx_seacells_bench"
+harness = false

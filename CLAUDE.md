@@ -4,7 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Crate overview
 
-`bixverse-rs` is a Rust library for computational biology, statistics, and single-cell analysis. It was extracted from the `bixverse` R package's `src/Rust/` directory and refactored into a standalone crate. It is published on crates.io and consumed both as a pure Rust library and (via `extendr-api`) from R.
+`bixverse-rs` is a Rust library for computational biology, statistics, and single-cell analysis. It was extracted from the `bixverse` R package's `src/Rust/` directory. Since 0.8.0 it is a cargo workspace of crates under `crates/`, all on one version (`[workspace.package]`), published together to crates.io:
+
+| Crate | Contents | Depends on |
+|---|---|---|
+| `bixverse-core` | `core`, `utils`, `ml` (sparse structures, linear algebra, stats, SIMD, k-means, GPs) | nothing in the workspace |
+| `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
+| `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `h5ad_io`, `sc_traits`, ...) | core |
+| `bixverse-sc` | the rest of `single_cell`, flattened (`sc_processing`, `sc_analysis`, ...) | methods (with `dge`), sc-data |
+| `bixverse-gpu` | `linalg`, `methods_gpu` | methods |
+| `bixverse-sc-gpu` | the old `gpu::sc_gpu`, flattened | sc, gpu |
+| `bixverse-mlx` | `linalg`, `methods`, `sc` | sc (always) |
+| `bixverse-rs` | facade: re-exports everything under the pre-0.8 module paths | all, optional |
+| `bixverse-r` | every `extendr-api` type in the workspace; re-exports `bixverse-rs` | the facade |
+
+The rule that keeps the graph sane: a crate never depends on a sibling through an optional feature, except the two leaves (`bixverse-rs`, `bixverse-r`). Optional features only gate external dependencies (hdf5, edge-rs, bonsai-rs).
+
+`python/` is its own workspace root (excluded from this one) and depends on `bixverse-sc-data` only.
 
 ## Sister crates: ann-search-rs, cubecl-utils-rs and edge-rs
 
@@ -22,84 +38,73 @@ When a task looks like it wants a new SIMD kernel, distance metric, kNN structur
 
 ## Feature flags
 
-Feature flags gate large chunks of the crate. Match your `cargo` invocations to what you are touching:
+Features live on the crate that owns the dependency; the facade and `bixverse-r` forward them under the old names.
 
-- default (no features): pure Rust bulk / statistics / graph / enrichment code
-- `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
-- `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
-- `dge`: enables the negative binomial differential expression surface and pulls in `edge-rs`. Implied by `single-cell`, but usable on its own for the bulk half (`methods::dge_bulk`)
-- `bonsai`: implies `single-cell` and pulls in `bonsai-rs` with its `sanity` feature. Counts to Sanity posteriors to a Bonsai tree in `single_cell::sc_analysis::bonsai` (disk) and `single_cell::mc_analysis::bonsai_mc` (in-memory metacells), both through the same chunk loop `stream_chunks`; with `gpu`, also `gpu::sc_gpu::sanity_bonsai_gpu`. Sanity is only ever named through `bonsai_rs::sanity_sc_rs`, never as a direct dependency, so the `SanityOutput` type always matches `from_sanity_output`
-- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek`, `half` and the `gpu` feature of `ann-search-rs` (its GPU kNN indices)
-- `mlx`: experimental, Apple Silicon only. Enables the `mlx` module (MLX via `mlx-c`, f32 only), independent of `gpu`. Turns on `ann-search-rs/mlx`, which owns `links = "mlxc"`, looks for `libmlxc.dylib` under `MLX_C_PREFIX` (default `/opt/homebrew`), links it and exports `DEP_MLXC_AVAILABLE`; if the library is missing it warns and skips. `build.rs` here only turns that into `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. The FFI bindings stay local because `ann_search_rs::mlx::ffi` is private. The `mlx::sc` submodule needs `single-cell` as well
-- `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
-- `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
+- `bixverse-core`: `accelerate` (Apple Accelerate GEMM via `ann-search-rs/accelerate`)
+- `bixverse-methods`: `dge` (pulls in `edge-rs`; `methods::dge_bulk`)
+- `bixverse-sc-data`: `h5` (the h5ad and 10x h5 readers; pulls in `hdf5`, `ndarray`), `hdf5-static`, `hdf5-filters`
+- `bixverse-sc`: `multi-modal`, `bonsai` (pulls in `bonsai-rs` with `sanity`; Sanity is only ever named through `bonsai_rs::sanity_sc_rs`)
+- `bixverse-sc-gpu`: `bonsai` (the GPU Sanity to Bonsai path)
+- `bixverse-mlx`: none. Apple Silicon only. `ann-search-rs/mlx` owns `links = "mlxc"` and exports `DEP_MLXC_AVAILABLE`; this crate's `build.rs` turns that into `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. Without `libmlxc` the crate compiles to nothing but that constant. The FFI bindings stay local because `ann_search_rs::mlx::ffi` is private
+- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge` and `bixverse-sc-data/h5`), `hdf5-static`, `hdf5-filters`, `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`
+- `bixverse-r`: the facade's features plus nothing else
+- `large-test` and `large_scale_diagnostics` exist on every crate that has gated tests (methods, sc, gpu, sc-gpu, mlx, facade); the facade forwards them. `large-test` is for slow tests that assert; `large_scale_diagnostics` for unasserted sweeps that print tables. No CI job enables either
 
 ## Common commands
 
 ```bash
-# Match CI: two independent test passes
-cargo test --no-default-features --features r
-cargo test --features single-cell,multi-modal
+# What CI runs (rust-workspace-test.yml in personal-actions)
+cargo test -p bixverse-core
+cargo test -p bixverse-methods --features dge
+cargo test -p bixverse-sc-data --features h5
+cargo test -p bixverse-sc --features multi-modal
+cargo test -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+cargo test -p bixverse-r --features single-cell,multi-modal,hdf5-static   # needs R
+cargo test -p bixverse-gpu
+cargo test -p bixverse-sc-gpu
+cargo test -p bixverse-rs --features sc-gpu,hdf5-static
 
-# The differential expression surface on its own, without single-cell. Worth
-# running because `methods::dge_bulk` has to build with no other feature on.
-cargo test --features dge
-
-# GPU tests (separate CI job). single-cell is required: tests/scenic_gpu.rs and
-# tests/seacells_gpu.rs are both cfg'd on single-cell + gpu, so `--features gpu`
-# alone silently skips them entirely.
-cargo test --features gpu,single-cell
+# Every member on its own: catches features that workspace unification hides.
+# bixverse-r is left out because extendr's build script needs R.
+cargo check -p <member> --no-default-features --all-targets
 
 # The slow asserting gates. Release, or the CPU reference solves dominate.
-# Around two minutes and roughly 979 tests.
-cargo test --release --features gpu,single-cell,multi-modal,large-test
+cargo test --release -p bixverse-rs --features sc-gpu,multi-modal,large-test
 
-# The print-only diagnostic sweeps. Nothing here can fail; read the output.
-cargo test --release --features gpu,single-cell,large_scale_diagnostics -- --nocapture
+# MLX backend (Apple Silicon, needs mlx-c installed)
+cargo test -p bixverse-mlx
+cargo bench -p bixverse-mlx --bench mlx_corr_bench
 
-# MLX backend (Apple Silicon, needs mlx-c installed). Without the library the
-# build warns and the tests have nothing to run against.
-cargo test --features mlx,single-cell
-cargo bench --features mlx --bench mlx_corr_bench
+# Single test by name (substring match)
+cargo test -p bixverse-sc -- test_name_substring
 
-# Run a single test by name (substring match)
-cargo test --features single-cell,multi-modal -- test_name_substring
+# Format / lint. Gated tests do not compile under the CI sets, so lint with all of them.
+cargo fmt --all
+cargo clippy --workspace --exclude bixverse-r --all-targets --features bixverse-rs/sc-gpu,bixverse-rs/multi-modal,bixverse-rs/bonsai,bixverse-rs/hdf5-static,bixverse-rs/mlx,bixverse-rs/large-test,bixverse-rs/large_scale_diagnostics
+cargo clippy -p bixverse-r --features single-cell,multi-modal,bonsai,sc-gpu --all-targets
 
-# Format / lint
-cargo fmt
-cargo clippy --features single-cell,multi-modal --all-targets
-
-# Benches (the GPU ones require the gpu feature)
-cargo bench --features gpu --bench gpu_corr_bench
-
-# Docs: docs.rs builds with single-cell + multi-modal
-cargo doc --features single-cell,multi-modal --open
+# Benches: the facade's live in crates/bixverse-rs/benches, the MLX ones in crates/bixverse-mlx/benches
+cargo bench -p bixverse-rs --features gpu --bench gpu_corr_bench
 ```
 
-Linux and Windows CI need `R_HOME` / R shared libraries on the linker path because `extendr-api` links against libR. On macOS with R installed this generally works out of the box.
+`bixverse-r` needs `R_HOME` / R shared libraries on the linker path because `extendr-api` links against libR. No other crate does. On macOS with R installed this generally works out of the box.
 
 ## Architecture
 
-The crate is organised by domain, not by algorithmic layer. Each top-level module contains its methods plus a sibling `*_r_wrapper.rs` file holding the `extendr_api` conversions. Keep the pure Rust surface free of R types: do all R conversions in the wrapper file.
+Each crate is organised by domain, not by algorithmic layer. Module trees were kept as they were inside `src/`; `single_cell`, `single_cell::sc_data`, `gpu::sc_gpu` and `mlx` became crate roots, so `crate::single_cell::sc_processing` inside `bixverse-sc` is now `crate::sc_processing`. Cross-crate paths are written out (`bixverse_core::core::math::...`); there is no aliasing at crate roots.
 
-Top-level modules:
+- `bixverse-core`: `core/` (math primitives, `faer` linear algebra, `CompressedSparseData2`, PCA/SVD, correlations, RBF kernels, synthetic data), `utils/` (SIMD via `BixverseSimd`, matrix helpers, traits, heap structures, assertion macros), `ml/` (k-means, Gaussian processes)
+- `bixverse-methods`: `enrichment/` (fgsea, GSVA, singscore, mitch, OAE, blitzGSEA), `graph/` (`SparseGraph`, community detection, PageRank), `methods/` (NMF, ICA, LDA, diffcor, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, `dge_bulk`), `ontology/`
+- `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 3, bumping it invalidates files on disk), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`
+- `bixverse-sc`: processing, kNN, batch correction, annotation, analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), trajectories, multi-modal (WNN)
+- `bixverse-gpu`, `bixverse-sc-gpu`: GPU kernels via `cubecl` / `cubek`. K-means comes from `ann-search-rs`
+- `bixverse-mlx`: experimental MLX backend via `mlx-c`, f32 only
 
-- `core/`: shared math primitives, linear algebra (`faer`), sparse structures (`CompressedSparseData2`, `CompressedSparseFormat`, `SparseAxis`), PCA/SVD, correlations, RBF kernels, synthetic data
-- `enrichment/`: GSEA (fgsea multi-level), GSVA, singscore, mitch, over-representation (OAE)
-- `graph/`: `SparseGraph` structure, community detection, label propagation, PageRank, graph metrics
-- `methods/`: bulk-omics methods, NMF (dense + HALS sparse), ICA, differential correlation, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, and (feature `dge`) the edgeR quasi-likelihood chain in `dge_bulk.rs`
-- `ml/clustering/`: general-purpose clustering
-- `ontology/`: GO Elim algorithm and semantic similarity
-- `utils/`: SIMD wrappers (`wide` via `BixverseSimd`), matrix helpers, traits, R↔Rust conversion (`r_rust_interface.rs`), heap structures, assertion macros
-- `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), multi-modal (WNN)
-- `mlx/` (feature `mlx`): experimental MLX backend via `mlx-c`: `linalg` (`corr`, `spmm`, `rand_svd`), `methods::nmf` (HALS and its sparse, stabilised and consensus variants), and under `single-cell` `sc::harmony` and `sc::seacells`. Independent of `gpu`; f32 only
-- `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA. K-means comes from `ann-search-rs`
+Where an sc algorithm has a GPU or MLX twin, the seam is generic over the backend's error: `FwArgminB` has `type Error: From<ScErrors> + From<CoreErrors> + Debug`, and the fastMNN drivers take a search closure returning `Result<_, E>`. `ScKnnResults<E>` and `SingleCellPcaRes<E>` default `E` to `ScErrors`. Use the same pattern for a new seam rather than adding a GPU variant to `ScErrors`.
 
-`prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
+**Errors.** One `thiserror` enum per crate: `CoreErrors`, `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`, `MlxErrors`, `RErrors`. Each upper enum wraps the ones below with `#[error(transparent)] Core(#[from] CoreErrors)` and so on, so `?` converts upwards; constructing a lower variant in an upper crate needs `.into()` (`Err(CoreErrors::InvalidArgument(..).into())`), and a test matching on it needs the wrapper (`Err(ScErrors::Core(CoreErrors::X { .. }))`). Add a variant to the lowest crate that raises it, in the matching subsystem section. The facade's `errors` module re-exports all of them.
 
-`errors.rs` defines `BixverseErrors` (a single `thiserror` enum for the whole crate). Variants are grouped by subsystem, so add new variants in the matching section rather than at the bottom. Many variants are gated by `#[cfg(feature = "single-cell")]` / `"multi-modal"` / `"gpu"`. Match the gating of the code that produces them.
-
-The single-cell binary sparse format is versioned via `SC_FILE_VERSION` (currently 3) in `prelude.rs`. Bumping it invalidates existing files on disk. `ParallelSparseReader::new` checks the magic string, the version, and every offset it reads against the mmap length, so a foreign, truncated or corrupt file errors rather than parsing or panicking.
+**Preludes.** Each crate has a `prelude` that re-exports the preludes below it plus its own errors and common types. Prefer `use crate::prelude::*;` in new modules. The facade prelude is the union.
 
 ## Performance conventions
 
@@ -113,18 +118,24 @@ Performance is a first-class concern. This crate is the fast core underneath an 
 
 ## R interop pattern
 
-There is no `#[extendr]` anywhere in this crate. The `*_r_wrapper.rs` files hold the deserialisation half only: `impl X { pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> }` plus a handful of `-> List` serialisers. The `#[extendr]` entry points live downstream in the `bixverse` R package.
+There is no `#[extendr]` anywhere in this workspace; the entry points live downstream in the `bixverse` R package. All extendr code lives in `bixverse-r`: the `*_r_wrapper(s).rs` files and `r_rust_interface.rs` (`r_list_to_map`, `r_list_count`, `faer_to_r_matrix`, `NamedNumericVec`, `IntoExtendrErr`, `FaerRType`, ...).
 
-The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaults = Self::default();`, numerics through `.and_then(|v| v.as_real()).unwrap_or(defaults.field)`, and string enums through a free `parse_*(s: &str) -> Option<T>` that errors on an unrecognised value rather than falling back. `utils/r_rust_interface.rs` has the shared helpers (`r_list_to_map`, `r_list_count`, `r_list_to_hashmap`, `faer_to_r_matrix`, `NamedNumericVec`, etc). `NamedVecError` implements `From` for `extendr_api::Error` so `?` works across the boundary.
+The params types live in other crates, so the orphan rule rules out inherent `from_r_list` impls. Three traits in `bixverse-r/src/lib.rs`, all in its prelude:
 
-A params struct owned by an upstream crate cannot take an inherent impl, so it gets an extension trait instead: `KMeansGpuParamsFromR`, `NebulaParamsFromR`, `ScTestedFromR`, `TestedFromR`.
+- `FromRList::from_r_list(List) -> extendr_api::Result<Self>` for parameter structs
+- `FromRMap::from_r_map(&HashMap<&str, Robj>) -> extendr_api::Result<Self>` for sub-configs read out of an already flattened list
+- `ToRList::to_r_list(&self) -> List` for fitted structures that round-trip
+
+Constructors that need extra arguments (a seed, isotype indices) are free functions in the wrapper files instead.
+
+The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaults = Self::default();`, numerics through `.and_then(|v| v.as_real()).unwrap_or(defaults.field)`, and string enums through a free `parse_*(s: &str) -> Option<T>` that errors on an unrecognised value rather than falling back.
 
 ## Testing layout
 
-- Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `bonsai_sc.rs` (bonsai, plus one gpu test), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `seacells_mlx.rs` (single-cell + large-test, and `mlx_available`), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
-- Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text
-- CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
+- Unit tests live inline (`#[cfg(test)] mod tests`) in each module file. A unit test that needs a crate above its own moves up: `crates/bixverse-sc/tests/in_memory_cell_subset.rs` exists because those tests use `sc_processing`
+- Integration tests and benches that span crates live in the facade, `crates/bixverse-rs/{tests,benches}`, under the old module paths, each gated by a file-level `#![cfg(...)]` on facade features (`single-cell`, `dge`, `bonsai`, `sc-gpu`, `large-test`, ...). The MLX ones live in `crates/bixverse-mlx/{tests,benches}`, because `cfg(mlx_available)` only exists in that crate. `r_ffi_bench` lives in `crates/bixverse-r/benches`
+- Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `crates/bixverse-rs/tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `crates/bixverse-rs/tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text. Run the generators from the repository root
+- CI matrix: Ubuntu / macOS / Windows for the CPU and R lanes (Windows uses msvc on the CPU lane and gnu on the R lane); Ubuntu / macOS for GPU (Linux uses Vulkan via `WGPU_BACKEND=vulkan`); plus a per-member `cargo check` on Ubuntu
 
 ### Expensive tests
 
@@ -139,9 +150,9 @@ No CI job enables either yet, so CI runs toy sizes only.
 
 Two consequences to keep in mind:
 
-- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run `cargo clippy --features gpu,single-cell,large-test,large_scale_diagnostics --all-targets` whenever you touch them.
+- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run the all-features clippy line from Common commands whenever you touch them.
 - Gating a test can orphan a helper or an import inside a `#[cfg(test)] mod tests` block. Carry the same `cfg` on the helper rather than reaching for `#[allow(dead_code)]` in `src/`.
-- Before doing that, check whether the gate is right at all. `run_columns_a_raw` in `gpu/sc_gpu/seacells_gpu.rs` used to carry the gate purely because its only caller was gated, which left the shared-memory reduction arm of `fw_columns_a_gpu` executing nowhere: `plane_reduce_viable` is true on Apple Silicon, so every default run took the plane path. The fix was a cheap ungated sibling at n = 64, k = 32, not a `cfg` on the helper. A gate that hides a whole code path is a coverage hole, not a cost saving.
+- Before doing that, check whether the gate is right at all. `run_columns_a_raw` in `crates/bixverse-sc-gpu/src/seacells_gpu.rs` used to carry the gate purely because its only caller was gated, which left the shared-memory reduction arm of `fw_columns_a_gpu` executing nowhere: `plane_reduce_viable` is true on Apple Silicon, so every default run took the plane path. The fix was a cheap ungated sibling at n = 64, k = 32, not a `cfg` on the helper. A gate that hides a whole code path is a coverage hole, not a cost saving.
 
 When gating, leave at least one cheap test covering each structural property. `test_fw_argmin_b_matches_cpu` and `test_fw_columns_a_capacity_boundary` exist for exactly that reason; do not gate them alongside their heavier siblings.
 

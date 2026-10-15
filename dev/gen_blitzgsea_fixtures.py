@@ -7,8 +7,8 @@ cross as text. Only the reference's *outputs* are emitted.
 Run from the repo root:
   uv run --python 3.11 --with 'numpy<2' --with pandas --with scipy \
       --with statsmodels --with mpmath --with matplotlib --with tqdm \
-      python dev/gen_blitzgsea_fixtures.py > tests/blitzgsea_fixtures/mod.rs
-  rustfmt --edition 2024 tests/blitzgsea_fixtures/mod.rs
+      python dev/gen_blitzgsea_fixtures.py > crates/bixverse-rs/tests/blitzgsea_fixtures/mod.rs
+  rustfmt --edition 2024 crates/bixverse-rs/tests/blitzgsea_fixtures/mod.rs
 
 The rustfmt pass only rewraps the index arrays; the values are identical
 with or without it.

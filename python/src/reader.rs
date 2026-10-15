@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use bixverse_rs::single_cell::sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
 use pyo3::prelude::*;
 
 use crate::error::BvErr;

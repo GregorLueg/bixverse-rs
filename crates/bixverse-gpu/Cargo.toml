@@ -1,0 +1,30 @@
+[package]
+name = "bixverse-gpu"
+description = "GPU linear algebra and bulk methods for bixverse via cubecl: sparse SVD, correlations, Cholesky and NMF."
+keywords = ["bioinformatics", "gpu", "cubecl", "linear-algebra"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[features]
+## Slow but asserting tests. Run in release.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = []
+
+[dependencies]
+ann-search-rs = { workspace = true, features = ["gpu"] }
+bixverse-core.workspace = true
+bixverse-methods.workspace = true
+cubecl.workspace = true
+cubecl-utils-rs.workspace = true
+cubek.workspace = true
+faer.workspace = true
+half.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+thiserror.workspace = true

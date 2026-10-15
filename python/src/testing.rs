@@ -8,7 +8,7 @@
 //! Everything here is prefixed with an underscore on the Python side and is
 //! not part of the package's public surface.
 
-use bixverse_rs::single_cell::sc_data::data_io::{CellGeneSparseWriter, CsrCellChunk};
+use bixverse_sc_data::data_io::{CellGeneSparseWriter, CsrCellChunk};
 use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::prelude::*;
 use rand::rngs::StdRng;

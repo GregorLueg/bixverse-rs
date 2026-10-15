@@ -1,0 +1,47 @@
+[package]
+name = "bixverse-sc"
+description = "Single cell and metacell analysis for bixverse: processing, batch correction, annotation, trajectories and differential expression."
+keywords = ["bioinformatics", "single-cell", "metacells", "harmony"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+exclude = ["tests/"]
+
+[features]
+## Multi-modal single cell analysis (WNN, ADT normalisation)
+multi-modal = []
+## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
+## posteriors as the input
+bonsai = ["dep:bonsai-rs"]
+## Slow but asserting tests. Run in release.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = []
+
+[dependencies]
+ann-search-rs.workspace = true
+approx.workspace = true
+bixverse-core.workspace = true
+bixverse-methods = { workspace = true, features = ["dge"] }
+bixverse-sc-data.workspace = true
+bonsai-rs = { workspace = true, optional = true }
+document-features.workspace = true
+edge-rs.workspace = true
+either.workspace = true
+faer.workspace = true
+half.workspace = true
+indexmap.workspace = true
+petgraph.workspace = true
+rand.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+statrs.workspace = true
+thiserror.workspace = true
+thousands.workspace = true
+wide.workspace = true
+
+[package.metadata.docs.rs]
+features = ["multi-modal"]

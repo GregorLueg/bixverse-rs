@@ -1,11 +1,11 @@
-//! Mapping [`BixverseErrors`] onto Python exceptions.
+//! Mapping [`ScDataErrors`] onto Python exceptions.
 //!
-//! No new error enum: the crate already has one and these bindings add no
-//! failure modes of their own beyond what pyo3 raises directly.
-//! `BixverseErrors` and `PyErr` are both foreign here, so the `From` impl
+//! No new error enum: the data layer already has one and these bindings add
+//! no failure modes of their own beyond what pyo3 raises directly.
+//! `ScDataErrors` and `PyErr` are both foreign here, so the `From` impl
 //! needs a local newtype.
 
-use bixverse_rs::errors::BixverseErrors;
+use bixverse_sc_data::errors::ScDataErrors;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError, PyValueError};
 use pyo3::prelude::*;
@@ -32,17 +32,17 @@ create_exception!(
 // Newtype //
 /////////////
 
-/// Carries a [`BixverseErrors`] to the FFI boundary.
+/// Carries a [`ScDataErrors`] to the FFI boundary.
 ///
 /// A tuple struct, which means it doubles as the conversion function:
 /// `.map_err(BvErr)?` in any method returning [`PyResult`].
 pub(crate) struct BvErr(
     /// The error the crate raised.
-    pub BixverseErrors,
+    pub ScDataErrors,
 );
 
-impl From<BixverseErrors> for BvErr {
-    fn from(e: BixverseErrors) -> Self {
+impl From<ScDataErrors> for BvErr {
+    fn from(e: ScDataErrors) -> Self {
         Self(e)
     }
 }
@@ -52,26 +52,26 @@ impl From<BvErr> for PyErr {
         let msg = e.0.to_string();
         match e.0 {
             // Filesystem.
-            BixverseErrors::BinaryIo(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
+            ScDataErrors::BinaryIo(ref io) if io.kind() == std::io::ErrorKind::NotFound => {
                 PyFileNotFoundError::new_err(msg)
             }
-            BixverseErrors::BinaryIo(_) => PyOSError::new_err(msg),
+            ScDataErrors::BinaryIo(_) => PyOSError::new_err(msg),
 
             // A store that is not what we asked for, or is damaged.
-            BixverseErrors::FileVersionMismatch { .. }
-            | BixverseErrors::HeaderDecodeFailed
-            | BixverseErrors::HeaderEncodeFailed
-            | BixverseErrors::ChunkBufferTooSmall { .. }
-            | BixverseErrors::ChunkPayloadTruncated { .. }
-            | BixverseErrors::ChunkDecompressionFailed(_)
-            | BixverseErrors::RawElemSizeInvalid(_)
-            | BixverseErrors::ReaderModeMismatch { .. } => SparseFileError::new_err(msg),
+            ScDataErrors::FileVersionMismatch { .. }
+            | ScDataErrors::HeaderDecodeFailed
+            | ScDataErrors::HeaderEncodeFailed
+            | ScDataErrors::ChunkBufferTooSmall { .. }
+            | ScDataErrors::ChunkPayloadTruncated { .. }
+            | ScDataErrors::ChunkDecompressionFailed(_)
+            | ScDataErrors::RawElemSizeInvalid(_)
+            | ScDataErrors::ReaderModeMismatch { .. } => SparseFileError::new_err(msg),
 
             // The caller asked for a cell the store does not hold.
-            BixverseErrors::ChunkIndexNotFound(_) => PyValueError::new_err(msg),
+            ScDataErrors::ChunkIndexNotFound(_) => PyValueError::new_err(msg),
 
-            // `BixverseErrors` covers the whole crate, most of it unreachable
-            // from these bindings. The catch-all is required, not laziness.
+            // The h5 and MTX ingestion variants and the wrapped core errors
+            // are unreachable from these bindings. The catch-all is required.
             _ => BixverseError::new_err(msg),
         }
     }

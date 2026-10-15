@@ -18,8 +18,8 @@ denoised row and column sums. That pins the matrix without a 400 KB source file.
 Run from the repo root:
   uv run --python 3.11 --with 'numpy<2' --with pandas --with scipy \
       --with anndata --with numba --with 'pydantic>=2.5,<3.0' \
-      python dev/gen_cellsweep_fixtures.py > tests/cellsweep_fixtures/mod.rs
-  rustfmt --edition 2024 tests/cellsweep_fixtures/mod.rs
+      python dev/gen_cellsweep_fixtures.py > crates/bixverse-rs/tests/cellsweep_fixtures/mod.rs
+  rustfmt --edition 2024 crates/bixverse-rs/tests/cellsweep_fixtures/mod.rs
 """
 
 import sys
