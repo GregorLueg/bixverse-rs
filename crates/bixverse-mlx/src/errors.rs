@@ -7,6 +7,11 @@ use thiserror::Error;
 /// Grouped by subsystem.
 #[derive(Debug, Error)]
 pub enum MlxErrors {
+    // -- external crates --
+    /// Propagates an error from `ann-search-rs`.
+    #[error("Error from the ann-search-rs crate: {0}")]
+    AnnSearchRsError(#[from] ann_search_rs::errors::AnnSearchErrors),
+
     // -- lower crates --
     /// Propagates an error from `bixverse-core`.
     #[error(transparent)]
