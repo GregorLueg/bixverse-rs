@@ -220,9 +220,9 @@ impl<T: BixverseFloat> FromRList for NonGaussianFactorConfig<T> {
     }
 }
 
-//////////////////////////////////////
+///////////////////////////////////////
 // Synthetic data - top-level params //
-//////////////////////////////////////
+///////////////////////////////////////
 
 impl<T: BixverseFloat> FromRList for SyntheticRnaSeqParams<T> {
     /// Generate [`SyntheticRnaSeqParams`] from an R list.
@@ -333,9 +333,9 @@ impl<T: BixverseFloat> FromRList for SyntheticRnaSeqParams<T> {
     }
 }
 
-////////////////////////////////////////
+/////////////////////////////////////////
 // Synthetic data - sparsity / dropout //
-////////////////////////////////////////
+/////////////////////////////////////////
 
 impl<T: BixverseFloat> FromRList for SparsityParams<T> {
     /// Generate [`SparsityParams`] from an R list.

@@ -43,10 +43,10 @@ const MAX_R_SPARSE_INDEX: u32 = i32::MAX as u32;
 
 /// Minimum buffer length before the parsers switch to Rayon.
 ///
-/// Below this the cost of splitting the work exceeds the scan itself. Single-cell
-/// count matrices sit five orders of magnitude above the threshold, so it only
-/// guards the small-matrix and unit-test paths. 64 Ki elements is a few pages per
-/// thread on a typical 16-thread machine.
+/// Below this the cost of splitting the work exceeds the scan itself.
+/// Single-cell count matrices sit five orders of magnitude above the threshold,
+/// so it only guards the small-matrix and unit-test paths. 64 Ki elements is a
+/// few pages per thread on a typical 16-thread machine.
 const PARALLEL_PARSE_THRESHOLD: usize = 1 << 16;
 
 /// Elements per Rayon task in the buffer fills.
@@ -433,8 +433,8 @@ pub fn r_list_count_allow_zero(
 /// Read a numeric parameter out of a flattened R list.
 ///
 /// The real-valued sibling of [r_list_count], and it exists for the same
-/// reason: extendr's `as_real()` matches REALSXP alone and does not coerce, so a
-/// caller writing `list(theta = 100L)` hands over an integer that the plain
+/// reason: extendr's `as_real()` matches REALSXP alone and does not coerce, so
+/// a caller writing `list(theta = 100L)` hands over an integer that the plain
 /// accessor drops on the floor, and the default silently runs instead. R's own
 /// idiom makes that easy to write, and several `params_*()` wrappers in the
 /// downstream package do exactly this.
@@ -925,10 +925,11 @@ where
 
 /// Read a matrix dimension from an R list slot.
 ///
-/// Accepts an integer or a whole, non-negative double, because R writes `5` as a
-/// double and only `5L` as an integer. Zero is legal: a sparse matrix may have no
-/// rows or no columns. `NA_integer_` arrives as [i32::MIN] and `NA_real_` as
-/// `NaN`, so both are rejected by the range and finiteness checks.
+/// Accepts an integer or a whole, non-negative double, because R writes `5` as
+/// a double and only `5L` as an integer. Zero is legal: a sparse matrix may
+/// have no rows or no columns. `NA_integer_` arrives as [i32::MIN] and
+/// `NA_real_` as `NaN`, so both are rejected by the range and finiteness
+/// checks.
 ///
 /// ### Params
 ///
@@ -954,10 +955,10 @@ fn r_dimension(value: Option<&Robj>, message: &'static str) -> Result<usize, REr
 
 /// Parse an R integer vector into a sparse index buffer.
 ///
-/// Fuses three passes that were previously separate: the `NA`/negative scan, the
-/// widening cast into the internal index type, and the upper-bound check that
-/// [validate_sparse_layout] would otherwise perform on a second traversal. On a
-/// 354 M non-zero matrix each avoided pass is a gigabyte of memory traffic.
+/// Fuses three passes that were previously separate: the `NA`/negative scan,
+/// the widening cast into the internal index type, and the upper-bound check
+/// that [validate_sparse_layout] would otherwise perform on a second traversal.
+/// On a 354 M non-zero matrix each avoided pass is a gigabyte of memory traffic.
 ///
 /// `NA_integer_` is [i32::MIN], so the `TryFrom` into an unsigned index type
 /// rejects it along with genuine negatives; no separate `NA` test is needed.
@@ -1078,17 +1079,17 @@ fn index_buffer_to_r(buffer: &[u32], message: &'static str) -> Result<Robj, RErr
 /// as an integer.
 ///
 /// Slots are read in dependency order rather than declaration order: the
-/// dimensions and `cs_type` come first, so the index parsers know the bound each
-/// buffer has to respect and can validate during the cast instead of on a second
-/// traversal. All three large buffers are read straight from R's memory via
-/// zero-copy slices, converted once, and allocated once.
+/// dimensions and `cs_type` come first, so the index parsers know the bound
+/// each buffer has to respect and can validate during the cast instead of on a
+/// second traversal. All three large buffers are read straight from R's memory
+/// via zero-copy slices, converted once, and allocated once.
 ///
 /// ### Params
 ///
 /// * `r_list` - R list holding `indptr`, `indices`, `data`, `nrow`, `ncol` and
 ///   `cs_type`.
-/// * `populate_data_2` - Boolean. If set to `true`, the data will also be copied
-///   into `data_2` of the [CompressedSparseData2].
+/// * `populate_data_2` - Boolean. If set to `true`, the data will also be
+///   copied into `data_2` of the [CompressedSparseData2].
 ///
 /// ### Returns
 ///

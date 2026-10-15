@@ -1,11 +1,5 @@
 //! Kernel density bandwidths and Nadaraya-Watson smoothing, matching R.
 //!
-//! Three R routines that scTransform's regularisation step leans on and that
-//! this crate did not have: `bw.nrd`, `bw.SJ` and `ksmooth(kernel = "normal")`.
-//! All three are ports rather than reimplementations, down to R's binning
-//! quirks, because the point is that a regularised model fitted here lands
-//! where the R one lands.
-//!
 //! Everything is `f64`. These run on gene-length vectors, a few thousand
 //! elements, so the memory argument for narrower floats does not apply, and
 //! `bw.SJ` in particular sums fourth and sixth derivatives of a Gaussian

@@ -25,9 +25,7 @@ use crate::prelude::*;
 ///
 /// R's `loess.control(cell = 0.2)`. The kd-tree splits until a cell holds no
 /// more than `span * n * cell` points, so the anchor count lands near
-/// `1 / (span * cell)` and is independent of `n`. At the HVG default of
-/// `span = 0.3` that is 17 cells whether there are two thousand genes or two
-/// hundred thousand.
+/// `1 / (span * cell)` and is independent of `n`.
 const LOESS_CELL: f64 = 0.2;
 
 /// Point count below which [`LoessSurface::Interpolate`] defers to
