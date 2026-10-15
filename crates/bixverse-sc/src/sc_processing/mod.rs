@@ -14,5 +14,4 @@ pub mod residuals;
 pub mod scdblfinder;
 pub mod scrublet;
 pub mod sctransform;
-pub mod snn;
 pub mod utils_doublets;

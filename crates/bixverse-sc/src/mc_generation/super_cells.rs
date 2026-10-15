@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::coo_to_csr;
 use bixverse_methods::graph::community_detections::walktrap_sparse_graph;
-use bixverse_methods::graph::graph_structures::knn_to_sparse_graph;
+use bixverse_methods::graph::knn_graph::*;
 
 ///////////////
 // SuperCell //
@@ -140,9 +140,9 @@ pub fn supercell<T>(
     params: &SuperCellParams,
     no_meta_cells: usize,
     verbose: usize,
-) -> Vec<usize>
+) -> Result<Vec<usize>, ScErrors>
 where
-    T: BixverseFloat + std::iter::Sum + BixverseNumeric + SimdDistance,
+    T: BixverseFloat + std::iter::Sum + BixverseNumeric + SimdDistance + Send + Sync,
 {
     let verbosity = parse_verbosity_level(verbose);
 
@@ -155,13 +155,21 @@ where
         if verbosity.normal_verbosity() {
             println!("Using the original version of SuperCell on the kNN graph")
         }
-        knn_to_sparse_graph(knn_indices, true)
+        let (idx, k) = flatten_knn(knn_indices);
+        build_knn_graph(
+            &idx,
+            None,
+            k,
+            knn_indices.len(),
+            &KnnSymmetrisation::Knn { binary: true },
+            0,
+        )?
     };
-    walktrap_sparse_graph(
+    Ok(walktrap_sparse_graph(
         &knn_graph,
         params.walk_length,
         no_meta_cells,
         params.max_support,
         verbosity.detailed_verbosity(),
-    )
+    ))
 }

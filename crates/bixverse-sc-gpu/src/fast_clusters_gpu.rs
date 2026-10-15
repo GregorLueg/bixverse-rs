@@ -40,9 +40,6 @@ pub struct FastLouvainParamsGpu {
     pub same_weight: bool,
 
     // -- snn --
-    /// Shall the full sNN graph be generated (also from non-connected
-    /// neighbours)
-    pub full_snn: bool,
     /// Optional pruning threshold. If not provided, will default to
     /// `1 / ceil(0.8 * k)`.
     pub pruning: Option<f32>,
@@ -78,7 +75,6 @@ impl FastLouvainParamsGpu {
             kmeans_params: None,
             knn_params: KnnParams::default(),
             same_weight: false,
-            full_snn: false,
             pruning: None,
             snn_similarity: "jaccard".to_string(),
             cell_mediated: false,
@@ -97,7 +93,6 @@ impl FastLouvainParamsGpu {
         CentroidGraphParams {
             knn_params: self.knn_params.clone(),
             same_weight: self.same_weight,
-            full_snn: self.full_snn,
             pruning: self.pruning,
             snn_similarity: self.snn_similarity.clone(),
             cell_mediated: self.cell_mediated,

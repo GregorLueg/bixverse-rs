@@ -961,10 +961,6 @@ impl FromRList for FastLouvainParams<f32> {
             .unwrap_or(defaults.multi_level_louvain);
 
         // snn
-        let full_snn = params
-            .get("full_snn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.full_snn);
 
         let pruning = params
             .get("pruning")
@@ -997,7 +993,6 @@ impl FromRList for FastLouvainParams<f32> {
             lr_alpha,
             louvain_iters,
             knn_params,
-            full_snn,
             pruning,
             snn_similarity,
             cell_mediated,

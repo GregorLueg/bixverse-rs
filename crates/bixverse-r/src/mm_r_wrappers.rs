@@ -5,10 +5,7 @@ use extendr_api::{List, Robj};
 use std::collections::HashMap;
 
 use crate::r_rust_interface::r_list_to_map;
-use crate::{
-    prelude::VecConvert,
-    single_cell::{multi_modal::wnn::parse_sigma_method, sc_processing::snn::parse_snn_type},
-};
+use crate::{prelude::VecConvert, single_cell::multi_modal::wnn::parse_sigma_method};
 use bixverse_rs::single_cell::sc_processing::knn::KnnParams;
 
 use crate::FromRList;
@@ -58,12 +55,6 @@ impl FromRList for WnnParams {
             .map(|v| v as usize)
             .unwrap_or(defaults.sigma_idx);
 
-        let snn_type = params
-            .get("snn_type")
-            .and_then(|v| v.as_str())
-            .and_then(parse_snn_type)
-            .unwrap_or(defaults.snn_type);
-
         let s_nn = params
             .get("s_nn")
             .and_then(|v| v.as_integer())
@@ -99,7 +90,6 @@ impl FromRList for WnnParams {
             knn_range,
             sigma_method,
             sigma_idx,
-            snn_type,
             s_nn,
             sd_scale,
             kernel_power,

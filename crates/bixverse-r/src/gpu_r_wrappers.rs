@@ -96,10 +96,6 @@ impl FromRList for FastLouvainParamsGpu {
             .get("same_weight")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.same_weight);
-        let full_snn = params
-            .get("full_snn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.full_snn);
         let pruning = params
             .get("pruning")
             .and_then(|v| v.as_real())
@@ -134,7 +130,6 @@ impl FromRList for FastLouvainParamsGpu {
             kmeans_params,
             knn_params,
             same_weight,
-            full_snn,
             pruning,
             snn_similarity,
             cell_mediated,

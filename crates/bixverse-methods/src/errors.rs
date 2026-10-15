@@ -82,6 +82,10 @@ pub enum MethodsErrors {
         got: usize,
     },
 
+    /// The UMAP kNN graph was asked for without kNN distances
+    #[error("Graph: the UMAP kNN symmetrisation needs the kNN distances.")]
+    KnnGraphNeedsDistances,
+
     /// A node type present in the graph has no type weight
     #[error("Graph: node type '{0}' has no type weight.")]
     MissingNodeTypeWeight(String),

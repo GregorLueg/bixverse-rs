@@ -25,7 +25,6 @@ use rustc_hash::FxHashMap;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::snn::*;
 use crate::sc_processing::utils_doublets::dispatch_knn;
 use bixverse_core::core::math::vector_helpers::{mean_nan, median};
 use bixverse_core::ml::clustering::clustering_metrics::adjusted_rand_index;
@@ -33,6 +32,7 @@ use bixverse_core::ml::clustering::k_means::*;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::graph_metrics::conductance_undirected;
 use bixverse_methods::graph::graph_structures::*;
+use bixverse_methods::graph::knn_graph::*;
 
 //////////////////
 // Fast Louvain //
@@ -185,9 +185,6 @@ pub struct CentroidGraphParams {
     /// Shall the weight of the kNN be set to 1.0 across or edges that have
     /// reverse edges be double counted.
     pub same_weight: bool,
-    /// Shall the full sNN graph be generated (also from non-connected
-    /// neighbours)
-    pub full_snn: bool,
     /// Optional pruning threshold. If not provided, will default to
     /// `1 / ceil(0.8 * k)`.
     pub pruning: Option<f32>,
@@ -227,9 +224,6 @@ pub struct FastLouvainParams<T> {
     pub same_weight: bool,
 
     // -- snn ---
-    /// Shall the full sNN graph be generated (also from non-connected
-    /// neighbours)
-    pub full_snn: bool,
     /// Optional pruning threshold. If not provided, will default to
     /// `1 / ceil(0.8 * k)`.
     /// neighbours.
@@ -271,7 +265,6 @@ where
             lr_alpha: T::from_f64(1.0).unwrap(),
             kmeans_params: KMeansParamsWrappers::default(),
             // snn
-            full_snn: false,
             pruning: None,
             snn_similarity: "jaccard".to_string(),
             // knn - louvain
@@ -308,7 +301,6 @@ impl FastLouvainParams<f32> {
         CentroidGraphParams {
             knn_params: self.knn_params.clone(),
             same_weight: self.same_weight,
-            full_snn: self.full_snn,
             pruning: self.pruning,
             snn_similarity: self.snn_similarity.clone(),
             cell_mediated: self.cell_mediated,
@@ -354,32 +346,6 @@ pub struct FastLouvainGridResult {
 /////////////
 // Helpers //
 /////////////
-
-/// Flatten a `Vec<Vec<T>>` of per-sample neighbour lists into column-major
-/// layout: `flat[neighbour_idx * n_samples + i]`. This matches the layout R
-/// matrices use (and what `generate_snn_*` expect).
-///
-/// ### Params
-///
-/// * `knn` - The row major kNN data
-/// * `k` - The number of neighbours
-///
-/// ### Returns
-///
-/// Column major version for sNN
-fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
-    let n = knn.len();
-    let mut out = Vec::with_capacity(n * k);
-    // SAFETY: we fill exactly n * k entries below, in any order
-    out.resize(n * k, knn[0][0]);
-    for (i, row) in knn.iter().enumerate() {
-        debug_assert_eq!(row.len(), k);
-        for (j, &v) in row.iter().enumerate() {
-            out[j * n + i] = v;
-        }
-    }
-    out
-}
 
 /// Cells per accumulation block in [`cell_mediated_graph`]. Blocks are summed
 /// in a fixed order so the edge weights do not depend on the thread count;
@@ -622,52 +588,22 @@ pub fn build_centroid_graph(
         verbosity.detailed_verbosity(),
     )?;
 
-    if !run_snn {
-        return Ok(knn_to_sparse_graph(&knn, params.same_weight));
-    }
-
-    let pruning = params
-        .pruning
-        .unwrap_or(1.0 / (params.knn_params.k as f32 * 0.8).ceil());
-
-    let start = Instant::now();
-
-    if verbosity.normal_verbosity() {
-        println!(" Running the sNN graph as {}...", &params.snn_similarity)
-    }
-
-    let knn_flat = flatten_knn_column_major(&knn, params.knn_params.k);
-    let snn_method = parse_snn_similiarity_method(&params.snn_similarity).unwrap_or_default();
-
-    let (snn_edges, snn_weights) = if params.full_snn {
-        generate_snn_full(
-            &knn_flat,
-            params.knn_params.k,
-            knn.len(),
-            pruning,
-            snn_method,
-            verbose,
-        )
+    let (idx, k) = flatten_knn(&knn);
+    let sym = if run_snn {
+        KnnSymmetrisation::Snn {
+            similarity: parse_snn_similarity(&params.snn_similarity).unwrap_or_default(),
+            prune: params
+                .pruning
+                .map(|p| p as f64)
+                .unwrap_or(1.0 / (params.knn_params.k as f64 * 0.8).ceil()),
+            rescue: true,
+        }
     } else {
-        generate_snn_limited(
-            &knn_flat,
-            params.knn_params.k,
-            knn.len(),
-            pruning,
-            snn_method,
-            verbose,
-        )
+        KnnSymmetrisation::Knn {
+            binary: params.same_weight,
+        }
     };
-
-    if verbosity.normal_verbosity() {
-        println!(" Finished the sNN generation in {:.2?}...", start.elapsed())
-    }
-
-    Ok(snn_edges_to_sparse_graph(
-        &snn_edges,
-        &snn_weights,
-        knn.len(),
-    ))
+    Ok(build_knn_graph(&idx, None, k, knn.len(), &sym, verbose)?)
 }
 
 /// Stage three: Louvain per resolution, propagated back to the samples.
@@ -993,7 +929,6 @@ mod tests {
             kmeans_params: KMeansParamsWrappers::default(),
             knn_params: knn,
             louvain_iters: 10,
-            full_snn: false,
             pruning: None,
             same_weight: false,
             multi_level_louvain: true,

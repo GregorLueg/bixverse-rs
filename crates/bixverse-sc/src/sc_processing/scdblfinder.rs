@@ -18,7 +18,7 @@ use crate::sc_processing::utils_doublets::*;
 use crate::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
 use bixverse_core::utils::vec_utils::min_max_scale;
 use bixverse_methods::graph::community_detections::*;
-use bixverse_methods::graph::graph_structures::*;
+use bixverse_methods::graph::knn_graph::*;
 
 ////////////////////////
 // Params and results //
@@ -1402,7 +1402,15 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
                 verbosity.detailed_verbosity(),
             )?;
 
-            let obs_graph = knn_to_sparse_graph(&obs_knn, true);
+            let (idx, k) = flatten_knn(&obs_knn);
+            let obs_graph = build_knn_graph::<f32>(
+                &idx,
+                None,
+                k,
+                obs_knn.len(),
+                &KnnSymmetrisation::Knn { binary: true },
+                0,
+            )?;
             louvain_sparse_graph(
                 &obs_graph,
                 self.params.cluster_resolution,

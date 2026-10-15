@@ -18,7 +18,7 @@ use crate::sc_processing::pca::PcaSolver;
 use crate::sc_processing::utils_doublets::*;
 use bixverse_core::core::math::stats::*;
 use bixverse_methods::graph::community_detections::*;
-use bixverse_methods::graph::graph_structures::*;
+use bixverse_methods::graph::knn_graph::*;
 
 ////////////////////////
 // Params and results //
@@ -576,7 +576,15 @@ impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
             let start_graph = Instant::now();
             // for doublet detection symmetrisation is not very good... better
             // to keep it false here
-            let graph = knn_to_sparse_graph(&knn, false);
+            let (idx, k) = flatten_knn(&knn);
+            let graph = build_knn_graph::<f32>(
+                &idx,
+                None,
+                k,
+                knn.len(),
+                &KnnSymmetrisation::Knn { binary: false },
+                0,
+            )?;
             if verbosity.normal_verbosity() {
                 println!(
                     "Transformed kNN graph. Done in {:.2?}",

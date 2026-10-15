@@ -14,7 +14,7 @@ use rustc_hash::FxHashSet;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::snn::*;
+use bixverse_methods::graph::knn_graph::*;
 
 ////////////////////
 // Structs, Enums //
@@ -130,9 +130,6 @@ pub struct WnnParams {
     pub sigma_idx: usize,
     /// `SnnFarthest` only: kNN size used to build the SNN graph. Default k_nn.
     pub s_nn: usize,
-    /// sNN type: build a limited version only considering edges that exists
-    /// in the kNN
-    pub snn_type: SnnType,
     /// Multiplier on sigma.
     pub sd_scale: f32,
     /// Kernel exponent power.
@@ -155,7 +152,6 @@ impl Default for WnnParams {
             sigma_method: SigmaMethod::SnnFarthest,
             sigma_idx: 19,
             s_nn: 20,
-            snn_type: SnnType::FullConnection,
             sd_scale: 1.0,
             kernel_power: 1.0,
             cross_const: 1e-4,
@@ -254,9 +250,8 @@ fn euclid(a: &[f32], b: &[f32]) -> f32 {
 
 /// Build SNN graph for sigma calculation
 ///
-/// Constructs a shared nearest-neighbour graph using Jaccard similarity with no
-/// pruning, matching Seurat's `FindModalityWeights` defaults. Input KNN indices
-/// are reordered into column-major layout before graph construction.
+/// Full sNN with Jaccard weights, no pruning and no component rescue, matching
+/// Seurat's `FindModalityWeights` defaults.
 ///
 /// ### Params
 ///
@@ -272,37 +267,19 @@ fn euclid(a: &[f32], b: &[f32]) -> f32 {
 fn build_snn_for_sigma(
     knn_indices: &[Vec<usize>],
     s_nn: usize,
-    snn_type: SnnType,
     n_cells: usize,
     verbose: usize,
-) -> SparseGraph<f32> {
-    // generate_snn_full needs column-major flat input!
-    let mut flat = vec![0usize; s_nn * n_cells];
-    for i in 0..n_cells {
-        for j in 0..s_nn {
-            flat[j * n_cells + i] = knn_indices[i][j];
-        }
+) -> Result<SparseGraph<f32>, ScErrors> {
+    let mut idx = Vec::with_capacity(s_nn * n_cells);
+    for row in knn_indices {
+        idx.extend(row[..s_nn].iter().map(|&j| j as u32));
     }
-    let (edges, weights) = match snn_type {
-        SnnType::FullConnection => generate_snn_full(
-            &flat,
-            s_nn,
-            n_cells,
-            0.0,
-            SnnSimilarityMethod::Intersection,
-            verbose,
-        ),
-        SnnType::LimitedConnection => generate_snn_limited(
-            &flat,
-            s_nn,
-            n_cells,
-            0.0,
-            SnnSimilarityMethod::Intersection,
-            verbose,
-        ),
+    let sym = KnnSymmetrisation::Snn {
+        similarity: SnnSimilarity::Jaccard,
+        prune: 0.0,
+        rescue: false,
     };
-
-    snn_edges_to_sparse_graph(&edges, &weights, n_cells)
+    Ok(build_knn_graph(&idx, None, s_nn, n_cells, &sym, verbose)?)
 }
 
 /// Per-cell sigma from SNN-farthest neighbours
@@ -449,17 +426,11 @@ pub fn compute_wnn(
     let snn_graphs: Option<Vec<SparseGraph<f32>>> = match params.sigma_method {
         SigmaMethod::SnnFarthest => {
             let t = Instant::now();
-            let g: Vec<_> = (0..2)
+            let g = (0..2)
                 .map(|r| {
-                    build_snn_for_sigma(
-                        modalities[r].knn_indices,
-                        params.s_nn,
-                        params.snn_type,
-                        n_cells,
-                        verbose,
-                    )
+                    build_snn_for_sigma(modalities[r].knn_indices, params.s_nn, n_cells, verbose)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             if verbosity.normal_verbosity() {
                 println!("WNN: per-modality SNN built in {:.2?}", t.elapsed());
             }
@@ -826,7 +797,6 @@ mod tests {
             sigma_method: SigmaMethod::SigmaIdx,
             sigma_idx: 1,
             s_nn: 2,
-            snn_type: SnnType::FullConnection,
             sd_scale: 1.0,
             kernel_power: 1.0,
             cross_const: 1e-4,
