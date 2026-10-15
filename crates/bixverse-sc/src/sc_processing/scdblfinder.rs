@@ -2,7 +2,6 @@
 //! F1000Res, 2021. Under the hood this uses the internal implementation of
 //! lightGBM.
 
-use either::Either;
 use faer::{Mat, MatRef};
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand::prelude::*;
@@ -16,6 +15,7 @@ use crate::sc_processing::knn::generate_knn_with_dist;
 use crate::sc_processing::pca::{PcaSolver, solve_dense_pca};
 use crate::sc_processing::utils_doublets::*;
 use crate::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
+use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_core::utils::vec_utils::min_max_scale;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::knn_graph::*;
@@ -65,11 +65,11 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// Which k-means clustering to use - standard or mini-batch
-    pub km_type: String,
-    /// [FastLouvainParams] for the fast clustering path. Gives control over
-    /// the k-means methods, batch size, etc.
-    pub fast_cluster_params: FastLouvainParams<f32>,
+    /// The k-means for the fast clustering path, standard or mini-batch
+    pub fast_cluster_kmeans: CpuKMeans,
+    /// [FastClusterParams] for the fast clustering path. The centroid graph,
+    /// distance and Louvain iterations are set from the fields above.
+    pub fast_cluster_params: FastClusterParams,
 
     // -- kNN --
     /// [KnnParams] for the various approximate nearest neighbour searches
@@ -130,8 +130,15 @@ impl Default for ScDblFinderParams {
             cluster_resolution: 1.0,
             cluster_iters: 10,
             fast_cluster: false,
-            km_type: "minibatch".to_string(),
-            fast_cluster_params: FastLouvainParams::default(),
+            fast_cluster_kmeans: CpuKMeans::new(
+                CpuKMeansKind::MiniBatch {
+                    batch_size: 4096,
+                    drift_threshold: 1e-4,
+                    lr_alpha: 1.0,
+                },
+                KMeansParamsWrappers::default(),
+            ),
+            fast_cluster_params: FastClusterParams::default(),
             knn_params: KnnParams::default(),
             n_iterations: 3,
             gbm_n_trees: 200,
@@ -1345,17 +1352,14 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             let n_centroids = self.params.fast_cluster_params.n_centroids;
             let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
-            let mut centroid_knn_params = self.params.knn_params.clone();
-            centroid_knn_params.k = centroid_k;
-
-            // extract some (but not all...)
-            let fast_params = FastLouvainParams {
-                n_centroids,
-                knn_params: centroid_knn_params,
-                louvain_iters: self.params.cluster_iters,
-                batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_params: self.params.fast_cluster_params.kmeans_params,
-                ..Default::default()
+            let fast_params = FastClusterParams {
+                dist: self.params.knn_params.ann_dist.clone(),
+                graph: CentroidGraph::Knn {
+                    k: centroid_k,
+                    sym: KnnSymmetrisation::Knn { binary: false },
+                },
+                max_evals: self.params.cluster_iters,
+                ..self.params.fast_cluster_params.clone()
             };
             if verbosity.normal_verbosity() {
                 println!(
@@ -1364,28 +1368,20 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
                 );
             }
 
-            let res = vec![self.params.cluster_resolution];
-
-            let res = fast_louvain_clusters(
+            let res = fast_clusters(
                 obs_pca.as_ref(),
-                &self.params.km_type,
-                &res,
+                &self.params.fast_cluster_kmeans,
                 &fast_params,
-                false,
-                false,
+                &[self.params.cluster_resolution],
+                1,
                 seed,
                 verbose,
             )?;
-
-            // quick helper to extract the assignments
-            let get_assignments = |x: FastLouvainResults| -> Vec<Vec<usize>> {
-                match x.get_assignments() {
-                    Either::Left(v) => v,
-                    Either::Right(_) => panic!("expected Single variant"),
-                }
-            };
-
-            get_assignments(res)[0].clone()
+            res.per_resolution
+                .into_iter()
+                .next()
+                .map(|r| r.labels)
+                .unwrap_or_default()
         } else {
             let obs_k = if self.params.knn_params.k == 0 {
                 (((self.n_cells as f32).sqrt() * 0.5).round() as usize)

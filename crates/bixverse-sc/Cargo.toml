@@ -31,7 +31,6 @@ bixverse-sc-data.workspace = true
 bonsai-rs = { workspace = true, optional = true }
 document-features.workspace = true
 edge-rs.workspace = true
-either.workspace = true
 faer.workspace = true
 half.workspace = true
 indexmap.workspace = true

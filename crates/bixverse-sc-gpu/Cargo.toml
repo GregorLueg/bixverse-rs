@@ -31,7 +31,6 @@ cubecl.workspace = true
 cubecl-utils-rs.workspace = true
 document-features.workspace = true
 edge-rs = { workspace = true, features = ["gpu"] }
-either.workspace = true
 faer.workspace = true
 half.workspace = true
 indexmap.workspace = true

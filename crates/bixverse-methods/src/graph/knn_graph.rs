@@ -1149,7 +1149,10 @@ mod tests {
             for u in 0..n {
                 let (nb, w) = g.get_neighbours_raw(u);
                 for (&v, &wv) in nb.iter().zip(w) {
-                    assert_eq!(wv, pair_snn_weight::<f32>(&idx, k, u, v as usize, similarity));
+                    assert_eq!(
+                        wv,
+                        pair_snn_weight::<f32>(&idx, k, u, v as usize, similarity)
+                    );
                 }
             }
         }

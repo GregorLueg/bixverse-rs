@@ -7,7 +7,6 @@
 //! (hypergeometric test). Across iterations, doublets are called by majority
 //! voting on per-iteration significance.
 
-use either::Either;
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
@@ -85,11 +84,11 @@ pub struct BoostParams {
     // -- fast cluster --
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// Which k-means clustering to use - standard or mini-batch
-    pub km_type: String,
-    /// [FastLouvainParams] for the fast clustering path. Gives control over
-    /// the k-means methods, batch size, etc.
-    pub fast_cluster_params: FastLouvainParams<f32>,
+    /// The k-means for the fast clustering path, standard or mini-batch
+    pub fast_cluster_kmeans: CpuKMeans,
+    /// [FastClusterParams] for the fast clustering path. The centroid graph,
+    /// distance, Louvain iterations and level are set from the fields above.
+    pub fast_cluster_params: FastClusterParams,
 }
 
 /// Results from the Boost doublet detection algorithm.
@@ -518,17 +517,15 @@ impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
             let n_centroids = self.params.fast_cluster_params.n_centroids;
             let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
-            let mut centroid_knn_params = self.params.knn_params.clone();
-            centroid_knn_params.k = centroid_k;
-
-            let fast_params = FastLouvainParams {
-                n_centroids,
-                knn_params: centroid_knn_params,
-                louvain_iters: self.params.louvain_iters,
-                batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_params: self.params.fast_cluster_params.kmeans_params,
-                multi_level_louvain: false,
-                ..Default::default()
+            let fast_params = FastClusterParams {
+                dist: self.params.knn_params.ann_dist.clone(),
+                graph: CentroidGraph::Knn {
+                    k: centroid_k,
+                    sym: KnnSymmetrisation::Knn { binary: false },
+                },
+                max_evals: self.params.louvain_iters,
+                multi_level: false,
+                ..self.params.fast_cluster_params.clone()
             };
 
             if verbosity.normal_verbosity() {
@@ -538,28 +535,20 @@ impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
                 );
             }
 
-            let louvain_resolutions: Vec<f32> = vec![self.params.resolution];
-
-            let res = fast_louvain_clusters(
+            let res = fast_clusters(
                 combined_pca.as_ref(),
-                &self.params.km_type,
-                &louvain_resolutions,
+                &self.params.fast_cluster_kmeans,
                 &fast_params,
-                false,
-                false,
+                &[self.params.resolution],
+                1,
                 seed,
                 verbose,
             )?;
-
-            // quick helper to extract the assignments
-            let get_assignments = |x: FastLouvainResults| -> Vec<Vec<usize>> {
-                match x.get_assignments() {
-                    Either::Left(v) => v,
-                    Either::Right(_) => panic!("expected Single variant"),
-                }
-            };
-
-            get_assignments(res)[0].clone()
+            res.per_resolution
+                .into_iter()
+                .next()
+                .map(|r| r.labels)
+                .unwrap_or_default()
         } else {
             let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
             if verbosity.normal_verbosity() {

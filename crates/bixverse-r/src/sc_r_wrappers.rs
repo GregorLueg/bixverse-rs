@@ -11,7 +11,8 @@ use crate::r_rust_interface::{
     r_list_count, r_list_count_allow_zero, r_list_real, r_list_required_real, r_list_to_map,
 };
 use crate::{FromRList, FromRMap, ToRList};
-use bixverse_rs::ml::clustering::k_means::KMeansParamsWrappers;
+use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
+use bixverse_rs::ml::clustering::k_means::{KMeansParamsWrappers, KMeansType, parse_k_means};
 use bixverse_rs::ml::gp::LandmarkGpParams;
 use bixverse_rs::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
@@ -21,7 +22,7 @@ use bixverse_rs::single_cell::sc_analysis::{
     cellphonedb::CellPhoneDbParams,
     dge_pathway_scores::{AucellParams, parse_auc_type},
     dialogue::{DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging},
-    fast_clusters::FastLouvainParams,
+    fast_clusters::{CentroidGraph, CpuKMeans, CpuKMeansKind, FastClusterParams},
     hotspot::{HotSpotGraphParams, HotSpotParams},
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
@@ -586,7 +587,8 @@ impl FromRList for BoostParams {
     /// The `BoostParams` with all parameters set.
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
 
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
@@ -698,13 +700,6 @@ impl FromRList for BoostParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let km_type = std::string::String::from(
-            params_list
-                .get("km_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("minibatch"),
-        );
-
         Ok(Self {
             // processing
             log_transform,
@@ -734,7 +729,7 @@ impl FromRList for BoostParams {
             // fast cluster related stuff
             fast_cluster,
             fast_cluster_params,
-            km_type,
+            fast_cluster_kmeans,
         })
     }
 }
@@ -757,15 +752,10 @@ impl FromRList for ScDblFinderParams {
     /// `ScDblFinderParams` with all parameters set.
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
         let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
-
-        let km_type = std::string::String::from(
-            map.get("km_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("minibatch"),
-        );
 
         Ok(Self {
             // Preprocessing
@@ -824,7 +814,7 @@ impl FromRList for ScDblFinderParams {
                 .get("fast_cluster")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.fast_cluster),
-            km_type,
+            fast_cluster_kmeans,
             fast_cluster_params,
             // kNN
             knn_params,
@@ -894,112 +884,133 @@ impl FromRList for ScDblFinderParams {
 }
 
 ///////////////////////
-// FastLouvainParams //
+// FastClusterParams //
 ///////////////////////
 
-impl FromRList for FastLouvainParams<f32> {
-    /// Generate the [FastLouvainParams] from an R list.
+impl FromRList for FastClusterParams {
+    /// Generate the [FastClusterParams] from an R list.
     ///
-    /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults. The nested kNN and k-means blocks are parsed from
-    /// the same flat list via `KnnParams::from_r_list` and
-    /// `KMeansParamsWrappers::from_r_list`.
+    /// Keys: `n_centroids`, `dist`, `cell_mediated` with `n_anchors`, or the
+    /// centroid kNN `centroid_k` with the [KnnSymmetrisation] keys (`knn_sym`,
+    /// ...); `algorithm` (`"louvain"` or `"leiden"`), `beta`, `n_iterations`,
+    /// `multi_level` and `max_evals`. Missing keys take
+    /// [FastClusterParams::default].
     ///
     /// ### Params
     ///
-    /// * `r_list` - The list with the fast Louvain parameters.
+    /// * `r_list` - The list with the fast clustering parameters.
     ///
-    /// ### Return
+    /// ### Returns
     ///
-    /// The [FastLouvainParams] with all of the parameters.
+    /// The [FastClusterParams], or an error for an unknown algorithm or
+    /// symmetrisation.
     fn from_r_list(r_list: List) -> Result<Self> {
-        let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
-        let defaults: FastLouvainParams<f32> = Self::default();
+        let defaults = Self::default();
 
-        // knn
-        let same_weight = params
-            .get("same_weight")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.same_weight);
-
-        // k means
-        let n_centroids = params
-            .get("n_centroids")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_centroids);
-
-        let batch_size = params
-            .get("batch_size")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.batch_size);
-
-        let drift_threshold: f32 = params
-            .get("drift_threshold")
-            .and_then(|v| v.as_real())
-            .map(|v| v as f32)
-            .unwrap_or(defaults.drift_threshold);
-
-        let lr_alpha: f32 = params
-            .get("lr_alpha")
-            .and_then(|v| v.as_real())
-            .map(|v| v as f32)
-            .unwrap_or(defaults.lr_alpha);
-
-        // louvain
-        let louvain_iters = params
-            .get("louvain_iters")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.louvain_iters);
-        let multi_level_louvain = params
-            .get("multi_level_louvain")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.multi_level_louvain);
-
-        // snn
-
-        let pruning = params
-            .get("pruning")
-            .and_then(|v| v.as_real())
-            .map(|x| x as f32);
-
-        let snn_similarity = std::string::String::from(
-            params
-                .get("snn_similarity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("jaccard"),
-        );
-
-        // cell-mediated graph
         let cell_mediated = params
             .get("cell_mediated")
             .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.cell_mediated);
-        let n_anchors = params
-            .get("n_anchors")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_anchors);
+            .unwrap_or(false);
+        let graph = if cell_mediated {
+            CentroidGraph::CellMediated {
+                n_anchors: r_list_count(&params, "n_anchors")?.unwrap_or(5),
+            }
+        } else {
+            let k_default = match defaults.graph {
+                CentroidGraph::Knn { k, .. } => k,
+                CentroidGraph::CellMediated { .. } => 15,
+            };
+            CentroidGraph::Knn {
+                k: r_list_count(&params, "centroid_k")?.unwrap_or(k_default),
+                sym: KnnSymmetrisation::from_r_map(&params)?,
+            }
+        };
+
+        let mut community = defaults.community;
+        if let Some(a) = params.get("algorithm").and_then(|v| v.as_str()) {
+            community.refine = match a.to_lowercase().as_str() {
+                "louvain" => false,
+                "leiden" => true,
+                other => {
+                    return Err(Error::Other(format!(
+                        "Unknown algorithm '{other}'; expected 'louvain' or 'leiden'"
+                    )));
+                }
+            };
+        }
+        community.beta = r_list_real(&params, "beta")?.unwrap_or(community.beta);
+        community.n_iterations =
+            r_list_count(&params, "n_iterations")?.unwrap_or(community.n_iterations);
 
         Ok(Self {
-            n_centroids,
-            kmeans_params,
-            batch_size,
-            drift_threshold,
-            lr_alpha,
-            louvain_iters,
-            knn_params,
-            pruning,
-            snn_similarity,
-            cell_mediated,
-            n_anchors,
-            multi_level_louvain,
-            same_weight,
+            n_centroids: r_list_count(&params, "n_centroids")?.unwrap_or(defaults.n_centroids),
+            dist: params
+                .get("dist")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or(defaults.dist),
+            graph,
+            community,
+            multi_level: params
+                .get("multi_level")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.multi_level),
+            max_evals: r_list_count(&params, "max_evals")?.unwrap_or(defaults.max_evals),
         })
+    }
+}
+
+/// Parse a [CpuKMeans] from an R list.
+///
+/// Keys: `km_type` (`"standard"` or `"minibatch"`), the mini-batch knobs
+/// `batch_size`, `drift_threshold` and `lr_alpha`, and the
+/// [KMeansParamsWrappers] keys.
+///
+/// ### Params
+///
+/// * `r_list` - The list with the k-means parameters
+/// * `default_km_type` - `km_type` when the list has none
+///
+/// ### Returns
+///
+/// The [CpuKMeans], or an error for an unknown `km_type`.
+pub fn cpu_kmeans_from_r_list(r_list: List, default_km_type: &str) -> Result<CpuKMeans> {
+    let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
+    let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+    let km_type = params
+        .get("km_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_km_type);
+    let kind = match parse_k_means(km_type) {
+        Some(KMeansType::StandardKMeans) => CpuKMeansKind::Standard,
+        Some(KMeansType::MiniBatchKMeans) => CpuKMeansKind::MiniBatch {
+            batch_size: r_list_count(&params, "batch_size")?.unwrap_or(4096),
+            drift_threshold: r_list_real(&params, "drift_threshold")?.unwrap_or(1e-4) as f32,
+            lr_alpha: r_list_real(&params, "lr_alpha")?.unwrap_or(1.0) as f32,
+        },
+        None => {
+            return Err(Error::Other(format!(
+                "Unknown km_type '{km_type}'; expected 'standard' or 'minibatch'"
+            )));
+        }
+    };
+    Ok(CpuKMeans::new(kind, kmeans_params))
+}
+
+impl FromRList for CpuKMeans {
+    /// Parse a [CpuKMeans] from an R list, standard k-means unless `km_type`
+    /// says otherwise. See [cpu_kmeans_from_r_list].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the k-means parameters
+    ///
+    /// ### Returns
+    ///
+    /// The [CpuKMeans]
+    fn from_r_list(r_list: List) -> Result<Self> {
+        cpu_kmeans_from_r_list(r_list, "standard")
     }
 }
 

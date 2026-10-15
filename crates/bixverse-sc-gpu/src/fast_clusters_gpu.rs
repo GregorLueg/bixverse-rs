@@ -1,301 +1,90 @@
-//! GPU-accelerated version of the fast Louvain clustering pipeline.
+//! GPU stage one for fast clustering.
 //!
-//! Only stage one changes: the k-means coarsening runs on the device via
-//! [`ann_search_rs::gpu::k_means_gpu::k_means_clusters_gpu`]. The centroid kNN,
-//! the optional sNN pass and the Louvain runs all reuse the CPU stages from
-//! [`bixverse_sc::sc_analysis::fast_clusters`].
+//! [`GpuKMeans`] runs the k-means on the device via
+//! [`ann_search_rs::gpu::k_means_gpu::k_means_clusters_gpu`], and the
+//! cell-mediated top-m search as an exhaustive GPU kNN query of the cells
+//! against the centroids. The centroid graph and the community detection are
+//! the CPU stages of [`bixverse_sc::sc_analysis::fast_clusters::fast_clusters`].
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
+use ann_search_rs::{build_exhaustive_index_gpu, query_exhaustive_index_gpu};
 use cubecl::Device;
-use faer::MatRef;
+use faer::{Mat, MatRef};
 
 use crate::prelude::*;
-use bixverse_sc::sc_analysis::fast_clusters::*;
-use bixverse_sc::sc_processing::knn::KnnParams;
+use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
 
-////////////
-// Params //
-////////////
+////////////////
+// GpuKMeans //
+////////////////
 
-/// Parameters for GPU fast Louvain clustering via k-means + kNN.
+/// GPU k-means coarsener for fast clustering.
 ///
-/// Mirrors [bixverse_sc::sc_analysis::fast_clusters::FastLouvainParams]
-/// minus the mini-batch knobs (`batch_size`, `drift_threshold`, `lr_alpha`), as
-/// the GPU k-means is full-batch Lloyd's, and with [KMeansGpuParams] in place
-/// of the CPU parameter wrapper.
+/// Full-batch Lloyd's on the device; there is no mini-batch path.
 #[derive(Clone, Debug)]
-pub struct FastLouvainParamsGpu {
-    // -- k means --
-    /// Number of k-means centroids.
-    pub n_centroids: usize,
-    /// GPU k-means parameters; `None` uses the k-means defaults.
-    pub kmeans_params: Option<KMeansGpuParams>,
-
-    // -- knn --
-    /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
-    /// the k-means distance and `k` is the number of neighbours per centroid.
-    pub knn_params: KnnParams,
-    /// Shall the weight of the kNN be set to 1.0 across or edges that have
-    /// reverse edges be double counted.
-    pub same_weight: bool,
-
-    // -- snn --
-    /// Optional pruning threshold. If not provided, will default to
-    /// `1 / ceil(0.8 * k)`.
-    pub pruning: Option<f32>,
-    /// String for the type of sNN similarity to use. One of `"jaccard"` or
-    /// `"rank"`.
-    pub snn_similarity: String,
-
-    // -- cell-mediated graph --
-    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
-    /// `true`, `run_snn` and the sNN settings are ignored.
-    pub cell_mediated: bool,
-    /// Number of nearest centroids each cell links to in the cell-mediated
-    /// graph.
-    pub n_anchors: usize,
-
-    // -- louvain --
-    /// Number of Louvain iterations.
-    pub louvain_iters: usize,
-    /// Shall multi-level Louvain be applied
-    pub multi_level_louvain: bool,
+pub struct GpuKMeans {
+    /// GPU k-means parameters; `None` takes the ann-search-rs defaults
+    pub params: Option<KMeansGpuParams>,
+    /// CubeCL runtime device
+    pub device: Device,
 }
 
-impl FastLouvainParamsGpu {
-    /// Generate a version of [FastLouvainParamsGpu] with sensible base
-    /// parameters. Matches the CPU defaults where the fields overlap.
+impl GpuKMeans {
+    /// Generate a new GPU k-means coarsener.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - GPU k-means parameters, `None` for the defaults
+    /// * `device` - CubeCL runtime device
     ///
     /// ### Returns
     ///
-    /// Self.
-    pub fn new() -> Self {
-        Self {
-            n_centroids: 1000,
-            kmeans_params: None,
-            knn_params: KnnParams::default(),
-            same_weight: false,
-            pruning: None,
-            snn_similarity: "jaccard".to_string(),
-            cell_mediated: false,
-            n_anchors: 5,
-            louvain_iters: 10,
-            multi_level_louvain: true,
+    /// Initialised self
+    pub fn new(params: Option<KMeansGpuParams>, device: Device) -> Self {
+        Self { params, device }
+    }
+}
+
+impl Coarsener for GpuKMeans {
+    type Error = ScGpuErrors;
+
+    /// k-means on the device. Manhattan is rejected by the driver; an
+    /// unparseable metric falls back to squared Euclidean there.
+    fn coarsen(
+        &self,
+        data: MatRef<f32>,
+        n_centroids: usize,
+        dist: &str,
+        seed: usize,
+        verbose: usize,
+    ) -> Result<(Mat<f32>, Vec<usize>), ScGpuErrors> {
+        Ok(k_means_clusters_gpu::<f32>(
+            data,
+            dist,
+            n_centroids,
+            self.params,
+            seed,
+            self.device.clone(),
+            parse_verbosity_level(verbose).detailed_verbosity(),
+        )?)
+    }
+
+    /// Exhaustive GPU kNN of the cells against the centroids.
+    fn top_m(
+        &self,
+        data: MatRef<f32>,
+        centroids: MatRef<f32>,
+        m: usize,
+        dist: &str,
+    ) -> Result<Vec<u32>, ScGpuErrors> {
+        let index = build_exhaustive_index_gpu(centroids, dist, self.device.clone())?;
+        let (idx, _) = query_exhaustive_index_gpu(data, &index, m, false, false)?;
+        let mut out = Vec::with_capacity(idx.len() * m);
+        for row in idx {
+            out.extend(row.into_iter().map(|c| c as u32));
         }
+        Ok(out)
     }
-
-    /// Extract the graph-construction settings for [`build_centroid_graph`].
-    ///
-    /// ### Returns
-    ///
-    /// The [CentroidGraphParams].
-    pub fn graph_params(&self) -> CentroidGraphParams {
-        CentroidGraphParams {
-            knn_params: self.knn_params.clone(),
-            same_weight: self.same_weight,
-            pruning: self.pruning,
-            snn_similarity: self.snn_similarity.clone(),
-            cell_mediated: self.cell_mediated,
-            n_anchors: self.n_anchors,
-        }
-    }
-}
-
-/// Default implementation for [FastLouvainParamsGpu]
-impl Default for FastLouvainParamsGpu {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/////////////
-// Stage 1 //
-/////////////
-
-/// GPU k-means coarsening of the data.
-///
-/// The GPU sibling of
-/// [bixverse_sc::sc_analysis::fast_clusters::fast_cluster_kmeans]. The
-/// requested centroid count is clamped to `n_samples - 1` and the distance
-/// metric comes from `params.knn_params.ann_dist`, so the coarsening and the
-/// centroid kNN agree on the geometry. Manhattan is rejected by the k-means
-/// driver; an unparseable metric string falls back to squared Euclidean there.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix.
-/// * `params` - Pipeline parameters.
-/// * `seed` - Seed for reproducibility.
-/// * `device` - CubeCL runtime device.
-/// * `verbose` - `0` silent, `1` normal, `2` detailed.
-///
-/// ### Returns
-///
-/// `(centroids of shape n_centroids x n_features, per-sample centroid index)`.
-///
-/// ### Errors
-///
-/// * Propagates the k-means dispatch, allocation and read-back errors.
-pub fn fast_cluster_kmeans_gpu(
-    data: MatRef<f32>,
-    params: &FastLouvainParamsGpu,
-    seed: usize,
-    device: Device,
-    verbose: usize,
-) -> Result<(faer::Mat<f32>, Vec<usize>), ScGpuErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-    let n_centroids = params.n_centroids.min(data.nrows() - 1);
-
-    Ok(k_means_clusters_gpu::<f32>(
-        data,
-        &params.knn_params.ann_dist,
-        n_centroids,
-        params.kmeans_params,
-        seed,
-        device,
-        verbosity.detailed_verbosity(),
-    )?)
-}
-
-//////////
-// Main //
-//////////
-
-/// Fast Louvain clustering on large data via GPU k-means coarsening.
-///
-/// Same pipeline as
-/// [bixverse_sc::sc_analysis::fast_clusters::fast_louvain_clusters], but
-/// stage one runs on the device. There is no `km_type` parameter: the GPU
-/// k-means has no mini-batch path.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
-///   alongside the Louvain memberships.
-/// * `seed` - Seed for reproducibility.
-/// * `device` - CubeCL runtime device.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Returns
-///
-/// The [FastLouvainResults], `Single` variant.
-///
-/// ### Errors
-///
-/// * Propagates the k-means, kNN and Louvain errors.
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_gpu(
-    data: MatRef<f32>,
-    resolutions: &[f32],
-    params: &FastLouvainParamsGpu,
-    run_snn: bool,
-    return_k_mean: bool,
-    seed: usize,
-    device: Device,
-    verbose: usize,
-) -> Result<FastLouvainResults, ScGpuErrors> {
-    let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
-
-    let graph = build_centroid_graph(
-        data,
-        centroids.as_ref(),
-        &params.graph_params(),
-        run_snn,
-        seed,
-        verbose,
-    )?;
-
-    let results = louvain_over_resolutions(
-        &graph,
-        &assignments,
-        resolutions,
-        params.louvain_iters,
-        params.multi_level_louvain,
-        seed,
-    )?;
-
-    Ok(FastLouvainResults::single(
-        results,
-        centroids,
-        assignments,
-        return_k_mean,
-    ))
-}
-
-/// Grid-search version of [`fast_louvain_clusters_gpu`] with stability metrics.
-///
-/// Builds the k-means -> centroid graph once, then runs Louvain across
-/// `n_louvain_seeds` seeds for each resolution.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
-///   alongside the grid results.
-/// * `seed` - Seed for k-means and kNN (the shared graph).
-/// * `n_louvain_seeds` - Number of seeds to vary Louvain over. Must be at least
-///   2 to produce ARI.
-/// * `device` - CubeCL runtime device.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Returns
-///
-/// The [FastLouvainResults], `GridRes` variant, with one
-/// [bixverse_sc::sc_analysis::fast_clusters::FastLouvainGridResult] per
-/// resolution in the same order.
-///
-/// ### Errors
-///
-/// * Propagates the k-means, kNN and Louvain errors, plus `InvalidArgument` for
-///   fewer than two Louvain seeds.
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_grid_gpu(
-    data: MatRef<f32>,
-    resolutions: &[f32],
-    params: &FastLouvainParamsGpu,
-    run_snn: bool,
-    return_k_mean: bool,
-    seed: usize,
-    n_louvain_seeds: usize,
-    device: Device,
-    verbose: usize,
-) -> Result<FastLouvainResults, ScGpuErrors> {
-    let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
-
-    let graph = build_centroid_graph(
-        data,
-        centroids.as_ref(),
-        &params.graph_params(),
-        run_snn,
-        seed,
-        verbose,
-    )?;
-
-    let results = louvain_grid_over_resolutions(
-        &graph,
-        &assignments,
-        resolutions,
-        params.louvain_iters,
-        params.multi_level_louvain,
-        seed,
-        n_louvain_seeds,
-    )?;
-
-    Ok(FastLouvainResults::grid(
-        results,
-        centroids,
-        assignments,
-        return_k_mean,
-    ))
 }
 
 ///////////
@@ -305,21 +94,10 @@ pub fn fast_louvain_clusters_grid_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bixverse_sc::sc_analysis::fast_clusters::*;
     use cubecl::wgpu::WgpuDevice;
-    use either::Either;
-    use faer::Mat;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::HashMap;
-
-    fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::default();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cubecl::Device::from(device.clone()).client();
-        }))
-        .ok()
-        .map(|_| device)
-    }
 
     fn make_two_blobs(n_per: usize, dim: usize, separation: f32, seed: u64) -> Mat<f32> {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -329,222 +107,57 @@ mod tests {
         })
     }
 
-    fn default_params() -> FastLouvainParamsGpu {
-        let mut knn = KnnParams::new();
-        knn.knn_method = "exhaustive".to_string();
-        knn.ann_dist = "euclidean".to_string();
-        knn.k = 5;
-        FastLouvainParamsGpu {
-            n_centroids: 30,
-            knn_params: knn,
-            ..FastLouvainParamsGpu::default()
-        }
+    fn device() -> Device {
+        WgpuDevice::default().into()
     }
 
-    fn majority(xs: &[usize]) -> usize {
-        let mut counts: HashMap<usize, usize> = HashMap::new();
-        for &x in xs {
-            *counts.entry(x).or_insert(0) += 1;
-        }
-        *counts.iter().max_by_key(|(_, c)| **c).unwrap().0
-    }
-
-    fn unwrap_single(r: FastLouvainResults) -> Vec<Vec<usize>> {
-        match r.get_assignments() {
-            Either::Left(v) => v,
-            Either::Right(_) => panic!("expected Single variant"),
-        }
-    }
-
-    fn unwrap_grid(r: FastLouvainResults) -> Vec<FastLouvainGridResult> {
-        match r.get_assignments() {
-            Either::Right(v) => v,
-            Either::Left(_) => panic!("expected GridRes variant"),
-        }
-    }
-
-    // Both blobs must land in distinct, near-pure communities.
-    fn assert_blobs_separated(labels: &[usize], n_per: usize) {
-        let (blob_a, blob_b) = labels.split_at(n_per);
-        let maj_a = majority(blob_a);
-        let maj_b = majority(blob_b);
-        assert_ne!(maj_a, maj_b);
-
-        let purity_a = blob_a.iter().filter(|&&l| l == maj_a).count() as f32 / n_per as f32;
-        let purity_b = blob_b.iter().filter(|&&l| l == maj_b).count() as f32 / n_per as f32;
-        assert!(purity_a > 0.9, "blob A purity {}", purity_a);
-        assert!(purity_b > 0.9, "blob B purity {}", purity_b);
-    }
-
-    /// Correctness floor: two blobs give two communities, each over 90% pure.
+    /// The GPU top-m returns the same centroid sets as the CPU scan.
     #[test]
-    fn test_gpu_separated_blobs() {
-        let Some(device) = try_device() else { return };
+    fn test_gpu_top_m_matches_cpu() {
+        let data = make_two_blobs(300, 8, 3.0, 1);
+        let centroids = Mat::from_fn(40, 8, |i, j| data[(i * 15, j)] + 0.01);
+        let gpu = GpuKMeans::new(None, device())
+            .top_m(data.as_ref(), centroids.as_ref(), 5, "euclidean")
+            .unwrap();
+        let cpu = top_m_cpu(data.as_ref(), centroids.as_ref(), 5, "euclidean");
+        let mut mismatch = 0;
+        for (g, c) in gpu.chunks_exact(5).zip(cpu.chunks_exact(5)) {
+            let (mut g, mut c) = (g.to_vec(), c.to_vec());
+            g.sort_unstable();
+            c.sort_unstable();
+            mismatch += (g != c) as usize;
+        }
+        // f32 ties at the m-th boundary may legitimately differ
+        assert!(mismatch <= 3, "{mismatch} rows differ");
+    }
+
+    /// The GPU coarsener separates two blobs on the kNN and the
+    /// cell-mediated centroid graphs.
+    #[test]
+    fn test_fast_clusters_gpu_separates_blobs() {
         let n_per = 200;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let labels = unwrap_single(
-            fast_louvain_clusters_gpu(
-                data.as_ref(),
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                0,
-                device.clone().into(),
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].len(), 2 * n_per);
-        assert_blobs_separated(&labels[0], n_per);
-    }
-
-    /// Same floor for the sNN path, which prunes edges by Jaccard first.
-    #[test]
-    fn test_gpu_separated_blobs_snn() {
-        let Some(device) = try_device() else { return };
-        let n_per = 200;
-        let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        // Jaccard pruning at k = 5 leaves the 15 centroids per blob too sparsely
-        // connected and Louvain splits a blob in two. k = 10 is what the sNN path
-        // wants at this centroid count.
-        let mut params = default_params();
-        params.knn_params.k = 10;
-
-        let labels = unwrap_single(
-            fast_louvain_clusters_gpu(
-                data.as_ref(),
-                &resolutions,
-                &params,
-                true,
-                false,
-                0,
-                device.clone().into(),
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_blobs_separated(&labels[0], n_per);
-    }
-
-    /// The same seed twice must give identical labels, k-means and Louvain.
-    #[test]
-    fn test_gpu_deterministic_with_same_seed() {
-        let Some(device) = try_device() else { return };
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let run = |device: WgpuDevice| {
-            unwrap_single(
-                fast_louvain_clusters_gpu(
-                    data.as_ref(),
-                    &resolutions,
-                    &default_params(),
-                    false,
-                    false,
-                    7,
-                    device.clone().into(),
-                    0,
-                )
-                .unwrap(),
-            )
-        };
-
-        assert_eq!(run(device.clone()), run(device));
-    }
-
-    /// With the flag set the result must also carry centroids and assignments.
-    #[test]
-    fn test_gpu_returns_kmeans_when_requested() {
-        let Some(device) = try_device() else { return };
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let params = default_params();
-
-        let res = fast_louvain_clusters_gpu(
-            data.as_ref(),
-            &[1.0],
-            &params,
-            false,
-            true,
-            0,
-            device.clone().into(),
-            0,
-        )
-        .unwrap();
-
-        let centroids = res.get_centroids().unwrap();
-        assert_eq!(centroids.nrows(), params.n_centroids);
-        assert_eq!(centroids.ncols(), data.ncols());
-        assert_eq!(res.get_k_mean_clusters().unwrap().len(), data.nrows());
-    }
-
-    /// One entry per resolution, in order, ARI in `[-1, 1]`, sane metrics.
-    #[test]
-    fn test_gpu_grid_shape_and_metrics() {
-        let Some(device) = try_device() else { return };
-        let n_per = 200;
-        let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![0.5, 1.0];
-
-        let results = unwrap_grid(
-            fast_louvain_clusters_grid_gpu(
-                data.as_ref(),
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                0,
-                4,
-                device.clone().into(),
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(results.len(), resolutions.len());
-        for (r, res) in results.iter().zip(resolutions.iter()) {
-            assert_eq!(r.resolution, *res);
-            assert_eq!(r.best_labels.len(), 2 * n_per);
-            assert!(
-                r.mean_ari >= -1.0 && r.mean_ari <= 1.0,
-                "mean_ari {}",
-                r.mean_ari
-            );
-            assert!(
-                r.mean_conductance >= 0.0,
-                "conductance {}",
-                r.mean_conductance
-            );
-            assert!(r.mean_n_communities >= 1.0);
-            assert_blobs_separated(&r.best_labels, n_per);
+        let coarsener = GpuKMeans::new(None, device());
+        for graph in [
+            CentroidGraph::Knn {
+                k: 5,
+                sym: bixverse_methods::graph::knn_graph::KnnSymmetrisation::Knn { binary: false },
+            },
+            CentroidGraph::CellMediated { n_anchors: 5 },
+        ] {
+            let params = FastClusterParams {
+                n_centroids: 30,
+                graph,
+                ..FastClusterParams::default()
+            };
+            let res = fast_clusters(data.as_ref(), &coarsener, &params, &[1.0], 1, 0, 0).unwrap();
+            let labels = &res.per_resolution[0].labels;
+            let n_labels = labels.iter().max().unwrap() + 1;
+            for l in 0..n_labels {
+                let in_a = labels[..n_per].iter().filter(|&&x| x == l).count();
+                let in_b = labels[n_per..].iter().filter(|&&x| x == l).count();
+                assert!(in_a == 0 || in_b == 0, "community {l} spans both blobs");
+            }
         }
-    }
-
-    /// Mean ARI needs two seeds to compare, so a single seed must error.
-    #[test]
-    fn test_gpu_grid_rejects_too_few_seeds() {
-        let Some(device) = try_device() else { return };
-        let data = make_two_blobs(100, 5, 5.0, 42);
-
-        let result = fast_louvain_clusters_grid_gpu(
-            data.as_ref(),
-            &[1.0],
-            &default_params(),
-            false,
-            false,
-            0,
-            1,
-            device.clone().into(),
-            0,
-        );
-
-        assert!(result.is_err());
     }
 }

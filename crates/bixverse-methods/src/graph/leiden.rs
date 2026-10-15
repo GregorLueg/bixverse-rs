@@ -1047,6 +1047,9 @@ fn refined_or_unrefined<G: LevelGraph>(
 
 /// Shared entry for Leiden and Louvain.
 ///
+/// [`leiden_sparse_graph`] and [`louvain_sparse_graph`] are thin wrappers;
+/// call this directly to cap the node evaluations or stop after one level.
+///
 /// ### Params
 ///
 /// * `graph` - Undirected [`SparseGraph`]
@@ -1057,7 +1060,7 @@ fn refined_or_unrefined<G: LevelGraph>(
 /// ### Returns
 ///
 /// Community per node, `0` the largest
-fn community_detection<T>(
+pub fn community_detection<T>(
     graph: &SparseGraph<T>,
     params: &LeidenParams,
     max_evals: usize,

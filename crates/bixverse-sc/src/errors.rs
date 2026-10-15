@@ -243,15 +243,6 @@ pub enum ScErrors {
         n_cells: usize,
     },
 
-    // -- FastCluster --
-    /// The Fast cluster results do not contain k-means cluster assignments
-    #[error("The fast cluster results were generated without any k means cluster assignments")]
-    FastClusterNoKmeansAssignments,
-
-    /// The Fast cluster results do not contain k-means centroids
-    #[error("The fast cluster results were generated without any centroids")]
-    FastClusterNoCentroids,
-
     // -- MELD --
     /// If the user provides a label which is out-of-range of the expected
     /// number of groups

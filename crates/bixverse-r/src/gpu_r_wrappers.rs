@@ -11,8 +11,6 @@ use crate::r_rust_interface::{r_list_count, r_list_count_allow_zero};
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::bbknn_gpu::BbknnParamsGpu;
 #[cfg(feature = "single-cell")]
-use bixverse_rs::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
-#[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::fast_mnn_gpu::FastMnnParamsGpu;
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
@@ -56,87 +54,6 @@ impl FromRList for KMeansGpuParams {
             .unwrap_or(false);
 
         Ok(Self::new(iters, init, fixed, quantise_to_f16))
-    }
-}
-
-//////////////////////////
-// FastLouvainParamsGpu //
-//////////////////////////
-
-#[cfg(feature = "single-cell")]
-impl FromRList for FastLouvainParamsGpu {
-    /// Generate [FastLouvainParamsGpu] from an R list.
-    ///
-    /// Should values not be found within the List, the parameters will default
-    /// to the values defined in `FastLouvainParamsGpu::default()`. Field names
-    /// mirror the CPU `FastLouvainParams::from_r_list`, with the k-means block
-    /// coming from the GPU keys (`k_means_iter`, `k_means_init`, `fixed`,
-    /// `quantise`) instead of the CPU ones.
-    ///
-    /// ### Params
-    ///
-    /// * `r_list` - The list with the fast Louvain parameters.
-    ///
-    /// ### Returns
-    ///
-    /// The [FastLouvainParamsGpu] with all parameters set.
-    fn from_r_list(r_list: List) -> Result<Self> {
-        let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let kmeans_params = Some(KMeansGpuParams::from_r_list(r_list.clone())?);
-
-        let defaults = Self::default();
-        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
-
-        let n_centroids = params
-            .get("n_centroids")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_centroids);
-        let same_weight = params
-            .get("same_weight")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.same_weight);
-        let pruning = params
-            .get("pruning")
-            .and_then(|v| v.as_real())
-            .map(|v| v as f32);
-        let snn_similarity = std::string::String::from(
-            params
-                .get("snn_similarity")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&defaults.snn_similarity),
-        );
-        let louvain_iters = params
-            .get("louvain_iters")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.louvain_iters);
-        let multi_level_louvain = params
-            .get("multi_level_louvain")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.multi_level_louvain);
-        let cell_mediated = params
-            .get("cell_mediated")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.cell_mediated);
-        let n_anchors = params
-            .get("n_anchors")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_anchors);
-
-        Ok(Self {
-            n_centroids,
-            kmeans_params,
-            knn_params,
-            same_weight,
-            pruning,
-            snn_similarity,
-            cell_mediated,
-            n_anchors,
-            louvain_iters,
-            multi_level_louvain,
-        })
     }
 }
 

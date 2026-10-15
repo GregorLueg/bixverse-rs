@@ -1,351 +1,39 @@
-//! A fast approach to generate clustering based on k-means clustering first on
-//! the data, followed by a graph over the centroids, (for now only) Louvain
-//! clustering on that graph with subsequent propagation of the module
-//! membership based on the original nearest centroid.
+//! Fast clustering on large data: k-means coarsening, a graph over the
+//! centroids, Leiden or Louvain on that graph, and every cell inherits its
+//! centroid's community (Lun's two-step clustering, as in bluster).
 //!
-//! The centroid graph is either a kNN/sNN graph on the centroid coordinates or
-//! the cell-mediated graph from Secuer, where centroids are linked by the cells
-//! that sit near both.
+//! The centroid graph is either a symmetrised kNN on the centroid coordinates
+//! or a cell-mediated graph, where centroids are linked by the cells that sit
+//! near both (`W = B^T D_x^-1 B`, the anchor graph of Wei et al.). Neither is
+//! a spectral method: only the centroids are clustered.
 //!
-//! The pipeline is split into three stages ([`fast_cluster_kmeans`],
-//! [`build_centroid_graph`] and [`louvain_over_resolutions`] /
-//! [`louvain_grid_over_resolutions`]) so that the GPU variant in
-//! `bixverse_sc_gpu::fast_clusters_gpu` can swap out stage one and reuse the
-//! rest untouched.
+//! Stage one is behind the [`Coarsener`] trait, so the GPU and MLX crates swap
+//! in their own k-means (and nearest-centroid search) and reuse the rest.
 
 use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::utils::k_means_utils::assign_all_parallel_top_m;
 use ann_search_rs::utils::matrix_to_flat;
-use either::Either;
 use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::fmt::Debug;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::utils_doublets::dispatch_knn;
+use crate::sc_processing::knn::generate_knn_with_dist;
 use bixverse_core::core::math::vector_helpers::{mean_nan, median};
 use bixverse_core::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_core::ml::clustering::k_means::*;
-use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::graph_metrics::conductance_undirected;
 use bixverse_methods::graph::graph_structures::*;
 use bixverse_methods::graph::knn_graph::*;
+use bixverse_methods::graph::leiden::{LeidenParams, community_detection};
 
-//////////////////
-// Fast Louvain //
-//////////////////
-
-///////////////////
-// Enums / types //
-///////////////////
-
-/// Enum that defines the results pending type of fast clustering
-pub enum FastLouvainResults {
-    /// Single version with only Louvain membership
-    Single {
-        /// Membership assignments across the resolutions
-        assignments: Vec<Vec<usize>>,
-        /// Optional k-means cluster assignment
-        clusters: Option<Vec<usize>>,
-        /// Optional k-means centroids
-        centroids: Option<Mat<f32>>,
-    },
-    /// Grid version across several seeds
-    GridRes {
-        /// [FastLouvainGridResult] per resolution
-        assignments: Vec<FastLouvainGridResult>,
-        /// Optional k-means cluster assignment
-        clusters: Option<Vec<usize>>,
-        /// Optional k-means centroids
-        centroids: Option<Mat<f32>>,
-    },
-}
-
-impl FastLouvainResults {
-    /// Build the [`FastLouvainResults::Single`] variant.
-    ///
-    /// ### Params
-    ///
-    /// * `assignments` - Per-resolution membership vectors
-    /// * `centroids` - The k-means centroids
-    /// * `clusters` - The k-means assignment per sample
-    /// * `keep_kmeans` - If `false`, `centroids` and `clusters` are dropped
-    ///
-    /// ### Returns
-    ///
-    /// Self.
-    pub fn single(
-        assignments: Vec<Vec<usize>>,
-        centroids: Mat<f32>,
-        clusters: Vec<usize>,
-        keep_kmeans: bool,
-    ) -> Self {
-        let (centroids, clusters) = if keep_kmeans {
-            (Some(centroids), Some(clusters))
-        } else {
-            (None, None)
-        };
-        Self::Single {
-            assignments,
-            clusters,
-            centroids,
-        }
-    }
-
-    /// Build the [`FastLouvainResults::GridRes`] variant.
-    ///
-    /// ### Params
-    ///
-    /// * `assignments` - Per-resolution [FastLouvainGridResult]
-    /// * `centroids` - The k-means centroids
-    /// * `clusters` - The k-means assignment per sample
-    /// * `keep_kmeans` - If `false`, `centroids` and `clusters` are dropped
-    ///
-    /// ### Returns
-    ///
-    /// Self.
-    pub fn grid(
-        assignments: Vec<FastLouvainGridResult>,
-        centroids: Mat<f32>,
-        clusters: Vec<usize>,
-        keep_kmeans: bool,
-    ) -> Self {
-        let (centroids, clusters) = if keep_kmeans {
-            (Some(centroids), Some(clusters))
-        } else {
-            (None, None)
-        };
-        Self::GridRes {
-            assignments,
-            clusters,
-            centroids,
-        }
-    }
-
-    /// Helper to get the assignments
-    ///
-    /// ### Returns
-    ///
-    /// Union type of either `Vec<Vec<usize>>` or a vector of
-    /// [FastLouvainGridResult].
-    #[inline]
-    pub fn get_assignments(&self) -> Either<Vec<Vec<usize>>, Vec<FastLouvainGridResult>> {
-        match self {
-            Self::Single { assignments, .. } => Either::Left(assignments.clone()),
-            Self::GridRes { assignments, .. } => Either::Right(assignments.clone()),
-        }
-    }
-
-    /// Helper to return the centroids
-    ///
-    /// ### Returns
-    ///
-    /// Returns the centroid matrix if found; Error otherwise
-    #[inline]
-    pub fn get_centroids(&self) -> Result<Mat<f32>, ScErrors> {
-        let centroids = match self {
-            Self::Single { centroids, .. } | Self::GridRes { centroids, .. } => centroids,
-        };
-        centroids.to_owned().ok_or(ScErrors::FastClusterNoCentroids)
-    }
-
-    /// Helper to return the k-means cluster assignments
-    ///
-    /// ### Returns
-    ///
-    /// Returns the k-means cluster assignment; Error otherwise
-    #[inline]
-    pub fn get_k_mean_clusters(&self) -> Result<Vec<usize>, ScErrors> {
-        let clusters = match self {
-            Self::Single { clusters, .. } | Self::GridRes { clusters, .. } => clusters,
-        };
-        clusters
-            .clone()
-            .ok_or(ScErrors::FastClusterNoKmeansAssignments)
-    }
-}
-
-////////////
-// Params //
-////////////
-
-/// Graph-construction settings shared by the CPU and GPU fast-clustering paths.
-///
-/// Both `FastLouvainParams` and its GPU sibling produce one of these via their
-/// `graph_params` method, so [`build_centroid_graph`] does not need to know
-/// which k-means backend produced the centroids.
-#[derive(Clone, Debug)]
-pub struct CentroidGraphParams {
-    /// [KnnParams] applied to the centroids. `ann_dist` also drives the k-means
-    /// distance and `k` is the number of neighbours per centroid.
-    pub knn_params: KnnParams,
-    /// Shall the weight of the kNN be set to 1.0 across or edges that have
-    /// reverse edges be double counted.
-    pub same_weight: bool,
-    /// Optional pruning threshold. If not provided, will default to
-    /// `1 / ceil(0.8 * k)`.
-    pub pruning: Option<f32>,
-    /// String for the type of sNN similarity to use. One of `"jaccard"` or
-    /// `"rank"`.
-    pub snn_similarity: String,
-    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
-    /// `true`, `run_snn` and the sNN settings are ignored.
-    pub cell_mediated: bool,
-    /// Number of nearest centroids each cell links to in the cell-mediated
-    /// graph.
-    pub n_anchors: usize,
-}
-
-/// Parameters for fast Louvain clustering via k-means + kNN.
-#[derive(Clone, Debug)]
-pub struct FastLouvainParams<T> {
-    // -- k means --
-    /// Number of k-means centroids.
-    pub n_centroids: usize,
-    /// Batch size for mini-batch k-means
-    pub batch_size: usize,
-    /// Drift threshold for mini batch k-means
-    pub drift_threshold: T,
-    /// Learning rate exponent for mini batch k-means:
-    /// `eta = m / count[c]^lr_alpha`
-    pub lr_alpha: T,
-    /// k-means parameters, see [KMeansParamsWrappers]
-    pub kmeans_params: KMeansParamsWrappers,
-
-    // -- knn --
-    /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
-    /// the k-means distance and `k` is the number of neighbours per centroid.
-    pub knn_params: KnnParams,
-    /// Shall the weight of the kNN be set to 1.0 across or edges that have
-    /// reverse edges be double counted.
-    pub same_weight: bool,
-
-    // -- snn ---
-    /// Optional pruning threshold. If not provided, will default to
-    /// `1 / ceil(0.8 * k)`.
-    /// neighbours.
-    pub pruning: Option<T>,
-    /// String for the type of sNN similarity to use. One of `"jaccard"` or
-    /// `"rank"`.
-    pub snn_similarity: String,
-
-    // -- cell-mediated graph --
-    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
-    /// `true`, `run_snn` and the sNN settings are ignored.
-    pub cell_mediated: bool,
-    /// Number of nearest centroids each cell links to in the cell-mediated
-    /// graph.
-    pub n_anchors: usize,
-
-    // -- louvain --
-    /// Number of Louvain iterations.
-    pub louvain_iters: usize,
-    /// Shall multi-level Louvain be applied
-    pub multi_level_louvain: bool,
-}
-
-impl<T> FastLouvainParams<T>
-where
-    T: BixverseFloat,
-{
-    /// Generate a version of FastLouvainParams with sensible base parameters
-    ///
-    /// ### Returns
-    ///
-    /// Self.
-    pub fn new() -> Self {
-        Self {
-            // kmeans
-            n_centroids: 1000,
-            batch_size: 4096,
-            drift_threshold: T::from_f64(1e-4).unwrap(),
-            lr_alpha: T::from_f64(1.0).unwrap(),
-            kmeans_params: KMeansParamsWrappers::default(),
-            // snn
-            pruning: None,
-            snn_similarity: "jaccard".to_string(),
-            // knn - louvain
-            knn_params: KnnParams::default(),
-            same_weight: false,
-            // cell-mediated graph
-            cell_mediated: false,
-            n_anchors: 5,
-            // louvain
-            louvain_iters: 10,
-            multi_level_louvain: true,
-        }
-    }
-
-    /// Returns the stored k-means parameters
-    ///
-    /// Helper function to extract the parameters
-    ///
-    /// ### Returns
-    ///
-    /// The [KMeansParamsWrappers]
-    pub fn get_kmeans_params(&self) -> KMeansParamsWrappers {
-        self.kmeans_params
-    }
-}
-
-impl FastLouvainParams<f32> {
-    /// Extract the graph-construction settings for [`build_centroid_graph`].
-    ///
-    /// ### Returns
-    ///
-    /// The [CentroidGraphParams].
-    pub fn graph_params(&self) -> CentroidGraphParams {
-        CentroidGraphParams {
-            knn_params: self.knn_params.clone(),
-            same_weight: self.same_weight,
-            pruning: self.pruning,
-            snn_similarity: self.snn_similarity.clone(),
-            cell_mediated: self.cell_mediated,
-            n_anchors: self.n_anchors,
-        }
-    }
-}
-
-/// Default implementation for KnnParams
-impl<T> Default for FastLouvainParams<T>
-where
-    T: BixverseFloat,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/////////////
-// Results //
-/////////////
-
-/// Per-resolution stability and quality metrics from the grid search.
-#[derive(Clone, Debug)]
-pub struct FastLouvainGridResult {
-    /// Resolution this entry corresponds to.
-    pub resolution: f32,
-    /// Mean pairwise ARI across all seed pairs.
-    pub mean_ari: f32,
-    /// Median pairwise ARI across all seed pairs.
-    pub median_ari: f32,
-    /// Mean conductance across communities, averaged across seeds.
-    /// NaN community values are skipped per seed.
-    pub mean_conductance: f32,
-    /// Median conductance across communities, averaged across seeds.
-    pub median_conductance: f32,
-    /// Number of communities, averaged across seeds.
-    pub mean_n_communities: f32,
-    /// Labels from the seed with the lowest mean conductance.
-    pub best_labels: Vec<usize>,
-}
-
-/////////////
-// Helpers //
-/////////////
+///////////
+// Const //
+///////////
 
 /// Cells per accumulation block in [`cell_mediated_graph`]. Blocks are summed
 /// in a fixed order so the edge weights do not depend on the thread count;
@@ -353,50 +41,89 @@ pub struct FastLouvainGridResult {
 /// at atlas scale.
 const CELL_MEDIATED_BLOCK: usize = 16_384;
 
-/// Build the centroid graph through the cells.
+////////////////
+// Coarsening //
+////////////////
+
+/// Stage one of fast clustering: k-means and the nearest-centroid search.
 ///
-/// Every cell links to its `n_anchors` nearest centroids with a locally scaled
-/// Gaussian weight `w_ij = exp(-d_ij^2 / (2 sigma_i^2))`, `sigma_i` being the
-/// mean distance to those centroids. Centroids are then joined by
-/// `W = B^T D_x^-1 B`, i.e. by the cells that sit near both, so two centroids
-/// that are close in space but have no cells between them stay apart. The
-/// diagonal of `W` is dropped, so no self-loops reach the community detection.
+/// Implemented by [`CpuKMeans`] here and by the GPU and MLX k-means in their
+/// own crates. The error type follows the backend seam pattern, so a backend
+/// can surface its own failures without a variant in [`ScErrors`].
+pub trait Coarsener {
+    /// Error returned by the backend
+    type Error: From<ScErrors> + From<CoreErrors> + Debug;
+
+    /// k-means on the cells.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - n_cells x n_features matrix
+    /// * `n_centroids` - Number of centroids, already clamped below `n_cells`
+    /// * `dist` - `"euclidean"` or `"cosine"`
+    /// * `seed` - Seed for reproducibility
+    /// * `verbose` - `0` silent, `1` normal, `2` detailed
+    ///
+    /// ### Returns
+    ///
+    /// `(centroids, n_centroids x n_features; centroid index per cell)`
+    fn coarsen(
+        &self,
+        data: MatRef<f32>,
+        n_centroids: usize,
+        dist: &str,
+        seed: usize,
+        verbose: usize,
+    ) -> Result<(Mat<f32>, Vec<usize>), Self::Error>;
+
+    /// The `m` nearest centroids of every cell, for [`CentroidGraph::CellMediated`].
+    ///
+    /// The default is the exact CPU scan.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - n_cells x n_features matrix
+    /// * `centroids` - n_centroids x n_features matrix
+    /// * `m` - Centroids per cell, at most `n_centroids`
+    /// * `dist` - `"euclidean"` or `"cosine"`
+    ///
+    /// ### Returns
+    ///
+    /// `n_cells * m` centroid ids, row-major, ascending by distance
+    fn top_m(
+        &self,
+        data: MatRef<f32>,
+        centroids: MatRef<f32>,
+        m: usize,
+        dist: &str,
+    ) -> Result<Vec<u32>, Self::Error> {
+        Ok(top_m_cpu(data, centroids, m, dist))
+    }
+}
+
+/// Exact CPU top-m nearest centroids per cell.
 ///
 /// ### Params
 ///
-/// * `data` - n_samples x n_features matrix the centroids were fitted on.
-/// * `centroids` - n_centroids x n_features matrix.
-/// * `n_anchors` - Centroids per cell; clamped to `1..=n_centroids`.
-/// * `ann_dist` - Distance metric, `"euclidean"` or `"cosine"`.
+/// * `data` - n_cells x n_features matrix
+/// * `centroids` - n_centroids x n_features matrix
+/// * `m` - Centroids per cell, at most `n_centroids`
+/// * `dist` - `"euclidean"` or `"cosine"`
 ///
 /// ### Returns
 ///
-/// The undirected centroid graph.
-///
-/// ### References
-///
-/// Wei et al., PLoS Comput Biol, 2022
-fn cell_mediated_graph(
-    data: MatRef<f32>,
-    centroids: MatRef<f32>,
-    n_anchors: usize,
-    ann_dist: &str,
-) -> SparseGraph<f32> {
+/// `n_cells * m` centroid ids, row-major, ascending by distance
+pub fn top_m_cpu(data: MatRef<f32>, centroids: MatRef<f32>, m: usize, dist: &str) -> Vec<u32> {
     let (data_flat, n, dim) = matrix_to_flat(data);
     let (cent_flat, k, _) = matrix_to_flat(centroids);
-    let dist = parse_ann_dist(ann_dist).unwrap_or_default();
-    let (data_norms, cent_norms) = if dist == Dist::Cosine {
-        (
-            compute_data_norms(&data_flat, dim, n, &dist),
-            recompute_centroid_norms(&cent_flat, dim, k, &dist),
-        )
+    let metric = parse_ann_dist(dist).unwrap_or_default();
+    let data_norms = compute_data_norms(&data_flat, dim, n, &metric);
+    let cent_norms = if metric == Dist::Cosine {
+        recompute_centroid_norms(&cent_flat, dim, k, &metric)
     } else {
-        (Vec::new(), Vec::new())
+        Vec::new()
     };
-
-    // same clamp as assign_all_parallel_top_m, which sets the row stride
-    let m = n_anchors.min(k).max(1);
-    let anchors = assign_all_parallel_top_m(
+    assign_all_parallel_top_m(
         &data_flat,
         &data_norms,
         dim,
@@ -405,8 +132,248 @@ fn cell_mediated_graph(
         &cent_norms,
         k,
         m,
-        &dist,
-    );
+        &metric,
+    )
+}
+
+/// Which CPU k-means to run.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum CpuKMeansKind {
+    /// Lloyd's / Hamerly k-means on all cells
+    #[default]
+    Standard,
+    /// Mini-batch k-means
+    MiniBatch {
+        /// Cells per batch
+        batch_size: usize,
+        /// Stop once the centroids move less than this
+        drift_threshold: f32,
+        /// Learning rate exponent: `eta = m / count[c]^lr_alpha`
+        lr_alpha: f32,
+    },
+}
+
+/// CPU k-means coarsener.
+#[derive(Clone, Debug, Default)]
+pub struct CpuKMeans {
+    /// Standard or mini-batch
+    pub kind: CpuKMeansKind,
+    /// k-means parameters; for mini-batch only `iters` is read
+    pub params: KMeansParamsWrappers,
+}
+
+impl CpuKMeans {
+    /// Generate a new CPU k-means coarsener.
+    ///
+    /// ### Params
+    ///
+    /// * `kind` - Standard or mini-batch
+    /// * `params` - k-means parameters
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    pub fn new(kind: CpuKMeansKind, params: KMeansParamsWrappers) -> Self {
+        Self { kind, params }
+    }
+}
+
+impl Coarsener for CpuKMeans {
+    type Error = ScErrors;
+
+    fn coarsen(
+        &self,
+        data: MatRef<f32>,
+        n_centroids: usize,
+        dist: &str,
+        seed: usize,
+        verbose: usize,
+    ) -> Result<(Mat<f32>, Vec<usize>), ScErrors> {
+        let detailed = parse_verbosity_level(verbose).detailed_verbosity();
+        Ok(match self.kind {
+            CpuKMeansKind::Standard => {
+                k_means_clusters(data, dist, n_centroids, Some(self.params), seed, detailed)?
+            }
+            CpuKMeansKind::MiniBatch {
+                batch_size,
+                drift_threshold,
+                lr_alpha,
+            } => train_centroids_minibatch(
+                data,
+                dist,
+                n_centroids,
+                self.params.get_data().iters,
+                batch_size,
+                drift_threshold,
+                lr_alpha,
+                seed,
+                detailed,
+            ),
+        })
+    }
+}
+
+////////////
+// Params //
+////////////
+
+/// The graph built over the centroids.
+#[derive(Clone, Copy, Debug)]
+pub enum CentroidGraph {
+    /// Exact kNN on the centroid coordinates, then symmetrised
+    Knn {
+        /// Neighbours per centroid
+        k: usize,
+        /// How the kNN becomes undirected
+        sym: KnnSymmetrisation,
+    },
+    /// Centroids linked through the cells near both, see
+    /// [`cell_mediated_graph`]
+    CellMediated {
+        /// Nearest centroids per cell
+        n_anchors: usize,
+    },
+}
+
+/// Default: 15-NN on the centroids with the default [`KnnSymmetrisation`]
+impl Default for CentroidGraph {
+    fn default() -> Self {
+        CentroidGraph::Knn {
+            k: 15,
+            sym: KnnSymmetrisation::default(),
+        }
+    }
+}
+
+/// Parameters for fast clustering. The coarsening backend is passed
+/// separately, see [`Coarsener`].
+#[derive(Clone, Debug)]
+pub struct FastClusterParams {
+    /// Number of k-means centroids, clamped below the number of cells
+    pub n_centroids: usize,
+    /// Distance for the k-means and the centroid graph: `"euclidean"` or
+    /// `"cosine"`
+    pub dist: String,
+    /// The centroid graph
+    pub graph: CentroidGraph,
+    /// Community detection. `refine = false` gives Louvain. `resolution` and
+    /// `seed` are set per run by [`fast_clusters`].
+    pub community: LeidenParams,
+    /// Full multi-level run; `false` stops after the first local-moving phase
+    pub multi_level: bool,
+    /// Cap on node evaluations per local-moving phase, in units of the level's
+    /// node count
+    pub max_evals: usize,
+}
+
+/// Defaults: 1000 centroids, Euclidean, the default [`CentroidGraph`] and
+/// multi-level Louvain with one iteration
+impl Default for FastClusterParams {
+    fn default() -> Self {
+        Self {
+            n_centroids: 1000,
+            dist: "euclidean".to_string(),
+            graph: CentroidGraph::default(),
+            community: LeidenParams {
+                n_iterations: 1,
+                refine: false,
+                ..LeidenParams::default()
+            },
+            multi_level: true,
+            max_evals: 10,
+        }
+    }
+}
+
+/////////////
+// Results //
+/////////////
+
+/// Stability and quality of one resolution across community-detection seeds.
+#[derive(Clone, Debug)]
+pub struct GridStats {
+    /// Mean pairwise ARI across all seed pairs
+    pub mean_ari: f32,
+    /// Median pairwise ARI across all seed pairs
+    pub median_ari: f32,
+    /// Mean conductance across communities, averaged across seeds. NaN
+    /// community values are skipped per seed.
+    pub mean_conductance: f32,
+    /// Median conductance across communities, averaged across seeds
+    pub median_conductance: f32,
+    /// Number of communities, averaged across seeds
+    pub mean_n_communities: f32,
+}
+
+/// Fast clustering output for one resolution.
+#[derive(Clone, Debug)]
+pub struct ResolutionResult {
+    /// The resolution
+    pub resolution: f32,
+    /// Community per cell. With several seeds, those of the seed with the
+    /// lowest mean conductance.
+    pub labels: Vec<usize>,
+    /// `Some` when more than one seed was run
+    pub stability: Option<GridStats>,
+}
+
+/// Fast clustering output.
+#[derive(Clone, Debug)]
+pub struct FastClusterResult {
+    /// One entry per resolution, in the order given
+    pub per_resolution: Vec<ResolutionResult>,
+    /// The k-means centroids, n_centroids x n_features
+    pub centroids: Mat<f32>,
+    /// Centroid index per cell
+    pub assignments: Vec<usize>,
+}
+
+////////////////////
+// Centroid graph //
+////////////////////
+
+/// Build the centroid graph through the cells.
+///
+/// Every cell links to its `m` nearest centroids with a locally scaled
+/// Gaussian weight `w_ij = exp(-d_ij^2 / (2 sigma_i^2))`, `sigma_i` being the
+/// mean distance to those centroids. Centroids are then joined by
+/// `W = B^T D_x^-1 B`, i.e. by the cells that sit near both, so two centroids
+/// that are close in space but have no cells between them stay apart. The
+/// diagonal of `W` is dropped, so no self-loops reach the community detection.
+///
+/// ### Params
+///
+/// * `data` - n_cells x n_features matrix the centroids were fitted on
+/// * `centroids` - n_centroids x n_features matrix
+/// * `anchors` - `n_cells * m` nearest centroid ids, row-major
+/// * `m` - Anchors per cell
+/// * `dist` - `"euclidean"` or `"cosine"`
+///
+/// ### Returns
+///
+/// The undirected centroid graph
+///
+/// ### References
+///
+/// Wei et al., PLoS Comput Biol, 2022
+fn cell_mediated_graph(
+    data: MatRef<f32>,
+    centroids: MatRef<f32>,
+    anchors: &[u32],
+    m: usize,
+    dist: &str,
+) -> SparseGraph<f32> {
+    let (data_flat, n, dim) = matrix_to_flat(data);
+    let (cent_flat, k, _) = matrix_to_flat(centroids);
+    let metric = parse_ann_dist(dist).unwrap_or_default();
+    let (data_norms, cent_norms) = if metric == Dist::Cosine {
+        (
+            compute_data_norms(&data_flat, dim, n, &metric),
+            recompute_centroid_norms(&cent_flat, dim, k, &metric),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let blocks: Vec<FxHashMap<(u32, u32), f32>> = anchors
         .par_chunks(m * CELL_MEDIATED_BLOCK)
@@ -420,7 +387,7 @@ fn cell_mediated_graph(
                 for (wj, &c) in w.iter_mut().zip(row) {
                     let c = c as usize;
                     let cent = &cent_flat[c * dim..(c + 1) * dim];
-                    *wj = match dist {
+                    *wj = match metric {
                         Dist::Cosine => {
                             let denom = data_norms[i] * cent_norms[c];
                             if denom > 0.0 {
@@ -473,424 +440,255 @@ fn cell_mediated_graph(
     edge_pairs_to_sparse_graph(&edges, &weights, k)
 }
 
-////////////
-// Stages //
-////////////
-
-/// Stage one: k-means coarsening of the data on the CPU.
+/// Exact kNN graph over the centroids.
 ///
-/// The requested centroid count is clamped to `n_samples - 1`. The distance
-/// metric is taken from `params.knn_params.ann_dist`, so the coarsening and the
-/// centroid kNN always agree on the geometry.
+/// The centroids are few, so the search is always exhaustive.
 ///
 /// ### Params
 ///
-/// * `data` - n_samples x n_features matrix.
-/// * `km_type` - Which type of k-means clustering to use. `"standard"` or
-///   `"minibatch"`; anything unparseable falls back to `"standard"`.
-/// * `params` - Pipeline parameters.
-/// * `seed` - Seed for reproducibility.
-/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+/// * `centroids` - n_centroids x n_features matrix
+/// * `k` - Neighbours per centroid, clamped below `n_centroids`
+/// * `sym` - How the kNN becomes undirected
+/// * `dist` - `"euclidean"` or `"cosine"`
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
 ///
 /// ### Returns
 ///
-/// `(centroids of shape n_centroids x n_features, per-sample centroid index)`.
-pub fn fast_cluster_kmeans(
-    data: MatRef<f32>,
-    km_type: &str,
-    params: &FastLouvainParams<f32>,
-    seed: usize,
-    verbose: usize,
-) -> Result<(Mat<f32>, Vec<usize>), ScErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-    let km_type = parse_k_means(km_type).unwrap_or_default();
-    let n_centroids = params.n_centroids.min(data.nrows() - 1);
-
-    let res = match km_type {
-        KMeansType::StandardKMeans => k_means_clusters(
-            data,
-            &params.knn_params.ann_dist,
-            n_centroids,
-            Some(params.get_kmeans_params()),
-            seed,
-            verbosity.detailed_verbosity(),
-        )?,
-        KMeansType::MiniBatchKMeans => train_centroids_minibatch(
-            data,
-            &params.knn_params.ann_dist,
-            n_centroids,
-            params.kmeans_params.get_data().iters,
-            params.batch_size,
-            params.drift_threshold,
-            params.lr_alpha,
-            seed,
-            verbosity.detailed_verbosity(),
-        ),
-    };
-
-    Ok(res)
-}
-
-/// Stage two: build the graph over the k-means centroids.
-///
-/// With `params.cell_mediated`, centroids are linked by the cells that sit near
-/// both (see [`cell_mediated_graph`]). Otherwise runs a kNN search on the
-/// centroids and turns it into a [SparseGraph], either directly or via a
-/// shared-nearest-neighbour pass. The sNN pruning threshold defaults to
-/// `1 / ceil(0.8 * k)` when `params.pruning` is `None`.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix the centroids were fitted on. Only
-///   read for the cell-mediated graph.
-/// * `centroids` - n_centroids x n_features matrix from stage one.
-/// * `params` - Graph-construction settings.
-/// * `run_snn` - Shall a shared nearest neighbour graph be generated. Ignored
-///   for the cell-mediated graph.
-/// * `seed` - Seed for reproducibility of the kNN search.
-/// * `verbose` - `0` silent, `1` normal, `2` detailed.
-///
-/// ### Returns
-///
-/// The undirected centroid graph.
-pub fn build_centroid_graph(
-    data: MatRef<f32>,
+/// The undirected centroid graph
+fn centroid_knn_graph(
     centroids: MatRef<f32>,
-    params: &CentroidGraphParams,
-    run_snn: bool,
-    seed: usize,
+    k: usize,
+    sym: &KnnSymmetrisation,
+    dist: &str,
     verbose: usize,
 ) -> Result<SparseGraph<f32>, ScErrors> {
-    let verbosity = parse_verbosity_level(verbose);
+    let n = centroids.nrows();
+    let knn_params = KnnParams {
+        knn_method: "exhaustive".to_string(),
+        ann_dist: dist.to_string(),
+        k: k.min(n.saturating_sub(1)),
+        ..KnnParams::default()
+    };
+    let needs_dist = matches!(sym, KnnSymmetrisation::Umap { .. });
+    let (knn, knn_dist) =
+        generate_knn_with_dist(centroids, &knn_params, needs_dist, false, 0, false)?;
+    let (idx, k) = flatten_knn(&knn);
+    let flat_dist: Option<Vec<f32>> = knn_dist.map(|d| d.into_iter().flatten().collect());
+    Ok(build_knn_graph(
+        &idx,
+        flat_dist.as_deref(),
+        k,
+        n,
+        sym,
+        verbose,
+    )?)
+}
 
-    if params.cell_mediated {
-        let start = Instant::now();
-        let graph = cell_mediated_graph(
-            data,
-            centroids,
-            params.n_anchors,
-            &params.knn_params.ann_dist,
-        );
-        if verbosity.normal_verbosity() {
-            println!(
-                " Built the cell-mediated centroid graph in {:.2?}...",
-                start.elapsed()
-            );
+/////////////////////////
+// Community detection //
+/////////////////////////
+
+/// Community detection on the centroid graph at several seeds, with the
+/// stability and quality of the partitions.
+///
+/// ARI and conductance are taken on the centroid partitions, which is cheaper
+/// than the per-cell ones and ranks the resolutions identically. The winning
+/// partition is the one with the lowest mean conductance.
+///
+/// ### Params
+///
+/// * `graph` - The centroid graph
+/// * `params` - Community parameters with the resolution already set
+/// * `max_evals` - Node-evaluation cap, see [`FastClusterParams`]
+/// * `multi_level` - Full multi-level run or one local-moving phase
+/// * `seeds` - One run per seed, at least two
+///
+/// ### Returns
+///
+/// `(winning centroid partition, stats)`
+fn seed_grid(
+    graph: &SparseGraph<f32>,
+    params: &LeidenParams,
+    max_evals: usize,
+    multi_level: bool,
+    seeds: &[u64],
+) -> Result<(Vec<usize>, GridStats), ScErrors> {
+    let mut parts: Vec<Vec<usize>> = seeds
+        .iter()
+        .map(|&s| {
+            community_detection(
+                graph,
+                &LeidenParams { seed: s, ..*params },
+                max_evals,
+                multi_level,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+
+    let s = parts.len();
+    let mut aris: Vec<f64> = Vec::with_capacity(s * (s - 1) / 2);
+    for i in 0..s {
+        for j in (i + 1)..s {
+            aris.push(adjusted_rand_index(&parts[i], &parts[j]));
         }
-        return Ok(graph);
+    }
+    let mean_ari = aris.iter().sum::<f64>() / aris.len() as f64;
+    let median_ari = median(&aris).unwrap_or(f64::NAN);
+
+    let mut mean_cond = Vec::with_capacity(s);
+    let mut median_cond = Vec::with_capacity(s);
+    for p in &parts {
+        let finite: Vec<f32> = conductance_undirected(graph, p)?
+            .into_iter()
+            .filter(|x| x.is_finite())
+            .collect();
+        mean_cond.push(mean_nan(&finite));
+        median_cond.push(median(&finite).unwrap_or(f32::NAN));
     }
 
-    let knn = dispatch_knn(
-        centroids,
-        params.knn_params.k,
-        &params.knn_params,
-        seed,
-        verbosity.detailed_verbosity(),
-    )?;
+    let mean_n_communities = parts
+        .iter()
+        .map(|p| p.iter().max().copied().unwrap_or(0) + 1)
+        .sum::<usize>() as f32
+        / s as f32;
 
-    let (idx, k) = flatten_knn(&knn);
-    let sym = if run_snn {
-        KnnSymmetrisation::Snn {
-            similarity: parse_snn_similarity(&params.snn_similarity).unwrap_or_default(),
-            prune: params
-                .pruning
-                .map(|p| p as f64)
-                .unwrap_or(1.0 / (params.knn_params.k as f64 * 0.8).ceil()),
-            rescue: true,
+    // NaN counts as worst
+    let best = mean_cond
+        .iter()
+        .map(|&c| if c.is_finite() { c } else { f32::INFINITY })
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or(0, |(i, _)| i);
+
+    let stats = GridStats {
+        mean_ari: mean_ari as f32,
+        median_ari: median_ari as f32,
+        mean_conductance: mean_nan(&mean_cond),
+        median_conductance: mean_nan(&median_cond),
+        mean_n_communities,
+    };
+    Ok((parts.swap_remove(best), stats))
+}
+
+//////////
+// Main //
+//////////
+
+/// Fast clustering via k-means coarsening.
+///
+/// k-means through `coarsener`, a graph over the centroids, then Leiden or
+/// Louvain per resolution on that graph; every cell takes its centroid's
+/// community. With `n_seeds > 1` each resolution runs once per seed and
+/// reports [`GridStats`]; the seeds are drawn from `seed`.
+///
+/// ### Params
+///
+/// * `data` - n_cells x n_features matrix
+/// * `coarsener` - The stage-one backend
+/// * `params` - The [`FastClusterParams`]
+/// * `resolutions` - Resolutions to run
+/// * `n_seeds` - Community-detection seeds per resolution, at least 1
+/// * `seed` - Seed for the k-means, and for the community detection when
+///   `n_seeds == 1`
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The [`FastClusterResult`]
+///
+/// ### References
+///
+/// Lun, bluster (`clusterRows` with `TwoStepParam`), Bioconductor
+pub fn fast_clusters<C: Coarsener>(
+    data: MatRef<f32>,
+    coarsener: &C,
+    params: &FastClusterParams,
+    resolutions: &[f32],
+    n_seeds: usize,
+    seed: usize,
+    verbose: usize,
+) -> Result<FastClusterResult, C::Error> {
+    if n_seeds == 0 {
+        return Err(CoreErrors::InvalidArgument("n_seeds must be at least 1".to_string()).into());
+    }
+    let verbosity = parse_verbosity_level(verbose);
+    let n_centroids = params
+        .n_centroids
+        .min(data.nrows().saturating_sub(1))
+        .max(1);
+
+    let start = Instant::now();
+    let (centroids, assignments) =
+        coarsener.coarsen(data, n_centroids, &params.dist, seed, verbose)?;
+    if verbosity.normal_verbosity() {
+        println!(
+            " k-means with {n_centroids} centroids: {:.2?}",
+            start.elapsed()
+        );
+    }
+
+    let start = Instant::now();
+    let graph = match params.graph {
+        CentroidGraph::Knn { k, sym } => {
+            centroid_knn_graph(centroids.as_ref(), k, &sym, &params.dist, verbose)?
         }
-    } else {
-        KnnSymmetrisation::Knn {
-            binary: params.same_weight,
+        CentroidGraph::CellMediated { n_anchors } => {
+            let m = n_anchors.clamp(1, centroids.nrows());
+            let anchors = coarsener.top_m(data, centroids.as_ref(), m, &params.dist)?;
+            cell_mediated_graph(data, centroids.as_ref(), &anchors, m, &params.dist)
         }
     };
-    Ok(build_knn_graph(&idx, None, k, knn.len(), &sym, verbose)?)
-}
+    if verbosity.normal_verbosity() {
+        println!(" Centroid graph: {:.2?}", start.elapsed());
+    }
 
-/// Stage three: Louvain per resolution, propagated back to the samples.
-///
-/// ### Params
-///
-/// * `graph` - The centroid graph from stage two.
-/// * `assignments` - Per-sample centroid index from stage one.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `louvain_iters` - Number of Louvain iterations.
-/// * `multi_level` - If `true`, run the full multi-level Louvain (phase 1 +
-///   phase 2 aggregation, repeated). If `false`, run only one phase 1 pass
-///   (matches Phenograph / the original doubletdetection behaviour).
-/// * `seed` - Seed for reproducibility.
-///
-/// ### Returns
-///
-/// One per-sample membership vector per resolution, in the same order.
-pub fn louvain_over_resolutions(
-    graph: &SparseGraph<f32>,
-    assignments: &[usize],
-    resolutions: &[f32],
-    louvain_iters: usize,
-    multi_level: bool,
-    seed: usize,
-) -> Result<Vec<Vec<usize>>, ScErrors> {
-    resolutions
+    let start = Instant::now();
+    let seeds: Vec<u64> = if n_seeds == 1 {
+        vec![seed as u64]
+    } else {
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+        (0..n_seeds).map(|_| rng.random::<u64>()).collect()
+    };
+    let per_resolution = resolutions
         .iter()
         .map(|&res| {
-            let centroid_communities =
-                louvain_sparse_graph(graph, res, louvain_iters, multi_level, seed)?;
-            Ok(assignments
-                .iter()
-                .map(|&c| centroid_communities[c])
-                .collect())
-        })
-        .collect()
-}
-
-/// Stage three, grid variant: Louvain across several seeds per resolution.
-///
-/// Reports mean/median pairwise ARI (Louvain stability), mean/median
-/// conductance (community quality), and the labels from the seed achieving the
-/// best (lowest) mean conductance. Both ARI and conductance are computed on the
-/// centroid-level partitions, which is cheaper than the per-sample ones and
-/// ranks the resolutions identically.
-///
-/// ### Params
-///
-/// * `graph` - The centroid graph from stage two.
-/// * `assignments` - Per-sample centroid index from stage one.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `louvain_iters` - Number of Louvain iterations.
-/// * `multi_level` - Multi-level Louvain or a single phase 1 pass.
-/// * `seed` - Seed from which the per-run Louvain seeds are drawn.
-/// * `n_louvain_seeds` - Number of Louvain seeds. Must be at least 2 to produce
-///   an ARI.
-///
-/// ### Returns
-///
-/// One [FastLouvainGridResult] per resolution, in the same order.
-pub fn louvain_grid_over_resolutions(
-    graph: &SparseGraph<f32>,
-    assignments: &[usize],
-    resolutions: &[f32],
-    louvain_iters: usize,
-    multi_level: bool,
-    seed: usize,
-    n_louvain_seeds: usize,
-) -> Result<Vec<FastLouvainGridResult>, ScErrors> {
-    if n_louvain_seeds < 2 {
-        return Err(
-            CoreErrors::InvalidArgument("n_louvain_seeds must be at least 2".to_string()).into(),
-        );
-    }
-
-    let mut seed_rng = StdRng::seed_from_u64(seed as u64);
-    let louvain_seeds: Vec<usize> = (0..n_louvain_seeds)
-        .map(|_| seed_rng.random::<u64>() as usize)
-        .collect();
-
-    let mut results = Vec::with_capacity(resolutions.len());
-
-    for &res in resolutions {
-        // run Louvain across all seeds at the centroid level
-        let centroid_partitions: Vec<Vec<usize>> = louvain_seeds
-            .iter()
-            .map(|&s| louvain_sparse_graph(graph, res, louvain_iters, multi_level, s))
-            .collect::<Result<_, _>>()?;
-
-        // pairwise ARI on centroid-level partitions (cheaper, equivalent ranking)
-        let s = louvain_seeds.len();
-        let mut aris: Vec<f64> = Vec::with_capacity(s * (s - 1) / 2);
-        for i in 0..s {
-            for j in (i + 1)..s {
-                aris.push(adjusted_rand_index(
-                    &centroid_partitions[i],
-                    &centroid_partitions[j],
-                ));
-            }
-        }
-        let mean_ari = aris.iter().sum::<f64>() / aris.len() as f64;
-        let median_ari = median(&aris).unwrap();
-
-        // per-seed mean conductance on the centroid graph
-        let mut per_seed_mean_cond = Vec::with_capacity(s);
-        let mut per_seed_median_cond = Vec::with_capacity(s);
-        for cp in &centroid_partitions {
-            let cond = conductance_undirected(graph, cp)?;
-            let finite: Vec<f32> = cond.into_iter().filter(|x| x.is_finite()).collect();
-            per_seed_mean_cond.push(mean_nan(&finite));
-            per_seed_median_cond.push(median(&finite).unwrap_or(f32::NAN));
-        }
-
-        let mean_conductance = mean_nan(&per_seed_mean_cond);
-        let median_conductance = mean_nan(&per_seed_median_cond);
-
-        let mean_n_communities = centroid_partitions
-            .iter()
-            .map(|cp| cp.iter().max().copied().unwrap_or(0) + 1)
-            .sum::<usize>() as f32
-            / s as f32;
-
-        // pick best seed by mean conductance (NaN treated as worst)
-        let best_idx = per_seed_mean_cond
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                let a = if a.is_finite() { **a } else { f32::INFINITY };
-                let b = if b.is_finite() { **b } else { f32::INFINITY };
-                a.partial_cmp(&b).unwrap()
+            let p = LeidenParams {
+                resolution: res as f64,
+                ..params.community
+            };
+            let (part, stability) = if n_seeds == 1 {
+                let part = community_detection(
+                    &graph,
+                    &LeidenParams {
+                        seed: seeds[0],
+                        ..p
+                    },
+                    params.max_evals,
+                    params.multi_level,
+                )
+                .map_err(ScErrors::from)?;
+                (part, None)
+            } else {
+                let (part, stats) =
+                    seed_grid(&graph, &p, params.max_evals, params.multi_level, &seeds)?;
+                (part, Some(stats))
+            };
+            Ok(ResolutionResult {
+                resolution: res,
+                labels: assignments.iter().map(|&c| part[c]).collect(),
+                stability,
             })
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-
-        // propagate the winning centroid partition to per-sample labels
-        let best_labels = assignments
-            .iter()
-            .map(|&c| centroid_partitions[best_idx][c])
-            .collect();
-
-        results.push(FastLouvainGridResult {
-            resolution: res,
-            mean_ari: mean_ari as f32,
-            median_ari: median_ari as f32,
-            mean_conductance,
-            median_conductance,
-            mean_n_communities,
-            best_labels,
-        });
+        })
+        .collect::<Result<Vec<_>, ScErrors>>()?;
+    if verbosity.normal_verbosity() {
+        println!(" Community detection: {:.2?}", start.elapsed());
     }
 
-    Ok(results)
-}
-
-////////////////////
-// Main functions //
-////////////////////
-
-/// Fast Louvain clustering on large data via k-means coarsening.
-///
-/// Runs k-means to obtain centroids, builds a graph on the centroids,
-/// applies Louvain to that graph, then propagates each centroid's community
-/// label back to the points assigned to it.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix.
-/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
-///   or `"minibatch"`.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
-///   alongside the Louvain memberships.
-/// * `seed` - Seed for reproducibility.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Returns
-///
-/// The [FastLouvainResults], `Single` variant.
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters(
-    data: MatRef<f32>,
-    km_type: &str,
-    resolutions: &[f32],
-    params: &FastLouvainParams<f32>,
-    run_snn: bool,
-    return_k_mean: bool,
-    seed: usize,
-    verbose: usize,
-) -> Result<FastLouvainResults, ScErrors> {
-    let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
-
-    let graph = build_centroid_graph(
-        data,
-        centroids.as_ref(),
-        &params.graph_params(),
-        run_snn,
-        seed,
-        verbose,
-    )?;
-
-    let results = louvain_over_resolutions(
-        &graph,
-        &assignments,
-        resolutions,
-        params.louvain_iters,
-        params.multi_level_louvain,
-        seed,
-    )?;
-
-    Ok(FastLouvainResults::single(
-        results,
+    Ok(FastClusterResult {
+        per_resolution,
         centroids,
         assignments,
-        return_k_mean,
-    ))
-}
-
-/// Grid-search version of [`fast_louvain_clusters`] with stability metrics.
-///
-/// Builds the k-means -> centroid graph once, then runs Louvain across
-/// `n_louvain_seeds` seeds for each resolution. Reports mean/median pairwise
-/// ARI (Louvain stability), mean/median conductance (community quality), and
-/// the labels from the seed achieving the best (lowest) mean conductance.
-///
-/// ### Params
-///
-/// * `data` - n_samples x n_features matrix.
-/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
-///   or `"minibatch"`.
-/// * `resolutions` - Slice of resolutions to iterate over.
-/// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
-///   alongside the grid results.
-/// * `seed` - Seed for k-means and kNN (the shared graph).
-/// * `n_louvain_seeds` - Number of seeds to vary Louvain over. Must be at least
-///   2 to produce ARI.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Returns
-///
-/// The [FastLouvainResults], `GridRes` variant, with one
-/// [FastLouvainGridResult] per resolution in the same order.
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_grid(
-    data: MatRef<f32>,
-    km_type: &str,
-    resolutions: &[f32],
-    params: &FastLouvainParams<f32>,
-    run_snn: bool,
-    return_k_mean: bool,
-    seed: usize,
-    n_louvain_seeds: usize,
-    verbose: usize,
-) -> Result<FastLouvainResults, ScErrors> {
-    let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
-
-    let graph = build_centroid_graph(
-        data,
-        centroids.as_ref(),
-        &params.graph_params(),
-        run_snn,
-        seed,
-        verbose,
-    )?;
-
-    let results = louvain_grid_over_resolutions(
-        &graph,
-        &assignments,
-        resolutions,
-        params.louvain_iters,
-        params.multi_level_louvain,
-        seed,
-        n_louvain_seeds,
-    )?;
-
-    Ok(FastLouvainResults::grid(
-        results,
-        centroids,
-        assignments,
-        return_k_mean,
-    ))
+    })
 }
 
 ///////////
@@ -900,8 +698,6 @@ pub fn fast_louvain_clusters_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use either::Either;
-    use faer::Mat;
     use std::collections::HashMap;
 
     fn make_two_blobs(n_per: usize, dim: usize, separation: f32, seed: u64) -> Mat<f32> {
@@ -916,26 +712,16 @@ mod tests {
         Mat::from_fn(2 * n_per, dim, |i, j| buf[i * dim + j])
     }
 
-    fn default_params() -> FastLouvainParams<f32> {
-        let mut knn = KnnParams::new();
-        knn.knn_method = "exhaustive".to_string();
-        knn.ann_dist = "euclidean".to_string();
-        knn.k = 5;
-        FastLouvainParams {
-            batch_size: 100,
-            drift_threshold: 1e-4,
-            lr_alpha: 1.0,
+    fn params_with(graph: CentroidGraph) -> FastClusterParams {
+        FastClusterParams {
             n_centroids: 30,
-            kmeans_params: KMeansParamsWrappers::default(),
-            knn_params: knn,
-            louvain_iters: 10,
-            pruning: None,
-            same_weight: false,
-            multi_level_louvain: true,
-            snn_similarity: "jaccard".to_string(),
-            cell_mediated: false,
-            n_anchors: 5,
+            graph,
+            ..FastClusterParams::default()
         }
+    }
+
+    fn knn_graph(sym: KnnSymmetrisation) -> CentroidGraph {
+        CentroidGraph::Knn { k: 5, sym }
     }
 
     fn majority(xs: &[usize]) -> usize {
@@ -946,217 +732,173 @@ mod tests {
         *counts.iter().max_by_key(|(_, c)| **c).unwrap().0
     }
 
-    fn unwrap_single(r: FastLouvainResults) -> Vec<Vec<usize>> {
-        match r.get_assignments() {
-            Either::Left(v) => v,
-            Either::Right(_) => panic!("expected Single variant"),
-        }
+    fn run(
+        data: &Mat<f32>,
+        coarsener: &CpuKMeans,
+        params: &FastClusterParams,
+        resolutions: &[f32],
+        n_seeds: usize,
+        seed: usize,
+    ) -> FastClusterResult {
+        fast_clusters(
+            data.as_ref(),
+            coarsener,
+            params,
+            resolutions,
+            n_seeds,
+            seed,
+            0,
+        )
+        .unwrap()
     }
 
-    fn unwrap_grid(r: FastLouvainResults) -> Vec<FastLouvainGridResult> {
-        match r.get_assignments() {
-            Either::Right(v) => v,
-            Either::Left(_) => panic!("expected GridRes variant"),
-        }
-    }
-
-    /// The same seed must give identical assignments, so nothing downstream sees run-to-run drift.
+    /// The same seed gives identical labels, so nothing downstream sees
+    /// run-to-run drift.
     #[test]
-    fn deterministic_with_same_seed() {
+    fn test_fast_clusters_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
-        let params = default_params();
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let a = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &params,
-                false,
-                false,
-                7,
-                0,
-            )
-            .unwrap(),
-        );
-        let b = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &params,
-                false,
-                false,
-                7,
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(a, b);
+        let params = params_with(knn_graph(KnnSymmetrisation::Knn { binary: false }));
+        let a = run(&data, &CpuKMeans::default(), &params, &[1.0], 1, 7);
+        let b = run(&data, &CpuKMeans::default(), &params, &[1.0], 1, 7);
+        assert_eq!(a.per_resolution[0].labels, b.per_resolution[0].labels);
+        assert_eq!(a.assignments, b.assignments);
+        assert!(a.per_resolution[0].stability.is_none());
     }
 
-    /// Two well-separated blobs never share a community, on the kNN, sNN and
-    /// cell-mediated centroid graphs. A blob may split into several
-    /// communities: on the SNN centroid graph that is the higher-modularity
+    /// Two well-separated blobs never share a community, for every centroid
+    /// graph and for Louvain and Leiden. A blob may split into several
+    /// communities: on the sNN centroid graph that is the higher-modularity
     /// answer (igraph splits it too).
     #[test]
-    fn produces_multiple_communities_on_separated_blobs() {
+    fn test_fast_clusters_separates_blobs_on_every_graph() {
         let n_per = 200;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
+        let graphs = [
+            ("knn", knn_graph(KnnSymmetrisation::Knn { binary: false })),
+            ("snn", knn_graph(KnnSymmetrisation::default())),
+            (
+                "umap",
+                knn_graph(KnnSymmetrisation::Umap {
+                    local_connectivity: 1.0,
+                    mix_ratio: 1.0,
+                }),
+            ),
+            (
+                "cell_mediated",
+                CentroidGraph::CellMediated { n_anchors: 5 },
+            ),
+        ];
 
-        for (run_snn, cell_mediated) in [(false, false), (true, false), (false, true)] {
-            let mut params = default_params();
-            params.cell_mediated = cell_mediated;
-            let labels = unwrap_single(
-                fast_louvain_clusters(
-                    data.as_ref(),
-                    "standard",
-                    &resolutions,
-                    &params,
-                    run_snn,
-                    false,
-                    0,
-                    0,
-                )
-                .unwrap(),
-            );
+        for (name, graph) in graphs {
+            for refine in [false, true] {
+                let mut params = params_with(graph);
+                params.community.refine = refine;
+                let res = run(&data, &CpuKMeans::default(), &params, &[1.0], 1, 0);
+                let labels = &res.per_resolution[0].labels;
+                assert_eq!(labels.len(), 2 * n_per);
 
-            assert_eq!(labels.len(), resolutions.len());
-            assert_eq!(labels[0].len(), 2 * n_per);
+                let (blob_a, blob_b) = labels.split_at(n_per);
+                assert_ne!(majority(blob_a), majority(blob_b), "{name} refine {refine}");
 
-            let (blob_a, blob_b) = labels[0].split_at(n_per);
-            assert_ne!(
-                majority(blob_a),
-                majority(blob_b),
-                "run_snn {} cell_mediated {}",
-                run_snn,
-                cell_mediated
-            );
-
-            // every community is at least 90% one blob
-            let n_labels = labels[0].iter().max().unwrap() + 1;
-            for l in 0..n_labels {
-                let in_a = blob_a.iter().filter(|&&x| x == l).count();
-                let in_b = blob_b.iter().filter(|&&x| x == l).count();
-                let purity = in_a.max(in_b) as f32 / (in_a + in_b).max(1) as f32;
-                assert!(
-                    purity > 0.9,
-                    "community {} purity {} (snn {}, cell_mediated {})",
-                    l,
-                    purity,
-                    run_snn,
-                    cell_mediated
-                );
+                // every community is at least 90% one blob
+                let n_labels = labels.iter().max().unwrap() + 1;
+                for l in 0..n_labels {
+                    let in_a = blob_a.iter().filter(|&&x| x == l).count();
+                    let in_b = blob_b.iter().filter(|&&x| x == l).count();
+                    let purity = in_a.max(in_b) as f32 / (in_a + in_b).max(1) as f32;
+                    assert!(
+                        purity > 0.9,
+                        "{name} refine {refine}: community {l} purity {purity}"
+                    );
+                }
             }
         }
     }
 
-    /// Stability metrics need seeds to compare, so a single Louvain seed is rejected up front.
+    /// The mini-batch k-means path also separates the blobs.
     #[test]
-    fn grid_rejects_too_few_seeds() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
+    fn test_fast_clusters_minibatch_kmeans() {
+        let n_per = 200;
+        let data = make_two_blobs(n_per, 8, 15.0, 42);
+        let coarsener = CpuKMeans::new(
+            CpuKMeansKind::MiniBatch {
+                batch_size: 100,
+                drift_threshold: 1e-4,
+                lr_alpha: 1.0,
+            },
+            KMeansParamsWrappers::default(),
+        );
+        let params = params_with(knn_graph(KnnSymmetrisation::Knn { binary: false }));
+        let res = run(&data, &coarsener, &params, &[1.0], 1, 3);
+        let (blob_a, blob_b) = res.per_resolution[0].labels.split_at(n_per);
+        assert_ne!(majority(blob_a), majority(blob_b));
+    }
 
-        let result = fast_louvain_clusters_grid(
+    /// Zero seeds is an argument error, not a panic.
+    #[test]
+    fn test_fast_clusters_rejects_zero_seeds() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+        let result = fast_clusters(
             data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            false,
+            &CpuKMeans::default(),
+            &FastClusterParams::default(),
+            &[1.0],
             0,
-            1,
+            0,
             0,
         );
-
         assert!(matches!(
             result,
             Err(ScErrors::Core(CoreErrors::InvalidArgument(_)))
         ));
     }
 
-    /// The grid search is reproducible down to the ARI, conductance and best labels it reports.
+    /// The seed grid is reproducible down to the ARI, conductance and labels
+    /// it reports.
     #[test]
-    fn grid_deterministic_with_same_seed() {
+    fn test_fast_clusters_grid_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let a = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                7,
-                4,
-                0,
-            )
-            .unwrap(),
-        );
-        let b = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                7,
-                4,
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(a.len(), b.len());
-        for (ra, rb) in a.iter().zip(b.iter()) {
-            assert!((ra.mean_ari - rb.mean_ari).abs() < 1e-6);
-            assert!((ra.median_ari - rb.median_ari).abs() < 1e-6);
-            assert!((ra.mean_conductance - rb.mean_conductance).abs() < 1e-6);
-            assert!((ra.median_conductance - rb.median_conductance).abs() < 1e-6);
-            assert_eq!(ra.best_labels, rb.best_labels);
+        let params = params_with(knn_graph(KnnSymmetrisation::Knn { binary: false }));
+        let a = run(&data, &CpuKMeans::default(), &params, &[1.0, 0.5], 4, 7);
+        let b = run(&data, &CpuKMeans::default(), &params, &[1.0, 0.5], 4, 7);
+        for (ra, rb) in a.per_resolution.iter().zip(&b.per_resolution) {
+            let (sa, sb) = (
+                ra.stability.as_ref().unwrap(),
+                rb.stability.as_ref().unwrap(),
+            );
+            assert_eq!(sa.mean_ari, sb.mean_ari);
+            assert_eq!(sa.median_ari, sb.median_ari);
+            assert_eq!(sa.mean_conductance, sb.mean_conductance);
+            assert_eq!(sa.median_conductance, sb.median_conductance);
+            assert_eq!(ra.labels, rb.labels);
         }
     }
 
-    /// On easy data every resolution reports a high mean ARI and still splits the two blobs.
+    /// On easy data every resolution reports a high mean ARI and still splits
+    /// the two blobs.
     #[test]
-    fn grid_well_separated_blobs_are_stable() {
+    fn test_fast_clusters_grid_well_separated_blobs_are_stable() {
         let n_per = 250;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0, 0.5, 0.25];
-
-        let results = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                42,
-                5,
-                0,
-            )
-            .unwrap(),
+        let params = params_with(knn_graph(KnnSymmetrisation::Knn { binary: false }));
+        let res = run(
+            &data,
+            &CpuKMeans::default(),
+            &params,
+            &[1.0, 0.5, 0.25],
+            5,
+            42,
         );
-
-        for (i, r) in results.iter().enumerate() {
+        for r in &res.per_resolution {
+            let s = r.stability.as_ref().unwrap();
             assert!(
-                r.mean_ari > 0.9,
-                "mean_ari {} for seed no {}",
-                r.mean_ari,
-                i
+                s.mean_ari > 0.9,
+                "mean_ari {} at {}",
+                s.mean_ari,
+                r.resolution
             );
-
-            let (blob_a, blob_b) = r.best_labels.split_at(n_per);
-            let maj_a = majority(blob_a);
-            let maj_b = majority(blob_b);
-            assert_ne!(maj_a, maj_b, "not the same majority for seed no {}", i);
+            let (blob_a, blob_b) = r.labels.split_at(n_per);
+            assert_ne!(majority(blob_a), majority(blob_b));
         }
     }
 
@@ -1171,14 +913,20 @@ mod tests {
         out
     }
 
+    /// The cell-mediated graph with its anchors from the CPU top-m.
+    fn cell_mediated(data: MatRef<f32>, centroids: MatRef<f32>, m: usize) -> SparseGraph<f32> {
+        let anchors = top_m_cpu(data, centroids, m, "euclidean");
+        cell_mediated_graph(data, centroids, &anchors, m, "euclidean")
+    }
+
     /// One cell between two anchors gives a single edge of weight
     /// `w1 w2 / (w1 + w2)`; the far third centroid stays isolated.
     #[test]
-    fn cell_mediated_edge_weight_matches_hand_computation() {
+    fn test_cell_mediated_edge_weight_matches_hand_computation() {
         let data = Mat::from_fn(1, 1, |_, _| 0.0f32);
         let centroids = Mat::from_fn(3, 1, |i, _| [1.0f32, 3.0, 10.0][i]);
 
-        let g = cell_mediated_graph(data.as_ref(), centroids.as_ref(), 2, "euclidean");
+        let g = cell_mediated(data.as_ref(), centroids.as_ref(), 2);
 
         // sigma = (1 + 3) / 2 = 2
         let w1 = (-1.0f32 / 8.0).exp();
@@ -1196,7 +944,7 @@ mod tests {
     /// Centroids are only linked through cells that sit near both, so two
     /// blobs with no cells in between give no edge across the gap.
     #[test]
-    fn cell_mediated_graph_has_no_edges_across_an_empty_gap() {
+    fn test_cell_mediated_graph_has_no_edges_across_an_empty_gap() {
         let n_per = 200;
         let dim = 4;
         let data = make_two_blobs(n_per, dim, 15.0, 42);
@@ -1211,13 +959,12 @@ mod tests {
             centre + nudge
         });
 
-        let g = cell_mediated_graph(data.as_ref(), centroids.as_ref(), 2, "euclidean");
+        let g = cell_mediated(data.as_ref(), centroids.as_ref(), 2);
 
         for (u, v, w) in edge_list(&g) {
             assert_eq!(u < 2, v < 2, "edge {u}-{v} crosses the gap");
             assert!(w > 0.0);
         }
-        // and within each blob the two centroids are linked
         assert_eq!(g.get_neighbours(0).0, vec![1]);
         assert_eq!(g.get_neighbours(2).0, vec![3]);
     }
@@ -1225,7 +972,7 @@ mod tests {
     /// Several accumulation blocks summed on 1 and on 4 threads give the
     /// bit-identical graph, so results do not depend on the thread count.
     #[test]
-    fn cell_mediated_graph_independent_of_thread_count() {
+    fn test_cell_mediated_graph_independent_of_thread_count() {
         let n = 2 * CELL_MEDIATED_BLOCK + 1000;
         let dim = 4;
         let mut rng = StdRng::seed_from_u64(7);
@@ -1237,12 +984,37 @@ mod tests {
                 .num_threads(threads)
                 .build()
                 .unwrap()
-                .install(|| cell_mediated_graph(data.as_ref(), centroids.as_ref(), 5, "euclidean"))
+                .install(|| cell_mediated(data.as_ref(), centroids.as_ref(), 5))
         };
 
         let one = edge_list(&build(1));
         let four = edge_list(&build(4));
         assert!(!one.is_empty());
         assert_eq!(one, four);
+    }
+
+    /// The whole pipeline gives the same labels on 1 and on 4 threads.
+    #[test]
+    fn test_fast_clusters_independent_of_thread_count() {
+        let data = make_two_blobs(300, 6, 4.0, 9);
+        for graph in [
+            knn_graph(KnnSymmetrisation::default()),
+            CentroidGraph::CellMediated { n_anchors: 4 },
+        ] {
+            let mut params = params_with(graph);
+            params.community.refine = true;
+            params.community.n_iterations = 2;
+            let build = |threads: usize| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| run(&data, &CpuKMeans::default(), &params, &[0.8], 1, 5))
+            };
+            assert_eq!(
+                build(1).per_resolution[0].labels,
+                build(4).per_resolution[0].labels
+            );
+        }
     }
 }
