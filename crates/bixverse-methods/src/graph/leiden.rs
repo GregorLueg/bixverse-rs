@@ -55,6 +55,14 @@ const PAR_MOVE_MIN_LEN: usize = 64;
 /// Target id of a move into an empty cluster, resolved when it is applied.
 const NEW_CLUSTER: u32 = u32::MAX;
 
+/// Safety cap on full iterations when iterating until stable
+/// (`n_iterations: None`), against a partition that oscillates.
+const MAX_ITERATIONS: usize = 1000;
+
+/// Nodes per partial sum of the level-0 modularity. Fixed, so the stopping
+/// decision of `min_gain` does not depend on the thread count.
+const QUALITY_CHUNK: usize = 4096;
+
 ////////////
 // Params //
 ////////////
@@ -99,7 +107,10 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
 /// * `beta` - Randomness of the refinement merges; the target is drawn with
 ///   probability proportional to `exp(gain / beta)`. igraph default 0.01.
 /// * `n_iterations` - Number of full Leiden iterations, each starting from
-///   the previous partition. igraph's R default is 2.
+///   the previous partition. `None` iterates until an iteration changes
+///   nothing (capped at 1000). igraph's R default is 2.
+/// * `min_gain` - With `n_iterations: None`, also stop once an iteration
+///   raises the modularity by no more than this. 0 waits for a fixed point.
 /// * `refine` - Run the Leiden refinement phase. `false` gives Louvain.
 /// * `seed` - Seed for the node orders and refinement draws
 /// * `local_moving` - How local moving visits the nodes; the parallel modes
@@ -111,8 +122,10 @@ pub struct LeidenParams {
     pub resolution: f64,
     /// Randomness of the refinement merges
     pub beta: f64,
-    /// Number of full iterations
-    pub n_iterations: usize,
+    /// Number of full iterations; `None` until stable
+    pub n_iterations: Option<usize>,
+    /// Modularity gain at or below which `n_iterations: None` stops
+    pub min_gain: f64,
     /// Run the refinement phase (Leiden) or not (Louvain)
     pub refine: bool,
     /// Random seed
@@ -128,18 +141,25 @@ impl LeidenParams {
     ///
     /// * `resolution` - Modularity resolution parameter (gamma)
     /// * `beta` - Randomness of the refinement merges
-    /// * `n_iterations` - Number of full iterations
+    /// * `n_iterations` - Number of full iterations; `None` until stable
     /// * `refine` - Run the refinement phase (Leiden) or not (Louvain)
     /// * `seed` - Random seed
     ///
     /// ### Returns
     ///
-    /// Initialised self
-    pub fn new(resolution: f64, beta: f64, n_iterations: usize, refine: bool, seed: u64) -> Self {
+    /// Initialised self, with `min_gain` 0
+    pub fn new(
+        resolution: f64,
+        beta: f64,
+        n_iterations: Option<usize>,
+        refine: bool,
+        seed: u64,
+    ) -> Self {
         Self {
             resolution,
             beta,
             n_iterations,
+            min_gain: 0.0,
             refine,
             seed,
             local_moving: LocalMoving::Queue,
@@ -153,7 +173,8 @@ impl Default for LeidenParams {
         Self {
             resolution: 1.0,
             beta: 0.01,
-            n_iterations: 2,
+            n_iterations: Some(2),
+            min_gain: 0.0,
             refine: true,
             seed: 42,
             local_moving: LocalMoving::Queue,
@@ -328,6 +349,57 @@ fn group_by_label(labels: &[u32], k: usize) -> (Vec<usize>, Vec<u32>) {
         cursor[l as usize] += 1;
     }
     (offsets, members)
+}
+
+/// Modularity of a partition of one level, as the stopping rule of
+/// `min_gain` sees it.
+///
+/// The internal weight is summed in chunks of [`QUALITY_CHUNK`] nodes, combined
+/// in order, so the value (and the decision to stop) does not depend on the
+/// thread count.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level, self-loops included
+/// * `node_w` - Node weights
+/// * `membership` - Cluster per node, labels `< n`
+/// * `res` - Resolution divided by `2m`
+/// * `two_m` - Total node weight
+///
+/// ### Returns
+///
+/// The modularity
+fn level_quality<G: LevelGraph>(
+    g: &G,
+    node_w: &[f64],
+    membership: &[u32],
+    res: f64,
+    two_m: f64,
+) -> f64 {
+    let n = g.n();
+    let partials: Vec<f64> = (0..n.div_ceil(QUALITY_CHUNK))
+        .into_par_iter()
+        .map(|chunk| {
+            let mut s = 0.0;
+            for v in chunk * QUALITY_CHUNK..((chunk + 1) * QUALITY_CHUNK).min(n) {
+                let c = membership[v];
+                let (nbrs, ws) = g.row(v);
+                for (&u, &w) in nbrs.iter().zip(ws) {
+                    if membership[u as usize] == c {
+                        s += wf(w);
+                    }
+                }
+            }
+            s
+        })
+        .collect();
+    let internal: f64 = partials.iter().sum();
+    let mut tot = vec![0.0f64; n];
+    for (&c, &k) in membership.iter().zip(node_w) {
+        tot[c as usize] += k;
+    }
+    let squares: f64 = tot.iter().map(|t| t * t).sum();
+    (internal - res * squares) / two_m
 }
 
 /// Modularity of a partition.
@@ -1726,8 +1798,17 @@ where
         // Run the loop on a pool thread: the parallel local-moving modes issue
         // thousands of short parallel calls, and each one from outside the pool
         // is an injection plus a blocking wake-up.
-        rayon::scope(|_| {
-            (0..params.n_iterations.max(1)).try_for_each(|it| {
+        rayon::scope(|_| -> Result<(), E> {
+            let until_stable = params.n_iterations.is_none();
+            let cap = params.n_iterations.map_or(MAX_ITERATIONS, |k| k.max(1));
+            let use_gain = until_stable && params.min_gain > 0.0;
+            let mut quality = if use_gain {
+                level_quality(&g, &node_w, &membership, res, two_m)
+            } else {
+                0.0
+            };
+            for it in 0..cap {
+                let before = until_stable.then(|| membership.clone());
                 leiden_iteration(
                     &g,
                     &node_w,
@@ -1738,9 +1819,26 @@ where
                     max_evals,
                     multi_level,
                     &mut level0,
-                )
-                .map(|_| ())
-            })
+                )?;
+                if let Some(mut before) = before {
+                    // compare partitions, not labels; `before` is already
+                    // reindexed unless this is the first iteration
+                    reindex(&mut before);
+                    let mut after = membership.clone();
+                    reindex(&mut after);
+                    if before == after {
+                        break;
+                    }
+                }
+                if use_gain {
+                    let q = level_quality(&g, &node_w, &membership, res, two_m);
+                    if q - quality <= params.min_gain {
+                        break;
+                    }
+                    quality = q;
+                }
+            }
+            Ok(())
         })?;
     }
 
@@ -1904,7 +2002,7 @@ pub fn louvain_sparse_graph<T>(
 where
     T: BixverseFloat + Send + Sync + std::iter::Sum,
 {
-    let params = LeidenParams::new(wf(resolution), 0.01, 1, false, seed as u64);
+    let params = LeidenParams::new(wf(resolution), 0.01, Some(1), false, seed as u64);
     community_detection(graph, &params, max_iter, multi_level)
 }
 
@@ -2089,11 +2187,41 @@ mod tests {
         assert!(all_connected(&g, &one));
     }
 
+    /// Iterating until stable terminates, gives the same partition at 1 and 4
+    /// threads (with and without `min_gain`, whose modularity sums are fixed
+    /// order), keeps Leiden's communities connected, and lands at least as
+    /// high as two iterations on a noisy planted partition.
+    #[test]
+    fn test_leiden_until_stable() {
+        let edges = planted(20, 400, 8, 3, 11);
+        let g = build_undirected(8000, &edges, false);
+        let q_two = modularity(&g, &leiden_sparse_graph(&g, None).unwrap(), 1.0);
+        for min_gain in [0.0, 1e-4] {
+            let p = LeidenParams {
+                n_iterations: None,
+                min_gain,
+                ..Default::default()
+            };
+            let run = |threads: usize| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| leiden_sparse_graph(&g, Some(p)).unwrap())
+            };
+            let one = run(1);
+            assert_eq!(one, run(4), "min_gain {min_gain}");
+            assert!(all_connected(&g, &one));
+            let q = modularity(&g, &one, 1.0);
+            assert!(q >= q_two - 1e-3, "min_gain {min_gain}: {q} vs {q_two}");
+        }
+    }
+
     /// Leiden or Louvain with the given local-moving mode.
     fn run_mode(g: &SparseGraph<f64>, mode: LocalMoving, refine: bool, seed: u64) -> Vec<usize> {
         let p = LeidenParams {
             refine,
-            n_iterations: if refine { 2 } else { 1 },
+            n_iterations: Some(if refine { 2 } else { 1 }),
             seed,
             local_moving: mode,
             ..Default::default()

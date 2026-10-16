@@ -15,8 +15,9 @@ impl FromRList for LeidenParams {
     /// Parse the [LeidenParams] from an R list.
     ///
     /// Missing keys fall back to [LeidenParams::default]. Recognised keys:
-    /// `resolution`, `beta`, `n_iterations`, `refine`, `seed` and
-    /// `local_moving` (`"queue"` or `"coloured"`).
+    /// `resolution`, `beta`, `n_iterations` (negative: until stable),
+    /// `min_gain`, `refine`, `seed` and `local_moving` (`"queue"` or
+    /// `"coloured"`).
     ///
     /// ### Params
     ///
@@ -32,7 +33,8 @@ impl FromRList for LeidenParams {
         Ok(Self {
             resolution: r_list_real(&params, "resolution")?.unwrap_or(defaults.resolution),
             beta: r_list_real(&params, "beta")?.unwrap_or(defaults.beta),
-            n_iterations: r_list_count(&params, "n_iterations")?.unwrap_or(defaults.n_iterations),
+            n_iterations: r_leiden_iterations(&params)?.unwrap_or(defaults.n_iterations),
+            min_gain: r_list_real(&params, "min_gain")?.unwrap_or(defaults.min_gain),
             refine: params
                 .get("refine")
                 .and_then(|v| v.as_bool())
@@ -62,6 +64,30 @@ pub fn r_local_moving(params: &HashMap<&str, Robj>) -> Result<Option<LocalMoving
                 "Unknown local_moving '{s}'; expected 'queue' or 'coloured'"
             ))
         }),
+    }
+}
+
+/// Read the optional `n_iterations` key of the Leiden parameters.
+///
+/// As in igraph, a negative value means "until stable".
+///
+/// ### Params
+///
+/// * `params` - The flattened R list
+///
+/// ### Returns
+///
+/// `None` if the key is absent, `Some(None)` for a negative value,
+/// `Some(Some(k))` for a positive whole number, or an error for 0 or a
+/// fraction
+pub fn r_leiden_iterations(params: &HashMap<&str, Robj>) -> Result<Option<Option<usize>>> {
+    match r_list_real(params, "n_iterations")? {
+        None => Ok(None),
+        Some(v) if v < 0.0 => Ok(Some(None)),
+        Some(v) if v >= 1.0 && v.fract() == 0.0 => Ok(Some(Some(v as usize))),
+        Some(v) => Err(Error::Other(format!(
+            "n_iterations must be a positive whole number, or negative to iterate until stable; got {v}"
+        ))),
     }
 }
 

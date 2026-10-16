@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     fn params(refine: bool, seed: u64) -> LeidenParams {
-        LeidenParams::new(1.0, 0.01, 2, refine, seed)
+        LeidenParams::new(1.0, 0.01, Some(2), refine, seed)
     }
 
     fn run_gpu(g: &SparseGraph<f64>, refine: bool, seed: u64, client: &Client) -> Vec<usize> {
@@ -1349,7 +1349,7 @@ mod tests {
 
     /// Edge list written by R: `n`, `m` as i32, then `m` sources, `m` targets
     /// (0-based i32) and `m` f32 weights.
-    #[cfg(feature = "large-test")]
+    #[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
     fn read_edge_list(path: &str) -> SparseGraph<f64> {
         let bytes = std::fs::read(path).expect("graph file");
         let word = |i: usize| <[u8; 4]>::try_from(&bytes[4 * i..4 * i + 4]).unwrap();
@@ -1386,7 +1386,7 @@ mod tests {
             "| algo | CPU Coloured s | GPU s | GPU upload s | GPU moving s | GPU rest s | Q CPU | Q GPU |"
         );
         for (name, refine, iters) in [("Louvain", false, 1), ("Leiden", true, 2)] {
-            let p = LeidenParams::new(1.0, 0.01, iters, refine, 42);
+            let p = LeidenParams::new(1.0, 0.01, Some(iters), refine, 42);
             let cpu_p = LeidenParams {
                 local_moving: LocalMoving::Coloured,
                 ..p
@@ -1422,6 +1422,62 @@ mod tests {
                 q_gpu > q_cpu - 0.01 * q_cpu.abs(),
                 "{name}: gpu {q_gpu} cpu {q_cpu}"
             );
+        }
+    }
+
+    /// Modularity and time against the iteration budget, CPU Coloured and
+    /// GPU, on the graph in `BIXVERSE_LEIDEN_GRAPH` (skipped when unset).
+    #[test]
+    // 829k-node harmony sNN: several minutes, more if `None` runs long
+    #[cfg(feature = "large_scale_diagnostics")]
+    fn test_leiden_gpu_iteration_sweep() {
+        let Some(client) = try_client() else { return };
+        let Ok(path) = std::env::var("BIXVERSE_LEIDEN_GRAPH") else {
+            return;
+        };
+        let g = read_edge_list(&path);
+        let budgets: [(&str, Option<usize>, f64); 5] = [
+            ("2", Some(2), 0.0),
+            ("5", Some(5), 0.0),
+            ("10", Some(10), 0.0),
+            ("stable", None, 0.0),
+            ("gain 1e-5", None, 1e-5),
+        ];
+        // warm the kernels
+        let warm = LeidenParams::new(1.0, 0.01, Some(1), false, 42);
+        community_detection_with(
+            &g,
+            &warm,
+            usize::MAX,
+            true,
+            &mut LeidenGpuMover::new(&client),
+        )
+        .unwrap();
+        println!("| algo | iterations | CPU s | GPU s | Q CPU | Q GPU |");
+        for (name, refine) in [("Louvain", false), ("Leiden", true)] {
+            for &(label, n_iterations, min_gain) in &budgets {
+                let p = LeidenParams {
+                    n_iterations,
+                    min_gain,
+                    ..LeidenParams::new(1.0, 0.01, None, refine, 42)
+                };
+                let cpu_p = LeidenParams {
+                    local_moving: LocalMoving::Coloured,
+                    ..p
+                };
+                let t = std::time::Instant::now();
+                let cpu = community_detection(&g, &cpu_p, usize::MAX, true).unwrap();
+                let t_cpu = t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
+                let mut mover = LeidenGpuMover::new(&client);
+                let gpu = community_detection_with(&g, &p, usize::MAX, true, &mut mover).unwrap();
+                let t_gpu = t.elapsed().as_secs_f64();
+                println!(
+                    "| {name} | {label} | {t_cpu:.2} | {t_gpu:.2} | {:.4} | {:.4} |",
+                    modularity(&g, &cpu, 1.0),
+                    modularity(&g, &gpu, 1.0)
+                );
+            }
         }
     }
 }

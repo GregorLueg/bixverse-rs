@@ -275,7 +275,7 @@ impl Default for FastClusterParams {
             dist: "euclidean".to_string(),
             graph: CentroidGraph::default(),
             community: LeidenParams {
-                n_iterations: 1,
+                n_iterations: Some(1),
                 refine: false,
                 ..LeidenParams::default()
             },
@@ -1003,7 +1003,7 @@ mod tests {
         ] {
             let mut params = params_with(graph);
             params.community.refine = true;
-            params.community.n_iterations = 2;
+            params.community.n_iterations = Some(2);
             let build = |threads: usize| {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
