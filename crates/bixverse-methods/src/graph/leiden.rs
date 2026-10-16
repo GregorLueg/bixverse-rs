@@ -14,7 +14,11 @@
 //! evaluations, at the same modularity. Louvain keeps the full shuffle, as the
 //! ordered sweep costs it modularity without a refinement to repair it.
 //!
-//! Determinism: local moving is sequential and seeded. Refinement
+//! Local moving defaults to the sequential queue. [`LocalMoving::Coloured`]
+//! and [`LocalMoving::Synchronous`] parallelise it on large levels, see their
+//! docs; both stay independent of the thread count.
+//!
+//! Determinism: the queue is sequential and seeded. Refinement
 //! runs in parallel over clusters, each cluster with its own RNG derived from
 //! `(seed, iteration, level, cluster)`, and aggregation is parallel over
 //! refined clusters with a fixed reduction order. The partition therefore
@@ -23,7 +27,9 @@
 use num_traits::{ToPrimitive, Zero};
 use rand::prelude::*;
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use crate::graph::community_detections::remap_communities_by_size;
 use crate::prelude::*;
@@ -37,9 +43,60 @@ use crate::prelude::*;
 /// resolutions (fast_clusters), where small levels are not worth a fork.
 const LEIDEN_PAR_MIN_NODES: usize = 4096;
 
+/// Safety cap on rounds of the parallel local-moving modes. Each round only
+/// revisits nodes whose neighbourhood changed, so real graphs stop far below
+/// it.
+const PAR_MOVE_MAX_ROUNDS: usize = 1000;
+
+/// Nodes per rayon task when deciding moves in parallel. Per-node work follows
+/// the degree, so small tasks balance better.
+const PAR_MOVE_MIN_LEN: usize = 64;
+
+/// Target id of a move into an empty cluster, resolved when it is applied.
+const NEW_CLUSTER: u32 = u32::MAX;
+
 ////////////
 // Params //
 ////////////
+
+/// How the local-moving phase visits the nodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum LocalMoving {
+    /// Traag's fast local moving: a sequential queue of unstable nodes
+    #[default]
+    Queue,
+    /// Greedy colour classes of a seeded node order. Each class decides its
+    /// moves in parallel against the state frozen at its start (no two nodes
+    /// of a class are neighbours, so their edge weights to clusters are
+    /// exact), then applies them in node order, re-checking each gain against
+    /// the live cluster totals. The scheme is the one in clust-libreville-rs
+    /// and leiden-rs.
+    Coloured,
+    /// Jacobi rounds: every unstable node decides from the same snapshot,
+    /// ties go to the lower cluster id, and a move is applied only if it goes
+    /// up (or, on alternate rounds, down) in cluster id, which stops pairs
+    /// from swapping forever. cuGraph's Louvain step (Lu, Halappanavar &
+    /// Kalyanaraman, 2015). Does not use the seed.
+    Synchronous,
+}
+
+/// Parse a [`LocalMoving`] name.
+///
+/// ### Params
+///
+/// * `s` - `"queue"`, `"coloured"` or `"synchronous"`, case-insensitive
+///
+/// ### Returns
+///
+/// The [`LocalMoving`], or `None` for an unknown name
+pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
+    match s.to_lowercase().as_str() {
+        "queue" => Some(LocalMoving::Queue),
+        "coloured" | "colored" => Some(LocalMoving::Coloured),
+        "synchronous" => Some(LocalMoving::Synchronous),
+        _ => None,
+    }
+}
 
 /// Parameters for [`leiden_sparse_graph`].
 ///
@@ -52,6 +109,9 @@ const LEIDEN_PAR_MIN_NODES: usize = 4096;
 ///   the previous partition. igraph's R default is 2.
 /// * `refine` - Run the Leiden refinement phase. `false` gives Louvain.
 /// * `seed` - Seed for the node orders and refinement draws
+/// * `local_moving` - How local moving visits the nodes; the parallel modes
+///   only run on levels of at least `LEIDEN_PAR_MIN_NODES` (4096) nodes,
+///   smaller ones use the queue
 #[derive(Clone, Copy, Debug)]
 pub struct LeidenParams {
     /// Modularity resolution parameter (gamma)
@@ -64,6 +124,8 @@ pub struct LeidenParams {
     pub refine: bool,
     /// Random seed
     pub seed: u64,
+    /// Local-moving strategy
+    pub local_moving: LocalMoving,
 }
 
 impl LeidenParams {
@@ -87,6 +149,7 @@ impl LeidenParams {
             n_iterations,
             refine,
             seed,
+            local_moving: LocalMoving::Queue,
         }
     }
 }
@@ -100,6 +163,7 @@ impl Default for LeidenParams {
             n_iterations: 2,
             refine: true,
             seed: 42,
+            local_moving: LocalMoving::Queue,
         }
     }
 }
@@ -351,7 +415,6 @@ fn move_nodes<G: LevelGraph>(
     rng: &mut StdRng,
 ) -> (usize, bool) {
     let n = g.n();
-    let mut changed = false;
 
     // Without shuffling, nodes are visited in node order from a random start.
     // Node order is BFS order at level 0 and follows it at coarser levels, so
@@ -366,6 +429,7 @@ fn move_nodes<G: LevelGraph>(
         let start = if n > 0 { rng.random_range(0..n) } else { 0 };
         (start..n).chain(0..start).map(|v| v as u32).collect()
     };
+    let mut changed = false;
     let mut queue: VecDeque<u32> = queue_order.into();
     let mut stable = vec![false; n];
 
@@ -452,6 +516,598 @@ fn move_nodes<G: LevelGraph>(
                     queue.push_back(u as u32);
                 }
             }
+        }
+    }
+
+    (reindex(membership), changed)
+}
+
+///////////////////////////
+// Parallel local moving //
+///////////////////////////
+
+/// Open-addressing map from cluster id to edge weight, for one row.
+///
+/// Sized to the row rather than to the cluster count, so the per-thread
+/// scratch does not grow with n (an n-long f64 array per thread is 66 MB on
+/// ten threads at 829k nodes).
+#[derive(Default)]
+struct ClusterTable {
+    /// Cluster id per slot, `u32::MAX` when free
+    keys: Vec<u32>,
+    /// Summed edge weight per slot
+    vals: Vec<f64>,
+    /// Occupied slots in insertion order
+    used: Vec<u32>,
+}
+
+impl ClusterTable {
+    /// Make room for a row of `deg` entries; the table must be empty.
+    ///
+    /// ### Params
+    ///
+    /// * `deg` - Entries in the row
+    #[inline]
+    fn reserve(&mut self, deg: usize) {
+        let cap = (2 * deg).next_power_of_two().max(16);
+        if self.keys.len() < cap {
+            self.keys = vec![u32::MAX; cap];
+            self.vals = vec![0.0; cap];
+        }
+    }
+
+    /// Slot of `c`, or the free slot where it goes.
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Cluster id
+    ///
+    /// ### Returns
+    ///
+    /// The slot index
+    #[inline]
+    fn slot(&self, c: u32) -> usize {
+        let mask = self.keys.len() - 1;
+        let mut i = (c.wrapping_mul(0x9E37_79B1) as usize) & mask;
+        while self.keys[i] != c && self.keys[i] != u32::MAX {
+            i = (i + 1) & mask;
+        }
+        i
+    }
+
+    /// Add `w` to cluster `c`.
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Cluster id
+    /// * `w` - Edge weight
+    #[inline]
+    fn add(&mut self, c: u32, w: f64) {
+        let i = self.slot(c);
+        if self.keys[i] == u32::MAX {
+            self.keys[i] = c;
+            self.vals[i] = w;
+            self.used.push(i as u32);
+        } else {
+            self.vals[i] += w;
+        }
+    }
+
+    /// Summed weight to cluster `c`, 0 if absent.
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Cluster id
+    ///
+    /// ### Returns
+    ///
+    /// The weight
+    #[inline]
+    fn get(&self, c: u32) -> f64 {
+        let i = self.slot(c);
+        if self.keys[i] == c { self.vals[i] } else { 0.0 }
+    }
+
+    /// Empty the table.
+    #[inline]
+    fn clear(&mut self) {
+        for &i in &self.used {
+            self.keys[i as usize] = u32::MAX;
+        }
+        self.used.clear();
+    }
+}
+
+thread_local! {
+    /// Per-thread [`ClusterTable`] for [`best_move`]. Empty between uses.
+    static MOVE_SCRATCH: RefCell<ClusterTable> = RefCell::new(ClusterTable::default());
+}
+
+/// A move decided by [`best_move`].
+#[derive(Clone, Copy, Debug)]
+struct Move {
+    /// Node
+    v: u32,
+    /// Target cluster, or [`NEW_CLUSTER`]
+    to: u32,
+    /// Edge weight from `v` to the target (0 for a new cluster)
+    w_to: f64,
+    /// Edge weight from `v` to its own cluster, `v` excluded
+    w_from: f64,
+}
+
+/// Local moving with the strategy in `mode`.
+///
+/// Levels below [`LEIDEN_PAR_MIN_NODES`] nodes always take the queue: they
+/// are cheap and gain nothing from a fork.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `node_w` - Node weights
+/// * `membership` - Initial partition, labels `< n`; updated and reindexed
+/// * `res` - Resolution divided by `2m`
+/// * `max_evals` - Cap on node evaluations
+/// * `shuffle` - Queue only: random instead of rotated node order
+/// * `mode` - The [`LocalMoving`] strategy
+/// * `rng` - Random number generator for the node orders
+///
+/// ### Returns
+///
+/// `(number of clusters, whether any node moved)`
+#[allow(clippy::too_many_arguments)]
+fn local_move<G: LevelGraph>(
+    g: &G,
+    node_w: &[f64],
+    membership: &mut [u32],
+    res: f64,
+    max_evals: usize,
+    shuffle: bool,
+    mode: LocalMoving,
+    rng: &mut StdRng,
+) -> (usize, bool) {
+    if g.n() < LEIDEN_PAR_MIN_NODES {
+        return move_nodes(g, node_w, membership, res, max_evals, shuffle, rng);
+    }
+    match mode {
+        LocalMoving::Queue => move_nodes(g, node_w, membership, res, max_evals, shuffle, rng),
+        LocalMoving::Coloured => move_nodes_coloured(g, node_w, membership, res, max_evals, rng),
+        LocalMoving::Synchronous => move_nodes_synchronous(g, node_w, membership, res, max_evals),
+    }
+}
+
+/// Best move of `v` against fixed cluster totals.
+///
+/// Candidates are the clusters of `v`'s neighbours and, if `v` is not alone,
+/// an empty cluster at gain 0. Only a strict improvement over staying counts;
+/// ties between candidates go to the lower cluster id, and an empty cluster
+/// is only taken when no neighbouring cluster beats staying.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `v` - The node
+/// * `membership` - Cluster per node
+/// * `cluster_w` - Summed node weight per cluster, `v` included
+/// * `cluster_n` - Nodes per cluster
+/// * `kv` - Node weight of `v`
+/// * `res` - Resolution divided by `2m`
+/// * `table` - Scratch, empty
+///
+/// ### Returns
+///
+/// The move, or `None` to stay
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn best_move<G: LevelGraph>(
+    g: &G,
+    v: u32,
+    membership: &[u32],
+    cluster_w: &[f64],
+    cluster_n: &[u32],
+    kv: f64,
+    res: f64,
+    table: &mut ClusterTable,
+) -> Option<Move> {
+    let (nbrs, ws) = g.row(v as usize);
+    table.reserve(nbrs.len());
+    for (&u, &w) in nbrs.iter().zip(ws) {
+        if u != v {
+            table.add(membership[u as usize], wf(w));
+        }
+    }
+    let own = membership[v as usize];
+    let w_from = table.get(own);
+    let stay = w_from - kv * (cluster_w[own as usize] - kv) * res;
+
+    let mut best = (own, stay);
+    let mut w_best = 0.0;
+    for &i in &table.used {
+        let c = table.keys[i as usize];
+        if c == own {
+            continue;
+        }
+        let gain = table.vals[i as usize] - kv * cluster_w[c as usize] * res;
+        if gain > best.1 || (gain == best.1 && best.0 != own && c < best.0) {
+            best = (c, gain);
+            w_best = table.vals[i as usize];
+        }
+    }
+    if best.0 == own && cluster_n[own as usize] > 1 && 0.0 > stay {
+        best = (NEW_CLUSTER, 0.0);
+        w_best = 0.0;
+    }
+    table.clear();
+    (best.0 != own).then_some(Move {
+        v,
+        to: best.0,
+        w_to: w_best,
+        w_from,
+    })
+}
+
+/// Decide the moves of `nodes` in parallel against fixed cluster totals.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `nodes` - Nodes to evaluate, sorted
+/// * `membership` - Cluster per node
+/// * `cluster_w` - Summed node weight per cluster
+/// * `cluster_n` - Nodes per cluster
+/// * `node_w` - Node weights
+/// * `res` - Resolution divided by `2m`
+///
+/// ### Returns
+///
+/// The moves, in the order of `nodes`
+fn decide_moves<G: LevelGraph>(
+    g: &G,
+    nodes: &[u32],
+    membership: &[u32],
+    cluster_w: &[f64],
+    cluster_n: &[u32],
+    node_w: &[f64],
+    res: f64,
+) -> Vec<Move> {
+    let decide = |&v: &u32| {
+        MOVE_SCRATCH.with(|s| {
+            best_move(
+                g,
+                v,
+                membership,
+                cluster_w,
+                cluster_n,
+                node_w[v as usize],
+                res,
+                &mut s.borrow_mut(),
+            )
+        })
+    };
+    nodes
+        .par_iter()
+        .with_min_len(PAR_MOVE_MIN_LEN)
+        .filter_map(decide)
+        .collect()
+}
+
+/// Flag the neighbours of the moved nodes that now sit in another cluster.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `moved` - Nodes that moved
+/// * `membership` - Cluster per node, after the moves
+/// * `pending` - Pending flag per node
+///
+/// ### Returns
+///
+/// The nodes whose flag this call set, in no particular order
+fn flag_neighbours<G: LevelGraph>(
+    g: &G,
+    moved: &[u32],
+    membership: &[u32],
+    pending: &[AtomicBool],
+) -> Vec<u32> {
+    // load first: most neighbours are already pending, and a swap would
+    // write their cache line anyway
+    let flag = |&v: &u32| {
+        let c = membership[v as usize];
+        g.row(v as usize).0.iter().copied().filter(move |&u| {
+            let p = &pending[u as usize];
+            membership[u as usize] != c && !p.load(Relaxed) && !p.swap(true, Relaxed)
+        })
+    };
+    moved
+        .par_iter()
+        .with_min_len(PAR_MOVE_MIN_LEN)
+        .flat_map_iter(flag)
+        .collect()
+}
+
+/// Take a pending list: sort it (so the result does not depend on the order
+/// in which the flags were set) and clear the flags.
+///
+/// ### Params
+///
+/// * `list` - Pending nodes; emptied
+/// * `pending` - Pending flag per node
+///
+/// ### Returns
+///
+/// The nodes, sorted
+fn take_pending(list: &mut Vec<u32>, pending: &[AtomicBool]) -> Vec<u32> {
+    let mut nodes = std::mem::take(list);
+    nodes.par_sort_unstable();
+    nodes
+        .par_iter()
+        .with_min_len(PAR_MOVE_MIN_LEN)
+        .for_each(|&v| pending[v as usize].store(false, Relaxed));
+    nodes
+}
+
+/// Summed node weight and node count per cluster.
+///
+/// ### Params
+///
+/// * `membership` - Cluster per node, labels `< n`
+/// * `node_w` - Node weights
+///
+/// ### Returns
+///
+/// `(cluster weights, cluster sizes, empty clusters in descending id order)`
+fn cluster_totals(membership: &[u32], node_w: &[f64]) -> (Vec<f64>, Vec<u32>, Vec<u32>) {
+    let n = membership.len();
+    let mut cluster_w = vec![0.0f64; n];
+    let mut cluster_n = vec![0u32; n];
+    for (v, &c) in membership.iter().enumerate() {
+        cluster_w[c as usize] += node_w[v];
+        cluster_n[c as usize] += 1;
+    }
+    let empty = (0..n as u32)
+        .rev()
+        .filter(|&c| cluster_n[c as usize] == 0)
+        .collect();
+    (cluster_w, cluster_n, empty)
+}
+
+/// Greedy first-fit colouring in the given order.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `order` - Visiting order
+///
+/// ### Returns
+///
+/// `(colour classes, each sorted by node id; colour per node)`
+fn greedy_colouring<G: LevelGraph>(g: &G, order: &[u32]) -> (Vec<Vec<u32>>, Vec<u32>) {
+    let n = g.n();
+    let mut colour = vec![u32::MAX; n];
+    let mut used: Vec<bool> = Vec::new();
+    let mut classes: Vec<Vec<u32>> = Vec::new();
+    for &v in order {
+        let nbrs = g.row(v as usize).0;
+        for &u in nbrs {
+            let c = colour[u as usize];
+            if c != u32::MAX {
+                used[c as usize] = true;
+            }
+        }
+        let c = used.iter().position(|&x| !x).unwrap_or(used.len());
+        if c == used.len() {
+            used.push(false);
+            classes.push(Vec::new());
+        }
+        for &u in nbrs {
+            let cu = colour[u as usize];
+            if cu != u32::MAX {
+                used[cu as usize] = false;
+            }
+        }
+        colour[v as usize] = c as u32;
+        classes[c].push(v);
+    }
+    classes.par_iter_mut().for_each(|c| c.sort_unstable());
+    (classes, colour)
+}
+
+/// Local moving over greedy colour classes, see [`LocalMoving::Coloured`].
+///
+/// The colouring visits the nodes in node order from a seeded start, which at
+/// level 0 is BFS order and keeps the scan cache-local. Each class keeps a
+/// list of its pending nodes; the classes are swept in turn until none is
+/// pending, so a sweep costs what its pending nodes cost.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `node_w` - Node weights
+/// * `membership` - Initial partition, labels `< n`; updated and reindexed
+/// * `res` - Resolution divided by `2m`
+/// * `max_evals` - Cap on node evaluations
+/// * `rng` - Random number generator for the colouring start
+///
+/// ### Returns
+///
+/// `(number of clusters, whether any node moved)`
+///
+/// ### References
+///
+/// Lu, Halappanavar & Kalyanaraman, Parallel Computing, 2015 (colouring);
+/// Sahu, arXiv:2312.13936, 2023 (GVE-Leiden, pruning)
+fn move_nodes_coloured<G: LevelGraph>(
+    g: &G,
+    node_w: &[f64],
+    membership: &mut [u32],
+    res: f64,
+    max_evals: usize,
+    rng: &mut StdRng,
+) -> (usize, bool) {
+    let n = g.n();
+    let start = rng.random_range(0..n) as u32;
+    let order: Vec<u32> = (start..n as u32).chain(0..start).collect();
+    let (classes, colour) = greedy_colouring(g, &order);
+
+    let (mut cluster_w, mut cluster_n, mut empty) = cluster_totals(membership, node_w);
+    let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
+    let mut lists = classes;
+    let mut moved: Vec<u32> = Vec::new();
+    let mut changed = false;
+    let mut evals = 0usize;
+
+    'sweeps: for _ in 0..PAR_MOVE_MAX_ROUNDS {
+        if lists.iter().all(|l| l.is_empty()) {
+            break;
+        }
+        for c in 0..lists.len() {
+            if lists[c].is_empty() {
+                continue;
+            }
+            let nodes = take_pending(&mut lists[c], &pending);
+            evals += nodes.len();
+            let moves = decide_moves(g, &nodes, membership, &cluster_w, &cluster_n, node_w, res);
+            moved.clear();
+            for m in moves {
+                let (v, kv) = (m.v as usize, node_w[m.v as usize]);
+                let from = membership[v] as usize;
+                let stay = m.w_from - kv * (cluster_w[from] - kv) * res;
+                let go = if m.to == NEW_CLUSTER {
+                    0.0
+                } else {
+                    m.w_to - kv * cluster_w[m.to as usize] * res
+                };
+                // no longer an improvement, or already alone
+                if go <= stay || (m.to == NEW_CLUSTER && cluster_n[from] == 1) {
+                    continue;
+                }
+                let to = if m.to == NEW_CLUSTER {
+                    empty
+                        .pop()
+                        .expect("a cluster with two or more nodes leaves one id free")
+                } else {
+                    m.to
+                } as usize;
+                cluster_w[from] -= kv;
+                cluster_n[from] -= 1;
+                if cluster_n[from] == 0 {
+                    empty.push(from as u32);
+                }
+                cluster_w[to] += kv;
+                cluster_n[to] += 1;
+                membership[v] = to as u32;
+                moved.push(v as u32);
+            }
+            changed |= !moved.is_empty();
+            for u in flag_neighbours(g, &moved, membership, &pending) {
+                lists[colour[u as usize] as usize].push(u);
+            }
+            if evals >= max_evals {
+                break 'sweeps;
+            }
+        }
+    }
+
+    (reindex(membership), changed)
+}
+
+/// Synchronous local moving, see [`LocalMoving::Synchronous`].
+///
+/// All pending nodes decide from one snapshot; the moves in the round's
+/// direction are applied together (if none goes that way, the direction flips
+/// within the round) and the others stay pending. Moves into an empty cluster
+/// ignore the direction, take the empty ids in node order and never empty
+/// their source. Cluster totals are recomputed from scratch after each round,
+/// in node order.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `node_w` - Node weights
+/// * `membership` - Initial partition, labels `< n`; updated and reindexed
+/// * `res` - Resolution divided by `2m`
+/// * `max_evals` - Cap on node evaluations
+///
+/// ### Returns
+///
+/// `(number of clusters, whether any node moved)`
+///
+/// ### References
+///
+/// Lu, Halappanavar & Kalyanaraman, Parallel Computing, 2015
+fn move_nodes_synchronous<G: LevelGraph>(
+    g: &G,
+    node_w: &[f64],
+    membership: &mut [u32],
+    res: f64,
+    max_evals: usize,
+) -> (usize, bool) {
+    let n = g.n();
+    let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
+    let mut frontier: Vec<u32> = (0..n as u32).collect();
+    let mut up = true;
+    let mut changed = false;
+    let mut evals = 0usize;
+    let mut moved: Vec<u32> = Vec::new();
+
+    for _ in 0..PAR_MOVE_MAX_ROUNDS {
+        if frontier.is_empty() {
+            break;
+        }
+        let nodes = take_pending(&mut frontier, &pending);
+        evals += nodes.len();
+        let (cluster_w, mut cluster_n, mut empty) = cluster_totals(membership, node_w);
+        let moves = decide_moves(g, &nodes, membership, &cluster_w, &cluster_n, node_w, res);
+        if moves.is_empty() {
+            break;
+        }
+        let goes = |m: &Move, up: bool, memb: &[u32]| {
+            m.to == NEW_CLUSTER || (m.to > memb[m.v as usize]) == up
+        };
+        if !moves
+            .iter()
+            .any(|m| m.to != NEW_CLUSTER && goes(m, up, membership))
+        {
+            up = !up;
+        }
+
+        // decide which moves go before any is applied, against the snapshot
+        let mut accepted: Vec<(u32, u32)> = Vec::with_capacity(moves.len());
+        for m in &moves {
+            if !goes(m, up, membership) {
+                if !pending[m.v as usize].swap(true, Relaxed) {
+                    frontier.push(m.v);
+                }
+                continue;
+            }
+            let to = if m.to == NEW_CLUSTER {
+                let from = membership[m.v as usize] as usize;
+                if cluster_n[from] <= 1 {
+                    continue;
+                }
+                let Some(c) = empty.pop() else {
+                    continue;
+                };
+                cluster_n[from] -= 1;
+                c
+            } else {
+                m.to
+            };
+            accepted.push((m.v, to));
+        }
+        if accepted.is_empty() {
+            break;
+        }
+        moved.clear();
+        for &(v, to) in &accepted {
+            membership[v as usize] = to;
+            moved.push(v);
+        }
+        changed = true;
+        frontier.extend(flag_neighbours(g, &moved, membership, &pending));
+        up = !up;
+        if evals >= max_evals {
+            break;
         }
     }
 
@@ -953,13 +1609,14 @@ fn leiden_iteration<G: LevelGraph>(
     let mut rng = StdRng::seed_from_u64(derive_seed(params.seed, &[iteration]));
     reindex(membership);
 
-    let (n_clusters, mut changed) = move_nodes(
+    let (n_clusters, mut changed) = local_move(
         graph,
         node_w,
         membership,
         res,
         max_evals.saturating_mul(n),
         !params.refine,
+        params.local_moving,
         &mut rng,
     );
     if !multi_level || n_clusters == n {
@@ -975,13 +1632,14 @@ fn leiden_iteration<G: LevelGraph>(
     let mut level = 1u64;
     loop {
         let gn = g.n();
-        let (nc, ch) = move_nodes(
+        let (nc, ch) = local_move(
             &g,
             &w,
             &mut agg_memb,
             res,
             max_evals.saturating_mul(gn),
             !params.refine,
+            params.local_moving,
             &mut rng,
         );
         changed |= ch;
@@ -1094,18 +1752,23 @@ where
     let mut membership: Vec<u32> = (0..n as u32).collect();
     if two_m > 0.0 {
         let res = params.resolution / two_m;
-        for it in 0..params.n_iterations.max(1) {
-            leiden_iteration(
-                &g,
-                &node_w,
-                &mut membership,
-                res,
-                params,
-                it as u64,
-                max_evals,
-                multi_level,
-            );
-        }
+        // Run the loop on a pool thread: the parallel local-moving modes issue
+        // thousands of short parallel calls, and each one from outside the pool
+        // is an injection plus a blocking wake-up.
+        rayon::scope(|_| {
+            for it in 0..params.n_iterations.max(1) {
+                leiden_iteration(
+                    &g,
+                    &node_w,
+                    &mut membership,
+                    res,
+                    params,
+                    it as u64,
+                    max_evals,
+                    multi_level,
+                );
+            }
+        });
     }
 
     // back from BFS labels to the caller's node order
@@ -1364,6 +2027,95 @@ mod tests {
         let one = run(1);
         assert_eq!(one, run(4));
         assert!(all_connected(&g, &one));
+    }
+
+    /// Leiden or Louvain with the given local-moving mode.
+    fn run_mode(g: &SparseGraph<f64>, mode: LocalMoving, refine: bool, seed: u64) -> Vec<usize> {
+        let p = LeidenParams {
+            refine,
+            n_iterations: if refine { 2 } else { 1 },
+            seed,
+            local_moving: mode,
+            ..Default::default()
+        };
+        community_detection(g, &p, usize::MAX, true).unwrap()
+    }
+
+    /// Both parallel modes give the same partition at 1 and 4 threads, for
+    /// Leiden and Louvain, and Leiden's communities stay connected.
+    #[test]
+    fn test_parallel_local_moving_thread_count_invariant() {
+        let edges = planted(20, 400, 8, 3, 11);
+        let g = build_undirected(8000, &edges, false);
+        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
+            for refine in [true, false] {
+                let run = |threads: usize| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap()
+                        .install(|| run_mode(&g, mode, refine, 3))
+                };
+                let one = run(1);
+                assert_eq!(one, run(4), "{mode:?} refine {refine}");
+                if refine {
+                    assert!(all_connected(&g, &one), "{mode:?}");
+                }
+            }
+        }
+    }
+
+    /// Both parallel modes recover planted blocks exactly, on a graph large
+    /// enough that they run instead of the queue.
+    #[test]
+    fn test_parallel_local_moving_recovers_planted_blocks() {
+        let edges = planted(8, 600, 10, 1, 7);
+        let g = build_undirected(4800, &edges, false);
+        assert!(g.get_node_number() >= LEIDEN_PAR_MIN_NODES);
+        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
+            for refine in [true, false] {
+                let labels = run_mode(&g, mode, refine, 1);
+                assert_eq!(n_communities(&labels), 8, "{mode:?} refine {refine}");
+                for v in 0..4800 {
+                    assert_eq!(
+                        labels[v],
+                        labels[(v / 600) * 600],
+                        "{mode:?} refine {refine}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Below `LEIDEN_PAR_MIN_NODES` the parallel modes take the queue, so
+    /// karate gives the queue's partition.
+    #[test]
+    fn test_parallel_local_moving_small_graph_uses_queue() {
+        let g = karate();
+        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
+            assert_eq!(
+                run_mode(&g, mode, true, 5),
+                run_mode(&g, LocalMoving::Queue, true, 5)
+            );
+        }
+    }
+
+    /// On a noisy planted partition the parallel modes land within 1% of the
+    /// queue's modularity, for Leiden and Louvain.
+    #[test]
+    fn test_parallel_local_moving_modularity_close_to_queue() {
+        let edges = planted(20, 400, 8, 3, 11);
+        let g = build_undirected(8000, &edges, false);
+        for refine in [true, false] {
+            let q_queue = modularity(&g, &run_mode(&g, LocalMoving::Queue, refine, 2), 1.0);
+            for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
+                let q = modularity(&g, &run_mode(&g, mode, refine, 2), 1.0);
+                assert!(
+                    q >= 0.99 * q_queue,
+                    "{mode:?} refine {refine}: {q} vs queue {q_queue}"
+                );
+            }
+        }
     }
 
     /// The same seed never gives a different partition.

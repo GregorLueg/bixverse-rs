@@ -893,7 +893,7 @@ impl FromRList for FastClusterParams {
     /// Keys: `n_centroids`, `dist`, `cell_mediated` with `n_anchors`, or the
     /// centroid kNN `centroid_k` with the [KnnSymmetrisation] keys (`knn_sym`,
     /// ...); `algorithm` (`"louvain"` or `"leiden"`), `beta`, `n_iterations`,
-    /// `multi_level` and `max_evals`. Missing keys take
+    /// `local_moving`, `multi_level` and `max_evals`. Missing keys take
     /// [FastClusterParams::default].
     ///
     /// ### Params
@@ -942,6 +942,8 @@ impl FromRList for FastClusterParams {
         community.beta = r_list_real(&params, "beta")?.unwrap_or(community.beta);
         community.n_iterations =
             r_list_count(&params, "n_iterations")?.unwrap_or(community.n_iterations);
+        community.local_moving =
+            crate::graph_r_wrapper::r_local_moving(&params)?.unwrap_or(community.local_moving);
 
         Ok(Self {
             n_centroids: r_list_count(&params, "n_centroids")?.unwrap_or(defaults.n_centroids),

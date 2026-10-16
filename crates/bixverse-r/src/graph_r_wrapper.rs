@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::prelude::*;
 use bixverse_rs::graph::knn_graph::{KnnSymmetrisation, SnnSimilarity, parse_snn_similarity};
-use bixverse_rs::graph::leiden::LeidenParams;
+use bixverse_rs::graph::leiden::{LeidenParams, LocalMoving, parse_local_moving};
 
 //////////////////
 // LeidenParams //
@@ -15,7 +15,8 @@ impl FromRList for LeidenParams {
     /// Parse the [LeidenParams] from an R list.
     ///
     /// Missing keys fall back to [LeidenParams::default]. Recognised keys:
-    /// `resolution`, `beta`, `n_iterations`, `refine` and `seed`.
+    /// `resolution`, `beta`, `n_iterations`, `refine`, `seed` and
+    /// `local_moving` (`"queue"`, `"coloured"` or `"synchronous"`).
     ///
     /// ### Params
     ///
@@ -39,7 +40,28 @@ impl FromRList for LeidenParams {
             seed: r_list_count_allow_zero(&params, "seed")?
                 .map(|v| v as u64)
                 .unwrap_or(defaults.seed),
+            local_moving: r_local_moving(&params)?.unwrap_or(defaults.local_moving),
         })
+    }
+}
+
+/// Read the optional `local_moving` key.
+///
+/// ### Params
+///
+/// * `params` - The flattened R list
+///
+/// ### Returns
+///
+/// The [LocalMoving] if the key is there, or an error for an unknown name
+pub fn r_local_moving(params: &HashMap<&str, Robj>) -> Result<Option<LocalMoving>> {
+    match params.get("local_moving").and_then(|v| v.as_str()) {
+        None => Ok(None),
+        Some(s) => parse_local_moving(s).map(Some).ok_or_else(|| {
+            Error::Other(format!(
+                "Unknown local_moving '{s}'; expected 'queue', 'coloured' or 'synchronous'"
+            ))
+        }),
     }
 }
 
