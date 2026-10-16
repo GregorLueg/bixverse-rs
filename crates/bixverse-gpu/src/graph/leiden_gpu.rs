@@ -2,9 +2,9 @@
 //!
 //! The CPU engine in `bixverse_methods::graph::leiden` colours level 0 and
 //! hands the classes to [`LeidenGpuMover`]; coarser levels, refinement and
-//! aggregation stay on the CPU. Per colour class the device runs decide,
-//! resolve, link, accept, apply and mark; the host reads one move counter per
-//! round.
+//! aggregation stay on the CPU. Per colour class the device runs four
+//! dependent launches (decide, link, accept, apply-and-mark); the host reads
+//! one move counter per round.
 //!
 //! The apply rule is clust-libreville-rs's OrderFree rule rather than the
 //! CPU's in-order re-check: a decided move is accepted against the class's
@@ -175,11 +175,16 @@ fn beats(gain: f32, c: u32, best_g: f32, best_c: u32) -> bool {
 /// * `acount` - Pending count per class
 /// * `g` - Class index
 /// * `cur` - Output, the pending count of this class for the kernels after
-///   this one ([`lm_resolve`] resets `acount[g]`)
+///   this one ([`lm_link`] resets `acount[g]`)
 /// * `affected` - Pending flag per node; cleared here
 /// * `out_to` - Target cluster, [`STAY`] or [`NEW`], per pending slot
 /// * `out_wto` - Edge weight to the target
 /// * `out_wfrom` - Edge weight to the own cluster, self excluded
+/// * `n` - Number of nodes; a new cluster for `v` is `n + v`
+/// * `r_from` - Output, source cluster of each proposal
+/// * `r_to` - Output, target cluster of each proposal
+/// * `heads_to` - List head per target cluster; reset for the targets used
+/// * `heads_from` - List head per source cluster; reset for the sources used
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn lm_decide(
@@ -201,6 +206,11 @@ fn lm_decide(
     out_to: &mut Tensor<u32>,
     out_wto: &mut Tensor<f32>,
     out_wfrom: &mut Tensor<f32>,
+    n: u32,
+    r_from: &mut Tensor<u32>,
+    r_to: &mut Tensor<u32>,
+    heads_to: &mut Tensor<u32>,
+    heads_from: &mut Tensor<u32>,
 ) {
     let count = acount[g as usize].load() as usize;
     if ABSOLUTE_POS == 0 {
@@ -325,75 +335,30 @@ fn lm_decide(
             out_to[i] = to;
             out_wto[i] = wto;
             out_wfrom[i] = w_from;
-        }
-        i += stride;
-    }
-}
-
-/// Source and target cluster of each proposal (a new cluster is `n + v`), and
-/// reset the list heads they use. Also resets the pending count of the class,
-/// so marks from later classes append from slot 0 for the next round; nothing
-/// appends to this class during its own step.
-///
-/// ### Params
-///
-/// * `alist` - Pending lists
-/// * `goff` - Offset of this class in `alist`
-/// * `acount` - Pending count per class
-/// * `g` - Class index
-/// * `cur` - Pending count of this class
-/// * `n` - Number of nodes
-/// * `comm` - Cluster per node
-/// * `out_to` - Decided targets
-/// * `r_from` - Output, source cluster
-/// * `r_to` - Output, target cluster
-/// * `heads_to` - List head per target cluster
-/// * `heads_from` - List head per source cluster
-#[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
-fn lm_resolve(
-    alist: &Tensor<u32>,
-    goff: u32,
-    acount: &mut Tensor<Atomic<u32>>,
-    g: u32,
-    cur: &Tensor<u32>,
-    n: u32,
-    comm: &Tensor<u32>,
-    out_to: &Tensor<u32>,
-    r_from: &mut Tensor<u32>,
-    r_to: &mut Tensor<u32>,
-    heads_to: &mut Tensor<u32>,
-    heads_from: &mut Tensor<u32>,
-) {
-    if ABSOLUTE_POS == 0 {
-        acount[g as usize].store(0u32);
-    }
-    let count = cur[0] as usize;
-    let stride = CUBE_COUNT * CUBE_DIM as usize;
-    let mut i = ABSOLUTE_POS;
-    while i < count {
-        let to0 = out_to[i];
-        if to0 != STAY {
-            let v = alist[goff as usize + i];
-            let from = comm[v as usize];
-            let mut to = to0;
-            if to0 == NEW {
-                to = n + v;
+            if to != STAY {
+                let mut target = to;
+                if to == NEW {
+                    target = n + v as u32;
+                }
+                r_from[i] = own;
+                r_to[i] = target;
+                heads_to[target as usize] = LIST_END;
+                heads_from[own as usize] = LIST_END;
             }
-            r_from[i] = from;
-            r_to[i] = to;
-            heads_to[to as usize] = LIST_END;
-            heads_from[from as usize] = LIST_END;
         }
         i += stride;
     }
 }
 
 /// Link each proposal into its target's and its source's list. Lists are
-/// unordered; only their sets matter.
+/// unordered; only their sets matter. Also resets the pending count of the
+/// class, so marks from later classes append from slot 0 for the next round;
+/// nothing appends to this class during its own step.
 ///
 /// ### Params
 ///
+/// * `acount` - Pending count per class
+/// * `g` - Class index
 /// * `cur` - Pending count of this class
 /// * `out_to` - Decided targets
 /// * `r_from` - Source clusters
@@ -405,6 +370,8 @@ fn lm_resolve(
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn lm_link(
+    acount: &mut Tensor<Atomic<u32>>,
+    g: u32,
     cur: &Tensor<u32>,
     out_to: &Tensor<u32>,
     r_from: &Tensor<u32>,
@@ -414,6 +381,9 @@ fn lm_link(
     next_to: &mut Tensor<u32>,
     next_from: &mut Tensor<u32>,
 ) {
+    if ABSOLUTE_POS == 0 {
+        acount[g as usize].store(0u32);
+    }
     let count = cur[0] as usize;
     let stride = CUBE_COUNT * CUBE_DIM as usize;
     let mut i = ABSOLUTE_POS;
@@ -921,19 +891,7 @@ impl LeidenGpuMover<'_> {
                         out_to.into_tensor_arg(),
                         out_wto.into_tensor_arg(),
                         out_wfrom.into_tensor_arg(),
-                    );
-                    lm_resolve::launch_unchecked(
-                        c,
-                        tc.clone(),
-                        td,
-                        alist.into_tensor_arg(),
-                        goff,
-                        acount.into_tensor_arg(),
-                        g as u32,
-                        cur.into_tensor_arg(),
                         n as u32,
-                        comm.into_tensor_arg(),
-                        out_to.into_tensor_arg(),
                         r_from.into_tensor_arg(),
                         r_to.into_tensor_arg(),
                         heads_to.into_tensor_arg(),
@@ -943,6 +901,8 @@ impl LeidenGpuMover<'_> {
                         c,
                         tc.clone(),
                         td,
+                        acount.into_tensor_arg(),
+                        g as u32,
                         cur.into_tensor_arg(),
                         out_to.into_tensor_arg(),
                         r_from.into_tensor_arg(),
@@ -1187,8 +1147,14 @@ mod tests {
     fn test_leiden_gpu_totals_match_labels() {
         let Some(client) = try_client() else { return };
         let g = planted(4, 300, 90, 2, 3);
-        let max_deg = (0..1200).map(|v| g.get_neighbours_raw(v).0.len()).max().unwrap();
-        assert!(max_deg > 4 * 32 && max_deg <= PLANE_DEG, "max degree {max_deg}");
+        let max_deg = (0..1200)
+            .map(|v| g.get_neighbours_raw(v).0.len())
+            .max()
+            .unwrap();
+        assert!(
+            max_deg > 4 * 32 && max_deg <= PLANE_DEG,
+            "max degree {max_deg}"
+        );
         let (indptr, indices, weights, node_w) = csr(&g);
         let n = node_w.len();
         let mut mover = LeidenGpuMover::new(&client);
