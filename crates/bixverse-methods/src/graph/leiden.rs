@@ -108,7 +108,7 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
 ///   probability proportional to `exp(gain / beta)`. igraph default 0.01.
 /// * `n_iterations` - Number of full Leiden iterations, each starting from
 ///   the previous partition. `None` iterates until an iteration changes
-///   nothing (capped at 1000). igraph's R default is 2.
+///   nothing (capped at 1000). Default 5; igraph's R default is 2.
 /// * `min_gain` - With `n_iterations: None`, also stop once an iteration
 ///   raises the modularity by no more than this. 0 waits for a fixed point.
 /// * `refine` - Run the Leiden refinement phase. `false` gives Louvain.
@@ -167,13 +167,15 @@ impl LeidenParams {
     }
 }
 
-/// Defaults match `igraph::cluster_leiden(objective_function = "modularity")`
+/// Defaults match `igraph::cluster_leiden(objective_function = "modularity")`,
+/// except 5 iterations rather than 2: on an 829k-cell sNN two left Leiden
+/// visibly short of converged (modularity 0.8914 vs 0.8925 at 5).
 impl Default for LeidenParams {
     fn default() -> Self {
         Self {
             resolution: 1.0,
             beta: 0.01,
-            n_iterations: Some(2),
+            n_iterations: Some(5),
             min_gain: 0.0,
             refine: true,
             seed: 42,
@@ -1971,7 +1973,10 @@ where
 
 /// Louvain community detection on modularity.
 ///
-/// The Leiden engine with the refinement switched off and one iteration.
+/// The Leiden engine with the refinement switched off. Multi-level runs two
+/// iterations (the second added 0.004 modularity on an 829k-cell sNN; it is
+/// stable by four); single-level runs one, the single local-moving phase of
+/// Phenograph and doubletdetection.
 ///
 /// ### Params
 ///
@@ -2002,7 +2007,8 @@ pub fn louvain_sparse_graph<T>(
 where
     T: BixverseFloat + Send + Sync + std::iter::Sum,
 {
-    let params = LeidenParams::new(wf(resolution), 0.01, Some(1), false, seed as u64);
+    let iterations = if multi_level { 2 } else { 1 };
+    let params = LeidenParams::new(wf(resolution), 0.01, Some(iterations), false, seed as u64);
     community_detection(graph, &params, max_iter, multi_level)
 }
 
