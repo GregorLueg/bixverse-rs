@@ -865,6 +865,11 @@ fn cluster_totals(membership: &[u32], node_w: &[f64]) -> (Vec<f64>, Vec<u32>, Ve
 
 /// Greedy first-fit colouring in the given order.
 ///
+/// The colours of a node's neighbours below 64 go into one `u64` mask, so the
+/// first free colour is a `trailing_ones`; only a node whose neighbours hold
+/// all of 0..64 rescans with a full flag array. kNN graphs need far fewer
+/// colours (829k harmony sNN: 42).
+///
 /// ### Params
 ///
 /// * `g` - Graph of this level
@@ -880,22 +885,29 @@ fn greedy_colouring<G: LevelGraph>(g: &G, order: &[u32]) -> (Vec<Vec<u32>>, Vec<
     let mut classes: Vec<Vec<u32>> = Vec::new();
     for &v in order {
         let nbrs = g.row(v as usize).0;
+        let mut mask = 0u64;
         for &u in nbrs {
             let c = colour[u as usize];
-            if c != u32::MAX {
-                used[c as usize] = true;
+            if c < 64 {
+                mask |= 1 << c;
             }
         }
-        let c = used.iter().position(|&x| !x).unwrap_or(used.len());
-        if c == used.len() {
-            used.push(false);
+        let c = if mask != u64::MAX {
+            mask.trailing_ones() as usize
+        } else {
+            used.resize(classes.len(), false);
+            for &u in nbrs {
+                let cu = colour[u as usize];
+                if cu != u32::MAX {
+                    used[cu as usize] = true;
+                }
+            }
+            let c = used.iter().position(|&x| !x).unwrap_or(used.len());
+            used.iter_mut().for_each(|x| *x = false);
+            c
+        };
+        if c == classes.len() {
             classes.push(Vec::new());
-        }
-        for &u in nbrs {
-            let cu = colour[u as usize];
-            if cu != u32::MAX {
-                used[cu as usize] = false;
-            }
         }
         colour[v as usize] = c as u32;
         classes[c].push(v);
@@ -2124,6 +2136,38 @@ mod tests {
             for v in 0..4800 {
                 assert_eq!(labels[v], labels[(v / 600) * 600], "refine {refine}");
             }
+        }
+    }
+
+    /// The mask colouring equals a plain first-fit pass, including past 64
+    /// colours (an 80-node clique on top of a planted graph).
+    #[test]
+    fn test_greedy_colouring_matches_first_fit() {
+        let mut edges = planted(4, 100, 12, 2, 5);
+        for u in 0..80 {
+            for v in u + 1..80 {
+                edges.push((u, v, 1.0));
+            }
+        }
+        let g = build_undirected(400, &edges, false);
+        let order: Vec<u32> = (150..400).chain(0..150).collect();
+        let (classes, colour) = greedy_colouring(&g, &order);
+
+        let mut want = vec![u32::MAX; 400];
+        for &v in &order {
+            let taken: Vec<u32> = g
+                .row(v as usize)
+                .0
+                .iter()
+                .map(|&u| want[u as usize])
+                .collect();
+            want[v as usize] = (0..).find(|c| !taken.contains(c)).unwrap();
+        }
+        assert_eq!(colour, want);
+        assert!(classes.len() >= 80);
+        for (c, members) in classes.iter().enumerate() {
+            assert!(members.is_sorted());
+            assert!(members.iter().all(|&v| colour[v as usize] == c as u32));
         }
     }
 
