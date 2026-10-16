@@ -168,8 +168,8 @@ impl LeidenParams {
 }
 
 /// Defaults match `igraph::cluster_leiden(objective_function = "modularity")`,
-/// except 5 iterations rather than 2: on an 829k-cell sNN two left Leiden
-/// visibly short of converged (modularity 0.8914 vs 0.8925 at 5).
+/// except 5 iterations rather than 2, as two leave Leiden short of converged
+/// on large graphs.
 impl Default for LeidenParams {
     fn default() -> Self {
         Self {
@@ -596,8 +596,7 @@ fn move_nodes<G: LevelGraph>(
 /// Open-addressing map from cluster id to edge weight, for one row.
 ///
 /// Sized to the row rather than to the cluster count, so the per-thread
-/// scratch does not grow with n (an n-long f64 array per thread is 66 MB on
-/// ten threads at 829k nodes).
+/// scratch does not grow with n, as an n-long array per thread would.
 #[derive(Default)]
 struct ClusterTable {
     /// Cluster id per slot, `u32::MAX` when free
@@ -942,7 +941,7 @@ fn cluster_totals(membership: &[u32], node_w: &[f64]) -> (Vec<f64>, Vec<u32>, Ve
 /// The colours of a node's neighbours below 64 go into one `u64` mask, so the
 /// first free colour is a `trailing_ones`; only a node whose neighbours hold
 /// all of 0..64 rescans with a full flag array. kNN graphs need far fewer
-/// colours (829k harmony sNN: 42).
+/// colours than that.
 ///
 /// ### Params
 ///
@@ -1974,8 +1973,8 @@ where
 /// Louvain community detection on modularity.
 ///
 /// The Leiden engine with the refinement switched off. Multi-level runs two
-/// iterations (the second added 0.004 modularity on an 829k-cell sNN; it is
-/// stable by four); single-level runs one, the single local-moving phase of
+/// iterations, since the second still improves the partition and later ones
+/// rarely change it. Single-level runs one, the single local-moving phase of
 /// Phenograph and doubletdetection.
 ///
 /// ### Params

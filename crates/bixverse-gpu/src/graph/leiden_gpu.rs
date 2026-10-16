@@ -47,13 +47,13 @@ const LIST_END: u32 = u32::MAX - 2;
 
 /// Plane-wide chunks of a row whose labels and weights the decide kernel holds
 /// locally; later chunks are re-read from global. 4 covers rows up to 128 edges
-/// at plane width 32 (829k harmony sNN: p99 degree 72).
+/// at plane width 32, which covers nearly all rows of a kNN graph.
 const REG_CHUNKS: usize = 4;
 
 /// Rows longer than this keep the whole run on the CPU. The decide kernel
 /// keeps one bit per plane-wide chunk of a row in a u32, so a row may span at
 /// most 32 chunks (1024 edges at plane width 32, 256 at width 8); level-0 kNN
-/// graphs stay far below it (829k harmony sNN: max degree 172).
+/// graphs stay far below it.
 const PLANE_DEG: usize = 512;
 
 /// Vertices per cube of the plane kernels.
@@ -74,8 +74,8 @@ const MAX_ROUNDS: usize = 1000;
 /// the rounding of up to `n / 2` stay below `2^31`.
 const FX_BITS: i32 = 30;
 
-/// Levels below this many nodes run on the CPU. Unmeasured placeholder until
-/// the size sweep.
+/// Graphs below this many nodes run on the CPU, which is cheaper there than
+/// the per-round kernel launches. The exact crossover is not tuned.
 pub const LEIDEN_GPU_MIN_NODES: usize = 50_000;
 
 /////////////
