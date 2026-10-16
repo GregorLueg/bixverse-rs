@@ -762,9 +762,9 @@ pub fn smooth_scores(
 ///
 /// Without a graph this is a raw per-cell argmax, which on typical scRNA-seq
 /// depth is noisy enough that the cluster-level call usually wins. Pass the same
-/// sNN graph the clustering ran on and the noise largely goes away. Build it with
-/// [KnnLabPropGraph::from_weighted_edge_list] from the `(edges, weights)` pair
-/// that `generate_snn_full` returns, or
+/// neighbour graph the clustering ran on and the noise largely goes away. Build
+/// it with [KnnLabPropGraph::from_weighted_edge_list] from a flat
+/// `(edges, weights)` pair, e.g. the edges of `build_knn_graph`, or
 /// [KnnLabPropGraph::from_weighted_node_pairs] when the edge list arrives as
 /// separate from/to vectors.
 ///

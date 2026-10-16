@@ -4,7 +4,9 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::prelude::*;
-use bixverse_rs::graph::knn_graph::{KnnSymmetrisation, SnnSimilarity, parse_snn_similarity};
+use bixverse_rs::graph::knn_graph::{
+    KnnSymmetrisation, SNN_PRUNE_DEFAULT, SnnSimilarity, parse_snn_similarity,
+};
 use bixverse_rs::graph::leiden::{LeidenParams, LocalMoving, parse_local_moving};
 
 //////////////////
@@ -124,7 +126,7 @@ impl FromRMap for KnnSymmetrisation {
                 };
                 let (prune, rescue) = match Self::default() {
                     Self::Snn { prune, rescue, .. } => (prune, rescue),
-                    _ => (1.0 / 15.0, true),
+                    _ => (SNN_PRUNE_DEFAULT, true),
                 };
                 Ok(Self::Snn {
                     similarity,

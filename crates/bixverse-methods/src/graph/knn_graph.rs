@@ -38,6 +38,13 @@ const MIN_K_DIST_SCALE: f64 = 1e-3;
 /// Binary-search iterations for the UMAP bandwidth, umap-learn's `n_iter`.
 const SMOOTH_K_ITERS: usize = 64;
 
+/// Default sNN prune. For the Jaccard weight a threshold `p` keeps pairs that
+/// share at least a fraction `2p / (1 + p)` of their self-inclusive
+/// neighbourhoods, independent of `k`. `1/16` asks for about 12%, in line with
+/// Seurat's `1/15`, and sits off the discrete weight `1/15` takes at `k = 15`,
+/// where float rounding would decide whether a 2-shared edge survives.
+pub const SNN_PRUNE_DEFAULT: f64 = 1.0 / 16.0;
+
 /// Floor on the rank sNN weight before scaling, as in bluster.
 const SNN_RANK_FLOOR: f64 = 1e-6;
 
@@ -87,12 +94,13 @@ pub enum KnnSymmetrisation {
     },
 }
 
-/// Defaults to the bluster sNN with Jaccard weights at a prune of 1/15
+/// Defaults to the bluster sNN with Jaccard weights at a prune of
+/// [`SNN_PRUNE_DEFAULT`]
 impl Default for KnnSymmetrisation {
     fn default() -> Self {
         KnnSymmetrisation::Snn {
             similarity: SnnSimilarity::Jaccard,
-            prune: 1.0 / 15.0,
+            prune: SNN_PRUNE_DEFAULT,
             rescue: true,
         }
     }
