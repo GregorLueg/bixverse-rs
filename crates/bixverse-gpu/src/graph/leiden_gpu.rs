@@ -45,6 +45,11 @@ const NEW: u32 = u32::MAX;
 /// End of a proposal list, and "no candidate" in the decide reduction.
 const LIST_END: u32 = u32::MAX - 2;
 
+/// Plane-wide chunks of a row whose labels and weights the decide kernel holds
+/// locally; later chunks are re-read from global. 4 covers rows up to 128 edges
+/// at plane width 32 (829k harmony sNN: p99 degree 72).
+const REG_CHUNKS: usize = 4;
+
 /// Rows longer than this keep the whole run on the CPU. The decide kernel
 /// keeps one bit per plane-wide chunk of a row in a u32, so a row may span at
 /// most 32 chunks (1024 edges at plane width 32, 256 at width 8); level-0 kNN
@@ -217,14 +222,23 @@ fn lm_decide(
         let k = strength[v];
         let chunks = (end - start + pd - 1) / pd;
 
-        // bit t: this lane's edge in chunk t is resolved, absent or a self-loop
+        // bit t: this lane's edge in chunk t is resolved, absent or a self-loop.
+        // Labels of the first REG_CHUNKS chunks are held locally: neighbour
+        // labels are frozen during decide, so every step would re-read them.
         let mut done = 0u32;
+        let mut cs = Array::<u32>::new(REG_CHUNKS);
+        let mut ws = Array::<f32>::new(REG_CHUNKS);
         for t in 0..chunks {
             let e = start + t * pd + lane as usize;
             let mut skip = true;
             if e < end {
-                if indices[e] != v as u32 {
+                let u = indices[e];
+                if u != v as u32 {
                     skip = false;
+                    if t < REG_CHUNKS {
+                        cs[t] = comm[u as usize];
+                        ws[t] = weights[e];
+                    }
                 }
             }
             if skip {
@@ -248,7 +262,11 @@ fn lm_decide(
                     if (done & (1u32 << (t as u32))) == 0u32 {
                         found = true;
                         key = (t * pd) as u32 + lane;
-                        c_lane = comm[indices[start + key as usize] as usize];
+                        if t < REG_CHUNKS {
+                            c_lane = cs[t];
+                        } else {
+                            c_lane = comm[indices[start + key as usize] as usize];
+                        }
                     }
                 }
             }
@@ -262,8 +280,13 @@ fn lm_decide(
                     let bit = 1u32 << (t as u32);
                     if (done & bit) == 0u32 {
                         let e = start + t * pd + lane as usize;
-                        if comm[indices[e] as usize] == cl {
-                            part += weights[e];
+                        let (c_t, w_t) = if t < REG_CHUNKS {
+                            (cs[t], ws[t])
+                        } else {
+                            (comm[indices[e] as usize], weights[e])
+                        };
+                        if c_t == cl {
+                            part += w_t;
                             done |= bit;
                         }
                     }
@@ -1158,11 +1181,14 @@ mod tests {
 
     /// After one local-moving phase the device totals and sizes equal what
     /// the host recomputes from the labels, exactly, and the run moved nodes.
-    /// Degree up to ~80 covers rows of several plane chunks.
+    /// Degree ~180 covers rows of several plane chunks, past the
+    /// `REG_CHUNKS` held locally at plane width 32.
     #[test]
     fn test_leiden_gpu_totals_match_labels() {
         let Some(client) = try_client() else { return };
-        let g = planted(6, 300, 40, 2, 3);
+        let g = planted(4, 300, 90, 2, 3);
+        let max_deg = (0..1200).map(|v| g.get_neighbours_raw(v).0.len()).max().unwrap();
+        assert!(max_deg > 4 * 32 && max_deg <= PLANE_DEG, "max degree {max_deg}");
         let (indptr, indices, weights, node_w) = csr(&g);
         let n = node_w.len();
         let mut mover = LeidenGpuMover::new(&client);
