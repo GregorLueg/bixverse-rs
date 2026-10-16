@@ -79,3 +79,7 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 zstd = "0.14.0"
+
+# Patch
+[patch.crates-io]
+ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs.git", branch = "feat-mlx-kmean-update" }

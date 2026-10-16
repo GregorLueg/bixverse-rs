@@ -14,9 +14,9 @@ use faer::{Mat, MatRef};
 use crate::prelude::*;
 use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
 
-////////////////
+///////////////
 // GpuKMeans //
-////////////////
+///////////////
 
 /// GPU k-means coarsener for fast clustering.
 ///

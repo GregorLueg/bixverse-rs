@@ -77,8 +77,8 @@ pub enum LocalMoving {
     /// moves in parallel against the state frozen at its start (no two nodes
     /// of a class are neighbours, so their edge weights to clusters are
     /// exact), then applies them in node order, re-checking each gain against
-    /// the live cluster totals. The scheme is the one in clust-libreville-rs
-    /// and leiden-rs.
+    /// the live cluster totals. The scheme is the one in `clust-libreville-rs`
+    /// and `leiden-rs`.
     Coloured,
 }
 
@@ -220,6 +220,10 @@ where
         self.get_neighbours_raw(i)
     }
 }
+
+//////////////
+// AggGraph //
+//////////////
 
 /// Symmetric CSR for one level of the hierarchy.
 ///
@@ -406,9 +410,9 @@ fn level_quality<G: LevelGraph>(
 
 /// Modularity of a partition.
 ///
-/// `Q = 1/2m * sum_c (e_c - gamma * K_c^2 / 2m)`, with `e_c` twice the
-/// internal edge weight and `K_c` the summed degree of cluster `c`.
-/// Self-loops count once per CSR entry, as in igraph.
+/// `Q = 1/2m * sum_c (e_c - gamma * K_c^2 / 2m)`, with `e_c` twice the internal
+/// edge weight and `K_c` the summed degree of cluster `c`. Self-loops count
+/// once per CSR entry, as in igraph.
 ///
 /// ### Params
 ///
@@ -448,14 +452,14 @@ where
     (internal - penalty) / two_m
 }
 
-///////////////////
+//////////////////
 // Local moving //
-///////////////////
+//////////////////
 
 /// Fast local moving (Traag et al. 2019, Alg. A.2 `MoveNodesFast`).
 ///
-/// Nodes sit in a queue, initially in shuffled or rotated order. A node takes the
-/// neighbouring cluster (or an empty one) with the strictly best gain over
+/// Nodes sit in a queue, initially in shuffled or rotated order. A node takes
+/// the neighbouring cluster (or an empty one) with the strictly best gain over
 /// staying; when it moves, its stable neighbours outside the new cluster are
 /// re-queued. Self-loops are skipped in the scan.
 ///
@@ -1653,8 +1657,8 @@ where
 
 /// Refined partition for Leiden, the unrefined one for Louvain.
 ///
-/// As in igraph, a refinement that merged nothing falls back to the
-/// unrefined partition, or the hierarchy would not shrink.
+/// As in igraph, a refinement that merged nothing falls back to the unrefined
+/// partition, or the hierarchy would not shrink.
 ///
 /// ### Params
 ///

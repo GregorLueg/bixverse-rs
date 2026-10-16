@@ -275,7 +275,7 @@ impl Default for FastClusterParams {
             dist: "euclidean".to_string(),
             graph: CentroidGraph::default(),
             community: LeidenParams {
-                n_iterations: Some(1),
+                n_iterations: Some(2),
                 refine: false,
                 ..LeidenParams::default()
             },

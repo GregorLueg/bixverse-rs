@@ -900,9 +900,9 @@ where
     })
 }
 
-////////////////
-// Front door //
-////////////////
+//////////
+// Main //
+//////////
 
 /// Build an undirected weighted graph from a kNN.
 ///
