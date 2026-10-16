@@ -46,8 +46,9 @@ const NEW: u32 = u32::MAX;
 const LIST_END: u32 = u32::MAX - 2;
 
 /// Rows longer than this keep the whole run on the CPU. The decide kernel
-/// costs `O(deg^2 / plane)` per lane; level-0 kNN graphs stay far below it
-/// (829k harmony sNN: max degree 172).
+/// keeps one bit per plane-wide chunk of a row in a u32, so a row may span at
+/// most 32 chunks (1024 edges at plane width 32, 256 at width 8); level-0 kNN
+/// graphs stay far below it (829k harmony sNN: max degree 172).
 const PLANE_DEG: usize = 512;
 
 /// Vertices per cube of the plane kernels.
@@ -75,22 +76,6 @@ pub const LEIDEN_GPU_MIN_NODES: usize = 50_000;
 /////////////
 // Kernels //
 /////////////
-
-/// Snapshot the pending count of class `g` and reset it, so marks from later
-/// classes append from slot 0 for the next round.
-///
-/// ### Params
-///
-/// * `acount` - Pending count per class
-/// * `g` - Class index
-/// * `cur` - Output, the snapshot
-#[cube(launch_unchecked)]
-fn lm_begin(acount: &mut Tensor<Atomic<u32>>, g: u32, cur: &mut Tensor<u32>) {
-    if ABSOLUTE_POS == 0 {
-        cur[0] = acount[g as usize].load();
-        acount[g as usize].store(0u32);
-    }
-}
 
 /// Zero a single counter.
 ///
@@ -129,12 +114,42 @@ fn lm_init(
     }
 }
 
+/// Whether candidate `c` with `gain` beats the best so far: higher gain, ties
+/// to the lower cluster id.
+///
+/// ### Params
+///
+/// * `gain` - Gain of the candidate
+/// * `c` - Its cluster
+/// * `best_g` - Best gain so far
+/// * `best_c` - Best cluster so far, [`LIST_END`] for none
+///
+/// ### Returns
+///
+/// `true` if the candidate wins
+#[cube]
+fn beats(gain: f32, c: u32, best_g: f32, best_c: u32) -> bool {
+    let mut take = best_c == LIST_END;
+    if gain > best_g {
+        take = true;
+    }
+    if gain == best_g {
+        if c < best_c {
+            take = true;
+        }
+    }
+    take
+}
+
 /// Best move of each pending node of a class, one plane per node, against the
 /// totals frozen at the class start.
 ///
-/// Lane `l` holds edge `start + l` (then `+ PLANE_DIM`, ...). Every lane sums
-/// its edge's cluster over the whole row by broadcasting the plane's edges,
-/// and only the first occurrence of a cluster counts as a candidate. The best
+/// Lane `l` holds edge `start + l` (then `+ PLANE_DIM`, ...). The loop runs
+/// once per distinct neighbour cluster: the lowest unresolved edge of the row
+/// leads, its cluster is broadcast, the lanes holding that cluster sum their
+/// weights in one `plane_sum` and mark those edges resolved, and the gain is
+/// then uniform over the plane. Once clusters form a row touches only a few,
+/// which is what makes this cheaper than comparing all edge pairs. The best
 /// candidate is the highest gain, ties to the lower cluster id, and must beat
 /// staying strictly; an empty cluster is taken when nothing beats staying and
 /// staying is negative. The CPU's `best_move` rule.
@@ -152,7 +167,10 @@ fn lm_init(
 /// * `scale` - Resolution over `2m`, divided by the fixed-point scale
 /// * `alist` - Pending lists of all classes
 /// * `goff` - Offset of this class in `alist`
-/// * `cur` - Pending count of this class
+/// * `acount` - Pending count per class
+/// * `g` - Class index
+/// * `cur` - Output, the pending count of this class for the kernels after
+///   this one ([`lm_resolve`] resets `acount[g]`)
 /// * `affected` - Pending flag per node; cleared here
 /// * `out_to` - Target cluster, [`STAY`] or [`NEW`], per pending slot
 /// * `out_wto` - Edge weight to the target
@@ -171,16 +189,20 @@ fn lm_decide(
     scale: f32,
     alist: &Tensor<u32>,
     goff: u32,
-    cur: &Tensor<u32>,
+    acount: &Tensor<Atomic<u32>>,
+    g: u32,
+    cur: &mut Tensor<u32>,
     affected: &mut Tensor<u32>,
     out_to: &mut Tensor<u32>,
     out_wto: &mut Tensor<f32>,
     out_wfrom: &mut Tensor<f32>,
 ) {
-    let count = cur[0] as usize;
+    let count = acount[g as usize].load() as usize;
+    if ABSOLUTE_POS == 0 {
+        cur[0] = count as u32;
+    }
     let lane = UNIT_POS_PLANE;
     let pd = PLANE_DIM as usize;
-    // 1D workgroup: WGSL rejects subgroup builtins in a multi-dimensional one
     let planes = (CUBE_DIM / PLANE_DIM) as usize;
     let stride = CUBE_COUNT * planes;
     let mut i = CUBE_POS * planes + (UNIT_POS / PLANE_DIM) as usize;
@@ -195,95 +217,67 @@ fn lm_decide(
         let k = strength[v];
         let chunks = (end - start + pd - 1) / pd;
 
+        // bit t: this lane's edge in chunk t is resolved, absent or a self-loop
+        let mut done = 0u32;
+        for t in 0..chunks {
+            let e = start + t * pd + lane as usize;
+            let mut skip = true;
+            if e < end {
+                if indices[e] != v as u32 {
+                    skip = false;
+                }
+            }
+            if skip {
+                done |= 1u32 << (t as u32);
+            }
+        }
+
         let mut w_from = 0.0f32;
         let mut best_c = u32::new(LIST_END as i64);
         let mut best_g = 0.0f32;
         let mut best_w = 0.0f32;
-        for t in 0..chunks {
-            let ei = t * pd + lane as usize;
-            let mut c = 0u32;
-            let mut ok = 0u32;
-            if start + ei < end {
-                let u = indices[start + ei];
-                if u != v as u32 {
-                    c = comm[u as usize];
-                    ok = 1u32;
-                }
-            }
-            // this lane's cluster summed over the row, and whether its edge is
-            // the cluster's first occurrence
-            let mut acc = 0.0f32;
-            let mut first = ok;
-            for t2 in 0..chunks {
-                let e2 = t2 * pd + lane as usize;
-                let mut c2 = 0u32;
-                let mut w2 = 0.0f32;
-                let mut ok2 = 0u32;
-                if start + e2 < end {
-                    let u2 = indices[start + e2];
-                    if u2 != v as u32 {
-                        c2 = comm[u2 as usize];
-                        w2 = weights[start + e2];
-                        ok2 = 1u32;
+        // `loop` + `break`: cubecl 0.11 reads a bare `while flag` condition
+        // once before the loop, so clearing the flag never ends it
+        loop {
+            // lowest unresolved edge of this lane, as a row position
+            let mut key = u32::new(LIST_END as i64);
+            let mut c_lane = 0u32;
+            let mut found = false;
+            for t in 0..chunks {
+                if !found {
+                    if (done & (1u32 << (t as u32))) == 0u32 {
+                        found = true;
+                        key = (t * pd) as u32 + lane;
+                        c_lane = comm[indices[start + key as usize] as usize];
                     }
                 }
-                for j in 0..pd {
-                    let cj = plane_shuffle(c2, j as u32);
-                    let wj = plane_shuffle(w2, j as u32);
-                    let okj = plane_shuffle(ok2, j as u32);
-                    // nested: cubecl does not promise short-circuit `&&`
-                    if okj == 1u32 {
-                        if cj == c {
-                            acc += wj;
-                            if t2 * pd + j < ei {
-                                first = 0u32;
-                            }
+            }
+            let lead = plane_min(key);
+            if lead == LIST_END {
+                break;
+            } else {
+                let cl = plane_shuffle(c_lane, lead % PLANE_DIM);
+                let mut part = 0.0f32;
+                for t in 0..chunks {
+                    let bit = 1u32 << (t as u32);
+                    if (done & bit) == 0u32 {
+                        let e = start + t * pd + lane as usize;
+                        if comm[indices[e] as usize] == cl {
+                            part += weights[e];
+                            done |= bit;
                         }
                     }
                 }
-            }
-
-            let mut wf = 0.0f32;
-            let mut g = f32::min_value();
-            let mut cand = u32::new(LIST_END as i64);
-            if first == 1u32 {
-                if c == own {
-                    wf = acc;
+                let wsum = plane_sum(part);
+                if cl == own {
+                    w_from = wsum;
                 } else {
-                    g = acc - k * f32::cast_from(tot[c as usize]) * scale;
-                    cand = c;
-                }
-            }
-            w_from += plane_sum(wf);
-
-            let gm = plane_max(g);
-            let mut cid = u32::new(LIST_END as i64);
-            if cand != LIST_END {
-                if g == gm {
-                    cid = cand;
-                }
-            }
-            let cm = plane_min(cid);
-            if cm != LIST_END {
-                // a cluster has one first occurrence, so one lane contributes
-                let mut ws = 0.0f32;
-                if cand == cm {
-                    ws = acc;
-                }
-                let wm = plane_sum(ws);
-                let mut take = best_c == LIST_END;
-                if gm > best_g {
-                    take = true;
-                }
-                if gm == best_g {
-                    if cm < best_c {
-                        take = true;
+                    let gain = wsum - k * f32::cast_from(tot[cl as usize]) * scale;
+                    if beats(gain, cl, best_g, best_c) {
+                        best_c = cl;
+                        best_g = gain;
+                        best_w = wsum;
                     }
-                }
-                if take {
-                    best_c = cm;
-                    best_g = gm;
-                    best_w = wm;
                 }
             }
         }
@@ -314,12 +308,16 @@ fn lm_decide(
 }
 
 /// Source and target cluster of each proposal (a new cluster is `n + v`), and
-/// reset the list heads they use.
+/// reset the list heads they use. Also resets the pending count of the class,
+/// so marks from later classes append from slot 0 for the next round; nothing
+/// appends to this class during its own step.
 ///
 /// ### Params
 ///
 /// * `alist` - Pending lists
 /// * `goff` - Offset of this class in `alist`
+/// * `acount` - Pending count per class
+/// * `g` - Class index
 /// * `cur` - Pending count of this class
 /// * `n` - Number of nodes
 /// * `comm` - Cluster per node
@@ -333,6 +331,8 @@ fn lm_decide(
 fn lm_resolve(
     alist: &Tensor<u32>,
     goff: u32,
+    acount: &mut Tensor<Atomic<u32>>,
+    g: u32,
     cur: &Tensor<u32>,
     n: u32,
     comm: &Tensor<u32>,
@@ -342,6 +342,9 @@ fn lm_resolve(
     heads_to: &mut Tensor<u32>,
     heads_from: &mut Tensor<u32>,
 ) {
+    if ABSOLUTE_POS == 0 {
+        acount[g as usize].store(0u32);
+    }
     let count = cur[0] as usize;
     let stride = CUBE_COUNT * CUBE_DIM as usize;
     let mut i = ABSOLUTE_POS;
@@ -500,15 +503,24 @@ fn lm_accept(
     }
 }
 
-/// Apply the accepted moves: integer atomics on totals and sizes, new labels,
-/// a move count.
+/// Apply the accepted moves, then flag the neighbours of each moved node that
+/// now sit in another cluster and append them to their class's pending list.
+///
+/// One plane per 32 pending slots. Each lane applies its own move (integer
+/// atomics on totals and sizes, the new label), then the plane walks its moved
+/// nodes in turn with the lanes striding each row, so rows are read
+/// contiguously. Fusing is safe because a class is an independent set: a moved
+/// node's neighbours sit in other classes, so their labels do not change here
+/// and the appends never land in this class's region.
 ///
 /// ### Params
 ///
+/// * `indptr` - Row offsets
+/// * `indices` - Column indices
+/// * `kint` - Fixed-point node weight
 /// * `alist` - Pending lists
 /// * `goff` - Offset of this class in `alist`
 /// * `cur` - Pending count of this class
-/// * `kint` - Fixed-point node weight
 /// * `acc` - 1 if accepted
 /// * `r_from` - Source clusters
 /// * `r_to` - Target clusters
@@ -516,13 +528,19 @@ fn lm_accept(
 /// * `size` - Cluster sizes
 /// * `comm` - Cluster per node
 /// * `moves` - Move counter of this round
+/// * `affected` - Pending flag per node
+/// * `colour` - Class per node
+/// * `goffs` - Offset of each class in `alist`
+/// * `acount` - Pending count per class
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
-fn lm_apply(
-    alist: &Tensor<u32>,
+fn lm_apply_mark(
+    indptr: &Tensor<u32>,
+    indices: &Tensor<u32>,
+    kint: &Tensor<u32>,
+    alist: &mut Tensor<u32>,
     goff: u32,
     cur: &Tensor<u32>,
-    kint: &Tensor<u32>,
     acc: &Tensor<u32>,
     r_from: &Tensor<u32>,
     r_to: &Tensor<u32>,
@@ -530,81 +548,65 @@ fn lm_apply(
     size: &mut Tensor<Atomic<u32>>,
     comm: &mut Tensor<u32>,
     moves: &mut Tensor<Atomic<u32>>,
-) {
-    let count = cur[0] as usize;
-    let stride = CUBE_COUNT * CUBE_DIM as usize;
-    let mut i = ABSOLUTE_POS;
-    while i < count {
-        if acc[i] == 1u32 {
-            let v = alist[goff as usize + i] as usize;
-            let kv = kint[v];
-            let from = r_from[i] as usize;
-            let to = r_to[i] as usize;
-            tot[from].fetch_sub(kv);
-            tot[to].fetch_add(kv);
-            size[from].fetch_sub(1u32);
-            size[to].fetch_add(1u32);
-            comm[v] = r_to[i];
-            moves[0].fetch_add(1u32);
-        }
-        i += stride;
-    }
-}
-
-/// Flag the neighbours of each moved node that now sit in another cluster and
-/// append them to their class's pending list. A class is an independent set,
-/// so the appends never land in this class's region.
-///
-/// ### Params
-///
-/// * `indptr` - Row offsets
-/// * `indices` - Column indices
-/// * `comm` - Cluster per node, after the moves
-/// * `alist` - Pending lists
-/// * `goff` - Offset of this class in `alist`
-/// * `cur` - Pending count of this class
-/// * `acc` - 1 if accepted
-/// * `affected` - Pending flag per node
-/// * `colour` - Class per node
-/// * `goffs` - Offset of each class in `alist`
-/// * `acount` - Pending count per class
-#[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
-fn lm_mark(
-    indptr: &Tensor<u32>,
-    indices: &Tensor<u32>,
-    comm: &Tensor<u32>,
-    alist: &mut Tensor<u32>,
-    goff: u32,
-    cur: &Tensor<u32>,
-    acc: &Tensor<u32>,
     affected: &mut Tensor<Atomic<u32>>,
     colour: &Tensor<u32>,
     goffs: &Tensor<u32>,
     acount: &mut Tensor<Atomic<u32>>,
 ) {
     let count = cur[0] as usize;
-    let stride = CUBE_COUNT * CUBE_DIM as usize;
-    let mut i = ABSOLUTE_POS;
-    while i < count {
-        if acc[i] == 1u32 {
-            let v = alist[goff as usize + i] as usize;
-            let c = comm[v];
-            for e in indptr[v] as usize..indptr[v + 1] as usize {
-                let u = indices[e] as usize;
-                if comm[u] != c {
-                    // plain load first: most neighbours are already flagged
-                    if affected[u].load() == 0u32 {
-                        if affected[u].exchange(1u32) == 0u32 {
-                            let gu = colour[u] as usize;
-                            let slot = acount[gu].fetch_add(1u32);
-                            alist[(goffs[gu] + slot) as usize] = u as u32;
+    let lane = UNIT_POS_PLANE;
+    let pd = PLANE_DIM as usize;
+    let planes = (CUBE_DIM / PLANE_DIM) as usize;
+    let stride = CUBE_COUNT * planes * pd;
+    let mut base = (CUBE_POS * planes + (UNIT_POS / PLANE_DIM) as usize) * pd;
+    while base < count {
+        let i = base + lane as usize;
+        let mut a = 0u32;
+        let mut v_lane = 0u32;
+        let mut c_lane = 0u32;
+        if i < count {
+            if acc[i] == 1u32 {
+                a = 1u32;
+                v_lane = alist[goff as usize + i];
+                c_lane = r_to[i];
+                let kv = kint[v_lane as usize];
+                let from = r_from[i] as usize;
+                tot[from].fetch_sub(kv);
+                tot[c_lane as usize].fetch_add(kv);
+                size[from].fetch_sub(1u32);
+                size[c_lane as usize].fetch_add(1u32);
+                comm[v_lane as usize] = c_lane;
+            }
+        }
+        let moved = plane_sum(a);
+        if moved > 0u32 {
+            if lane == 0 {
+                moves[0].fetch_add(moved);
+            }
+            for r in 0..pd {
+                if plane_shuffle(a, r as u32) == 1u32 {
+                    let v = plane_shuffle(v_lane, r as u32) as usize;
+                    let c = plane_shuffle(c_lane, r as u32);
+                    let end = indptr[v + 1] as usize;
+                    let mut e = indptr[v] as usize + lane as usize;
+                    while e < end {
+                        let u = indices[e] as usize;
+                        if comm[u] != c {
+                            // plain load first: most neighbours are already flagged
+                            if affected[u].load() == 0u32 {
+                                if affected[u].exchange(1u32) == 0u32 {
+                                    let gu = colour[u] as usize;
+                                    let slot = acount[gu].fetch_add(1u32);
+                                    alist[(goffs[gu] + slot) as usize] = u as u32;
+                                }
+                            }
                         }
+                        e += pd;
                     }
                 }
             }
         }
-        i += stride;
+        base += stride;
     }
 }
 
@@ -872,15 +874,8 @@ impl LeidenGpuMover<'_> {
                 let goff = goffs[g];
                 let (tc, td) = thread_grid(len);
                 let (pc, pdim) = plane_grid(len, plane);
+                let (mc, md) = plane_grid(len.div_ceil(plane as usize), plane);
                 unsafe {
-                    lm_begin::launch_unchecked(
-                        c,
-                        one.0.clone(),
-                        one.1,
-                        acount.into_tensor_arg(),
-                        g as u32,
-                        cur.into_tensor_arg(),
-                    );
                     lm_decide::launch_unchecked(
                         c,
                         pc,
@@ -896,6 +891,8 @@ impl LeidenGpuMover<'_> {
                         scale,
                         alist.into_tensor_arg(),
                         goff,
+                        acount.into_tensor_arg(),
+                        g as u32,
                         cur.into_tensor_arg(),
                         affected.into_tensor_arg(),
                         out_to.into_tensor_arg(),
@@ -908,6 +905,8 @@ impl LeidenGpuMover<'_> {
                         td,
                         alist.into_tensor_arg(),
                         goff,
+                        acount.into_tensor_arg(),
+                        g as u32,
                         cur.into_tensor_arg(),
                         n as u32,
                         comm.into_tensor_arg(),
@@ -953,14 +952,16 @@ impl LeidenGpuMover<'_> {
                         next_from.into_tensor_arg(),
                         acc.into_tensor_arg(),
                     );
-                    lm_apply::launch_unchecked(
+                    lm_apply_mark::launch_unchecked(
                         c,
-                        tc.clone(),
-                        td,
+                        mc,
+                        md,
+                        d.indptr.into_tensor_arg(),
+                        d.indices.into_tensor_arg(),
+                        d.kint.into_tensor_arg(),
                         alist.into_tensor_arg(),
                         goff,
                         cur.into_tensor_arg(),
-                        d.kint.into_tensor_arg(),
                         acc.into_tensor_arg(),
                         r_from.into_tensor_arg(),
                         r_to.into_tensor_arg(),
@@ -968,18 +969,6 @@ impl LeidenGpuMover<'_> {
                         size.into_tensor_arg(),
                         comm.into_tensor_arg(),
                         moves.into_tensor_arg(),
-                    );
-                    lm_mark::launch_unchecked(
-                        c,
-                        tc,
-                        td,
-                        d.indptr.into_tensor_arg(),
-                        d.indices.into_tensor_arg(),
-                        comm.into_tensor_arg(),
-                        alist.into_tensor_arg(),
-                        goff,
-                        cur.into_tensor_arg(),
-                        acc.into_tensor_arg(),
                         affected.into_tensor_arg(),
                         colour.into_tensor_arg(),
                         goffs_d.into_tensor_arg(),
@@ -1009,7 +998,8 @@ impl LeidenGpuMover<'_> {
 ///
 /// Falls back to the CPU engine with [`LocalMoving::Coloured`] when the graph
 /// has fewer than [`LEIDEN_GPU_MIN_NODES`] nodes, a row longer than
-/// [`PLANE_DEG`], or the device lacks fixed-width plane operations.
+/// [`PLANE_DEG`] (or 32 plane widths), or the device lacks fixed-width plane
+/// operations.
 ///
 /// ### Params
 ///
@@ -1039,7 +1029,9 @@ where
         .map(|i| graph.get_neighbours_raw(i).0.len())
         .max()
         .unwrap_or(0);
-    if n < LEIDEN_GPU_MIN_NODES || max_deg > PLANE_DEG || gpu_supported(client).is_none() {
+    // the decide kernel's resolved mask holds 32 plane-wide chunks
+    let fits = gpu_supported(client).is_some_and(|p| max_deg <= PLANE_DEG.min(32 * p as usize));
+    if n < LEIDEN_GPU_MIN_NODES || !fits {
         let cpu = LeidenParams {
             local_moving: LocalMoving::Coloured,
             ..*params
