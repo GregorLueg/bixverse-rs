@@ -25,6 +25,7 @@ cubecl-utils-rs.workspace = true
 cubek.workspace = true
 faer.workspace = true
 half.workspace = true
+num-traits.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true

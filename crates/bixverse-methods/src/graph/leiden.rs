@@ -904,12 +904,30 @@ fn greedy_colouring<G: LevelGraph>(g: &G, order: &[u32]) -> (Vec<Vec<u32>>, Vec<
     (classes, colour)
 }
 
+/// Greedy colouring in node order from a seeded start.
+///
+/// At level 0 node order is BFS order, which keeps the scan cache-local.
+///
+/// ### Params
+///
+/// * `g` - Graph of this level
+/// * `rng` - Random number generator for the start
+///
+/// ### Returns
+///
+/// `(colour classes, each sorted by node id; colour per node)`
+fn seeded_colouring<G: LevelGraph>(g: &G, rng: &mut StdRng) -> (Vec<Vec<u32>>, Vec<u32>) {
+    let n = g.n();
+    let start = rng.random_range(0..n) as u32;
+    let order: Vec<u32> = (start..n as u32).chain(0..start).collect();
+    greedy_colouring(g, &order)
+}
+
 /// Local moving over greedy colour classes, see [`LocalMoving::Coloured`].
 ///
-/// The colouring visits the nodes in node order from a seeded start, which at
-/// level 0 is BFS order and keeps the scan cache-local. Each class keeps a
-/// list of its pending nodes; the classes are swept in turn until none is
-/// pending, so a sweep costs what its pending nodes cost.
+/// Colours come from [`seeded_colouring`]. Each class keeps a list of its
+/// pending nodes; the classes are swept in turn until none is pending, so a
+/// sweep costs what its pending nodes cost.
 ///
 /// ### Params
 ///
@@ -937,9 +955,7 @@ fn move_nodes_coloured<G: LevelGraph>(
     rng: &mut StdRng,
 ) -> (usize, bool) {
     let n = g.n();
-    let start = rng.random_range(0..n) as u32;
-    let order: Vec<u32> = (start..n as u32).chain(0..start).collect();
-    let (classes, colour) = greedy_colouring(g, &order);
+    let (classes, colour) = seeded_colouring(g, rng);
 
     let (mut cluster_w, mut cluster_n, mut empty) = cluster_totals(membership, node_w);
     let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
@@ -1479,12 +1495,15 @@ fn permute_graph<G: LevelGraph>(g: &G, order: &[u32], pos: &[u32]) -> AggGraph<G
 /// * `iteration` - Index of this iteration, for seeding
 /// * `max_evals` - Node-evaluation cap per local-moving phase, in units of n
 /// * `multi_level` - `false` stops after the first local-moving phase
+/// * `level0` - Local moving of level 0: `(graph, node weights, membership,
+///   res, rng) -> (number of clusters, whether any node moved)`, membership
+///   reindexed
 ///
 /// ### Returns
 ///
 /// Whether any node moved
 #[allow(clippy::too_many_arguments)]
-fn leiden_iteration<G: LevelGraph>(
+fn leiden_iteration<G, E, F>(
     graph: &G,
     node_w: &[f64],
     membership: &mut [u32],
@@ -1493,23 +1512,19 @@ fn leiden_iteration<G: LevelGraph>(
     iteration: u64,
     max_evals: usize,
     multi_level: bool,
-) -> bool {
+    level0: &mut F,
+) -> Result<bool, E>
+where
+    G: LevelGraph,
+    F: FnMut(&G, &[f64], &mut [u32], f64, &mut StdRng) -> Result<(usize, bool), E>,
+{
     let n = graph.n();
     let mut rng = StdRng::seed_from_u64(derive_seed(params.seed, &[iteration]));
     reindex(membership);
 
-    let (n_clusters, mut changed) = local_move(
-        graph,
-        node_w,
-        membership,
-        res,
-        max_evals.saturating_mul(n),
-        !params.refine,
-        params.local_moving,
-        &mut rng,
-    );
+    let (n_clusters, mut changed) = level0(graph, node_w, membership, res, &mut rng)?;
     if !multi_level || n_clusters == n {
-        return changed;
+        return Ok(changed);
     }
 
     let (refined, n_refined) = refined_or_unrefined(
@@ -1548,7 +1563,7 @@ fn leiden_iteration<G: LevelGraph>(
         level += 1;
     }
 
-    changed
+    Ok(changed)
 }
 
 /// Refined partition for Leiden, the unrefined one for Louvain.
@@ -1592,10 +1607,61 @@ fn refined_or_unrefined<G: LevelGraph>(
     (membership.to_vec(), n_clusters)
 }
 
-/// Shared entry for Leiden and Louvain.
+/// Level-0 local moving on another backend (a GPU), for
+/// [`community_detection_with`].
 ///
-/// [`leiden_sparse_graph`] and [`louvain_sparse_graph`] are thin wrappers;
-/// call this directly to cap the node evaluations or stop after one level.
+/// The engine hands over the BFS-relabelled level-0 graph once, then one
+/// colouring per iteration. Coarser levels, refinement and aggregation stay on
+/// the CPU.
+pub trait LocalMover {
+    /// Backend error
+    type Error: From<MethodsErrors>;
+
+    /// Take the level-0 graph. Called once, before the first
+    /// [`LocalMover::move_nodes`].
+    ///
+    /// ### Params
+    ///
+    /// * `indptr` - Row offsets, length n + 1
+    /// * `indices` - Column indices, symmetric, self-loops possible
+    /// * `weights` - Edge weights
+    /// * `node_w` - Node weights (weighted degree, self-loops included)
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or the backend's error
+    fn prepare<W: ToPrimitive + Sync>(
+        &mut self,
+        indptr: &[usize],
+        indices: &[u32],
+        weights: &[W],
+        node_w: &[f64],
+    ) -> Result<(), Self::Error>;
+
+    /// Coloured local moving on the prepared graph, see
+    /// [`LocalMoving::Coloured`]. The apply rule may differ from the CPU's.
+    ///
+    /// ### Params
+    ///
+    /// * `membership` - Initial partition, labels `< n`; updated, labels
+    ///   `< n` but not necessarily contiguous
+    /// * `classes` - Colour classes, each sorted by node id
+    /// * `colour` - Colour per node
+    /// * `res` - Resolution divided by `2m`
+    ///
+    /// ### Returns
+    ///
+    /// Whether any node moved
+    fn move_nodes(
+        &mut self,
+        membership: &mut [u32],
+        classes: &[Vec<u32>],
+        colour: &[u32],
+        res: f64,
+    ) -> Result<bool, Self::Error>;
+}
+
+/// Shared body of [`community_detection`] and [`community_detection_with`].
 ///
 /// ### Params
 ///
@@ -1603,21 +1669,25 @@ fn refined_or_unrefined<G: LevelGraph>(
 /// * `params` - The [`LeidenParams`]
 /// * `max_evals` - Node-evaluation cap per local-moving phase, in units of n
 /// * `multi_level` - `false` stops after the first local-moving phase
+/// * `level0` - Level-0 local moving, see [`leiden_iteration`]
 ///
 /// ### Returns
 ///
 /// Community per node, `0` the largest
-pub fn community_detection<T>(
+fn detect<T, E, F>(
     graph: &SparseGraph<T>,
     params: &LeidenParams,
     max_evals: usize,
     multi_level: bool,
-) -> Result<Vec<usize>, MethodsErrors>
+    mut level0: F,
+) -> Result<Vec<usize>, E>
 where
     T: BixverseFloat + Send + Sync + std::iter::Sum,
+    E: From<MethodsErrors> + Send,
+    F: FnMut(&AggGraph<T>, &[f64], &mut [u32], f64, &mut StdRng) -> Result<(usize, bool), E> + Send,
 {
     if graph.is_directed() {
-        return Err(MethodsErrors::GraphDirectedError);
+        return Err(MethodsErrors::GraphDirectedError.into());
     }
     let n = graph.get_node_number();
     if n == 0 {
@@ -1645,7 +1715,7 @@ where
         // thousands of short parallel calls, and each one from outside the pool
         // is an injection plus a blocking wake-up.
         rayon::scope(|_| {
-            for it in 0..params.n_iterations.max(1) {
+            (0..params.n_iterations.max(1)).try_for_each(|it| {
                 leiden_iteration(
                     &g,
                     &node_w,
@@ -1655,9 +1725,11 @@ where
                     it as u64,
                     max_evals,
                     multi_level,
-                );
-            }
-        });
+                    &mut level0,
+                )
+                .map(|_| ())
+            })
+        })?;
     }
 
     // back from BFS labels to the caller's node order
@@ -1666,6 +1738,93 @@ where
         .map(|&new| membership[new as usize] as usize)
         .collect();
     Ok(remap_communities_by_size(&labels))
+}
+
+/// Shared entry for Leiden and Louvain.
+///
+/// [`leiden_sparse_graph`] and [`louvain_sparse_graph`] are thin wrappers;
+/// call this directly to cap the node evaluations or stop after one level.
+///
+/// ### Params
+///
+/// * `graph` - Undirected [`SparseGraph`]
+/// * `params` - The [`LeidenParams`]
+/// * `max_evals` - Node-evaluation cap per local-moving phase, in units of n
+/// * `multi_level` - `false` stops after the first local-moving phase
+///
+/// ### Returns
+///
+/// Community per node, `0` the largest
+pub fn community_detection<T>(
+    graph: &SparseGraph<T>,
+    params: &LeidenParams,
+    max_evals: usize,
+    multi_level: bool,
+) -> Result<Vec<usize>, MethodsErrors>
+where
+    T: BixverseFloat + Send + Sync + std::iter::Sum,
+{
+    let (shuffle, mode) = (!params.refine, params.local_moving);
+    detect(
+        graph,
+        params,
+        max_evals,
+        multi_level,
+        |g, node_w, membership, res, rng| {
+            let evals = max_evals.saturating_mul(g.n());
+            Ok(local_move(
+                g, node_w, membership, res, evals, shuffle, mode, rng,
+            ))
+        },
+    )
+}
+
+/// [`community_detection`] with level-0 local moving on a [`LocalMover`].
+///
+/// Every iteration colours level 0 as [`LocalMoving::Coloured`] does and
+/// hands the classes to `mover`; coarser levels use `params.local_moving` on
+/// the CPU. `max_evals` caps the CPU levels only.
+///
+/// ### Params
+///
+/// * `graph` - Undirected [`SparseGraph`]
+/// * `params` - The [`LeidenParams`]
+/// * `max_evals` - Node-evaluation cap per CPU local-moving phase, in units
+///   of n
+/// * `multi_level` - `false` stops after the first local-moving phase
+/// * `mover` - The level-0 [`LocalMover`]
+///
+/// ### Returns
+///
+/// Community per node, `0` the largest
+pub fn community_detection_with<T, M>(
+    graph: &SparseGraph<T>,
+    params: &LeidenParams,
+    max_evals: usize,
+    multi_level: bool,
+    mover: &mut M,
+) -> Result<Vec<usize>, M::Error>
+where
+    T: BixverseFloat + Send + Sync + std::iter::Sum,
+    M: LocalMover + Send,
+    M::Error: Send,
+{
+    let mut prepared = false;
+    detect(
+        graph,
+        params,
+        max_evals,
+        multi_level,
+        |g, node_w, membership, res, rng| {
+            if !prepared {
+                mover.prepare(&g.indptr, &g.indices, &g.weights, node_w)?;
+                prepared = true;
+            }
+            let (classes, colour) = seeded_colouring(g, rng);
+            let changed = mover.move_nodes(membership, &classes, &colour, res)?;
+            Ok((reindex(membership), changed))
+        },
+    )
 }
 
 //////////

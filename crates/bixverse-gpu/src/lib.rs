@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 pub mod errors;
+pub mod graph;
 pub mod linalg;
 pub mod methods_gpu;
 pub mod prelude;
