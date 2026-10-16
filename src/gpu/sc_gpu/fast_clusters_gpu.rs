@@ -21,8 +21,8 @@ use crate::single_cell::sc_processing::knn::KnnParams;
 ///
 /// Mirrors [crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams]
 /// minus the mini-batch knobs (`batch_size`, `drift_threshold`, `lr_alpha`), as
-/// the GPU k-means is full-batch Lloyd's, and with [KMeansGpuParams] in place of
-/// the CPU parameter wrapper.
+/// the GPU k-means is full-batch Lloyd's, and with [KMeansGpuParams] in place
+/// of the CPU parameter wrapper.
 #[derive(Clone, Debug)]
 pub struct FastLouvainParamsGpu {
     // -- k means --
