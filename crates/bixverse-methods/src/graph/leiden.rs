@@ -15,8 +15,8 @@
 //! ordered sweep costs it modularity without a refinement to repair it.
 //!
 //! Local moving defaults to the sequential queue. [`LocalMoving::Coloured`]
-//! and [`LocalMoving::Synchronous`] parallelise it on large levels, see their
-//! docs; both stay independent of the thread count.
+//! parallelises it on large levels, see its docs; it stays independent of the
+//! thread count.
 //!
 //! Determinism: the queue is sequential and seeded. Refinement
 //! runs in parallel over clusters, each cluster with its own RNG derived from
@@ -72,19 +72,13 @@ pub enum LocalMoving {
     /// the live cluster totals. The scheme is the one in clust-libreville-rs
     /// and leiden-rs.
     Coloured,
-    /// Jacobi rounds: every unstable node decides from the same snapshot,
-    /// ties go to the lower cluster id, and a move is applied only if it goes
-    /// up (or, on alternate rounds, down) in cluster id, which stops pairs
-    /// from swapping forever. cuGraph's Louvain step (Lu, Halappanavar &
-    /// Kalyanaraman, 2015). Does not use the seed.
-    Synchronous,
 }
 
 /// Parse a [`LocalMoving`] name.
 ///
 /// ### Params
 ///
-/// * `s` - `"queue"`, `"coloured"` or `"synchronous"`, case-insensitive
+/// * `s` - `"queue"` or `"coloured"`, case-insensitive
 ///
 /// ### Returns
 ///
@@ -93,7 +87,6 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
     match s.to_lowercase().as_str() {
         "queue" => Some(LocalMoving::Queue),
         "coloured" | "colored" => Some(LocalMoving::Coloured),
-        "synchronous" => Some(LocalMoving::Synchronous),
         _ => None,
     }
 }
@@ -672,7 +665,6 @@ fn local_move<G: LevelGraph>(
     match mode {
         LocalMoving::Queue => move_nodes(g, node_w, membership, res, max_evals, shuffle, rng),
         LocalMoving::Coloured => move_nodes_coloured(g, node_w, membership, res, max_evals, rng),
-        LocalMoving::Synchronous => move_nodes_synchronous(g, node_w, membership, res, max_evals),
     }
 }
 
@@ -1005,109 +997,6 @@ fn move_nodes_coloured<G: LevelGraph>(
             if evals >= max_evals {
                 break 'sweeps;
             }
-        }
-    }
-
-    (reindex(membership), changed)
-}
-
-/// Synchronous local moving, see [`LocalMoving::Synchronous`].
-///
-/// All pending nodes decide from one snapshot; the moves in the round's
-/// direction are applied together (if none goes that way, the direction flips
-/// within the round) and the others stay pending. Moves into an empty cluster
-/// ignore the direction, take the empty ids in node order and never empty
-/// their source. Cluster totals are recomputed from scratch after each round,
-/// in node order.
-///
-/// ### Params
-///
-/// * `g` - Graph of this level
-/// * `node_w` - Node weights
-/// * `membership` - Initial partition, labels `< n`; updated and reindexed
-/// * `res` - Resolution divided by `2m`
-/// * `max_evals` - Cap on node evaluations
-///
-/// ### Returns
-///
-/// `(number of clusters, whether any node moved)`
-///
-/// ### References
-///
-/// Lu, Halappanavar & Kalyanaraman, Parallel Computing, 2015
-fn move_nodes_synchronous<G: LevelGraph>(
-    g: &G,
-    node_w: &[f64],
-    membership: &mut [u32],
-    res: f64,
-    max_evals: usize,
-) -> (usize, bool) {
-    let n = g.n();
-    let pending: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(true)).collect();
-    let mut frontier: Vec<u32> = (0..n as u32).collect();
-    let mut up = true;
-    let mut changed = false;
-    let mut evals = 0usize;
-    let mut moved: Vec<u32> = Vec::new();
-
-    for _ in 0..PAR_MOVE_MAX_ROUNDS {
-        if frontier.is_empty() {
-            break;
-        }
-        let nodes = take_pending(&mut frontier, &pending);
-        evals += nodes.len();
-        let (cluster_w, mut cluster_n, mut empty) = cluster_totals(membership, node_w);
-        let moves = decide_moves(g, &nodes, membership, &cluster_w, &cluster_n, node_w, res);
-        if moves.is_empty() {
-            break;
-        }
-        let goes = |m: &Move, up: bool, memb: &[u32]| {
-            m.to == NEW_CLUSTER || (m.to > memb[m.v as usize]) == up
-        };
-        if !moves
-            .iter()
-            .any(|m| m.to != NEW_CLUSTER && goes(m, up, membership))
-        {
-            up = !up;
-        }
-
-        // decide which moves go before any is applied, against the snapshot
-        let mut accepted: Vec<(u32, u32)> = Vec::with_capacity(moves.len());
-        for m in &moves {
-            if !goes(m, up, membership) {
-                if !pending[m.v as usize].swap(true, Relaxed) {
-                    frontier.push(m.v);
-                }
-                continue;
-            }
-            let to = if m.to == NEW_CLUSTER {
-                let from = membership[m.v as usize] as usize;
-                if cluster_n[from] <= 1 {
-                    continue;
-                }
-                let Some(c) = empty.pop() else {
-                    continue;
-                };
-                cluster_n[from] -= 1;
-                c
-            } else {
-                m.to
-            };
-            accepted.push((m.v, to));
-        }
-        if accepted.is_empty() {
-            break;
-        }
-        moved.clear();
-        for &(v, to) in &accepted {
-            membership[v as usize] = to;
-            moved.push(v);
-        }
-        changed = true;
-        frontier.extend(flag_neighbours(g, &moved, membership, &pending));
-        up = !up;
-        if evals >= max_evals {
-            break;
         }
     }
 
@@ -2041,80 +1930,68 @@ mod tests {
         community_detection(g, &p, usize::MAX, true).unwrap()
     }
 
-    /// Both parallel modes give the same partition at 1 and 4 threads, for
-    /// Leiden and Louvain, and Leiden's communities stay connected.
+    /// Coloured gives the same partition at 1 and 4 threads, for Leiden and
+    /// Louvain, and Leiden's communities stay connected.
     #[test]
     fn test_parallel_local_moving_thread_count_invariant() {
         let edges = planted(20, 400, 8, 3, 11);
         let g = build_undirected(8000, &edges, false);
-        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
-            for refine in [true, false] {
-                let run = |threads: usize| {
-                    rayon::ThreadPoolBuilder::new()
-                        .num_threads(threads)
-                        .build()
-                        .unwrap()
-                        .install(|| run_mode(&g, mode, refine, 3))
-                };
-                let one = run(1);
-                assert_eq!(one, run(4), "{mode:?} refine {refine}");
-                if refine {
-                    assert!(all_connected(&g, &one), "{mode:?}");
-                }
+        for refine in [true, false] {
+            let run = |threads: usize| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| run_mode(&g, LocalMoving::Coloured, refine, 3))
+            };
+            let one = run(1);
+            assert_eq!(one, run(4), "refine {refine}");
+            if refine {
+                assert!(all_connected(&g, &one));
             }
         }
     }
 
-    /// Both parallel modes recover planted blocks exactly, on a graph large
-    /// enough that they run instead of the queue.
+    /// Coloured recovers planted blocks exactly, on a graph large enough that
+    /// it runs instead of the queue.
     #[test]
     fn test_parallel_local_moving_recovers_planted_blocks() {
         let edges = planted(8, 600, 10, 1, 7);
         let g = build_undirected(4800, &edges, false);
         assert!(g.get_node_number() >= LEIDEN_PAR_MIN_NODES);
-        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
-            for refine in [true, false] {
-                let labels = run_mode(&g, mode, refine, 1);
-                assert_eq!(n_communities(&labels), 8, "{mode:?} refine {refine}");
-                for v in 0..4800 {
-                    assert_eq!(
-                        labels[v],
-                        labels[(v / 600) * 600],
-                        "{mode:?} refine {refine}"
-                    );
-                }
+        for refine in [true, false] {
+            let labels = run_mode(&g, LocalMoving::Coloured, refine, 1);
+            assert_eq!(n_communities(&labels), 8, "refine {refine}");
+            for v in 0..4800 {
+                assert_eq!(labels[v], labels[(v / 600) * 600], "refine {refine}");
             }
         }
     }
 
-    /// Below `LEIDEN_PAR_MIN_NODES` the parallel modes take the queue, so
-    /// karate gives the queue's partition.
+    /// Below `LEIDEN_PAR_MIN_NODES` Coloured takes the queue, so karate gives
+    /// the queue's partition.
     #[test]
     fn test_parallel_local_moving_small_graph_uses_queue() {
         let g = karate();
-        for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
-            assert_eq!(
-                run_mode(&g, mode, true, 5),
-                run_mode(&g, LocalMoving::Queue, true, 5)
-            );
-        }
+        assert_eq!(
+            run_mode(&g, LocalMoving::Coloured, true, 5),
+            run_mode(&g, LocalMoving::Queue, true, 5)
+        );
     }
 
-    /// On a noisy planted partition the parallel modes land within 1% of the
-    /// queue's modularity, for Leiden and Louvain.
+    /// On a noisy planted partition Coloured lands within 1% of the queue's
+    /// modularity, for Leiden and Louvain.
     #[test]
     fn test_parallel_local_moving_modularity_close_to_queue() {
         let edges = planted(20, 400, 8, 3, 11);
         let g = build_undirected(8000, &edges, false);
         for refine in [true, false] {
             let q_queue = modularity(&g, &run_mode(&g, LocalMoving::Queue, refine, 2), 1.0);
-            for mode in [LocalMoving::Coloured, LocalMoving::Synchronous] {
-                let q = modularity(&g, &run_mode(&g, mode, refine, 2), 1.0);
-                assert!(
-                    q >= 0.99 * q_queue,
-                    "{mode:?} refine {refine}: {q} vs queue {q_queue}"
-                );
-            }
+            let q = modularity(&g, &run_mode(&g, LocalMoving::Coloured, refine, 2), 1.0);
+            assert!(
+                q >= 0.99 * q_queue,
+                "refine {refine}: {q} vs queue {q_queue}"
+            );
         }
     }
 

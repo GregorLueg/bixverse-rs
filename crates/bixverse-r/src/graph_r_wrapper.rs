@@ -16,7 +16,7 @@ impl FromRList for LeidenParams {
     ///
     /// Missing keys fall back to [LeidenParams::default]. Recognised keys:
     /// `resolution`, `beta`, `n_iterations`, `refine`, `seed` and
-    /// `local_moving` (`"queue"`, `"coloured"` or `"synchronous"`).
+    /// `local_moving` (`"queue"` or `"coloured"`).
     ///
     /// ### Params
     ///
@@ -59,7 +59,7 @@ pub fn r_local_moving(params: &HashMap<&str, Robj>) -> Result<Option<LocalMoving
         None => Ok(None),
         Some(s) => parse_local_moving(s).map(Some).ok_or_else(|| {
             Error::Other(format!(
-                "Unknown local_moving '{s}'; expected 'queue', 'coloured' or 'synchronous'"
+                "Unknown local_moving '{s}'; expected 'queue' or 'coloured'"
             ))
         }),
     }
