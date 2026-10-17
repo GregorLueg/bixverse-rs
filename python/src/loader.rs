@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use bixverse_sc_data::errors::ScDataErrors;
 use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::errors::ScDataErrors;
 use crossbeam_channel::{Receiver, bounded};
 use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
