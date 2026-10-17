@@ -31,7 +31,7 @@ dge = ["bixverse-methods/dge"]
 ## for the h5ad and 10x h5 readers.
 single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
-h5 = ["single-cell", "bixverse-sc-data/h5"]
+h5 = ["single-cell", "bixverse-sc-data/h5", "dep:hdf5"]
 ## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
 hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
 ## Compile the LZF and Blosc filters into the HDF5 build. See
@@ -69,6 +69,9 @@ bixverse-gpu = { workspace = true, optional = true }
 bixverse-sc-gpu = { workspace = true, optional = true }
 bixverse-mlx = { workspace = true, optional = true }
 document-features.workspace = true
+# Only for tests/h5ad_compression.rs. A dev-dependency cannot be optional, and
+# an unconditional one drags HDF5 into every build of the tests.
+hdf5 = { workspace = true, optional = true }
 
 [dev-dependencies]
 ann-search-rs.workspace = true
@@ -80,7 +83,6 @@ cubek.workspace = true
 edge-rs.workspace = true
 faer.workspace = true
 half.workspace = true
-hdf5.workspace = true
 indexmap.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
