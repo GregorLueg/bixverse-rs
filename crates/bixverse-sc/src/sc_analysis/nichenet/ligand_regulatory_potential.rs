@@ -16,8 +16,6 @@
 //!      `ltf_cutoff == 0`.
 
 use faer::{Mat, MatRef};
-use petgraph::Graph;
-use petgraph::graph::NodeIndex;
 use rayon::prelude::*;
 
 use crate::prelude::*;
@@ -112,32 +110,6 @@ fn hub_correct<T: BixverseFloat>(to: &[u32], weight: &[T], n_nodes: usize, h: T)
             }
         })
         .collect()
-}
-
-/// Build petgraph from indexed edges then convert to PageRankGraph.
-///
-/// ### Params
-///
-/// * `n_nodes` - Number of nodes
-/// * `from` - Indices of the `from` nodes.
-/// * `to` - Indices of the `to` nodes.
-/// * `weight` - The edge weight.
-///
-/// ### Returns
-///
-/// The [PageRankGraph] for fast personalised page rank calculations.
-fn build_ppr_graph<T>(n_nodes: usize, from: &[u32], to: &[u32], weight: &[T]) -> PageRankGraph<T>
-where
-    T: BixverseFloat + std::iter::Sum,
-{
-    let mut g: Graph<&str, T> = Graph::new();
-    for _ in 0..n_nodes {
-        g.add_node("");
-    }
-    for ((&f, &t), &w) in from.iter().zip(to.iter()).zip(weight.iter()) {
-        g.add_edge(NodeIndex::new(f as usize), NodeIndex::new(t as usize), w);
-    }
-    PageRankGraph::from_petgraph(g)
 }
 
 /// Threshold each row of a dense matrix at its `q` quantile, return as CSR.
@@ -355,7 +327,10 @@ where
     };
 
     // 2. build PPR graph and GRN CSR
-    let pr_graph = build_ppr_graph(n_nodes, sig_from, sig_to, &sig_w);
+    let sig_from_idx: Vec<usize> = sig_from.iter().map(|&f| f as usize).collect();
+    let sig_to_idx: Vec<usize> = sig_to.iter().map(|&t| t as usize).collect();
+    let pr_graph =
+        PageRankGraph::from_indices(n_nodes, &sig_from_idx, &sig_to_idx, Some(&sig_w), false);
     let grn = coo_to_csr(grn_from, grn_to, &grn_w, (n_nodes, n_nodes));
 
     // 3. flatten seeds across groups

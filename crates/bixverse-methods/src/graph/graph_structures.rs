@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 
 use faer::{Mat, MatRef};
-use petgraph::Graph;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::clone::Clone;
@@ -227,60 +226,6 @@ where
     pub fn is_directed(&self) -> bool {
         self.directed
     }
-}
-
-//////////////
-// Petgraph //
-//////////////
-
-/// Generate a PetGraph Graph
-///
-/// ### Params
-///
-/// * `nodes` - Slice of the node names.
-/// * `from` - Slice of the names of the from nodes.
-/// * `to` - Slice of the names of the no nodes.
-/// * `undirected` - Shall a directed or undirected graph be generated.
-///
-/// ### Returns
-///
-/// The generated PetGraph
-pub fn graph_from_strings<'a, T>(
-    nodes: &'a [String],
-    from: &[String],
-    to: &[String],
-    weights: Option<&[T]>,
-    undirected: bool,
-) -> Graph<&'a str, T>
-where
-    T: BixverseFloat,
-{
-    assert_same_len!(from, to);
-
-    if let Some(weights) = weights {
-        assert_same_len!(from, weights);
-    }
-
-    let mut graph: Graph<&'a str, T> = Graph::new();
-
-    let mut term_to_idx = FxHashMap::default();
-
-    for term in nodes {
-        let idx = graph.add_node(term);
-        term_to_idx.insert(term, idx);
-    }
-
-    for (i, (from, to)) in from.iter().zip(to.iter()).enumerate() {
-        let from = *term_to_idx.get(from).unwrap();
-        let to = *term_to_idx.get(to).unwrap();
-        let weight = weights.map(|w| w[i]).unwrap_or(T::one());
-        graph.add_edge(from, to, weight);
-        if undirected {
-            graph.add_edge(to, from, weight);
-        }
-    }
-
-    graph
 }
 
 //////////////////////////////////
@@ -581,46 +526,43 @@ where
 // Heterogenous graphs //
 /////////////////////////
 
-/// NodeData structure
+/// Directed edge list with a type per node and a type and weight per edge,
+/// for constrained personalised PageRank.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // clippy is wrongly complaining here
-pub struct NodeData<'a> {
-    /// Name of the node.
-    pub name: &'a str,
-    /// Type of the node
-    pub node_type: &'a str,
+pub struct AttributedGraph<'a, T> {
+    /// Type per node
+    pub node_types: Vec<&'a str>,
+    /// 0-based source node per edge
+    pub from: Vec<usize>,
+    /// 0-based target node per edge
+    pub to: Vec<usize>,
+    /// Type per edge
+    pub edge_types: Vec<&'a str>,
+    /// Weight per edge
+    pub weights: Vec<T>,
 }
 
-/// EdgeData structure
-#[derive(Debug, Clone)]
-pub struct EdgeData<'a, T> {
-    /// Type of the edge.
-    pub edge_type: &'a str,
-    /// Weight of the edge.
-    pub weight: &'a T,
-}
-
-/// Generate a weighted, labelled PetGraph Graph
+/// Generate a weighted, typed graph from node and edge lists
 ///
 /// ### Params
 ///
 /// * `nodes` - Slice of node names.
 /// * `node_types` - Slice of the node types.
 /// * `from` - Slice of the names of the from nodes.
-/// * `to` - Slice of the names of the no nodes.
+/// * `to` - Slice of the names of the to nodes.
 /// * `edge_types` - Slice of the edge types.
 /// * `edge_weights` - Slice of the edge weights.
 ///
 /// ### Returns
 ///
-/// A `Graph<NodeData<'_>, EdgeData<'_>>` graph for subsequent usage in
-/// constraint personalised page-rank iteration.
+/// An `AttributedGraph` for subsequent usage in constrained personalised
+/// page-rank iteration.
 ///
 /// ### Panics
 ///
 /// Function will panic if `nodes` and `nodes_types` do not have the same
-/// length and/or when `from`, `to`, `edge_types` and `edge_weights` do not
-/// have the same length.
+/// length, when `from`, `to`, `edge_types` and `edge_weights` do not have the
+/// same length, or when an edge names a node that is not in `nodes`.
 pub fn graph_from_strings_with_attributes<'a, T>(
     nodes: &'a [String],
     node_types: &'a [String],
@@ -628,49 +570,80 @@ pub fn graph_from_strings_with_attributes<'a, T>(
     to: &'a [String],
     edge_types: &'a [String],
     edge_weights: &'a [T],
-) -> Graph<NodeData<'a>, EdgeData<'a, T>>
+) -> AttributedGraph<'a, T>
 where
     T: BixverseFloat,
 {
     assert_same_len!(nodes, node_types);
     assert_same_len!(from, to, edge_types, edge_weights);
 
-    let mut graph: Graph<NodeData<'_>, EdgeData<'_, T>> = Graph::new();
-    let mut name_to_idx = FxHashMap::default();
-
-    // add the nodes
-    for (name, node_type) in nodes.iter().zip(node_types.iter()) {
-        let node_data = NodeData { name, node_type };
-        let idx = graph.add_node(node_data);
-        name_to_idx.insert(name, idx);
-    }
-
-    // add the edges
-    for (((from_name, to_name), edge_type), weight) in from
+    let name_to_idx: FxHashMap<&String, usize> = nodes
         .iter()
-        .zip(to.iter())
-        .zip(edge_types.iter())
-        .zip(edge_weights.iter())
-    {
-        let from_idx = *name_to_idx
-            .get(from_name)
-            .unwrap_or_else(|| panic!("From node '{}' not found in nodes list", from_name));
+        .enumerate()
+        .map(|(idx, name)| (name, idx))
+        .collect();
+    let lookup = |name: &String| {
+        *name_to_idx
+            .get(name)
+            .unwrap_or_else(|| panic!("Node '{name}' not found in nodes list"))
+    };
 
-        let to_idx = *name_to_idx
-            .get(to_name)
-            .unwrap_or_else(|| panic!("From node '{}' not found in nodes list", from_name));
-
-        let edge_data = EdgeData { edge_type, weight };
-
-        graph.add_edge(from_idx, to_idx, edge_data);
+    AttributedGraph {
+        node_types: node_types.iter().map(String::as_str).collect(),
+        from: from.iter().map(lookup).collect(),
+        to: to.iter().map(lookup).collect(),
+        edge_types: edge_types.iter().map(String::as_str).collect(),
+        weights: edge_weights.to_vec(),
     }
-
-    graph
 }
 
 ///////////////////////////////
 // Structure transformations //
 ///////////////////////////////
+
+/// Build a CSR adjacency from an edge list via counting sort.
+///
+/// Duplicate `(row, col)` pairs are kept as separate entries, in input order.
+///
+/// ### Params
+///
+/// * `n` - Number of rows (nodes)
+/// * `rows` - Row index per edge
+/// * `cols` - Column index per edge
+/// * `vals` - Value per edge
+///
+/// ### Returns
+///
+/// Tuple of `(indptr, indices, values)`.
+pub(crate) fn edges_to_csr<T>(
+    n: usize,
+    rows: &[u32],
+    cols: &[u32],
+    vals: &[T],
+) -> (Vec<usize>, Vec<u32>, Vec<T>)
+where
+    T: BixverseFloat,
+{
+    let mut indptr = vec![0usize; n + 1];
+    for &r in rows {
+        indptr[r as usize + 1] += 1;
+    }
+    for i in 0..n {
+        indptr[i + 1] += indptr[i];
+    }
+
+    let mut next = indptr[..n].to_vec();
+    let mut indices = vec![0u32; rows.len()];
+    let mut values = vec![T::zero(); rows.len()];
+    for ((&r, &c), &v) in rows.iter().zip(cols).zip(vals) {
+        let pos = next[r as usize];
+        indices[pos] = c;
+        values[pos] = v;
+        next[r as usize] += 1;
+    }
+
+    (indptr, indices, values)
+}
 
 /// Generate a KNN graph adjacency matrix from a similarity matrix
 ///
@@ -950,15 +923,27 @@ mod tests {
 
     /// String node names map onto indices without dropping or duplicating edges.
     #[test]
-    fn test_graph_from_strings() {
+    fn test_graph_from_strings_with_attributes() {
         let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let from = vec!["A".to_string(), "B".to_string()];
-        let to = vec!["B".to_string(), "C".to_string()];
-        let weights = vec![1.5, 2.5];
+        let node_types = vec!["x".to_string(), "y".to_string(), "x".to_string()];
+        let from = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let to = vec!["B".to_string(), "C".to_string(), "B".to_string()];
+        let edge_types = vec!["e".to_string(), "f".to_string(), "e".to_string()];
+        let weights = vec![1.5, 2.5, 0.5];
 
-        let graph = graph_from_strings(&nodes, &from, &to, Some(&weights), false);
+        let graph = graph_from_strings_with_attributes(
+            &nodes,
+            &node_types,
+            &from,
+            &to,
+            &edge_types,
+            &weights,
+        );
 
-        assert_eq!(graph.node_count(), 3);
-        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.node_types, vec!["x", "y", "x"]);
+        assert_eq!(graph.from, vec![0, 1, 2]);
+        assert_eq!(graph.to, vec![1, 2, 1]);
+        assert_eq!(graph.edge_types, vec!["e", "f", "e"]);
+        assert_eq!(graph.weights, weights);
     }
 }

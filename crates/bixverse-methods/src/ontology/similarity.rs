@@ -2,13 +2,12 @@
 //! implemented for now)
 
 use faer::Mat;
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
+use crate::graph::graph_structures::edges_to_csr;
 use crate::prelude::*;
 
 ////////////
@@ -237,20 +236,24 @@ where
 ///
 /// This one needs the RwLock to be able to do the parallelisation on top. This
 /// locks it to maximum one writer and multiple readers at the same time.
-pub type SValueCache<T> = RwLock<FxHashMap<NodeIndex, FxHashMap<NodeIndex, T>>>;
+pub type SValueCache<T> = RwLock<FxHashMap<usize, FxHashMap<usize, T>>>;
 
 /// Structure for calculating the Wang similarity on a given Ontology
 pub struct WangSimOntology<T> {
     /// HashMap between term to node index.
-    term_to_idx: FxHashMap<String, NodeIndex>,
+    term_to_idx: FxHashMap<String, usize>,
     /// The term order as a string.
     idx_to_term: Vec<String>,
-    /// Directed Graph from parent to child.
-    graph: DiGraph<String, T>,
+    /// Offsets into `child_indices` per parent, length `n_terms + 1`
+    child_indptr: Vec<usize>,
+    /// Child node per parent -> child edge. Duplicate edges are kept.
+    child_indices: Vec<u32>,
+    /// Weight per entry of `child_indices`
+    child_weights: Vec<T>,
     /// A vector containing the ancestors as HashSets.
-    ancestors: Vec<FxHashSet<NodeIndex>>,
-    /// Calculated topological order.
-    topo_order: Vec<NodeIndex>,
+    ancestors: Vec<FxHashSet<usize>>,
+    /// Topological order, children before parents.
+    topo_order: Vec<usize>,
     /// The `SValueCache` caching all of the S values for each node.
     s_values_cache: SValueCache<T>,
 }
@@ -266,10 +269,17 @@ where
     /// * `parents` - Slice containing the names of the parents
     /// * `children` - Slice containing the names of the children
     /// * `w` - Slice of the weights between the parents and children.
+    ///
+    /// ### Returns
+    ///
+    /// The initialised `WangSimOntology`.
+    ///
+    /// ### Panics
+    ///
+    /// If the parent -> child graph contains a cycle.
     pub fn new(parents: &[String], children: &[String], w: &[T]) -> Self {
         assert_same_len!(parents, children, w);
 
-        let mut graph = DiGraph::new();
         let mut term_to_idx = FxHashMap::default();
         let mut idx_to_term = Vec::new();
 
@@ -285,27 +295,28 @@ where
         idx_to_term.reserve(all_terms.len());
         term_to_idx.reserve(all_terms.len());
 
-        // Add nodes to the graph
         for term in all_terms {
-            let idx = graph.add_node(term.clone());
-            term_to_idx.insert(term.clone(), idx);
+            term_to_idx.insert(term.clone(), idx_to_term.len());
             idx_to_term.push(term);
         }
 
-        // Add edges to the graph
-        for ((parent, child), w) in parents.iter().zip(children.iter()).zip(w.iter()) {
-            let parent_idx = *term_to_idx.get(parent).unwrap();
-            let child_idx = *term_to_idx.get(child).unwrap();
-            graph.add_edge(parent_idx, child_idx, *w);
-        }
+        let n = idx_to_term.len();
+        let parent_idx: Vec<u32> = parents.iter().map(|t| term_to_idx[t] as u32).collect();
+        let child_idx: Vec<u32> = children.iter().map(|t| term_to_idx[t] as u32).collect();
 
-        let topo_order = Self::compute_topological_order(&graph);
-        let ancestors = Self::get_ancestors(&graph, &topo_order);
+        let (child_indptr, child_indices, child_weights) =
+            edges_to_csr(n, &parent_idx, &child_idx, w);
+        let (parent_indptr, parent_indices, _) = edges_to_csr(n, &child_idx, &parent_idx, w);
+
+        let topo_order = Self::compute_topological_order(&child_indptr, &child_indices);
+        let ancestors = Self::get_ancestors(&parent_indptr, &parent_indices, &topo_order);
 
         WangSimOntology {
             term_to_idx,
             idx_to_term,
-            graph,
+            child_indptr,
+            child_indices,
+            child_weights,
             ancestors,
             topo_order,
             s_values_cache: RwLock::new(FxHashMap::default()),
@@ -327,13 +338,13 @@ where
         let per_term: Vec<(Vec<(u32, T)>, T)> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let s_values = self.get_or_compute_s_values(NodeIndex::new(i));
+                let s_values = self.get_or_compute_s_values(i);
                 let total: T = s_values.values().copied().sum();
                 let mut dense: Vec<(u32, T)> = self.ancestors[i]
                     .iter()
                     .map(|node| {
                         (
-                            node.index() as u32,
+                            *node as u32,
                             s_values.get(node).copied().unwrap_or_else(T::zero),
                         )
                     })
@@ -386,9 +397,9 @@ where
     ///
     /// ### Returns
     ///
-    /// Returns a HashMap of the NodeIndeces with the given S values for all ancestors
+    /// Returns a HashMap of the node indices with the given S values for all ancestors
     /// of the specified term_idx.
-    fn get_or_compute_s_values(&self, term_idx: NodeIndex) -> FxHashMap<NodeIndex, T> {
+    fn get_or_compute_s_values(&self, term_idx: usize) -> FxHashMap<usize, T> {
         // Try to read from cache first
         {
             let cache = self.s_values_cache.read().unwrap();
@@ -458,63 +469,87 @@ where
     ///
     /// ### Params
     ///
-    /// * `graph` - The DirectedGraph representing the ontology
-    /// * `topo_order` - The vector defining the topological order
+    /// * `parent_indptr` - Offsets into `parent_indices` per child
+    /// * `parent_indices` - Parent node per child -> parent edge
+    /// * `topo_order` - Topological order, children before parents
     ///
     /// ### Returns
     ///
-    /// A vector of the HashSets with the ancestor node indices.
+    /// A vector of the HashSets with the ancestor node indices, self included.
     fn get_ancestors(
-        graph: &DiGraph<String, T>,
-        topo_order: &[NodeIndex],
-    ) -> Vec<FxHashSet<NodeIndex>> {
-        let mut ancestors = vec![FxHashSet::default(); graph.node_count()];
+        parent_indptr: &[usize],
+        parent_indices: &[u32],
+        topo_order: &[usize],
+    ) -> Vec<FxHashSet<usize>> {
+        let mut ancestors = vec![FxHashSet::default(); topo_order.len()];
 
-        // Process nodes in reverse topological order
+        // Parents before children, so every parent set is final when read
         for &node_idx in topo_order.iter().rev() {
             let mut node_ancestors = FxHashSet::default();
-
-            // Add self
             node_ancestors.insert(node_idx);
-            for parent_idx in graph.neighbors_directed(node_idx, petgraph::Incoming) {
-                node_ancestors.extend(&ancestors[parent_idx.index()]);
+            for &parent_idx in &parent_indices[parent_indptr[node_idx]..parent_indptr[node_idx + 1]]
+            {
+                node_ancestors.extend(&ancestors[parent_idx as usize]);
             }
-
-            ancestors[node_idx.index()] = node_ancestors;
+            ancestors[node_idx] = node_ancestors;
         }
 
         ancestors
     }
 
-    /// Compute topological order
+    /// Compute the topological order via Kahn's algorithm
     ///
     /// ### Params
     ///
-    /// * `graph` - The DirectedGraph representing the ontology
+    /// * `child_indptr` - Offsets into `child_indices` per parent
+    /// * `child_indices` - Child node per parent -> child edge
     ///
     /// ### Returns
     ///
-    /// A vector of node indices based on the topological order of the directed
-    /// graph.
-    fn compute_topological_order(graph: &DiGraph<String, T>) -> Vec<NodeIndex> {
-        petgraph::algo::toposort(graph, None)
-            .unwrap_or_else(|_| panic!("Ontology contains cycles"))
-            .into_iter()
-            .rev()
-            .collect()
+    /// The node indices in topological order, children before parents.
+    ///
+    /// ### Panics
+    ///
+    /// If the graph contains a cycle.
+    fn compute_topological_order(child_indptr: &[usize], child_indices: &[u32]) -> Vec<usize> {
+        let n = child_indptr.len() - 1;
+        let mut in_degree = vec![0usize; n];
+        for &c in child_indices {
+            in_degree[c as usize] += 1;
+        }
+
+        let mut order: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+        let mut head = 0;
+        while head < order.len() {
+            let node = order[head];
+            head += 1;
+            for &c in &child_indices[child_indptr[node]..child_indptr[node + 1]] {
+                in_degree[c as usize] -= 1;
+                if in_degree[c as usize] == 0 {
+                    order.push(c as usize);
+                }
+            }
+        }
+
+        if order.len() < n {
+            panic!("Ontology contains cycles");
+        }
+
+        order.reverse();
+        order
     }
 
     /// Calculate the S-values for a specific term's DAG
     ///
     /// ### Params
     ///
-    /// * `term_idx` - The NodeIndex for which to calculate the S values
+    /// * `term_idx` - The node index for which to calculate the S values
     ///
     /// ### Returns
     ///
-    /// A HashMap of NodeIndices with corresponding S values
-    fn calculate_s_values(&self, term_idx: NodeIndex) -> FxHashMap<NodeIndex, T> {
-        let dag_nodes = &self.ancestors[term_idx.index()];
+    /// A HashMap of node indices with corresponding S values
+    fn calculate_s_values(&self, term_idx: usize) -> FxHashMap<usize, T> {
+        let dag_nodes = &self.ancestors[term_idx];
         let mut s_values = FxHashMap::with_capacity_and_hasher(dag_nodes.len(), FxBuildHasher);
 
         s_values.insert(term_idx, T::one());
@@ -527,10 +562,12 @@ where
 
             let mut max_contribution: T = T::zero();
 
-            // Iterate through outgoing edges to get the specific weights
-            for edge_ref in self.graph.edges_directed(node_idx, petgraph::Outgoing) {
-                let child_idx = edge_ref.target();
-                let edge_weight = *edge_ref.weight();
+            let range = self.child_indptr[node_idx]..self.child_indptr[node_idx + 1];
+            for (&child_idx, &edge_weight) in self.child_indices[range.clone()]
+                .iter()
+                .zip(&self.child_weights[range])
+            {
+                let child_idx = child_idx as usize;
 
                 if dag_nodes.contains(&child_idx)
                     && let Some(&child_s_value) = s_values.get(&child_idx)
@@ -572,18 +609,18 @@ where
     ///
     /// ### Params
     ///
-    /// * `term_idx_1` - NodeIndex of term 1
-    /// * `term_idx_2` - NodeIndex of term 2
+    /// * `term_idx_1` - Node index of term 1
+    /// * `term_idx_2` - Node index of term 2
     ///
     /// ### Returns
     ///
     /// The Wang similarity between the two terms.
-    fn wang_sim_by_idx(&self, term_idx_1: NodeIndex, term_idx_2: NodeIndex) -> Option<T> {
+    fn wang_sim_by_idx(&self, term_idx_1: usize, term_idx_2: usize) -> Option<T> {
         let s_val_1 = self.get_or_compute_s_values(term_idx_1);
         let s_val_2 = self.get_or_compute_s_values(term_idx_2);
 
-        let dag1_nodes = &self.ancestors[term_idx_1.index()];
-        let dag2_nodes = &self.ancestors[term_idx_2.index()];
+        let dag1_nodes = &self.ancestors[term_idx_1];
+        let dag2_nodes = &self.ancestors[term_idx_2];
 
         // Find intersection more efficiently
         let (smaller, larger) = if dag1_nodes.len() < dag2_nodes.len() {
@@ -592,7 +629,7 @@ where
             (dag2_nodes, dag1_nodes)
         };
 
-        let common_nodes: Vec<NodeIndex> = smaller
+        let common_nodes: Vec<usize> = smaller
             .iter()
             .filter(|node| larger.contains(node))
             .cloned()

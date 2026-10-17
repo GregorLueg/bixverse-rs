@@ -4,4 +4,4 @@
 pub use bixverse_core::prelude::*;
 
 pub use crate::errors::*;
-pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
+pub use crate::graph::graph_structures::{AttributedGraph, SparseGraph};
