@@ -1,0 +1,175 @@
+[package]
+name = "bixverse-rs"
+description = "A Rust library with various utilities for computational biology and single cell. Facade over the bixverse-* crates."
+keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+exclude = ["tests/"]
+
+[lib]
+name = "bixverse_rs"
+path = "src/lib.rs"
+
+############
+# Features #
+############
+
+[features]
+default = ["accelerate"]
+## Routes dense CPU GEMMs through Apple Accelerate on macOS (no effect
+## elsewhere). Decompositions (SVD, eigen) stay on faer, which is faster there.
+accelerate = ["bixverse-core/accelerate"]
+## The negative binomial differential expression methods built on `edge-rs`.
+## Implied by `single-cell`, but usable on its own for the bulk half.
+dge = ["bixverse-methods/dge"]
+## The single cell suite and the bixverse binary store. No HDF5: add `h5`
+## for the h5ad and 10x h5 readers.
+single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data"]
+## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
+h5 = ["single-cell", "bixverse-sc-data/h5", "dep:hdf5"]
+## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
+hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
+## Compile the LZF and Blosc filters into the HDF5 build. See
+## `bixverse-sc-data`.
+hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
+## Multi-modal single cell analysis (requires single-cell)
+multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
+## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
+## posteriors as the input (requires single-cell)
+bonsai = ["single-cell", "bixverse-sc/bonsai", "bixverse-sc-gpu?/bonsai"]
+## GPU linear algebra and bulk methods via cubecl
+gpu = ["dep:bixverse-gpu"]
+## GPU single cell methods (requires gpu and single-cell)
+sc-gpu = ["gpu", "single-cell", "dep:bixverse-sc-gpu"]
+## Experimental, Apple Silicon only: MLX backend via mlx-c. Independent of
+## `gpu`. Needs `brew install mlx-c` (or `MLX_C_PREFIX` pointing at an install
+## prefix); without the library the build warns and the backend is skipped.
+mlx = ["single-cell", "dep:bixverse-mlx"]
+## Slow but asserting tests: the GPU parity gates and the large-scale numerical
+## checks. Run in release or the CPU reference solves dominate.
+large-test = ["bixverse-methods/large-test", "bixverse-sc?/large-test", "bixverse-gpu?/large-test", "bixverse-sc-gpu?/large-test", "bixverse-mlx?/large-test"]
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = ["bixverse-methods/large_scale_diagnostics", "bixverse-sc?/large_scale_diagnostics", "bixverse-gpu?/large_scale_diagnostics", "bixverse-sc-gpu?/large_scale_diagnostics", "bixverse-mlx?/large_scale_diagnostics"]
+
+################
+# Dependencies #
+################
+
+[dependencies]
+bixverse-core.workspace = true
+bixverse-methods.workspace = true
+bixverse-sc-data = { workspace = true, optional = true }
+bixverse-sc = { workspace = true, optional = true }
+bixverse-gpu = { workspace = true, optional = true }
+bixverse-sc-gpu = { workspace = true, optional = true }
+bixverse-mlx = { workspace = true, optional = true }
+document-features.workspace = true
+# Only for tests/h5ad_compression.rs. A dev-dependency cannot be optional, and
+# an unconditional one drags HDF5 into every build of the tests.
+hdf5 = { workspace = true, optional = true }
+
+[dev-dependencies]
+ann-search-rs.workspace = true
+approx.workspace = true
+bonsai-rs.workspace = true
+cubecl.workspace = true
+cubecl-utils-rs.workspace = true
+cubek.workspace = true
+edge-rs.workspace = true
+faer.workspace = true
+half.workspace = true
+indexmap.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+wide.workspace = true
+
+###########
+# Benches #
+###########
+
+[[bench]]
+name = "accelerate_e2e_bench"
+harness = false
+
+[[bench]]
+name = "accelerate_gemm_bench"
+harness = false
+
+[[bench]]
+name = "cellsweep_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "sc_loader_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "sc_reader_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "hvg_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "dge_scan_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "pairwise_cor_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "seacells_gpu_bench"
+harness = false
+required-features = ["sc-gpu"]
+
+[[bench]]
+name = "gpu_sparse_svd_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_corr_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_nmf_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_scenic_bench"
+harness = false
+required-features = ["sc-gpu"]
+
+[[bench]]
+name = "gpu_scenic_micro"
+harness = false
+required-features = ["sc-gpu"]
+
+[[bench]]
+name = "harmony_bench"
+harness = false
+required-features = ["single-cell"]
+
+#################
+# Documentation #
+#################
+
+[package.metadata.docs.rs]
+features = ["single-cell", "h5", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]

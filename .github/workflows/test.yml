@@ -12,18 +12,28 @@ concurrency:
 
 jobs:
   test:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-test.yml@v1
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@v1
     with:
-      # Two runs: the minimal build and the feature build. The minimal one keeps
-      # `r` on, so the R wrappers are still compiled and tested; the build
-      # without `r` is covered by the Python workflow.
-      cpu-args: '--no-default-features --features r'
-      cpu-args-extra: '--features single-cell,multi-modal,hdf5-static'
-      gpu-args: '--features gpu,single-cell,hdf5-static'
-      # extendr links against R, so the toolchain needs the gnu ABI on Windows
-      # and a shared libR on Linux.
-      needs-r: true
-      # The expensive GPU tests sit behind large_scale_diagnostics, which this
-      # lane deliberately does not enable.
+      # No R on this lane: only bixverse-r links libR.
+      cpu-runs: |
+        -p bixverse-core
+        -p bixverse-methods --features dge
+        -p bixverse-sc-data --features hdf5-static
+        -p bixverse-sc --features multi-modal
+        -p bixverse-rs --features single-cell,multi-modal
+        -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+      # extendr links against R, so this lane needs the gnu ABI on Windows and
+      # a shared libR on Linux.
+      r-runs: |
+        -p bixverse-r
+        -p bixverse-r --features single-cell,multi-modal
+        -p bixverse-r --features single-cell,multi-modal,hdf5-static
+      # The expensive GPU tests sit behind large-test and
+      # large_scale_diagnostics, which this lane deliberately does not enable.
+      gpu-runs: |
+        -p bixverse-gpu
+        -p bixverse-sc-gpu
+        -p bixverse-rs --features sc-gpu,hdf5-static
+      check-exclude: bixverse-r
       gpu-malloc-check: true
     secrets: inherit

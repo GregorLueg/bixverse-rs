@@ -7,8 +7,8 @@ v5.0.0 database, restricted to proteins with a single gene name.
 
 Run from the repo root:
   uv run --with /Users/gregorlueg/repos/others/CellphoneDB \
-      python dev/gen_cpdb_fixtures.py > tests/cpdb_fixtures/mod.rs
-  rustfmt --edition 2024 tests/cpdb_fixtures/mod.rs
+      python dev/gen_cpdb_fixtures.py > crates/bixverse-rs/tests/cpdb_fixtures/mod.rs
+  rustfmt --edition 2024 crates/bixverse-rs/tests/cpdb_fixtures/mod.rs
 """
 
 import os

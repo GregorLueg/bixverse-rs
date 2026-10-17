@@ -1,4 +1,4 @@
-"""Generate tests/analytic_pearson_fixtures/mod.rs from scanpy's reference.
+"""Generate crates/bixverse-rs/tests/analytic_pearson_fixtures/mod.rs from scanpy's reference.
 
 The count matrix is rebuilt from the same seeded Numerical Recipes LCG the
 scTransform fixture uses, on both sides, so nothing but integers and the
@@ -19,8 +19,8 @@ emitted so the relationship is pinned rather than assumed.
 
 Run from the repo root:
   uv run --python 3.11 --with scanpy python dev/gen_analytic_pearson_fixtures.py \
-      > tests/analytic_pearson_fixtures/mod.rs
-  rustfmt --edition 2024 tests/analytic_pearson_fixtures/mod.rs
+      > crates/bixverse-rs/tests/analytic_pearson_fixtures/mod.rs
+  rustfmt --edition 2024 crates/bixverse-rs/tests/analytic_pearson_fixtures/mod.rs
 """
 
 import numpy as np

@@ -12,10 +12,9 @@ permissions:
 
 jobs:
   release:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-release.yml@v1
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-release.yml@v1
     with:
-      publish-args: '--features single-cell,multi-modal,gpu,hdf5-static'
-      # cargo publish builds the crate to verify it, and that build links
-      # against R.
+      # cargo publish builds each member to verify it, and bixverse-r's build
+      # links against R.
       needs-r: true
     secrets: inherit

@@ -1,0 +1,702 @@
+//! Permutation testing for perturbation distances.
+//!
+//! See Peidli et al., Nat Methods, 2024.
+
+use crate::utils::gemm;
+use faer::Accum;
+use faer::linalg::matmul::triangular::BlockStructure;
+use faer::{Mat, MatRef, Par};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rayon::prelude::*;
+
+use crate::core::math::matrix_helpers::{mirror_lower_to_upper, stack_rows, subset_rows};
+use crate::prelude::*;
+use crate::utils::faer_parallelism;
+
+use super::pert_dist::{PertDistance, edistance_two_matrices, edistance_two_matrices_seq};
+
+////////////
+// Consts //
+////////////
+
+/// Reasonable sub sample size
+const N_SUB_SAMPLE: usize = 500;
+
+/// Number of permutations folded into one GEMM tile
+const PERM_TILE: usize = 64;
+
+///////////////////
+// Enums/Structs //
+///////////////////
+
+/// Strategy for permutation testing.
+#[derive(Debug, Clone, Copy)]
+pub enum PermutationPath {
+    /// Materialise pooled N x N distance matrix once. O(N^2) memory; cheap
+    /// per-permutation cost.
+    Fast,
+    /// Recompute distances per permutation via GEMM. O(Nd) memory; expensive
+    /// per-permutation cost.
+    Slow,
+    /// Cap each group at `max_per_group` cells (uniform random subsample),
+    /// then run the fast path.
+    Subsample {
+        /// Maximum number of samples per group
+        max_per_group: usize,
+    },
+}
+
+/// Default implementation for [PermutationPath]
+impl Default for PermutationPath {
+    fn default() -> Self {
+        PermutationPath::Subsample {
+            max_per_group: N_SUB_SAMPLE,
+        }
+    }
+}
+
+/// Parse the permutation path to take
+///
+/// ### Params
+///
+/// * `s` - String to parse. One of `"fast"`, `"slow"`, or `"subsample"`.
+/// * `max_per_group` - Optional usize. To how many max to subsample. If not
+///   provided, defaults to `N_SUB_SAMPLE` (500).
+///
+/// ### Returns
+///
+/// Option of [PermutationPath]
+pub fn parse_perm_path(s: &str, max_per_group: Option<usize>) -> Option<PermutationPath> {
+    let max_per_group = max_per_group.unwrap_or(N_SUB_SAMPLE);
+
+    match s.to_lowercase().as_str() {
+        "fast" => Some(PermutationPath::Fast),
+        "slow" => Some(PermutationPath::Slow),
+        "subsample" => Some(PermutationPath::Subsample { max_per_group }),
+        _ => None,
+    }
+}
+
+/// Result of a single permutation test.
+#[derive(Debug, Clone)]
+pub struct PermutationTestResult<T> {
+    /// Observed E-distance on the full (or subsampled) groups.
+    pub observed: T,
+    /// p-value: count of null distances strictly greater than `observed`,
+    /// clipped to at least 1, divided by `n_perms`.
+    pub pvalue: T,
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Subsample indices
+///
+/// ### Params
+///
+/// * `n` - Number of samples
+/// * `max` - The maximum number of samples
+/// * `rng` - The random number generator
+///
+/// ### Returns
+///
+/// The (potentially) subsampled indices
+fn subsample_indices(n: usize, max: usize, rng: &mut StdRng) -> Vec<usize> {
+    if n <= max {
+        (0..n).collect()
+    } else {
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.shuffle(rng);
+        idx.truncate(max);
+        idx.sort_unstable();
+        idx
+    }
+}
+
+/// Compute pooled cell-cell distance matrix (N x N, symmetric, zero diagonal).
+///
+/// ### Params
+///
+/// * `pooled` - The pooled matrix
+/// * `dist` - The [PertDistance] to calculate
+///
+/// ### Returns
+///
+/// The N x N matrix. This can become large in memory
+fn pooled_distance_matrix<T: BixverseFloat>(pooled: MatRef<T>, dist: PertDistance) -> Mat<T> {
+    let n = pooled.nrows();
+
+    let mut gram = Mat::<T>::zeros(n, n);
+    gemm::gram(
+        gram.as_mut(),
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        pooled,
+        pooled.transpose(),
+        T::one(),
+        faer_parallelism(),
+    );
+
+    let norms_sq: Vec<T> = (0..n).map(|i| *gram.get(i, i)).collect();
+    let two = T::from_f64(2.0).unwrap();
+
+    // Lower triangle straight into the output columns, then mirrored.
+    let mut res = Mat::<T>::zeros(n, n);
+    res.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
+        for i in (j + 1)..n {
+            let d_sq = (norms_sq[i] + norms_sq[j] - two * *gram.get(i, j)).max(T::zero());
+            col[i] = match dist {
+                PertDistance::Euclidean => d_sq.sqrt(),
+                PertDistance::SquaredEuclidean => d_sq,
+            };
+        }
+    });
+    mirror_lower_to_upper(res.as_mut());
+
+    res
+}
+
+/// E-distance from a precomputed pooled N x N distance matrix.
+///
+/// `mask[i] = true` puts cell i in group X; otherwise Y. Reused across
+/// permutations: distances are invariant, only the partition changes.
+///
+/// ### Params
+///
+/// * `d` - The N x N distance matrix
+/// * `mask` - The boolean mask for the permutations
+///
+/// ### Returns
+///
+/// The pairwise edistance given the mask
+pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) -> T {
+    let n = d.nrows();
+    assert_eq!(n, d.ncols());
+    assert_eq!(n, mask.len());
+
+    let n_x = mask.iter().filter(|&&b| b).count();
+    let n_y = n - n_x;
+
+    // Sums count each unordered pair twice ((i,j) and (j,i)). `d` is symmetric,
+    // so column `i` is row `i` and the walk is contiguous.
+    let (sum_xx, sum_yy, sum_xy) = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mi = mask[i];
+            let mut sxx = T::zero();
+            let mut syy = T::zero();
+            let mut sxy = T::zero();
+            for (j, (&dij, &mj)) in d.col(i).iter().zip(mask.iter()).enumerate() {
+                if i == j {
+                    continue;
+                }
+                match (mi, mj) {
+                    (true, true) => sxx += dij,
+                    (false, false) => syy += dij,
+                    _ => sxy += dij,
+                }
+            }
+            (sxx, syy, sxy)
+        })
+        .reduce(
+            || (T::zero(), T::zero(), T::zero()),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+        );
+
+    let two = T::from_f64(2.0).unwrap();
+    let n_x_t = T::from_usize(n_x).unwrap();
+    let n_y_t = T::from_usize(n_y).unwrap();
+
+    let within_x = if n_x < 2 {
+        T::zero()
+    } else {
+        sum_xx / (n_x_t * (n_x_t - T::one()))
+    };
+    let within_y = if n_y < 2 {
+        T::zero()
+    } else {
+        sum_yy / (n_y_t * (n_y_t - T::one()))
+    };
+    let between = if n_x == 0 || n_y == 0 {
+        T::zero()
+    } else {
+        sum_xy / (two * n_x_t * n_y_t)
+    };
+
+    two * between - within_x - within_y
+}
+
+/// E-distances for many permutation masks against one pooled distance matrix
+///
+/// The within and between sums are products of `d` with the 0/1 mask columns,
+/// so a tile of masks goes through one GEMM per group instead of one scalar
+/// pass over `d` per permutation. `d` must be symmetric with a zero diagonal,
+/// as [pooled_distance_matrix] returns it.
+///
+/// ### Params
+///
+/// * `d` - The N x N pooled distance matrix
+/// * `masks` - One group mask per permutation
+///
+/// ### Returns
+///
+/// One E-distance per mask.
+fn edistance_from_pairwise_batch<T: BixverseFloat>(d: MatRef<T>, masks: &[Vec<bool>]) -> Vec<T> {
+    let n = d.nrows();
+    let two = T::from_f64(2.0).unwrap();
+
+    masks
+        .par_chunks(PERM_TILE)
+        .flat_map_iter(|tile| {
+            let p = tile.len();
+            let mut in_x = Mat::<T>::zeros(n, p);
+            let mut in_y = Mat::<T>::zeros(n, p);
+            for (c, mask) in tile.iter().enumerate() {
+                for (i, &b) in mask.iter().enumerate() {
+                    if b {
+                        in_x[(i, c)] = T::one();
+                    } else {
+                        in_y[(i, c)] = T::one();
+                    }
+                }
+            }
+            let mut z_x = Mat::<T>::zeros(n, p);
+            let mut z_y = Mat::<T>::zeros(n, p);
+            gemm::gemm(
+                z_x.as_mut(),
+                Accum::Replace,
+                d,
+                in_x.as_ref(),
+                T::one(),
+                Par::Seq,
+            );
+            gemm::gemm(
+                z_y.as_mut(),
+                Accum::Replace,
+                d,
+                in_y.as_ref(),
+                T::one(),
+                Par::Seq,
+            );
+
+            (0..p)
+                .map(|c| {
+                    let (mut sxx, mut syy, mut sxy) = (T::zero(), T::zero(), T::zero());
+                    let (mut n_x, mut n_y) = (0usize, 0usize);
+                    for i in 0..n {
+                        if tile[c][i] {
+                            sxx += z_x[(i, c)];
+                            sxy += z_y[(i, c)];
+                            n_x += 1;
+                        } else {
+                            syy += z_y[(i, c)];
+                            sxy += z_x[(i, c)];
+                            n_y += 1;
+                        }
+                    }
+                    let n_x_t = T::from_usize(n_x).unwrap();
+                    let n_y_t = T::from_usize(n_y).unwrap();
+                    let within_x = if n_x < 2 {
+                        T::zero()
+                    } else {
+                        sxx / (n_x_t * (n_x_t - T::one()))
+                    };
+                    let within_y = if n_y < 2 {
+                        T::zero()
+                    } else {
+                        syy / (n_y_t * (n_y_t - T::one()))
+                    };
+                    let between = if n_x == 0 || n_y == 0 {
+                        T::zero()
+                    } else {
+                        sxy / (two * n_x_t * n_y_t)
+                    };
+                    two * between - within_x - within_y
+                })
+                .collect::<Vec<T>>()
+        })
+        .collect()
+}
+
+//////////
+// Main //
+//////////
+
+/// Permutation test between two row-matrix groups.
+///
+/// ### Params
+///
+/// * `x`, `y` - Samples-as-rows matrices for each group.
+/// * `dist` - Cell-cell distance variant.
+/// * `path` - Memory/compute trade-off, see [`PermutationPath`].
+/// * `n_perms` - Number of label permutations to draw.
+/// * `seed` - RNG seed.
+///
+/// ### Results
+///
+/// The [PermutationTestResult]
+pub fn permutation_test_two_groups<T>(
+    x: MatRef<T>,
+    y: MatRef<T>,
+    dist: PertDistance,
+    path: PermutationPath,
+    n_perms: usize,
+    seed: u64,
+) -> Result<PermutationTestResult<T>, CoreErrors>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    if n_perms == 0usize {
+        return Err(CoreErrors::MustBePositive("n_perms".into()));
+    }
+    if x.ncols() != y.ncols() {
+        return Err(CoreErrors::NonMatchingFeatureDim {
+            dim_x: x.ncols(),
+            dim_y: y.ncols(),
+        });
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // subsample collapses to fast path after sampling.
+    let (x_owned, y_owned, use_fast) = match path {
+        PermutationPath::Subsample { max_per_group } => {
+            let idx_x = subsample_indices(x.nrows(), max_per_group, &mut rng);
+            let idx_y = subsample_indices(y.nrows(), max_per_group, &mut rng);
+            (
+                Some(subset_rows(x, &idx_x)),
+                Some(subset_rows(y, &idx_y)),
+                true,
+            )
+        }
+        PermutationPath::Fast => (None, None, true),
+        PermutationPath::Slow => (None, None, false),
+    };
+
+    let x_ref = x_owned.as_ref().map(|m| m.as_ref()).unwrap_or(x);
+    let y_ref = y_owned.as_ref().map(|m| m.as_ref()).unwrap_or(y);
+
+    let n_x = x_ref.nrows();
+    let n_total = n_x + y_ref.nrows();
+
+    let observed = edistance_two_matrices(x_ref, y_ref, dist)?;
+
+    let mut initial_mask = vec![false; n_total];
+    for m in initial_mask.iter_mut().take(n_x) {
+        *m = true;
+    }
+
+    // masks generated sequentially (StdRng !Sync), then consumed in parallel.
+    let masks: Vec<Vec<bool>> = (0..n_perms)
+        .map(|_| {
+            let mut m = initial_mask.clone();
+            m.shuffle(&mut rng);
+            m
+        })
+        .collect();
+
+    let pooled = stack_rows(x_ref, y_ref);
+
+    let null_dist: Vec<T> = if use_fast {
+        let d_mat = pooled_distance_matrix(pooled.as_ref(), dist);
+        edistance_from_pairwise_batch(d_mat.as_ref(), &masks)
+    } else {
+        masks
+            .par_iter()
+            .map(|m| {
+                let xs: Vec<usize> = m
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &b)| if b { Some(i) } else { None })
+                    .collect();
+                let ys: Vec<usize> = m
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &b)| if !b { Some(i) } else { None })
+                    .collect();
+                let x_p = subset_rows(pooled.as_ref(), &xs);
+                let y_p = subset_rows(pooled.as_ref(), &ys);
+                let res = edistance_two_matrices_seq(x_p.as_ref(), y_p.as_ref(), dist)?;
+
+                Ok(res)
+            })
+            .collect::<Result<Vec<_>, CoreErrors>>()?
+    };
+
+    let count = null_dist.iter().filter(|&&d| d > observed).count().max(1);
+    let pvalue = T::from_usize(count).unwrap() / T::from_usize(n_perms).unwrap();
+
+    Ok(PermutationTestResult { observed, pvalue })
+}
+
+/// One-sided permutation tests: each non-reference group against the reference.
+///
+/// The reference group's entry has `observed = 0` and `pvalue = 1` (axiom).
+///
+/// ### Params
+///
+/// * `embedding` - The embedding matrix of shape samples x features
+/// * `labels` - The label vector
+/// * `reference` - The reference id
+/// * `dist` - The [PertDistance] to use
+/// * `path` - The [PermutationPath] to use
+/// * `n_perms` - The number of permutations to run for
+/// * `seed` - The random seed
+///
+/// ### Returns
+///
+/// A Vec of [PermutationTestResult]
+#[allow(clippy::too_many_arguments)]
+pub fn permutation_test_onesided<T>(
+    embedding: MatRef<T>,
+    labels: &[usize],
+    reference: usize,
+    dist: PertDistance,
+    path: PermutationPath,
+    n_perms: usize,
+    seed: u64,
+) -> Result<Vec<PermutationTestResult<T>>, CoreErrors>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    if embedding.nrows() != labels.len() {
+        return Err(CoreErrors::NumberLabelsNotEqualSampleNumber {
+            label_length: labels.len(),
+            n_samples: embedding.nrows(),
+        });
+    }
+    let n_groups = labels.iter().max().map(|&x| x + 1).unwrap_or(0);
+    if reference >= n_groups {
+        return Err(CoreErrors::ReferenceOutOfRange);
+    }
+
+    let d = embedding.ncols();
+    let mut indices: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+    for (i, &g) in labels.iter().enumerate() {
+        indices[g].push(i);
+    }
+    let groups: Vec<Mat<T>> = indices
+        .into_iter()
+        .map(|rows| Mat::from_fn(rows.len(), d, |i, j| *embedding.get(rows[i], j)))
+        .collect();
+
+    let res = (0..n_groups)
+        .map(|g| {
+            if g == reference {
+                Ok(PermutationTestResult {
+                    observed: T::zero(),
+                    pvalue: T::one(),
+                })
+            } else {
+                let res = permutation_test_two_groups(
+                    groups[g].as_ref(),
+                    groups[reference].as_ref(),
+                    dist,
+                    path,
+                    n_perms,
+                    seed.wrapping_add(g as u64),
+                )?;
+
+                Ok(res)
+            }
+        })
+        .collect::<Result<Vec<_>, CoreErrors>>()?;
+
+    Ok(res)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::base::pert_dist::edistance_two_matrices;
+
+    const EPS: f64 = 1e-10;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < EPS
+    }
+
+    /// The parser is case insensitive and carries the cap through into the subsample variant.
+    #[test]
+    fn parse_path_variants() {
+        assert!(matches!(
+            parse_perm_path("fast", Some(100)),
+            Some(PermutationPath::Fast)
+        ));
+        assert!(matches!(
+            parse_perm_path("SLOW", Some(100)),
+            Some(PermutationPath::Slow)
+        ));
+        match parse_perm_path("subsample", Some(250)) {
+            Some(PermutationPath::Subsample { max_per_group }) => assert_eq!(max_per_group, 250),
+            _ => panic!("expected subsample variant"),
+        }
+        assert!(parse_perm_path("nope", Some(0)).is_none());
+    }
+
+    /// At or below the cap nothing is dropped or reordered, so the RNG stays unused.
+    #[test]
+    fn subsample_keeps_all_when_le_max() {
+        let mut rng = StdRng::seed_from_u64(0);
+        assert_eq!(subsample_indices(5, 10, &mut rng), vec![0, 1, 2, 3, 4]);
+        assert_eq!(subsample_indices(5, 5, &mut rng), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Above the cap the draw is exactly `max`, strictly ascending and in range.
+    #[test]
+    fn subsample_truncates_sorted_in_range() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let idx = subsample_indices(100, 10, &mut rng);
+        assert_eq!(idx.len(), 10);
+        for w in idx.windows(2) {
+            assert!(w[0] < w[1]);
+        }
+        assert!(*idx.last().unwrap() < 100);
+    }
+
+    /// Reading the energy distance off a pooled distance matrix by mask matches the direct route.
+    #[test]
+    fn edist_from_pairwise_matches_direct() {
+        let x = Mat::<f64>::from_fn(4, 3, |i, j| (i as f64 - 1.0) * (j as f64 + 1.0));
+        let y = Mat::<f64>::from_fn(3, 3, |i, j| (i as f64 + 2.0) * (j as f64 - 0.5));
+        let pooled = stack_rows(x.as_ref(), y.as_ref());
+        let d_mat = pooled_distance_matrix(pooled.as_ref(), PertDistance::Euclidean);
+
+        let mut mask = vec![false; 7];
+        for m in mask.iter_mut().take(4) {
+            *m = true;
+        }
+        let e_mask = edistance_from_pairwise(d_mat.as_ref(), &mask);
+        let e_direct =
+            edistance_two_matrices(x.as_ref(), y.as_ref(), PertDistance::Euclidean).unwrap();
+        assert!(close(e_mask, e_direct));
+    }
+
+    /// The cached-matrix path and the recompute path are the same test, not two different ones.
+    #[test]
+    fn fast_and_slow_agree() {
+        // Same seed -> same masks -> two paths must agree up to fp precision.
+        let x = Mat::<f64>::from_fn(6, 4, |i, j| (i * 3 + j) as f64);
+        let y = Mat::<f64>::from_fn(7, 4, |i, j| (i + j * 2) as f64 + 0.5);
+        let fast = permutation_test_two_groups(
+            x.as_ref(),
+            y.as_ref(),
+            PertDistance::Euclidean,
+            PermutationPath::Fast,
+            32,
+            7,
+        )
+        .unwrap();
+        let slow = permutation_test_two_groups(
+            x.as_ref(),
+            y.as_ref(),
+            PertDistance::Euclidean,
+            PermutationPath::Slow,
+            32,
+            7,
+        )
+        .unwrap();
+        assert!(close(fast.observed, slow.observed));
+        assert!(close(fast.pvalue, slow.pvalue));
+    }
+
+    /// The observed statistic is the plain energy distance, untouched by the permutation code.
+    #[test]
+    fn observed_matches_edistance() {
+        let x = Mat::<f64>::from_fn(4, 3, |i, j| (i + 2 * j) as f64);
+        let y = Mat::<f64>::from_fn(4, 3, |i, j| (i + 2 * j) as f64 + 1.0);
+        let direct =
+            edistance_two_matrices(x.as_ref(), y.as_ref(), PertDistance::Euclidean).unwrap();
+        let perm = permutation_test_two_groups(
+            x.as_ref(),
+            y.as_ref(),
+            PertDistance::Euclidean,
+            PermutationPath::Fast,
+            5,
+            0,
+        )
+        .unwrap();
+        assert!(close(direct, perm.observed));
+    }
+
+    /// Zero permutations errors instead of returning a p-value with an empty null.
+    #[test]
+    fn zero_perms_errors() {
+        let x = Mat::<f64>::zeros(2, 2);
+        let y = Mat::<f64>::zeros(2, 2);
+        assert!(matches!(
+            permutation_test_two_groups(
+                x.as_ref(),
+                y.as_ref(),
+                PertDistance::Euclidean,
+                PermutationPath::Fast,
+                0,
+                0,
+            ),
+            Err(CoreErrors::MustBePositive(_))
+        ));
+    }
+
+    /// Mismatched feature counts are caught before any permutation work starts.
+    #[test]
+    fn dim_mismatch_errors() {
+        let x = Mat::<f64>::zeros(3, 2);
+        let y = Mat::<f64>::zeros(3, 3);
+        assert!(matches!(
+            permutation_test_two_groups(
+                x.as_ref(),
+                y.as_ref(),
+                PertDistance::Euclidean,
+                PermutationPath::Fast,
+                10,
+                0,
+            ),
+            Err(CoreErrors::NonMatchingFeatureDim { .. })
+        ));
+    }
+
+    /// The p-value is bounded by the pseudocount floor of `1/n_perm` and by 1.
+    #[test]
+    fn pvalue_in_range() {
+        let x = Mat::<f64>::from_fn(4, 2, |i, j| (i + j) as f64);
+        let y = Mat::<f64>::from_fn(4, 2, |i, j| (i + j) as f64 + 10.0);
+        let r = permutation_test_two_groups(
+            x.as_ref(),
+            y.as_ref(),
+            PertDistance::Euclidean,
+            PermutationPath::Fast,
+            50,
+            0,
+        )
+        .unwrap();
+        assert!(r.pvalue >= 1.0 / 50.0 - 1e-12);
+        assert!(r.pvalue <= 1.0 + 1e-12);
+    }
+
+    /// The reference group compared with itself gives distance zero and a p-value of one.
+    #[test]
+    fn onesided_reference_axiom() {
+        let emb = Mat::<f64>::from_fn(9, 2, |i, j| ((i + 1) * (j + 1)) as f64);
+        let labels = vec![0_usize, 0, 0, 1, 1, 1, 2, 2, 2];
+        let res = permutation_test_onesided(
+            emb.as_ref(),
+            &labels,
+            1,
+            PertDistance::Euclidean,
+            PermutationPath::Fast,
+            16,
+            0,
+        )
+        .unwrap();
+        assert_eq!(res.len(), 3);
+        assert_eq!(res[1].observed, 0.0);
+        assert_eq!(res[1].pvalue, 1.0);
+    }
+}

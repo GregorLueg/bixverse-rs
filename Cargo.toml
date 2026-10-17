@@ -1,82 +1,23 @@
-[package]
-name = "bixverse-rs"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The Python bindings are their own workspace root, so `cargo publish` and a
+# root `cargo test` never see pyo3.
+exclude = ["python"]
+
+[workspace.package]
 version = "0.8.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
 repository = "https://github.com/GregorLueg/bixverse-rs"
-description = "A Rust library with various utilities for computational biology and single cell."
+readme = "README.md"
 categories = [
   "science::computational-biology",
   "science::bioinformatics",
-  "science::computational-biology::systems-biology",
   "mathematics",
   "algorithms",
 ]
-keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
-exclude = ["dev/", "tests/"]
-
-[lib]
-name = "bixverse_rs"
-path = "src/lib.rs"
-
-############
-# Features #
-############
-
-[features]
-## `r` is on by default, because the R package is the crate's main consumer
-## and every existing build expects it.
-default = ["accelerate", "r"]
-## Routes dense CPU GEMMs through Apple Accelerate on macOS (no effect
-## elsewhere). Decompositions (SVD, eigen) stay on faer, which is faster there.
-accelerate = ["ann-search-rs/accelerate"]
-## The R bindings: the `*_r_wrapper` modules and the `extendr-api` conversion
-## helpers. Turn it off for a consumer that must not link libR, such as the
-## Python wheel, which would otherwise carry a dynamic dependency on an R
-## installation.
-r = ["extendr-api"]
-## Enables the single cell features in bixverse-rs
-single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray", "dge", "zstd"]
-## Compile the bundled HDF5 C library from source. Leave it off to link an
-## external libhdf5 found via `HDF5_DIR` or pkg-config, which is what the R
-## package does on Windows: `hdf5-metno-src` names its output with the host
-## toolchain's convention, so an msvc host targeting gnu emits `libhdf5` and
-## the link fails.
-hdf5-static = ["hdf5?/static"]
-## Compile the LZF (32000) and Blosc (32001) filters into the HDF5 build, so
-## h5ad files written by `hdf5plugin` with those codecs can be read. Both
-## register through `H5Zregister` and never touch the HDF5 plugin path, which
-## for a `hdf5-metno-src` build points at a long gone cargo `OUT_DIR`. Off by
-## default: Blosc vendors c-blosc plus lz4, zlib and zstd, all built with `cc`.
-## Snappy is left out on purpose. It is C++, and the R package links this
-## staticlib without the C++ runtime. Filters outside these two (standalone
-## zstd, bitshuffle, lz4, blosc2) raise `BixverseErrors::UnsupportedH5Filter`.
-## Blosc with snappy passes that check, since the codec sits in the chunk
-## header, and fails in `H5Dread` with c-blosc naming the missing compressor.
-hdf5-filters = ["hdf5?/lzf", "hdf5?/blosc-lz4", "hdf5?/blosc-zlib", "hdf5?/blosc-zstd"]
-## Enables the negative binomial differential expression methods built on
-## `edge-rs`: the edgeR quasi-likelihood chain and, with `single-cell`, NEBULA.
-## Implied by `single-cell`, but usable on its own for the bulk half.
-dge = ["edge-rs"]
-## Slow but asserting tests: the GPU parity gates and the large-scale numerical
-## checks. These can fail, so they are worth running on a schedule. Run in
-## release or the CPU reference solves dominate.
-large-test = []
-## Unasserted diagnostic sweeps that print tables for a human to read. They
-## cannot fail, so running them in CI buys nothing; use them when investigating.
-large_scale_diagnostics = []
-## Enables Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
-## posteriors as the input (requires single-cell)
-bonsai = ["single-cell", "dep:bonsai-rs"]
-## Enables multi-modal single cell analysis (requires single-cell)
-multi-modal = ["single-cell"]
-## Enable GPU-accelerated algorithms and methods
-gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek", "edge-rs?/gpu", "bonsai-rs?/gpu"]
-## Experimental, Apple Silicon only: MLX backend via mlx-c. Independent of
-## `gpu`. Needs `brew install mlx-c` (or `MLX_C_PREFIX` pointing at an install
-## prefix); without the library the build warns and the backend is skipped.
-mlx = ["ann-search-rs/mlx"]
 
 #####################
 # Compilation flags #
@@ -91,30 +32,40 @@ codegen-units = 4
 # Dependencies #
 ################
 
-[dependencies]
+[workspace.dependencies]
+# Workspace crates. Every internal dependency drops default features, so a
+# feature switched off at the top cannot be switched back on underneath.
+bixverse-core = { path = "crates/bixverse-core", version = "0.8.0", default-features = false }
+bixverse-methods = { path = "crates/bixverse-methods", version = "0.8.0", default-features = false }
+bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.8.0", default-features = false }
+bixverse-sc = { path = "crates/bixverse-sc", version = "0.8.0", default-features = false }
+bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.8.0", default-features = false }
+bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.8.0", default-features = false }
+bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.8.0", default-features = false }
+bixverse-rs = { path = "crates/bixverse-rs", version = "0.8.0", default-features = false }
+
+# External
 approx = "0.5.1"
 ann-search-rs = { version = "0.11.0", default-features = false }
-bincode = { version = "2.0.1", features = ["serde"], optional = true }
-bonsai-rs = { version = "0.3.0", features = ["sanity"], optional = true }
-cubecl = { version = "0.11.0", features = ["wgpu"], optional = true }
-cubecl-utils-rs = { version = "0.2.0", optional = true }
-cubek = { version = "0.3.0", features = ["matmul"], optional = true }
+bincode = { version = "2.0.1", features = ["serde"] }
+bonsai-rs = { version = "0.3.0", features = ["sanity"] }
+cubecl = { version = "0.11.0", features = ["wgpu"] }
+cubecl-utils-rs = "0.2.0"
+cubek = { version = "0.3.0", features = ["matmul"] }
 document-features = "0.2.12"
-edge-rs = { version = "0.3.0", optional = true }
+edge-rs = "0.3.0"
 either = "1.15.0"
-extendr-api = { version = "0.9.0", optional = true }
+extendr-api = "0.9.0"
+extendr-engine = "0.9.0"
 faer = "0.24.4"
 faer-traits = "0.24.0"
 faer-entity = "0.20.1"
-fmt = "0.1.0"
-half = { version = "2.7.1", optional = true }
-hdf5 = { package = "hdf5-metno", version = "0.15.0", features = [
-    "zlib",
-], optional = true }
-indexmap = { version = "2.13.0", optional = true }
-lz4_flex = { version = "0.12.0", optional = true }
-memmap2 = { version = "0.9.9", optional = true }
-ndarray = { version = "0.17.2", optional = true }
+half = "2.7.1"
+hdf5 = { package = "hdf5-metno", version = "0.15.0", features = ["zlib"] }
+indexmap = "2.13.0"
+lz4_flex = "0.12.0"
+memmap2 = "0.9.9"
+ndarray = "0.17.2"
 num-traits = "0.2.19"
 once_cell = "1.21.3"
 petgraph = "0.8.3"
@@ -127,125 +78,8 @@ statrs = "0.18.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
-zstd = { version = "0.14.0", optional = true }
+zstd = "0.14.0"
 
-####################
-# Dev dependencies #
-####################
-
-[dev-dependencies]
-extendr-engine = "0.9.0"
-
-#################
-# Documentation #
-#################
-
-[package.metadata.docs.rs]
-features = ["single-cell", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]
-
-###########
-# Benches #
-###########
-
-[[bench]]
-name = "accelerate_e2e_bench"
-harness = false
-
-[[bench]]
-name = "accelerate_gemm_bench"
-harness = false
-
-[[bench]]
-name = "cellsweep_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "sc_loader_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "sc_reader_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "hvg_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "dge_scan_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "pairwise_cor_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "seacells_gpu_bench"
-harness = false
-required-features = ["gpu", "single-cell"]
-
-[[bench]]
-name = "gpu_sparse_svd_bench"
-harness = false
-required-features = ["gpu"]
-
-[[bench]]
-name = "gpu_corr_bench"
-harness = false
-required-features = ["gpu"]
-
-[[bench]]
-name = "mlx_corr_bench"
-harness = false
-required-features = ["mlx"]
-
-[[bench]]
-name = "gpu_nmf_bench"
-harness = false
-required-features = ["gpu"]
-
-[[bench]]
-name = "mlx_nmf_bench"
-harness = false
-required-features = ["mlx"]
-
-[[bench]]
-name = "mlx_sparse_svd_bench"
-harness = false
-required-features = ["mlx"]
-
-[[bench]]
-name = "mlx_harmony_bench"
-harness = false
-required-features = ["mlx", "single-cell"]
-
-[[bench]]
-name = "mlx_seacells_bench"
-harness = false
-required-features = ["mlx", "single-cell"]
-
-[[bench]]
-name = "gpu_scenic_bench"
-harness = false
-required-features = ["gpu", "single-cell"]
-
-[[bench]]
-name = "gpu_scenic_micro"
-harness = false
-required-features = ["gpu", "single-cell"]
-
-[[bench]]
-name = "harmony_bench"
-harness = false
-required-features = ["single-cell"]
-
-[[bench]]
-name = "r_ffi_bench"
-harness = false
-required-features = ["r"]
+# Patch
+[patch.crates-io]
+ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs.git", branch = "feat-mlx-kmean-update" }
