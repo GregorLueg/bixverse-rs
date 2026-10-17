@@ -56,6 +56,14 @@
 - `LeidenParams::n_iterations` is an `Option<usize>` (`None` iterates until
   stable) and defaults to 5 instead of 2. `LeidenParams` gains `min_gain` and
   `local_moving`, and `LeidenParams::new()` takes the `Option`.
+- petgraph is no longer a dependency. `graph_from_strings()` and
+  `PageRankGraph::from_petgraph()` are gone: build with
+  `PageRankGraph::from_strings()` or the new `PageRankGraph::from_indices()`.
+  `personalised_page_rank()` takes a `&PageRankGraph` and wraps
+  `personalised_page_rank_optimised()`. `NodeData` and `EdgeData` are replaced
+  by `AttributedGraph`, which `graph_from_strings_with_attributes()` now
+  returns and `constrained_personalised_page_rank()` takes. `SValueCache` is
+  keyed by `usize`; the `WangSimOntology` API is otherwise unchanged.
 
 ### Feature
 

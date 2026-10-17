@@ -1,12 +1,10 @@
 //! Implementations of the PageRank algorithm for rapid identification of
 //! influential nodes in the network
 
-use petgraph::Graph;
-use petgraph::prelude::*;
-use petgraph::visit::NodeIndexable;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::graph::graph_structures::edges_to_csr;
 use crate::prelude::*;
 
 /////////////
@@ -86,36 +84,48 @@ pub struct PageRankGraph<T> {
     inv_out_weight: Vec<T>,
 }
 
-#[allow(dead_code)]
 impl<T> PageRankGraph<T>
 where
     T: BixverseFloat + std::iter::Sum,
 {
-    /// Generate the structure from a given petgraph.
+    /// Generate the structure from 0-based edge indices.
     ///
     /// ### Params
     ///
-    /// * `graph` The PetGraph from which to generate the structure.
+    /// * `node_count` - Number of nodes
+    /// * `from` - 0-based source node per edge
+    /// * `to` - 0-based target node per edge
+    /// * `weights` - Optional weight per edge. Defaults to 1.
+    /// * `undirected` - Add every edge in both directions
     ///
     /// ### Returns
     ///
     /// Initialised `PageRankGraph` structure
-    pub fn from_petgraph(graph: Graph<&str, T>) -> Self {
-        let node_count = graph.node_count();
+    pub fn from_indices(
+        node_count: usize,
+        from: &[usize],
+        to: &[usize],
+        weights: Option<&[T]>,
+        undirected: bool,
+    ) -> Self {
+        assert_same_len!(from, to);
 
-        // Build adjacency structure more efficiently
+        if let Some(weights) = weights {
+            assert_same_len!(from, weights);
+        }
+
         let mut out_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
         let mut in_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
 
-        // Single pass through edges and clippy being dumb
+        for (i, (&from_idx, &to_idx)) in from.iter().zip(to.iter()).enumerate() {
+            let weight = weights.map(|w| w[i]).unwrap_or(T::one());
 
-        for i in 0..node_count {
-            let node_id = graph.from_index(i);
-            for edge in graph.edges(node_id) {
-                let target_idx = graph.to_index(edge.target());
-                let weight = *edge.weight();
-                out_edges[i].push((target_idx, weight));
-                in_edges[target_idx].push((i, weight));
+            out_edges[from_idx].push((to_idx, weight));
+            in_edges[to_idx].push((from_idx, weight));
+
+            if undirected {
+                out_edges[to_idx].push((from_idx, weight));
+                in_edges[from_idx].push((to_idx, weight));
             }
         }
 
@@ -151,11 +161,16 @@ where
     /// * `nodes` - Slice of the node names
     /// * `from` - Slice of the names of the from nodes
     /// * `to` - Slice of the names of the to nodes
+    /// * `weights` - Optional weight per edge. Defaults to 1.
     /// * `undirected` - Whether to create bidirectional edges
     ///
     /// ### Returns
     ///
     /// Initialised `PageRankGraph` structure
+    ///
+    /// ### Panics
+    ///
+    /// If an edge names a node that is not in `nodes`.
     pub fn from_strings(
         nodes: &[String],
         from: &[String],
@@ -163,62 +178,20 @@ where
         weights: Option<&[T]>,
         undirected: bool,
     ) -> Self {
-        assert_same_len!(from, to);
+        let name_to_idx: FxHashMap<&String, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name, idx))
+            .collect();
+        let lookup = |name: &String| {
+            *name_to_idx
+                .get(name)
+                .unwrap_or_else(|| panic!("Node '{name}' not found in nodes list"))
+        };
+        let from_idx: Vec<usize> = from.iter().map(lookup).collect();
+        let to_idx: Vec<usize> = to.iter().map(lookup).collect();
 
-        if let Some(weights) = weights {
-            assert_same_len!(from, weights);
-        }
-
-        let node_count = nodes.len();
-
-        // Create mapping from node names to indices
-        let mut name_to_idx = FxHashMap::default();
-        for (idx, name) in nodes.iter().enumerate() {
-            name_to_idx.insert(name, idx);
-        }
-
-        // Build adjacency lists with weights
-        let mut out_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
-        let mut in_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
-
-        for (i, (from_name, to_name)) in from.iter().zip(to.iter()).enumerate() {
-            let from_idx = *name_to_idx.get(from_name).unwrap();
-            let to_idx = *name_to_idx.get(to_name).unwrap();
-
-            let weight = weights.map(|w| w[i]).unwrap_or(T::one());
-
-            out_edges[from_idx].push((to_idx, weight));
-            in_edges[to_idx].push((from_idx, weight));
-
-            if undirected {
-                out_edges[to_idx].push((from_idx, weight));
-                in_edges[from_idx].push((to_idx, weight));
-            }
-        }
-
-        // Flatten in_edges for better cache locality
-        let mut in_edges_flat = Vec::new();
-        let mut in_edge_weights_flat = Vec::new();
-        let mut in_edges_offsets = Vec::with_capacity(node_count + 1);
-        in_edges_offsets.push(0);
-
-        for node_in_edges in &in_edges {
-            for &(node_idx, weight) in node_in_edges {
-                in_edges_flat.push(node_idx);
-                in_edge_weights_flat.push(weight);
-            }
-            in_edges_offsets.push(in_edges_flat.len());
-        }
-
-        let inv_out_weight = inv_out_weights(&out_edges);
-
-        Self {
-            node_count,
-            in_edges_flat,
-            in_edge_weights_flat,
-            in_edges_offsets,
-            inv_out_weight,
-        }
+        Self::from_indices(nodes.len(), &from_idx, &to_idx, weights, undirected)
     }
 
     /// Get incoming edges for a node
@@ -279,14 +252,17 @@ where
 // PageRank //
 //////////////
 
-/// Parallel personalised PageRank algorithm.
+/// Parallel personalised PageRank algorithm for a single run.
+///
+/// Allocates its own working memory. For many runs on one graph, call
+/// [personalised_page_rank_optimised] with thread-local working memory instead.
 ///
 /// ### Params
 ///
-/// * `graph` - The PetGraph on which to run the personalised page-rank.
+/// * `graph` - The `PageRankGraph` on which to run the personalised page-rank.
 /// * `damping_factor` - The dampening factor parameter, i.e., the probability
-///   of resetting.
-/// * `personalization_vector` - The vector of probabilities for the reset,
+///   of continuing the walk.
+/// * `personalisation_vector` - The vector of probabilities for the reset,
 ///   making this the personalised page rank.
 /// * `nb_iter` - Maximum number of iterations for the personalised page rank.
 /// * `tol` - Optional convergence threshold on the L1 change between
@@ -296,7 +272,7 @@ where
 ///
 /// The (normalised) personalised page rank scores.
 pub fn personalised_page_rank<T>(
-    graph: Graph<&str, T>,
+    graph: &PageRankGraph<T>,
     damping_factor: T,
     personalisation_vector: &[T],
     nb_iter: usize,
@@ -305,75 +281,30 @@ pub fn personalised_page_rank<T>(
 where
     T: BixverseFloat + std::iter::Sum,
 {
-    let node_count = graph.node_count();
-    if node_count == 0 {
+    if graph.node_count == 0 {
         return vec![];
     }
 
-    // Validate inputs (same as before)
     assert!(
         T::zero() <= damping_factor && damping_factor <= T::one(),
         "Damping factor should be between 0 and 1."
     );
     assert_eq!(
         personalisation_vector.len(),
-        node_count,
+        graph.node_count,
         "Personalisation vector length must match node count."
     );
 
     let tolerance = tol.unwrap_or(T::from_f64(DEFAULT_TOLERANCE).unwrap());
 
-    let mut out_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
-    let mut in_edges: Vec<Vec<(usize, T)>> = vec![Vec::new(); node_count];
-
-    // build adjacency lists with weights
-    for (i, out_edge_vec) in out_edges.iter_mut().enumerate().take(node_count) {
-        let node_id = graph.from_index(i);
-        for edge in graph.edges(node_id) {
-            let target_idx = graph.to_index(edge.target());
-            let weight = *edge.weight();
-            out_edge_vec.push((target_idx, weight));
-            in_edges[target_idx].push((i, weight));
-        }
-    }
-
-    let inv_out_weight = inv_out_weights(&out_edges);
-
-    let mut ranks: Vec<T> = personalisation_vector.to_vec();
-    let teleport_factor = T::one() - damping_factor;
-
-    for _ in 0..nb_iter {
-        let new_ranks: Vec<T> = (0..node_count)
-            .into_par_iter()
-            .map(|v| {
-                let teleport_prob = teleport_factor * personalisation_vector[v];
-
-                let link_prob = in_edges[v]
-                    .iter()
-                    .map(|&(w, edge_weight)| ranks[w] * edge_weight * inv_out_weight[w])
-                    .sum::<T>();
-
-                teleport_prob + damping_factor * link_prob
-            })
-            .collect();
-
-        let l1 = new_ranks
-            .par_iter()
-            .zip(&ranks)
-            .map(|(new, old)| (*new - *old).abs())
-            .sum::<T>();
-
-        ranks = new_ranks;
-
-        if l1 <= tolerance {
-            break;
-        }
-    }
-
-    let sum: T = ranks.iter().copied().sum();
-    ranks.iter_mut().for_each(|x| *x /= sum);
-
-    ranks
+    personalised_page_rank_optimised(
+        graph,
+        damping_factor,
+        personalisation_vector,
+        nb_iter,
+        tolerance,
+        &mut PageRankWorkingMemory::new(),
+    )
 }
 
 /// Optimised PageRank with pre-allocated working memory
@@ -469,7 +400,7 @@ where
 ///
 /// ### Params
 ///
-/// * `graph` - The PetGraph with NodeData and EdgeData
+/// * `graph` - The `AttributedGraph` with node and edge types
 /// * `damping_factor` - The dampening factor parameter, i.e., the probability
 ///   of resetting.
 /// * `personalization_vector` - The vector of probabilities for the reset,
@@ -487,7 +418,7 @@ where
 ///
 /// The normalised personalised PageRank scores
 pub fn constrained_personalised_page_rank<T>(
-    graph: &Graph<NodeData, EdgeData<T>>,
+    graph: &AttributedGraph<T>,
     damping_factor: T,
     personalisation_vector: &[T],
     nb_iter: usize,
@@ -498,7 +429,7 @@ pub fn constrained_personalised_page_rank<T>(
 where
     T: BixverseFloat + std::iter::Sum,
 {
-    let node_count = graph.node_count();
+    let node_count = graph.node_types.len();
     if node_count == 0 {
         return vec![];
     }
@@ -523,24 +454,21 @@ where
     let mut out_edges: Vec<Vec<(usize, T, bool)>> = vec![Vec::new(); node_count];
     let mut in_edges: Vec<Vec<(usize, T, bool)>> = vec![Vec::new(); node_count];
 
-    for node_idx in graph.node_indices() {
-        let node_idx_usize = graph.to_index(node_idx);
-        let node_data = &graph[node_idx];
-
-        // check if this node is a sink - if so, it has no valid outgoing edges
-        if sink_types.contains(node_data.node_type) {
+    for (((&source, &target), &edge_type), &weight) in graph
+        .from
+        .iter()
+        .zip(&graph.to)
+        .zip(&graph.edge_types)
+        .zip(&graph.weights)
+    {
+        // sink nodes have no valid outgoing edges
+        if sink_types.contains(graph.node_types[source]) {
             continue;
         }
 
-        // add all outgoing edges with their weights and sink edge flags
-        for edge in graph.edges(node_idx) {
-            let edge_data = edge.weight();
-            let target_idx = graph.to_index(edge.target());
-            let is_sink_edge = constrained_types.contains(edge_data.edge_type);
-
-            out_edges[node_idx_usize].push((target_idx, *edge_data.weight, is_sink_edge));
-            in_edges[target_idx].push((node_idx_usize, *edge_data.weight, is_sink_edge));
-        }
+        let is_sink_edge = constrained_types.contains(edge_type);
+        out_edges[source].push((target, weight, is_sink_edge));
+        in_edges[target].push((source, weight, is_sink_edge));
     }
 
     // calculate out-degrees (sum of weights of ALL edges, including sink edges)
@@ -895,48 +823,6 @@ where
     }
 }
 
-/// Build a CSR adjacency from an edge list via counting sort.
-///
-/// ### Params
-///
-/// * `n` - Number of rows (nodes)
-/// * `rows` - Row index per edge
-/// * `cols` - Column index per edge
-/// * `vals` - Value per edge
-///
-/// ### Returns
-///
-/// Tuple of `(indptr, indices, values)`.
-fn edges_to_csr<T>(
-    n: usize,
-    rows: &[u32],
-    cols: &[u32],
-    vals: &[T],
-) -> (Vec<usize>, Vec<u32>, Vec<T>)
-where
-    T: BixverseFloat,
-{
-    let mut indptr = vec![0usize; n + 1];
-    for &r in rows {
-        indptr[r as usize + 1] += 1;
-    }
-    for i in 0..n {
-        indptr[i + 1] += indptr[i];
-    }
-
-    let mut next = indptr[..n].to_vec();
-    let mut indices = vec![0u32; rows.len()];
-    let mut values = vec![T::zero(); rows.len()];
-    for ((&r, &c), &v) in rows.iter().zip(cols).zip(vals) {
-        let pos = next[r as usize];
-        indices[pos] = c;
-        values[pos] = v;
-        next[r as usize] += 1;
-    }
-
-    (indptr, indices, values)
-}
-
 /// Working memory for [constrained_personalised_page_rank_optimised]
 ///
 /// One per thread; reused across runs to avoid per-seed allocations.
@@ -1130,45 +1016,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The CSR-backed PageRank agrees with the petgraph reference implementation.
-    #[test]
-    fn test_optimised_page_rank_matches_reference() {
-        // Star graph 0 -> 1, 0 -> 2, uniform personalisation. Both the
-        // petgraph reference and the CSR-backed optimised path must agree.
-        let mut graph = Graph::<&str, f64>::new();
-        let n0 = graph.add_node("A");
-        let n1 = graph.add_node("B");
-        let n2 = graph.add_node("C");
-        graph.add_edge(n0, n1, 1.0);
-        graph.add_edge(n0, n2, 1.0);
-
-        let p_vec: Vec<f64> = vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
-        let reference = personalised_page_rank(graph, 0.85, &p_vec, 100, None);
-
-        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let from = vec!["A".to_string(), "A".to_string()];
-        let to = vec!["B".to_string(), "C".to_string()];
-        let weights = vec![1.0, 1.0];
-        let pr_graph = PageRankGraph::from_strings(&nodes, &from, &to, Some(&weights), false);
-
-        let mut memory = PageRankWorkingMemory::new();
-        let optimised =
-            personalised_page_rank_optimised(&pr_graph, 0.85, &p_vec, 100, 1e-6, &mut memory);
-
-        assert_eq!(reference.len(), 3);
-        assert_eq!(optimised.len(), 3);
-        for (i, (r, o)) in reference.iter().zip(optimised.iter()).enumerate() {
-            assert!(
-                (r - o).abs() < 1e-6,
-                "node {i}: reference {r} vs optimised {o}"
-            );
-        }
-
-        // The two leaves are symmetric and the mass is conserved.
-        assert!((optimised[1] - optimised[2]).abs() < 1e-6);
-        assert!((optimised.iter().sum::<f64>() - 1.0).abs() < 1e-6);
-    }
+    use crate::graph::graph_structures::graph_from_strings_with_attributes;
 
     /// Both PPR paths match igraph's prpack on a weighted directed graph with
     /// a dangling node (7) and a node with only a zero-weight out-edge (6).
@@ -1192,22 +1040,18 @@ mod tests {
         let mut p_vec = vec![0.0; 8];
         p_vec[0] = 1.0;
 
-        let mut graph = Graph::<&str, f64>::new();
-        let idx: Vec<_> = (0..8).map(|_| graph.add_node("")).collect();
-        for ((&a, &b), &w) in from.iter().zip(&to).zip(&weights) {
-            graph.add_edge(idx[a], idx[b], w);
-        }
+        let graph = PageRankGraph::from_indices(8, &from, &to, Some(&weights), false);
 
         let tol = DEFAULT_TOLERANCE;
         let optimised = personalised_page_rank_optimised(
-            &PageRankGraph::from_petgraph(graph.clone()),
+            &graph,
             0.8,
             &p_vec,
             1000,
             tol,
             &mut PageRankWorkingMemory::new(),
         );
-        let reference = personalised_page_rank(graph, 0.8, &p_vec, 1000, None);
+        let reference = personalised_page_rank(&graph, 0.8, &p_vec, 1000, None);
 
         for i in 0..8 {
             assert!(
@@ -1223,6 +1067,45 @@ mod tests {
                 expected[i]
             );
         }
+    }
+
+    /// On the chain a -> b -> c with a sink edge a -> b, mass reaching b is
+    /// absorbed there and never forwarded, so c only gets what b's other
+    /// in-flows carry: nothing. Without the sink edge c gets mass.
+    #[test]
+    fn test_constrained_page_rank_sink_edge_absorbs_mass() {
+        let nodes: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let node_types: Vec<String> = vec!["n".to_string(); 3];
+        let from = vec!["a".to_string(), "b".to_string()];
+        let to = vec!["b".to_string(), "c".to_string()];
+        let edge_types = vec!["sink".to_string(), "flow".to_string()];
+        let weights = vec![1.0, 1.0];
+        let graph = graph_from_strings_with_attributes(
+            &nodes,
+            &node_types,
+            &from,
+            &to,
+            &edge_types,
+            &weights,
+        );
+        let p_vec = [1.0, 0.0, 0.0];
+        let sink_edges: FxHashSet<String> = ["sink".to_string()].into_iter().collect();
+
+        let constrained = constrained_personalised_page_rank(
+            &graph,
+            0.85,
+            &p_vec,
+            1000,
+            None,
+            None,
+            Some(&sink_edges),
+        );
+        let free = constrained_personalised_page_rank(&graph, 0.85, &p_vec, 1000, None, None, None);
+
+        assert!((constrained.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(constrained[1] > 0.0);
+        assert_eq!(constrained[2], 0.0);
+        assert!(free[2] > 0.0);
     }
 
     /// Toy multiscale graph: two drugs, three proteins, one function, one

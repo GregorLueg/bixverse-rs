@@ -6,7 +6,6 @@
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use crate::graph::graph_structures::graph_from_strings;
 use crate::graph::page_rank::*;
 use crate::prelude::BixverseFloat;
 
@@ -91,20 +90,22 @@ where
     T: BixverseFloat + std::iter::Sum,
 {
     let summarisation_type: TiedSumType = parse_tied_sum(&summarisation_fun).unwrap();
-    let graph_1 = graph_from_strings(&node_names, &from, &to, weights, undirected);
+    let pagerank_graph_1 = Arc::new(PageRankGraph::from_strings(
+        &node_names,
+        &from,
+        &to,
+        weights,
+        undirected,
+    ));
 
     // For tied diffusion in the directed case, the directionality is reversed
-    let graph_2 = if !undirected {
-        graph_from_strings(&node_names, &to, &from, weights, undirected)
+    let pagerank_graph_2 = Arc::new(if !undirected {
+        PageRankGraph::from_strings(&node_names, &to, &from, weights, undirected)
     } else {
-        graph_from_strings(&node_names, &from, &to, weights, undirected)
-    };
+        PageRankGraph::from_strings(&node_names, &from, &to, weights, undirected)
+    });
 
     let half = T::from_f64(0.5).unwrap();
-
-    // Pre-process graph once
-    let pagerank_graph_1 = Arc::new(PageRankGraph::from_petgraph(graph_1));
-    let pagerank_graph_2 = Arc::new(PageRankGraph::from_petgraph(graph_2));
 
     let tied_res: Vec<Vec<T>> = personalise_vecs_1
         .into_par_iter()

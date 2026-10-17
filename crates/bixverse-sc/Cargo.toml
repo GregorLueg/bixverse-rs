@@ -34,7 +34,6 @@ edge-rs.workspace = true
 faer.workspace = true
 half.workspace = true
 indexmap.workspace = true
-petgraph.workspace = true
 rand.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
