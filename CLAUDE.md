@@ -56,7 +56,7 @@ Features live on the crate that owns the dependency; the facade and `bixverse-r`
 # What CI runs (rust-workspace-test.yml in personal-actions)
 cargo test -p bixverse-core
 cargo test -p bixverse-methods --features dge
-cargo test -p bixverse-sc-data --features h5
+cargo test -p bixverse-sc-data --features hdf5-static
 cargo test -p bixverse-sc --features multi-modal
 cargo test -p bixverse-rs --features single-cell,multi-modal               # no HDF5
 cargo test -p bixverse-rs --features single-cell,multi-modal,hdf5-static
