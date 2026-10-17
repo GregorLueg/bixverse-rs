@@ -26,6 +26,9 @@
 //! Needs `libmlxc` (see `build.rs`); without it the `mlx` module does not
 //! exist and this does not compile.
 
+#![cfg_attr(not(mlx_available), no_main)]
+#![cfg(mlx_available)]
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 

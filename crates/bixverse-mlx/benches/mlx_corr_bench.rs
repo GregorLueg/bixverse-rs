@@ -14,6 +14,9 @@
 //!
 //! `BIXVERSE_BENCH_BIG=1` adds the 200k x 10k shape.
 
+#![cfg_attr(not(mlx_available), no_main)]
+#![cfg(mlx_available)]
+
 use std::time::{Duration, Instant};
 
 use faer::Mat;

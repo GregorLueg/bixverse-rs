@@ -16,6 +16,9 @@
 //!
 //! `BIXVERSE_BENCH_BIG=1` adds the 1M x 2000 production shape.
 
+#![cfg_attr(not(mlx_available), no_main)]
+#![cfg(mlx_available)]
+
 use std::time::{Duration, Instant};
 
 use bixverse_core::core::math::pca_svd::randomised_sparse_svd;
