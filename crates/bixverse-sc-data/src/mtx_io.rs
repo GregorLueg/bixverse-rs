@@ -94,6 +94,9 @@ pub struct MtxReader {
     qc_params: MinCellQuality,
     /// Are the cells stored as rows
     cells_as_rows: bool,
+    /// Optional cell indices to admit, 0-based in the mtx file's own cell
+    /// axis. `None` admits everything.
+    cell_allowlist: Option<Vec<usize>>,
 }
 
 impl MtxReader {
@@ -123,7 +126,38 @@ impl MtxReader {
             header,
             qc_params,
             cells_as_rows,
+            cell_allowlist: None,
         })
+    }
+
+    /// Restrict the reader to a subset of the cells in the file.
+    ///
+    /// The filter bites in [`MtxReader::parse_mtx_quality`], before the gene
+    /// statistics are accumulated, so `min_cells` is computed against the
+    /// admitted cells only. Excluded cells never reach the writer either,
+    /// since the write passes map through `quality.cells_to_keep`.
+    ///
+    /// Index space: 0-based positions in the mtx file's own cell axis, which
+    /// is the row axis when `cells_as_rows` and the column axis otherwise.
+    /// For 10x output that is the order of `barcodes.tsv.gz` and nothing else;
+    /// `tissue_positions.csv` is in array raster order and must be joined on
+    /// the barcode string first.
+    ///
+    /// Indices are range-checked in [`MtxReader::parse_mtx_quality`] so the
+    /// builder stays infallible. That check matters: mtx is 1-based on disk
+    /// and so is R, and a 1-based allowlist would otherwise silently drop the
+    /// last cell and shift every barcode by one in a positional join.
+    ///
+    /// ### Params
+    ///
+    /// * `allowlist` - Cell indices to admit. An empty list admits nothing.
+    ///
+    /// ### Returns
+    ///
+    /// Self, for chaining off [`MtxReader::new`].
+    pub fn with_cell_allowlist(mut self, allowlist: impl IntoIterator<Item = usize>) -> Self {
+        self.cell_allowlist = Some(allowlist.into_iter().collect());
+        self
     }
 
     /// Parse the header of the mtx file
@@ -169,6 +203,10 @@ impl MtxReader {
 
     /// Helper to parse the file to understand which cells to keep
     ///
+    /// Both passes honour [`MtxReader::with_cell_allowlist`], so the gene
+    /// statistics in the first pass, and hence `min_cells`, see only the
+    /// admitted cells.
+    ///
     /// ### Params
     ///
     /// * `verbose` - Controls verbosity of the function.
@@ -179,6 +217,32 @@ impl MtxReader {
     /// for the cells/genes to keep.
     pub fn parse_mtx_quality(&mut self, verbose: bool) -> IoResult<CellOnFileQuality> {
         const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+
+        let admitted: Option<Vec<bool>> = match &self.cell_allowlist {
+            None => None,
+            Some(list) => {
+                let mut mask = vec![false; self.header.total_cells];
+                for &i in list {
+                    if i >= self.header.total_cells {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "Cell allowlist index {i} is out of range for a file with {} cells (indices are 0-based)",
+                                self.header.total_cells
+                            ),
+                        ));
+                    }
+                    mask[i] = true;
+                }
+                Some(mask)
+            }
+        };
+        let is_admitted = |cell_idx: usize| {
+            admitted
+                .as_ref()
+                .is_none_or(|m| m.get(cell_idx) == Some(&true))
+        };
+
         let file_size = self.reader.get_ref().metadata()?.len();
         let num_chunks = ((file_size / CHUNK_SIZE) as usize).max(1);
 
@@ -231,13 +295,13 @@ impl MtxReader {
                                 if let Some((row, col, _)) =
                                     parse_mtx_line(&line_buffer[..trim_end])
                                 {
-                                    let gene_idx = if self.cells_as_rows {
-                                        (col - 1) as usize
+                                    let (cell_idx, gene_idx) = if self.cells_as_rows {
+                                        ((row - 1) as usize, (col - 1) as usize)
                                     } else {
-                                        (row - 1) as usize
+                                        ((col - 1) as usize, (row - 1) as usize)
                                     };
 
-                                    if gene_idx < self.header.total_genes {
+                                    if is_admitted(cell_idx) && gene_idx < self.header.total_genes {
                                         local_gene_counts[gene_idx] += 1;
                                     }
                                 }
@@ -331,7 +395,8 @@ impl MtxReader {
                                             ((col - 1) as usize, (row - 1) as usize)
                                         };
 
-                                        if genes_to_keep_lookup.get(gene_idx) == Some(&true)
+                                        if is_admitted(cell_idx)
+                                            && genes_to_keep_lookup.get(gene_idx) == Some(&true)
                                             && cell_idx < self.header.total_cells
                                         {
                                             local_cell_stats[cell_idx].0 += 1;
@@ -369,10 +434,13 @@ impl MtxReader {
         let cell_gene_count: Vec<u32> = merged.iter().map(|&(count, _)| count).collect();
         let cell_lib_size: Vec<u32> = merged.iter().map(|&(_, size)| size).collect();
 
-        // Filter cells
+        // The allowlist is checked here as well as in the scans: with
+        // `min_unique_genes` and `min_lib_size` both at zero the thresholds
+        // admit everything, so a zeroed-out excluded cell would survive.
         let cells_to_keep: Vec<usize> = (0..self.header.total_cells)
             .filter(|&i| {
-                cell_gene_count[i] as usize >= self.qc_params.min_unique_genes
+                is_admitted(i)
+                    && cell_gene_count[i] as usize >= self.qc_params.min_unique_genes
                     && cell_lib_size[i] as f32 >= self.qc_params.min_lib_size as f32
             })
             .collect();
@@ -1293,5 +1361,90 @@ mod tests {
                 .expect("empty cell is on disk");
             assert!(cell[0].indices.is_empty());
         }
+    }
+
+    ///////////////
+    // Allowlist //
+    ///////////////
+
+    /// Four cells x three genes, genes as rows (10x layout). Gene 3 only fires
+    /// in cells 3 and 4, so an allowlist of cells 1 and 2 must drop it under
+    /// `min_cells = 2`.
+    const ALLOWLIST_MTX: &str = "%%MatrixMarket matrix coordinate integer general\n\
+3 4 10\n\
+1 1 5\n\
+1 2 5\n\
+1 3 5\n\
+1 4 5\n\
+2 1 3\n\
+2 2 3\n\
+2 3 3\n\
+2 4 3\n\
+3 3 7\n\
+3 4 7\n";
+
+    /// QC thresholds for the allowlist fixture: genes need two cells.
+    fn allowlist_qc() -> MinCellQuality {
+        MinCellQuality {
+            min_unique_genes: 1,
+            min_lib_size: 1,
+            min_cells: 2,
+            target_size: 1e4,
+        }
+    }
+
+    /// Without an allowlist every cell and gene of the fixture passes.
+    #[test]
+    fn test_mtx_without_allowlist_keeps_everything() {
+        let mtx = write_mtx("no_allowlist", ALLOWLIST_MTX);
+        let mut reader = MtxReader::new(mtx.path(), allowlist_qc(), false).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+
+        assert_eq!(quality.cells_to_keep, vec![0, 1, 2, 3]);
+        assert_eq!(quality.genes_to_keep, vec![0, 1, 2]);
+    }
+
+    /// The allowlist restricts the cells and the gene `min_cells` count.
+    #[test]
+    fn test_mtx_allowlist_restricts_cells_and_gene_qc() {
+        let mtx = write_mtx("allowlist", ALLOWLIST_MTX);
+        let mut reader = MtxReader::new(mtx.path(), allowlist_qc(), false)
+            .expect("reader opens")
+            .with_cell_allowlist([0_usize, 1]);
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+
+        assert_eq!(quality.cells_to_keep, vec![0, 1]);
+        // Gene 3 (index 2) fires only in the excluded cells.
+        assert_eq!(quality.genes_to_keep, vec![0, 1]);
+    }
+
+    /// Zero thresholds admit everything, so the final filter must still apply
+    /// the allowlist.
+    #[test]
+    fn test_mtx_allowlist_survives_zero_thresholds() {
+        let mtx = write_mtx("allowlist_zero", ALLOWLIST_MTX);
+        let params = MinCellQuality {
+            min_unique_genes: 0,
+            min_lib_size: 0,
+            min_cells: 0,
+            target_size: 1e4,
+        };
+        let mut reader = MtxReader::new(mtx.path(), params, false)
+            .expect("reader opens")
+            .with_cell_allowlist([2_usize]);
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+
+        assert_eq!(quality.cells_to_keep, vec![2]);
+    }
+
+    /// A 1-based allowlist out of R must error, not drop the last cell.
+    #[test]
+    fn test_mtx_allowlist_out_of_range_errors() {
+        let mtx = write_mtx("allowlist_range", ALLOWLIST_MTX);
+        let mut reader = MtxReader::new(mtx.path(), allowlist_qc(), false)
+            .expect("reader opens")
+            .with_cell_allowlist([1_usize, 2, 3, 4]);
+        let err = reader.parse_mtx_quality(false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
