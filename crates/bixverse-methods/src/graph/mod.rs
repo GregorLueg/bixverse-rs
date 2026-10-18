@@ -12,3 +12,4 @@ pub mod leiden;
 pub mod page_rank;
 pub mod shortest_paths;
 pub mod spanning_tree;
+pub mod spatial_graph;
