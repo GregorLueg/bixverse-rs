@@ -31,12 +31,19 @@ dge = ["bixverse-methods/dge"]
 ## for the h5ad and 10x h5 readers.
 single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
-h5 = ["single-cell", "bixverse-sc-data/h5", "dep:hdf5"]
+h5 = ["single-cell", "bixverse-sc-data/h5", "bixverse-sp?/h5", "dep:hdf5"]
 ## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
-hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
+hdf5-static = ["h5", "bixverse-sc-data/hdf5-static", "bixverse-sp?/hdf5-static"]
 ## Compile the LZF and Blosc filters into the HDF5 build. See
 ## `bixverse-sc-data`.
 hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
+## Spatial transcriptomics via `bixverse-sp` (requires single-cell). No HDF5:
+## `h5` adds the `obsm/spatial` and `uns/spatial` reader.
+spatial = ["single-cell", "dep:bixverse-sp"]
+## Per-spot histology image features. Needs the OpenSlide C library present
+## at build and run time (`brew install openslide`,
+## `apt install libopenslide-dev`).
+spatial-image = ["spatial", "bixverse-sp/spatial-image"]
 ## Multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
 ## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
@@ -65,6 +72,7 @@ bixverse-core.workspace = true
 bixverse-methods.workspace = true
 bixverse-sc-data = { workspace = true, optional = true, features = ["analysis"] }
 bixverse-sc = { workspace = true, optional = true }
+bixverse-sp = { workspace = true, optional = true }
 bixverse-gpu = { workspace = true, optional = true }
 bixverse-sc-gpu = { workspace = true, optional = true }
 bixverse-mlx = { workspace = true, optional = true }
@@ -172,4 +180,6 @@ required-features = ["single-cell"]
 #################
 
 [package.metadata.docs.rs]
-features = ["single-cell", "h5", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]
+# `spatial-image` is deliberately absent: it needs the OpenSlide C library and
+# its headers, which docs.rs has no way to install.
+features = ["single-cell", "h5", "multi-modal", "dge", "hdf5-static", "hdf5-filters", "spatial"]

@@ -26,6 +26,8 @@ pub mod prelude;
 pub mod r_rust_interface;
 #[cfg(feature = "single-cell")]
 pub mod sc_r_wrappers;
+#[cfg(feature = "spatial")]
+pub mod sp_r_wrappers;
 
 /// Builds a parameter struct from an R list.
 ///

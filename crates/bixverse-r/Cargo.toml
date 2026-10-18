@@ -29,6 +29,10 @@ hdf5-filters = ["h5", "bixverse-rs/hdf5-filters"]
 ## See `bixverse-rs`.
 multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
 ## See `bixverse-rs`.
+spatial = ["single-cell", "bixverse-rs/spatial"]
+## See `bixverse-rs`.
+spatial-image = ["spatial", "bixverse-rs/spatial-image"]
+## See `bixverse-rs`.
 bonsai = ["single-cell", "bixverse-rs/bonsai", "dep:bonsai-rs"]
 ## See `bixverse-rs`.
 gpu = ["bixverse-rs/gpu", "ann-search-rs/gpu"]

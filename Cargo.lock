@@ -574,6 +574,7 @@ dependencies = [
  "bixverse-sc",
  "bixverse-sc-data",
  "bixverse-sc-gpu",
+ "bixverse-sp",
  "bonsai-rs",
  "cubecl",
  "cubecl-utils-rs",

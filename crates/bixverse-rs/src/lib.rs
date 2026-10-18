@@ -27,6 +27,8 @@ pub mod errors {
     pub use bixverse_sc_data::errors::*;
     #[cfg(feature = "sc-gpu")]
     pub use bixverse_sc_gpu::errors::*;
+    #[cfg(feature = "spatial")]
+    pub use bixverse_sp::errors::*;
 }
 
 /// The union of the preludes of every crate compiled in.
@@ -42,6 +44,8 @@ pub mod prelude {
     pub use bixverse_sc::prelude::*;
     #[cfg(feature = "sc-gpu")]
     pub use bixverse_sc_gpu::prelude::*;
+    #[cfg(feature = "spatial")]
+    pub use bixverse_sp::prelude::*;
 }
 
 /// Single cell and metacell analysis.
@@ -51,6 +55,10 @@ pub mod single_cell {
     pub use bixverse_sc_data as sc_data;
     pub use bixverse_sc_data::{CELL_BATCH_SIZE, sc_traits};
 }
+
+/// Spatial transcriptomics.
+#[cfg(feature = "spatial")]
+pub use bixverse_sp as spatial;
 
 /// GPU methods via cubecl.
 #[cfg(feature = "gpu")]
