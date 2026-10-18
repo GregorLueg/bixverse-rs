@@ -20,14 +20,18 @@ jobs:
         -p bixverse-methods --features dge
         -p bixverse-sc-data --features hdf5-static
         -p bixverse-sc --features multi-modal
+        -p bixverse-sp
+        -p bixverse-sp --features hdf5-static
         -p bixverse-rs --features single-cell,multi-modal
         -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+        -p bixverse-rs --features spatial,hdf5-static
       # extendr links against R, so this lane needs the gnu ABI on Windows and
       # a shared libR on Linux.
       r-runs: |
         -p bixverse-r
         -p bixverse-r --features single-cell,multi-modal
         -p bixverse-r --features single-cell,multi-modal,hdf5-static
+        -p bixverse-r --features spatial,hdf5-static
       # The expensive GPU tests sit behind large-test and
       # large_scale_diagnostics, which this lane deliberately does not enable.
       gpu-runs: |

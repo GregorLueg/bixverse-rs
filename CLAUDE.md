@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
 | `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `v4_io`, `h5ad_io`, `sc_traits`, ...) | core |
 | `bixverse-sc` | the rest of `single_cell`, flattened (`sc_processing`, `sc_analysis`, ...) | methods (with `dge`), sc-data |
+| `bixverse-sp` | spatial transcriptomics, the old `spatial` module flattened (`sp_graph`, `sp_processing`, `sp_analysis`, `sp_data`, `sp_image`) | sc (always) |
 | `bixverse-gpu` | `linalg`, `methods_gpu` | methods |
 | `bixverse-sc-gpu` | the old `gpu::sc_gpu`, flattened | sc, gpu |
 | `bixverse-mlx` | `linalg`, `methods`, `sc` | sc (always) |
@@ -45,8 +46,9 @@ Features live on the crate that owns the dependency; the facade and `bixverse-r`
 - `bixverse-sc-data`: `h5` (the h5ad and 10x h5 readers; pulls in `hdf5`, `ndarray`), `hdf5-static`, `hdf5-filters`
 - `bixverse-sc`: `multi-modal`, `bonsai` (pulls in `bonsai-rs` with `sanity`; Sanity is only ever named through `bonsai_rs::sanity_sc_rs`)
 - `bixverse-sc-gpu`: `bonsai` (the GPU Sanity to Bonsai path)
+- `bixverse-sp`: `h5` (the `obsm/spatial` and `uns/spatial` reader; forwards `bixverse-sc-data/h5`), `hdf5-static`, `spatial-image` (per-spot histology features; pulls in `image` and `openslide-rs`, needs the OpenSlide C library installed, linked dynamically because OpenSlide is LGPL)
 - `bixverse-mlx`: none. Apple Silicon only. `ann-search-rs/mlx` owns `links = "mlxc"` and exports `DEP_MLXC_AVAILABLE`; this crate's `build.rs` turns that into `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. Without `libmlxc` the crate compiles to nothing but that constant. The FFI bindings stay local because `ann_search_rs::mlx::ffi` is private
-- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge`; no HDF5), `h5` (implies `single-cell`, turns on `bixverse-sc-data/h5`), `hdf5-static` and `hdf5-filters` (imply `h5`), `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`. A consumer that never reads h5ad or 10x h5 (bixverse.gpu) leaves `h5` off and has no HDF5 in its tree
+- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge`; no HDF5), `h5` (implies `single-cell`, turns on `bixverse-sc-data/h5`), `hdf5-static` and `hdf5-filters` (imply `h5`), `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `spatial` (single-cell + `bixverse-sp`, re-exported as `bixverse_rs::spatial`), `spatial-image`, `mlx`. A consumer that never reads h5ad or 10x h5 (bixverse.gpu) leaves `h5` off and has no HDF5 in its tree
 - `bixverse-r`: the facade's features plus nothing else. The h5 parameter impls (`H5adFileTask`, `TenxFileTask`) sit behind its `h5`
 - `large-test` and `large_scale_diagnostics` exist on every crate that has gated tests (methods, sc, gpu, sc-gpu, mlx, facade); the facade forwards them. `large-test` is for slow tests that assert; `large_scale_diagnostics` for unasserted sweeps that print tables. No CI job enables either
 
@@ -58,11 +60,15 @@ cargo test -p bixverse-core
 cargo test -p bixverse-methods --features dge
 cargo test -p bixverse-sc-data --features hdf5-static
 cargo test -p bixverse-sc --features multi-modal
+cargo test -p bixverse-sp
+cargo test -p bixverse-sp --features hdf5-static
 cargo test -p bixverse-rs --features single-cell,multi-modal               # no HDF5
 cargo test -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+cargo test -p bixverse-rs --features spatial,hdf5-static
 cargo test -p bixverse-r                                                    # needs R
 cargo test -p bixverse-r --features single-cell,multi-modal
 cargo test -p bixverse-r --features single-cell,multi-modal,hdf5-static
+cargo test -p bixverse-r --features spatial,hdf5-static
 cargo test -p bixverse-gpu
 cargo test -p bixverse-sc-gpu
 cargo test -p bixverse-rs --features sc-gpu,hdf5-static
@@ -70,6 +76,9 @@ cargo test -p bixverse-rs --features sc-gpu,hdf5-static
 # Every member on its own: catches features that workspace unification hides.
 # bixverse-r is left out because extendr's build script needs R.
 cargo check -p <member> --no-default-features --all-targets
+
+# Not in CI: the reusable workflow cannot install OpenSlide.
+cargo test -p bixverse-sp --features hdf5-static,spatial-image
 
 # The slow asserting gates. Release, or the CPU reference solves dominate.
 cargo test --release -p bixverse-rs --features sc-gpu,multi-modal,large-test
@@ -100,12 +109,13 @@ Each crate is organised by domain, not by algorithmic layer. Module trees were k
 - `bixverse-methods`: `enrichment/` (fgsea, GSVA, singscore, mitch, OAE, blitzGSEA, decoupler ULM / MLM in `lm_activity`), `graph/` (`SparseGraph`, community detection, PageRank), `methods/` (NMF, ICA, LDA, diffcor, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, `dge_bulk`), `ontology/`
 - `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 4, the previous `SC_FILE_VERSION_V3` still reads; see "Single cell binary format" below), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`
 - `bixverse-sc`: processing, kNN, batch correction, annotation, analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), trajectories, multi-modal (WNN)
+- `bixverse-sp`: spatial graph builder (hex, square, kNN, radius), Moran's I, SPARK-X, neighbourhood enrichment, h5ad spatial ingest and orientation, histology image features. `GraphCsr`, the symmetric CSR shared with HotSpot, lives in `bixverse-methods` as `graph::spatial_graph`
 - `bixverse-gpu`, `bixverse-sc-gpu`: GPU kernels via `cubecl` / `cubek`. K-means comes from `ann-search-rs`
 - `bixverse-mlx`: experimental MLX backend via `mlx-c`, f32 only
 
 Where an sc algorithm has a GPU or MLX twin, the seam is generic over the backend's error: `FwArgminB` has `type Error: From<ScErrors> + From<CoreErrors> + Debug`, and the fastMNN drivers take a search closure returning `Result<_, E>`. `ScKnnResults<E>` and `SingleCellPcaRes<E>` default `E` to `ScErrors`. Use the same pattern for a new seam rather than adding a GPU variant to `ScErrors`.
 
-**Errors.** One `thiserror` enum per crate: `CoreErrors`, `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`, `MlxErrors`, `RErrors`. Each upper enum wraps the ones below with `#[error(transparent)] Core(#[from] CoreErrors)` and so on, so `?` converts upwards; constructing a lower variant in an upper crate needs `.into()` (`Err(CoreErrors::InvalidArgument(..).into())`), and a test matching on it needs the wrapper (`Err(ScErrors::Core(CoreErrors::X { .. }))`). Add a variant to the lowest crate that raises it, in the matching subsystem section. The facade's `errors` module re-exports all of them.
+**Errors.** One `thiserror` enum per crate: `CoreErrors`, `MethodsErrors`, `ScDataErrors`, `ScErrors`, `SpErrors`, `GpuErrors`, `ScGpuErrors`, `MlxErrors`, `RErrors`. Each upper enum wraps the ones below with `#[error(transparent)] Core(#[from] CoreErrors)` and so on, so `?` converts upwards; constructing a lower variant in an upper crate needs `.into()` (`Err(CoreErrors::InvalidArgument(..).into())`), and a test matching on it needs the wrapper (`Err(ScErrors::Core(CoreErrors::X { .. }))`). Add a variant to the lowest crate that raises it, in the matching subsystem section. The facade's `errors` module re-exports all of them.
 
 **Single cell binary format.** Two files per store, cell-major (CSR) and gene-major (CSC), one independently compressed chunk per cell or gene, offsets plus an index map in a tail header, `mmap` reads. Version 4 (the writers' default) stores indices and raw counts delta bit-packed in blocks of 128 behind an uncompressed 32 byte chunk header and a per-chunk codec (`ChunkCodec`: lz4 by default, zstd, none), and drops the normalised layer: it is recomputed on read from the raw counts, library size and target size, bit for bit, and a chunk where it does not recompute keeps it verbatim. A gene file carries a per-cell library-size table in its tail (pointed at by `library_index_offset`) for that recompute, and a table of normalised values for counts 1 to 4 is built when it opens. All of it lives in `v4_io`. Rules that follow from it:
 
