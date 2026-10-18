@@ -1,0 +1,49 @@
+[package]
+name = "bixverse-sp"
+description = "Spatial transcriptomics for bixverse: spatial graphs, spatially variable genes, neighbourhood enrichment and histology image features."
+keywords = ["bioinformatics", "spatial", "transcriptomics", "visium"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+exclude = ["tests/"]
+
+[features]
+## The `obsm/spatial` and `uns/spatial` h5ad reader. Pulls in HDF5.
+h5 = ["bixverse-sc-data/h5", "dep:hdf5"]
+## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
+hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
+## Per-spot histology image features. Needs the OpenSlide C library present
+## at build and run time (`brew install openslide`,
+## `apt install libopenslide-dev`).
+spatial-image = ["dep:image", "dep:openslide-rs", "dep:openslide-sys"]
+
+[dependencies]
+bixverse-core.workspace = true
+bixverse-methods.workspace = true
+bixverse-sc.workspace = true
+bixverse-sc-data.workspace = true
+document-features.workspace = true
+faer.workspace = true
+hdf5 = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+indexmap.workspace = true
+openslide-rs = { workspace = true, optional = true }
+openslide-sys = { workspace = true, optional = true }
+rand.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+statrs.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+approx.workspace = true
+num-traits.workspace = true
+
+[package.metadata.docs.rs]
+# `spatial-image` is deliberately absent: it needs the OpenSlide C library and
+# its headers, which docs.rs has no way to install.
+features = ["h5", "hdf5-static"]
