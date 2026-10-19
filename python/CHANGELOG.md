@@ -3,6 +3,14 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.1.1
+
+Requires `bixverse-sc-data` 0.8.0.
+
+**Features**
+
+- Leverages the redesign of the crate into smaller subcrates.
+
 ## 0.1.0
 
 First release.
