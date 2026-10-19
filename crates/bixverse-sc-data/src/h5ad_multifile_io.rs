@@ -1,0 +1,870 @@
+//! Multi-h5ad loading: scan multiple h5ad files, apply global gene QC,
+//! and write all cells into a single binary file.
+
+use hdf5::File;
+use ndarray::{Array2, s};
+use rayon::prelude::*;
+use std::path::Path;
+use std::time::Instant;
+use thousands::Separable;
+
+use super::data_io::*;
+use super::h5_filters::check_h5ad_filters;
+use super::h5ad_io::*;
+use crate::prelude::*;
+
+//////////////////
+// H5File tasks //
+//////////////////
+
+/// Per-file task descriptor for multi-h5ad loading
+pub struct H5adFileTask {
+    /// Experimental identifier
+    pub exp_id: String,
+    /// Path to the h5ad file
+    pub h5_path: String,
+    /// Type of storage in this specific h5ad file
+    pub cs_type: H5ADFormat,
+    /// Number of cells/spots in this h5ad file
+    pub no_cells: usize,
+    /// Number of genes/features in this h5ad file
+    pub no_genes: usize,
+    /// file-local gene idx -> universe gene idx; None if gene not in universe
+    pub gene_local_to_universe: Vec<Option<usize>>,
+    /// Raw count storage
+    pub raw_slot: RawDataSlot,
+}
+
+//////////////////
+// H5File scans //
+//////////////////
+
+//////////////
+// Features //
+//////////////
+
+/// Scan per given task the number of NNZ for the features
+///
+/// For CSR-stored h5ad files.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `universe_size` - Total number of features in this universe
+///
+/// ### Returns
+///
+/// Number of NNZ per given task/feature
+fn scan_gene_nnz_csr(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+
+    let mut gene_nnz = vec![0usize; universe_size];
+
+    const CHUNK_SIZE: usize = 10_000;
+
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let data_start = indptr[chunk_start];
+        let data_end = indptr[chunk_end];
+
+        if data_start >= data_end {
+            continue;
+        }
+
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+
+        for cell_idx in chunk_start..chunk_end {
+            let start = indptr[cell_idx] - data_start;
+            let end = indptr[cell_idx + 1] - data_start;
+
+            for local_idx in start..end {
+                let gene_idx = chunk_indices[local_idx] as usize;
+                if let Some(&Some(u_idx)) = task.gene_local_to_universe.get(gene_idx) {
+                    gene_nnz[u_idx] += 1;
+                }
+            }
+        }
+    }
+
+    Ok(gene_nnz)
+}
+
+/// Scan per given task the number of NNZ for the features
+///
+/// For CSC-stored h5ad files.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `universe_size` - Total number of features in this universe
+///
+/// ### Returns
+///
+/// Number of NNZ per given task/feature
+fn scan_gene_nnz_csc(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+
+    let mut gene_nnz = vec![0usize; universe_size];
+
+    for (local, opt) in task.gene_local_to_universe.iter().enumerate() {
+        if let Some(u_idx) = opt {
+            gene_nnz[*u_idx] = indptr[local + 1] - indptr[local];
+        }
+    }
+
+    Ok(gene_nnz)
+}
+
+/// Per-task gene nnz scan for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `universe_size` - Total number of features in this universe
+///
+/// ### Returns
+///
+/// Number of NNZ per given task/feature
+pub fn scan_gene_nnz_dense_row(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let mut gene_nnz = vec![0usize; universe_size];
+
+    const CHUNK_SIZE: usize = 10_000;
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        for row in block.outer_iter() {
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val != 0.0
+                    && let Some(&Some(u_idx)) = task.gene_local_to_universe.get(gene_idx)
+                {
+                    gene_nnz[u_idx] += 1;
+                }
+            }
+        }
+    }
+
+    Ok(gene_nnz)
+}
+
+/// Scan per given task the number of NNZ for the features
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `universe_size` - Total number of features in this universe
+///
+/// ### Returns
+///
+/// Number of NNZ per given task/feature
+fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> Result<Vec<usize>, ScDataErrors> {
+    match task.cs_type {
+        H5ADFormat::Csr => scan_gene_nnz_csr(task, universe_size),
+        H5ADFormat::Csc => scan_gene_nnz_csc(task, universe_size),
+        H5ADFormat::DenseRow => scan_gene_nnz_dense_row(task, universe_size),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
+    }
+}
+
+///////////
+// Cells //
+///////////
+
+/// Scan per given task the cell/spot quality measures
+///
+/// For CSR-stored h5ad files.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `gene_local_to_final` - Genes to include
+///
+/// ### Returns
+///
+/// Vector of (unique_genes, library_size) per cell
+fn scan_cell_stats_csr(
+    task: &H5adFileTask,
+    gene_local_to_final: &[Option<usize>],
+) -> Result<Vec<(usize, f32)>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+
+    let mut cell_stats = Vec::with_capacity(task.no_cells);
+
+    const CHUNK_SIZE: usize = 10_000;
+
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let data_start = indptr[chunk_start];
+        let data_end = indptr[chunk_end];
+
+        if data_start >= data_end {
+            cell_stats.extend((chunk_start..chunk_end).map(|_| (0usize, 0.0f32)));
+            continue;
+        }
+
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+
+        for cell_idx in chunk_start..chunk_end {
+            let start = indptr[cell_idx] - data_start;
+            let end = indptr[cell_idx + 1] - data_start;
+
+            let mut unique = 0usize;
+            let mut lib_size = 0.0f32;
+
+            for local_idx in start..end {
+                let gene_idx = chunk_indices[local_idx] as usize;
+                if let Some(&Some(_)) = gene_local_to_final.get(gene_idx) {
+                    unique += 1;
+                    lib_size += chunk_data[local_idx];
+                }
+            }
+
+            cell_stats.push((unique, lib_size));
+        }
+    }
+
+    Ok(cell_stats)
+}
+
+/// Scan per given task the cell/spot quality measures
+///
+/// For CSC-stored h5ad files.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `gene_local_to_final` - Genes to include
+///
+/// ### Returns
+///
+/// Vector of (unique_genes, library_size) per cell
+fn scan_cell_stats_csc(
+    task: &H5adFileTask,
+    gene_local_to_final: &[Option<usize>],
+) -> Result<Vec<(usize, f32)>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+
+    let mut cell_unique = vec![0usize; task.no_cells];
+    let mut cell_lib_size = vec![0.0f32; task.no_cells];
+
+    let genes_with_final: Vec<usize> = gene_local_to_final
+        .iter()
+        .enumerate()
+        .filter_map(|(local, opt)| opt.map(|_| local))
+        .collect();
+
+    const GENE_CHUNK_SIZE: usize = 5_000;
+
+    for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
+        let start_pos = gene_chunk.iter().map(|&g| indptr[g]).min().unwrap_or(0);
+        let end_pos = gene_chunk.iter().map(|&g| indptr[g + 1]).max().unwrap_or(0);
+
+        if start_pos >= end_pos {
+            continue;
+        }
+
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+
+        for &local_gene in gene_chunk {
+            let gene_start = indptr[local_gene] - start_pos;
+            let gene_end = indptr[local_gene + 1] - start_pos;
+
+            for idx in gene_start..gene_end {
+                let cell_idx = chunk_indices[idx] as usize;
+                if cell_idx < task.no_cells {
+                    cell_unique[cell_idx] += 1;
+                    cell_lib_size[cell_idx] += chunk_data[idx];
+                }
+            }
+        }
+    }
+
+    Ok(cell_unique.into_iter().zip(cell_lib_size).collect())
+}
+
+/// Per-task cell stats scan for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `gene_local_to_final` - Genes to include
+///
+/// ### Returns
+///
+/// Vector of (unique_genes, library_size) per cell
+pub fn scan_cell_stats_dense_row(
+    task: &H5adFileTask,
+    gene_local_to_final: &[Option<usize>],
+) -> Result<Vec<(usize, f32)>, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let mut cell_stats: Vec<(usize, f32)> = Vec::with_capacity(task.no_cells);
+
+    const CHUNK_SIZE: usize = 10_000;
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        for row in block.outer_iter() {
+            let mut unique = 0usize;
+            let mut lib_size = 0.0f32;
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val == 0.0 {
+                    continue;
+                }
+                if let Some(&Some(_)) = gene_local_to_final.get(gene_idx) {
+                    unique += 1;
+                    lib_size += val;
+                }
+            }
+            cell_stats.push((unique, lib_size));
+        }
+    }
+
+    Ok(cell_stats)
+}
+
+/// Scan per given task the cell/spot quality measures
+///
+/// Dispatches to the respective helper
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `gene_local_to_final` - Genes to include
+///
+/// ### Returns
+///
+/// Vector of (unique_genes, library_size) per cell
+fn scan_cell_stats(
+    task: &H5adFileTask,
+    gene_local_to_final: &[Option<usize>],
+) -> Result<Vec<(usize, f32)>, ScDataErrors> {
+    match task.cs_type {
+        H5ADFormat::Csr => scan_cell_stats_csr(task, gene_local_to_final),
+        H5ADFormat::Csc => scan_cell_stats_csc(task, gene_local_to_final),
+        H5ADFormat::DenseRow => scan_cell_stats_dense_row(task, gene_local_to_final),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
+    }
+}
+
+///////////////////
+// H5file writes //
+///////////////////
+
+/// Per-file QC output returned to caller
+pub struct H5FileQcResult {
+    /// Experimental identifier
+    pub exp_id: String,
+    /// Cells/spots to keep
+    pub cells_to_keep: Vec<usize>,
+    /// Library sizes of the cells
+    pub lib_size: Vec<usize>,
+    /// Number of cells/spots expressing the gene
+    pub nnz: Vec<usize>,
+}
+
+/// Final result from multi-h5ad loading
+pub struct MultiH5adResult {
+    /// Global gene indices
+    pub global_gene_indices: Vec<usize>,
+    /// Total cells/spots ingested
+    pub total_cells: usize,
+    /// Total genes/features/ingested
+    pub total_genes: usize,
+    /// Per file QC information as a vector
+    pub per_file: Vec<H5FileQcResult>,
+}
+
+/// Write the cells from an H5adFileTask (in CSR)
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `cells_to_keep` - Which cells to keep from this file
+/// * `gene_mapping` - Informations on the gene mapping
+/// * `target_size` - The target size to normalise to
+/// * `cell_offset` - Current offset in the binary file
+/// * `writer` - The CellGeneSparseWriter to write to the binary file
+///
+/// ### Returns
+///
+/// An H5FileQcResult
+fn write_h5_csr_cells(
+    task: &H5adFileTask,
+    cells_to_keep: &[usize],
+    gene_mapping: &[Option<usize>],
+    target_size: f32,
+    cell_offset: usize,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<H5FileQcResult, ScDataErrors> {
+    let indptr = {
+        let file = hdf5::File::open(&task.h5_path)?;
+        check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+        read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?
+    };
+
+    let (nnz, lib_size) = write_h5_cell_major_cells(
+        Path::new(&task.h5_path),
+        task.raw_slot.get_data(),
+        task.raw_slot.get_indices(),
+        &indptr,
+        cells_to_keep,
+        &dense_gene_map_from_options(gene_mapping),
+        cell_offset,
+        target_size,
+        writer,
+        false,
+    )?;
+
+    Ok(H5FileQcResult {
+        exp_id: task.exp_id.clone(),
+        cells_to_keep: cells_to_keep.to_vec(),
+        lib_size,
+        nnz,
+    })
+}
+
+/// Write the cells from an H5adFileTask (in CSC)
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `cells_to_keep` - Which cells to keep from this file
+/// * `gene_mapping` - Informations on the gene mapping
+/// * `target_size` - The target size to normalise to
+/// * `cell_offset` - Current offset in the binary file
+/// * `writer` - The CellGeneSparseWriter to write to the binary file
+///
+/// ### Returns
+///
+/// An H5FileQcResult
+fn write_h5_csc_cells(
+    task: &H5adFileTask,
+    cells_to_keep: &[usize],
+    gene_mapping: &[Option<usize>],
+    target_size: f32,
+    cell_offset: usize,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<H5FileQcResult, ScDataErrors> {
+    let file = hdf5::File::open(&task.h5_path)?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+
+    let cell_map = dense_index_map(cells_to_keep);
+
+    // (gene_index, raw_count) - gene index as u32 to support >65k features
+    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
+
+    let genes_with_final: Vec<(usize, usize)> = gene_mapping
+        .iter()
+        .enumerate()
+        .filter_map(|(local, opt)| opt.map(|f| (local, f)))
+        .collect();
+
+    const GENE_CHUNK_SIZE: usize = 5_000;
+
+    for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
+        let start_pos = gene_chunk
+            .iter()
+            .map(|&(local, _)| indptr[local])
+            .min()
+            .unwrap_or(0);
+        let end_pos = gene_chunk
+            .iter()
+            .map(|&(local, _)| indptr[local + 1])
+            .max()
+            .unwrap_or(0);
+
+        if start_pos >= end_pos {
+            continue;
+        }
+
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+
+        for &(local_gene, final_gene) in gene_chunk {
+            let gene_start = indptr[local_gene] - start_pos;
+            let gene_end = indptr[local_gene + 1] - start_pos;
+
+            for idx in gene_start..gene_end {
+                let old_cell = chunk_indices[idx] as usize;
+                let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
+                if new_cell != INDEX_DROPPED {
+                    cell_data[new_cell as usize].push((final_gene as u32, chunk_data[idx] as u32));
+                }
+            }
+        }
+    }
+
+    let (nnz, lib_size) = write_cell_rows(&mut cell_data, cell_offset, target_size, writer)?;
+
+    Ok(H5FileQcResult {
+        exp_id: task.exp_id.clone(),
+        cells_to_keep: cells_to_keep.to_vec(),
+        lib_size,
+        nnz,
+    })
+}
+
+/// Per-task writer for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `cells_to_keep` - Which cells to keep from this file
+/// * `gene_mapping` - Informations on the gene mapping
+/// * `target_size` - The target size to normalise to
+/// * `cell_offset` - Current offset in the binary file
+/// * `writer` - The CellGeneSparseWriter to write to the binary file
+///
+/// ### Returns
+///
+/// An H5FileQcResult
+pub fn write_h5_dense_row_cells(
+    task: &H5adFileTask,
+    cells_to_keep: &[usize],
+    gene_mapping: &[Option<usize>],
+    target_size: f32,
+    cell_offset: usize,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<H5FileQcResult, ScDataErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+
+    let gene_map = dense_gene_map_from_options(gene_mapping);
+    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
+    let mut nnz = Vec::with_capacity(cells_to_keep.len());
+
+    const BATCH_SIZE: usize = 1_000;
+    let mut written = 0usize;
+
+    for cell_batch in cells_to_keep.chunks(BATCH_SIZE) {
+        let row_start = *cell_batch
+            .iter()
+            .min()
+            .expect("batch non-empty by construction");
+        let row_end = *cell_batch
+            .iter()
+            .max()
+            .expect("batch non-empty by construction")
+            + 1;
+        let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
+
+        let first = cell_offset + written;
+        let built = cell_batch
+            .par_iter()
+            .enumerate()
+            .map_init(Vec::<(u32, u32)>::new, |buf, (k, &old_cell)| {
+                buf.clear();
+                let row = block.row(old_cell - row_start);
+                for (gene_idx, &val) in row.iter().enumerate() {
+                    let final_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
+                    if val != 0.0 && final_gene != INDEX_DROPPED {
+                        buf.push((final_gene, val as u32));
+                    }
+                }
+                Ok(compress_cell_row(buf, first + k, target_size)?)
+            })
+            .collect::<Result<Vec<_>, ScDataErrors>>()?;
+
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, payload) in built {
+            nnz.push(nnz_i);
+            lib_size.push(payload.library_size);
+            payloads.push(payload);
+        }
+        writer.write_compressed_cell_chunks(&payloads)?;
+        written += cell_batch.len();
+    }
+
+    Ok(H5FileQcResult {
+        exp_id: task.exp_id.clone(),
+        cells_to_keep: cells_to_keep.to_vec(),
+        lib_size,
+        nnz,
+    })
+}
+
+/// Write the cells from an H5adFileTask (dispatch to respective helper)
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `cells_to_keep` - Which cells to keep from this file
+/// * `gene_mapping` - Informations on the gene mapping
+/// * `target_size` - The target size to normalise to
+/// * `cell_offset` - Current offset in the binary file
+/// * `writer` - The CellGeneSparseWriter to write to the binary file
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// An H5FileQcResult
+fn write_h5_file_cells(
+    task: &H5adFileTask,
+    cells_to_keep: &[usize],
+    gene_mapping: &[Option<usize>],
+    target_size: f32,
+    cell_offset: usize,
+    writer: &mut CellGeneSparseWriter,
+    verbose: bool,
+) -> Result<H5FileQcResult, ScDataErrors> {
+    if verbose {
+        println!(
+            "  Writing {} ({} cells)...",
+            task.exp_id,
+            cells_to_keep.len().separate_with_underscores()
+        );
+    }
+    match task.cs_type {
+        H5ADFormat::Csr => write_h5_csr_cells(
+            task,
+            cells_to_keep,
+            gene_mapping,
+            target_size,
+            cell_offset,
+            writer,
+        ),
+        H5ADFormat::Csc => write_h5_csc_cells(
+            task,
+            cells_to_keep,
+            gene_mapping,
+            target_size,
+            cell_offset,
+            writer,
+        ),
+        H5ADFormat::DenseRow => write_h5_dense_row_cells(
+            task,
+            cells_to_keep,
+            gene_mapping,
+            target_size,
+            cell_offset,
+            writer,
+        ),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
+    }
+}
+
+//////////
+// Main //
+//////////
+
+/// Write multiple h5ad files to disk
+///
+/// ### Params
+///
+/// * `tasks` - Reference to the H5adFileTasks to ingest.
+/// * `bin_path` - Path to the cells.bin file to write all the h5ad files to.
+/// * `universe` - Size of the feature universe
+/// * `cell_qc` - The minimum quality filters to apply
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// The MultiH5adResult results
+pub fn multi_h5ad_to_file<P: AsRef<Path>>(
+    tasks: &[H5adFileTask],
+    bin_path: P,
+    universe_size: usize,
+    cell_qc: &MinCellQuality,
+    verbose: bool,
+) -> Result<MultiH5adResult, ScDataErrors> {
+    let total_start = Instant::now();
+
+    for task in tasks {
+        check_h5ad_filters(&File::open(&task.h5_path)?, &task.raw_slot, &task.cs_type)?;
+    }
+
+    if verbose {
+        println!(
+            "Scan 1/2: Counting gene expression across {} files...",
+            tasks.len()
+        );
+    }
+
+    // first parallel scan to check features
+    let per_file_nnz: Vec<Vec<usize>> = tasks
+        .par_iter()
+        .map(|task| {
+            if verbose {
+                println!("  Scanning genes in {}...", task.exp_id);
+            }
+            scan_gene_nnz(task, universe_size)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // aggregate
+    let mut global_gene_nnz = vec![0usize; universe_size];
+    for file_nnz in &per_file_nnz {
+        for (i, &count) in file_nnz.iter().enumerate() {
+            global_gene_nnz[i] += count;
+        }
+    }
+
+    // determine final gene set
+    let mut universe_to_final = vec![None; universe_size];
+    let mut final_idx = 0usize;
+    for (u_idx, &nnz) in global_gene_nnz.iter().enumerate() {
+        if nnz >= cell_qc.min_cells {
+            universe_to_final[u_idx] = Some(final_idx);
+            final_idx += 1;
+        }
+    }
+
+    let global_gene_indices: Vec<usize> = (0..universe_size)
+        .filter(|&i| universe_to_final[i].is_some())
+        .collect();
+    let total_genes = global_gene_indices.len();
+
+    if verbose {
+        println!(
+            "  Genes passing global QC: {} / {}",
+            total_genes.separate_with_underscores(),
+            universe_size.separate_with_underscores()
+        );
+    }
+
+    // compose per-file local -> final mappings
+    let composed_mappings: Vec<Vec<Option<usize>>> = tasks
+        .iter()
+        .map(|task| {
+            task.gene_local_to_universe
+                .iter()
+                .map(|opt| opt.and_then(|u| universe_to_final[u]))
+                .collect()
+        })
+        .collect();
+
+    // second parallel scan across cells
+    if verbose {
+        println!("Scan 2/2: Computing cell QC with final gene set...");
+    }
+
+    let per_file_cell_stats: Vec<Vec<(usize, f32)>> = tasks
+        .par_iter()
+        .zip(composed_mappings.par_iter())
+        .map(|(task, mapping)| {
+            if verbose {
+                println!("  Scanning cells in {}...", task.exp_id);
+            }
+            scan_cell_stats(task, mapping)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let per_file_cells: Vec<Vec<usize>> = per_file_cell_stats
+        .iter()
+        .map(|stats| {
+            stats
+                .iter()
+                .enumerate()
+                .filter(|(_, (unique, lib))| {
+                    *unique >= cell_qc.min_unique_genes && *lib >= cell_qc.min_lib_size as f32
+                })
+                .map(|(idx, _)| idx)
+                .collect()
+        })
+        .collect();
+
+    let total_cells: usize = per_file_cells.iter().map(|v| v.len()).sum();
+
+    if verbose {
+        for (i, task) in tasks.iter().enumerate() {
+            println!(
+                "  {}: {} / {} cells passing QC",
+                task.exp_id,
+                per_file_cells[i].len().separate_with_underscores(),
+                task.no_cells.separate_with_underscores()
+            );
+        }
+        println!("  Total cells: {}", total_cells.separate_with_underscores());
+    }
+
+    // write all of the cells to file
+    if verbose {
+        println!("Writing cells to binary...");
+    }
+
+    let mut writer = CellGeneSparseWriter::new(
+        &bin_path,
+        true,
+        total_cells,
+        total_genes,
+        cell_qc.target_size,
+    )?;
+
+    let mut cell_offset = 0usize;
+    let mut per_file_results = Vec::with_capacity(tasks.len());
+
+    for (file_idx, task) in tasks.iter().enumerate() {
+        let qc_result = write_h5_file_cells(
+            task,
+            &per_file_cells[file_idx],
+            &composed_mappings[file_idx],
+            cell_qc.target_size,
+            cell_offset,
+            &mut writer,
+            verbose,
+        )?;
+
+        cell_offset += per_file_cells[file_idx].len();
+        per_file_results.push(qc_result);
+    }
+
+    writer.finalise()?;
+
+    let elapsed = total_start.elapsed();
+    if verbose {
+        println!("Multi-h5ad loading complete: {:.2?}", elapsed);
+    }
+
+    Ok(MultiH5adResult {
+        global_gene_indices,
+        total_cells,
+        total_genes,
+        per_file: per_file_results,
+    })
+}

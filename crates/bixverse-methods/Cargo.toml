@@ -1,0 +1,36 @@
+[package]
+name = "bixverse-methods"
+description = "Bulk omics methods for bixverse: enrichment, graphs, ontologies, matrix factorisation and differential expression."
+keywords = ["bioinformatics", "enrichment", "gsea", "nmf", "graph"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+
+[features]
+## The negative binomial differential expression methods built on `edge-rs`:
+## the edgeR quasi-likelihood chain and the limma linear model chain.
+dge = ["dep:edge-rs"]
+## Slow but asserting tests. Run in release.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = []
+
+[dependencies]
+ann-search-rs.workspace = true
+approx.workspace = true
+bixverse-core.workspace = true
+document-features.workspace = true
+edge-rs = { workspace = true, optional = true }
+faer.workspace = true
+num-traits.workspace = true
+once_cell.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+statrs.workspace = true
+thiserror.workspace = true

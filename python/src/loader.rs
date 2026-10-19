@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use bixverse_rs::errors::BixverseErrors;
-use bixverse_rs::single_cell::sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::errors::ScDataErrors;
 use crossbeam_channel::{Receiver, bounded};
 use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
@@ -56,7 +56,7 @@ const DEFAULT_PREFETCH: usize = 4;
 ///
 /// Carries the crate's own error rather than a `PyErr`, so the feeder never
 /// touches Python state off the GIL.
-type BatchMsg = Result<PreparedBatch, BixverseErrors>;
+type BatchMsg = Result<PreparedBatch, ScDataErrors>;
 
 /// Convert a materialised batch into the Python-facing tuple.
 ///
@@ -183,7 +183,7 @@ impl PyCellLoader {
         genes: Option<PyReadonlyArray1<'_, u32>>,
     ) -> PyResult<Self> {
         if !reader.cell_based {
-            return Err(BvErr(BixverseErrors::ReaderModeMismatch {
+            return Err(BvErr(ScDataErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
             })

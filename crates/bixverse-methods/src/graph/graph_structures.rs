@@ -1,0 +1,949 @@
+//! Structures for graphs within bixverse.
+
+#![allow(dead_code)]
+
+use faer::{Mat, MatRef};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::clone::Clone;
+use std::collections::BinaryHeap;
+
+use crate::prelude::*;
+use bixverse_core::core::math::sparse::coo_to_csr;
+
+////////////
+// Consts //
+////////////
+
+/// Rows of the similarity matrix processed per parallel task in the kNN build
+const KNN_ROW_BLOCK: usize = 32;
+
+/// Tile edge for the symmetrisation pass
+const KNN_SYM_TILE: usize = 64;
+
+///////////////
+// Union-find //
+///////////////
+
+/// Disjoint-set forest with path halving and union by size.
+pub struct UnionFind {
+    /// Parent pointer per element; a root points at itself.
+    parent: Vec<u32>,
+    /// Size of the tree rooted at each element. Only meaningful at roots.
+    size: Vec<u32>,
+}
+
+impl UnionFind {
+    /// Create `n` singleton sets.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of elements.
+    ///
+    /// ### Returns
+    ///
+    /// The initialised forest.
+    pub fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n as u32).collect(),
+            size: vec![1; n],
+        }
+    }
+
+    /// Find the root of `x`, halving the path on the way up.
+    ///
+    /// ### Params
+    ///
+    /// * `x` - Element to look up.
+    ///
+    /// ### Returns
+    ///
+    /// The root of `x`'s set.
+    pub fn find(&mut self, mut x: u32) -> u32 {
+        while self.parent[x as usize] != x {
+            let grandparent = self.parent[self.parent[x as usize] as usize];
+            self.parent[x as usize] = grandparent;
+            x = grandparent;
+        }
+        x
+    }
+
+    /// Merge the sets containing `a` and `b`, smaller tree under larger.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First element.
+    /// * `b` - Second element.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when the two were in different sets and have just been merged,
+    /// `false` when they already shared a root. Kruskal needs that answer to
+    /// decide whether an edge joins two components or closes a cycle.
+    pub fn union(&mut self, a: u32, b: u32) -> bool {
+        let (mut ra, mut rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return false;
+        }
+        if self.size[ra as usize] < self.size[rb as usize] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        self.parent[rb as usize] = ra;
+        self.size[ra as usize] += self.size[rb as usize];
+        true
+    }
+}
+
+/////////////////////////////
+// Sparse graph structures //
+/////////////////////////////
+
+/// Structure representation of a sparse graph
+///
+/// ### Fields
+///
+/// * `adjacency` - Sparse CSR representation of the graph with `f16` as
+///   weights.
+/// * `num_nodes` - Number of nodes represented in the graph.
+/// * `directed` - Whether the graph is directed or not.
+#[derive(Clone, Debug)]
+pub struct SparseGraph<T: Clone> {
+    /// Adjacency matrix in CSR (symmetric for undirected graphs)
+    adjacency: CompressedSparseData2<T>,
+    num_nodes: usize,
+    directed: bool,
+}
+
+impl<T> SparseGraph<T>
+where
+    T: Clone + BixverseFloat + std::iter::Sum,
+{
+    /// Generate a new SparseGraph
+    ///
+    /// ### Params
+    ///
+    /// * `num_nodes` - Number of nodes in the graph
+    /// * `adjacency` - CompressedSparseData2 containing the adjacency
+    ///   information
+    /// * `directed` - Is this a directed or undirected graph
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    pub fn new(num_nodes: usize, adjacency: CompressedSparseData2<T>, directed: bool) -> Self {
+        Self {
+            adjacency,
+            num_nodes,
+            directed,
+        }
+    }
+
+    /// Helper function to get the neighbours and weights
+    ///
+    /// ### Params
+    ///
+    /// * `node` - Index of the node for which to get the neighbours
+    ///
+    /// ### Return
+    ///
+    /// Tuple of `(neighbour_indices, edge_weights)`
+    #[inline]
+    pub fn get_neighbours(&self, node: usize) -> (Vec<usize>, &[T]) {
+        let start = self.adjacency.indptr[node] as usize;
+        let end = self.adjacency.indptr[node + 1] as usize;
+        (
+            self.adjacency.indices[start..end].index_cast(),
+            &self.adjacency.data[start..end],
+        )
+    }
+
+    /// Get the neighbours and weights without allocating
+    ///
+    /// ### Params
+    ///
+    /// * `node` - Index of the node for which to get the neighbours
+    ///
+    /// ### Return
+    ///
+    /// Tuple of `(neighbour_indices, edge_weights)`, borrowed from the CSR
+    #[inline]
+    pub fn get_neighbours_raw(&self, node: usize) -> (&[u32], &[T]) {
+        let start = self.adjacency.indptr[node] as usize;
+        let end = self.adjacency.indptr[node + 1] as usize;
+        (
+            &self.adjacency.indices[start..end],
+            &self.adjacency.data[start..end],
+        )
+    }
+
+    /// Get the node degree
+    ///
+    /// ### Params
+    ///
+    /// * `node` - Index of the node to get the node degree from
+    ///
+    /// ### Return
+    ///
+    /// The node degree for this node.
+    #[inline]
+    pub fn get_node_degree(&self, node: usize) -> usize {
+        (self.adjacency.indptr[node + 1] - self.adjacency.indptr[node]) as usize
+    }
+
+    /// Get total weight
+    ///
+    /// ### Params
+    ///
+    /// * `undirected` - Is the graph undirected or not.
+    ///
+    /// ### Returns
+    ///
+    /// The total edge weight
+    pub fn total_weight(&self) -> T {
+        let mut total = T::zero();
+        for i in 0..self.num_nodes {
+            let (_, weights) = self.get_neighbours(i);
+            total += weights.iter().copied().sum::<T>();
+        }
+        let half = T::from_f64(0.5).unwrap();
+        if !self.directed { total * half } else { total }
+    }
+
+    /// Expose the number of nodes
+    ///
+    /// ### Returns
+    ///
+    /// The number of nodes in the graph
+    pub fn get_node_number(&self) -> usize {
+        self.num_nodes
+    }
+
+    /// Expose if graph is directed
+    ///
+    /// ### Returns
+    ///
+    /// Boolean indicating if graph is directed
+    pub fn is_directed(&self) -> bool {
+        self.directed
+    }
+}
+
+//////////////////////////////////
+// Hierachical graph structures //
+//////////////////////////////////
+
+/// Represents one level in the hierarchy
+///
+/// ### Fields
+///
+/// * `graph` - The sparse graph
+/// * `node_map` - Maps fine node -> coarse node
+/// * `coarse_weights` - Number of fine nodes that mapped to each coarse node
+#[allow(dead_code)]
+pub struct CoarseLevel<T>
+where
+    T: Clone,
+{
+    graph: SparseGraph<T>,
+    node_map: Vec<usize>,
+    coarse_weights: Vec<usize>,
+}
+
+/// Multi-level graph hierarchy
+///
+/// ### Fields
+///
+/// * `finest` - Original finest level graph
+/// * `levels` - Coarse levels
+pub struct GraphHierarchy<T>
+where
+    T: Clone,
+{
+    finest: SparseGraph<T>,
+    levels: Vec<CoarseLevel<T>>,
+}
+
+impl<T> GraphHierarchy<T>
+where
+    T: Clone + BixverseFloat + std::iter::Sum + std::default::Default,
+{
+    /// Build a Graph hierarchy based on an initial graph
+    ///
+    /// This one assumes undirected graphs!!!
+    ///
+    /// ### Params
+    ///
+    /// * `graph` - The initial SparseGraph
+    /// * `reduction_ratio` - By how much to reduce per level the number of
+    ///   nodes. Typically 0.5.
+    /// * `max_levels` - Maximum depth in terms of coarsion.
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self.
+    pub fn build(graph: SparseGraph<T>, reduction_ratio: T, max_levels: usize) -> Self {
+        assert!(
+            !graph.is_directed(),
+            "This is implemented for undirected graphs!"
+        );
+        let mut levels = Vec::new();
+        let mut current_graph = graph.clone();
+
+        let min_nodes = T::from_usize(100).unwrap();
+
+        for _ in 0..max_levels {
+            let coarse_level = Self::coarsen_level(&current_graph);
+
+            let current_nodes = T::from_usize(current_graph.num_nodes).unwrap();
+            let coarse_nodes = T::from_usize(coarse_level.graph.num_nodes).unwrap();
+            let reduction = coarse_nodes / current_nodes;
+
+            if reduction > reduction_ratio || coarse_nodes < min_nodes {
+                break;
+            }
+
+            current_graph = coarse_level.graph.clone();
+            levels.push(coarse_level);
+        }
+
+        Self {
+            finest: graph,
+            levels,
+        }
+    }
+
+    /// Coarsen one level using heavy-edge matching
+    ///
+    /// Generates a CoarseLevel of a given graph via heavy edge matching.
+    ///
+    /// ### Params
+    ///
+    /// * `graph` - The SparseGraph to coarsen
+    ///
+    /// ### Returns
+    ///
+    /// CoarseLevel containing the coarsened graph and mapping information
+    fn coarsen_level(graph: &SparseGraph<T>) -> CoarseLevel<T> {
+        let matching = Self::heavy_edge_matching(graph);
+        let (coarse_graph, node_map, coarse_weights) = Self::contract_graph(graph, &matching);
+
+        CoarseLevel {
+            graph: coarse_graph,
+            node_map,
+            coarse_weights,
+        }
+    }
+
+    /// Match nodes via heavy edges
+    ///
+    /// Finds pairs of nodes to match based on heaviest edge weights. Each node
+    /// is matched with its heaviest unmatched neighbour.
+    ///
+    /// ### Params
+    ///
+    /// * `graph` - SparseGraph for which to identify the matching nodes
+    ///
+    /// ### Returns
+    ///
+    /// Vector where each element is either None (unmatched) or Some(node_id)
+    /// indicating which node this node is matched with
+    fn heavy_edge_matching(graph: &SparseGraph<T>) -> Vec<Option<usize>> {
+        let n = graph.num_nodes;
+        let mut matching = vec![None; n];
+        let mut matched = vec![false; n];
+
+        for i in 0..n {
+            if matched[i] {
+                continue;
+            }
+
+            let (neighbour, weights) = graph.get_neighbours(i);
+
+            // Find heaviest unmatched neighbour
+            let mut best_neighbour = None;
+            let mut best_weight = T::zero();
+
+            for (&j, &w) in neighbour.iter().zip(weights.iter()) {
+                if !matched[j] && j != i && w > best_weight {
+                    best_weight = w;
+                    best_neighbour = Some(j)
+                }
+            }
+
+            if let Some(j) = best_neighbour {
+                matching[i] = Some(j);
+                matching[j] = Some(i);
+                matched[i] = true;
+                matched[j] = true;
+            }
+        }
+
+        matching
+    }
+
+    /// Contract graph based on matching
+    ///
+    /// Creates a coarser graph by merging matched nodes. Edges between matched
+    /// nodes are removed, and edges to external nodes are combined.
+    ///
+    /// ### Params
+    ///
+    /// * `graph` - The fine-level graph to contract
+    /// * `matching` - Node matching information from heavy_edge_matching
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of (coarse_graph, node_map, coarse_weights) where node_map
+    /// indicates which coarse node each fine node maps to, and coarse_weights
+    /// counts how many fine nodes were merged into each coarse node
+    fn contract_graph(
+        graph: &SparseGraph<T>,
+        matching: &[Option<usize>],
+    ) -> (SparseGraph<T>, Vec<usize>, Vec<usize>) {
+        let n = graph.num_nodes;
+        let mut node_map = vec![0; n];
+        let mut coarse_id = 0;
+
+        // assign coarse node IDs
+        for i in 0..n {
+            if node_map[i] == 0 || i == 0 {
+                match matching[i] {
+                    Some(j) if j > i => {
+                        node_map[i] = coarse_id;
+                        node_map[j] = coarse_id;
+                        coarse_id += 1;
+                    }
+                    None => {
+                        // i unchanged
+                        node_map[i] = coarse_id;
+                        coarse_id += 1;
+                    }
+                    _ => {} // already assigned
+                }
+            }
+        }
+
+        let num_coarse = coarse_id;
+        let mut coarse_weights = vec![0; num_coarse];
+
+        for i in 0..n {
+            coarse_weights[node_map[i]] += 1;
+        }
+
+        // Build coarse graph edges
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+
+        for i in 0..n {
+            let ci = node_map[i];
+            let (neighbours, weights) = graph.get_neighbours(i);
+
+            for (&j, &w) in neighbours.iter().zip(weights.iter()) {
+                let cj = node_map[j];
+                if ci != cj {
+                    rows.push(ci);
+                    cols.push(cj);
+                    vals.push(w);
+                }
+            }
+        }
+
+        // Sort to group duplicates
+        let mut edges: Vec<(usize, usize, T)> = rows
+            .into_iter()
+            .zip(cols)
+            .zip(vals)
+            .map(|((r, c), v)| (r, c, v))
+            .collect();
+        edges.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+
+        // Sum duplicates
+        let mut deduped_rows = Vec::new();
+        let mut deduped_cols = Vec::new();
+        let mut deduped_vals = Vec::new();
+
+        if !edges.is_empty() {
+            let (mut curr_r, mut curr_c, mut curr_v) = edges[0];
+
+            for &(r, c, v) in &edges[1..] {
+                if r == curr_r && c == curr_c {
+                    curr_v += v;
+                } else {
+                    deduped_rows.push(curr_r);
+                    deduped_cols.push(curr_c);
+                    deduped_vals.push(curr_v);
+                    (curr_r, curr_c, curr_v) = (r, c, v);
+                }
+            }
+            deduped_rows.push(curr_r);
+            deduped_cols.push(curr_c);
+            deduped_vals.push(curr_v);
+        }
+
+        let coarse_csr = coo_to_csr(
+            &deduped_rows.index_cast(),
+            &deduped_cols.index_cast(),
+            &deduped_vals,
+            (num_coarse, num_coarse),
+        );
+
+        let coarse_graph = SparseGraph::new(num_coarse, coarse_csr, false);
+
+        (coarse_graph, node_map, coarse_weights)
+    }
+
+    /// Project coarse solution to fine level
+    ///
+    /// ### Params
+    ///
+    /// * `level` - Which coarse level (0 = first coarsening)
+    /// * `coarse_labels` - Labels at coarse level
+    ///
+    /// ### Returns
+    ///
+    /// Vector of labels at the fine level
+    pub fn prolong(&self, level: usize, coarse_labels: &[usize]) -> Vec<usize> {
+        if level >= self.levels.len() {
+            return coarse_labels.to_vec();
+        }
+
+        let node_map = &self.levels[level].node_map;
+        node_map.iter().map(|&ci| coarse_labels[ci]).collect()
+    }
+
+    /// Get coarsest graph
+    ///
+    /// ### Returns
+    ///
+    /// Reference to the coarsest graph in the hierarchy
+    pub fn coarsest(&self) -> &SparseGraph<T> {
+        self.levels.last().map(|l| &l.graph).unwrap_or(&self.finest)
+    }
+}
+
+/////////////////////////
+// Heterogenous graphs //
+/////////////////////////
+
+/// Directed edge list with a type per node and a type and weight per edge,
+/// for constrained personalised PageRank.
+#[derive(Debug, Clone)]
+pub struct AttributedGraph<'a, T> {
+    /// Type per node
+    pub node_types: Vec<&'a str>,
+    /// 0-based source node per edge
+    pub from: Vec<usize>,
+    /// 0-based target node per edge
+    pub to: Vec<usize>,
+    /// Type per edge
+    pub edge_types: Vec<&'a str>,
+    /// Weight per edge
+    pub weights: Vec<T>,
+}
+
+/// Generate a weighted, typed graph from node and edge lists
+///
+/// ### Params
+///
+/// * `nodes` - Slice of node names.
+/// * `node_types` - Slice of the node types.
+/// * `from` - Slice of the names of the from nodes.
+/// * `to` - Slice of the names of the to nodes.
+/// * `edge_types` - Slice of the edge types.
+/// * `edge_weights` - Slice of the edge weights.
+///
+/// ### Returns
+///
+/// An `AttributedGraph` for subsequent usage in constrained personalised
+/// page-rank iteration.
+///
+/// ### Panics
+///
+/// Function will panic if `nodes` and `nodes_types` do not have the same
+/// length, when `from`, `to`, `edge_types` and `edge_weights` do not have the
+/// same length, or when an edge names a node that is not in `nodes`.
+pub fn graph_from_strings_with_attributes<'a, T>(
+    nodes: &'a [String],
+    node_types: &'a [String],
+    from: &'a [String],
+    to: &'a [String],
+    edge_types: &'a [String],
+    edge_weights: &'a [T],
+) -> AttributedGraph<'a, T>
+where
+    T: BixverseFloat,
+{
+    assert_same_len!(nodes, node_types);
+    assert_same_len!(from, to, edge_types, edge_weights);
+
+    let name_to_idx: FxHashMap<&String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (name, idx))
+        .collect();
+    let lookup = |name: &String| {
+        *name_to_idx
+            .get(name)
+            .unwrap_or_else(|| panic!("Node '{name}' not found in nodes list"))
+    };
+
+    AttributedGraph {
+        node_types: node_types.iter().map(String::as_str).collect(),
+        from: from.iter().map(lookup).collect(),
+        to: to.iter().map(lookup).collect(),
+        edge_types: edge_types.iter().map(String::as_str).collect(),
+        weights: edge_weights.to_vec(),
+    }
+}
+
+///////////////////////////////
+// Structure transformations //
+///////////////////////////////
+
+/// Build a CSR adjacency from an edge list via counting sort.
+///
+/// Duplicate `(row, col)` pairs are kept as separate entries, in input order.
+///
+/// ### Params
+///
+/// * `n` - Number of rows (nodes)
+/// * `rows` - Row index per edge
+/// * `cols` - Column index per edge
+/// * `vals` - Value per edge
+///
+/// ### Returns
+///
+/// Tuple of `(indptr, indices, values)`.
+pub(crate) fn edges_to_csr<T>(
+    n: usize,
+    rows: &[u32],
+    cols: &[u32],
+    vals: &[T],
+) -> (Vec<usize>, Vec<u32>, Vec<T>)
+where
+    T: BixverseFloat,
+{
+    let mut indptr = vec![0usize; n + 1];
+    for &r in rows {
+        indptr[r as usize + 1] += 1;
+    }
+    for i in 0..n {
+        indptr[i + 1] += indptr[i];
+    }
+
+    let mut next = indptr[..n].to_vec();
+    let mut indices = vec![0u32; rows.len()];
+    let mut values = vec![T::zero(); rows.len()];
+    for ((&r, &c), &v) in rows.iter().zip(cols).zip(vals) {
+        let pos = next[r as usize];
+        indices[pos] = c;
+        values[pos] = v;
+        next[r as usize] += 1;
+    }
+
+    (indptr, indices, values)
+}
+
+/// Generate a KNN graph adjacency matrix from a similarity matrix
+///
+/// ### Params
+///
+/// * `similarities` - The symmetric similarity matrix.
+/// * `k` - Number of neighbours to take
+///
+/// ### Returns
+///
+/// The KNN adjacency matrix
+pub fn get_knn_graph_adj<T>(similarities: &MatRef<T>, k: usize) -> Mat<T>
+where
+    T: BixverseFloat,
+{
+    assert_symmetric_mat!(similarities);
+    let n = similarities.nrows();
+    let mut adjacency: Mat<T> = Mat::zeros(n, n);
+
+    // Row blocks, walking each column once per block so the reads are
+    // contiguous in the column-major matrix.
+    let blocks: Vec<usize> = (0..n).step_by(KNN_ROW_BLOCK).collect();
+    let rows: Vec<Vec<(usize, T)>> = blocks
+        .par_iter()
+        .flat_map_iter(|&start| {
+            let end = (start + KNN_ROW_BLOCK).min(n);
+            let mut heaps: Vec<BinaryHeap<(RevOrderedFloat<T>, usize)>> = (start..end)
+                .map(|_| BinaryHeap::with_capacity(k + 1))
+                .collect();
+
+            for j in 0..n {
+                let col = similarities.col(j);
+                for (heap, i) in heaps.iter_mut().zip(start..end) {
+                    if i == j {
+                        continue;
+                    }
+                    let entry = (RevOrderedFloat(col[i]), j);
+                    // The entry that would be pushed and immediately popped
+                    if heap.len() == k && heap.peek().is_some_and(|top| entry >= *top) {
+                        continue;
+                    }
+                    heap.push(entry);
+                    if heap.len() > k {
+                        heap.pop();
+                    }
+                }
+            }
+
+            heaps.into_iter().map(|heap| {
+                heap.into_iter()
+                    .map(|(ordered_sim, index)| (index, ordered_sim.0))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+
+    // Fill adjacency matrix
+    for (i, neighbors) in rows.iter().enumerate() {
+        for &(j, sim) in neighbors {
+            adjacency[(i, j)] = sim;
+        }
+    }
+
+    // Symmetrise tile by tile to avoid strided walks
+    let two = T::from_f64(2.0).unwrap();
+    for ib in (0..n).step_by(KNN_SYM_TILE) {
+        for jb in (ib..n).step_by(KNN_SYM_TILE) {
+            for j in jb..(jb + KNN_SYM_TILE).min(n) {
+                for i in ib..(ib + KNN_SYM_TILE).min(n).min(j) {
+                    let val = (adjacency[(i, j)] + adjacency[(j, i)]) / two;
+                    adjacency[(i, j)] = val;
+                    adjacency[(j, i)] = val;
+                }
+            }
+        }
+    }
+
+    adjacency
+}
+
+/// Generate a Laplacian matrix from an adjacency matrix
+///
+/// ### Params
+///
+/// * `adjacency` - The symmetric adjacency matrix.
+///
+/// ### Returns
+///
+/// The Laplacian matrix
+pub fn adjacency_to_laplacian<T>(adjacency: &MatRef<T>, normalise: bool) -> Mat<T>
+where
+    T: BixverseFloat,
+{
+    assert_symmetric_mat!(adjacency);
+    let n = adjacency.nrows();
+
+    // Column-wise accumulation, in the same order as a row sum
+    let mut degrees = vec![T::zero(); n];
+    for j in 0..n {
+        for (d, &x) in degrees.iter_mut().zip(adjacency.col(j).iter()) {
+            *d += x;
+        }
+    }
+
+    if !normalise {
+        let mut laplacian = adjacency.cloned();
+        for j in 0..n {
+            for i in 0..n {
+                if i != j {
+                    laplacian[(i, j)] = -adjacency[(i, j)];
+                }
+            }
+            laplacian[(j, j)] = degrees[j] - adjacency[(j, j)];
+        }
+        laplacian
+    } else {
+        let inv_sqrt_d: Vec<T> = degrees
+            .iter()
+            .map(|&d| {
+                if d > T::from_f64(1e-10).unwrap() {
+                    T::one() / d.sqrt()
+                } else {
+                    T::zero()
+                }
+            })
+            .collect();
+        let mut laplacian = Mat::zeros(n, n);
+        for j in 0..n {
+            laplacian[(j, j)] = T::one();
+            for i in 0..n {
+                laplacian[(i, j)] -= inv_sqrt_d[i] * adjacency[(i, j)] * inv_sqrt_d[j];
+            }
+        }
+        laplacian
+    }
+}
+
+/// Build an undirected SparseGraph from a flat edge-pair list.
+///
+/// Counting-sort CSR build, then a parallel per-row sort of the column
+/// indices. Duplicate edges are kept as separate entries (algorithms that scan
+/// rows sum them), and a self-loop lands twice in its row, as in igraph.
+///
+/// ### Params
+///
+/// * `edges` - Flat edge list, pairs `[u, v, u, v, ...]`, 0-based
+/// * `weights` - Edge weights, one per pair
+/// * `n_nodes` - Number of nodes in the graph
+///
+/// ### Returns
+///
+/// Undirected graph with a symmetric, row-sorted CSR
+pub fn edge_pairs_to_sparse_graph<T>(
+    edges: &[usize],
+    weights: &[T],
+    n_nodes: usize,
+) -> SparseGraph<T>
+where
+    T: BixverseFloat + std::iter::Sum + Send + Sync,
+{
+    let n_edges = weights.len();
+
+    let mut indptr = vec![0usize; n_nodes + 1];
+    for e in 0..n_edges {
+        indptr[edges[2 * e] + 1] += 1;
+        indptr[edges[2 * e + 1] + 1] += 1;
+    }
+    for i in 1..=n_nodes {
+        indptr[i] += indptr[i - 1];
+    }
+
+    let nnz = indptr[n_nodes];
+    let mut indices = vec![0usize; nnz];
+    let mut data = vec![T::zero(); nnz];
+    let mut cursor = indptr.clone();
+
+    for e in 0..n_edges {
+        let i = edges[2 * e];
+        let j = edges[2 * e + 1];
+        let w = weights[e];
+
+        indices[cursor[i]] = j;
+        data[cursor[i]] = w;
+        cursor[i] += 1;
+
+        indices[cursor[j]] = i;
+        data[cursor[j]] = w;
+        cursor[j] += 1;
+    }
+
+    // sort column indices within each row, keeping data aligned
+    let mut rows: Vec<(&mut [usize], &mut [T])> = Vec::with_capacity(n_nodes);
+    let (mut idx_rest, mut data_rest) = (indices.as_mut_slice(), data.as_mut_slice());
+    for node in 0..n_nodes {
+        let len = indptr[node + 1] - indptr[node];
+        let (idx_row, idx_tail) = idx_rest.split_at_mut(len);
+        let (data_row, data_tail) = data_rest.split_at_mut(len);
+        rows.push((idx_row, data_row));
+        idx_rest = idx_tail;
+        data_rest = data_tail;
+    }
+
+    rows.par_iter_mut()
+        .for_each_init(Vec::<(usize, T)>::new, |scratch, (idx_row, data_row)| {
+            if idx_row.len() < 2 {
+                return;
+            }
+            scratch.clear();
+            scratch.extend(idx_row.iter().copied().zip(data_row.iter().copied()));
+            scratch.sort_unstable_by_key(|&(node, _)| node);
+            for ((i, d), &(node, w)) in idx_row.iter_mut().zip(data_row.iter_mut()).zip(&*scratch) {
+                *i = node;
+                *d = w;
+            }
+        });
+
+    let adjacency = CompressedSparseData2 {
+        data,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: None,
+        shape: (n_nodes, n_nodes),
+    };
+
+    SparseGraph::new(n_nodes, adjacency, false)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bixverse_core::core::math::sparse::CompressedSparseData2;
+    use faer::Mat;
+
+    /// Degrees, total weight and neighbour slices read straight off the CSR.
+    #[test]
+    fn test_sparse_graph_properties() {
+        // Simple line graph: 0 <-> 1 <-> 2
+        let data = vec![1.0, 1.0, 1.0, 1.0];
+        let indices = vec![1, 0, 2, 1]; // neighbors
+        let indptr = vec![0, 1, 3, 4]; // node offsets
+        let csr =
+            CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        let graph = SparseGraph::new(3, csr, false);
+
+        assert_eq!(graph.get_node_degree(0), 1);
+        assert_eq!(graph.get_node_degree(1), 2);
+        assert_eq!(graph.total_weight(), 2.0); // 2 undirected edges of weight 1.0
+
+        let (n0_neighbors, n0_weights) = graph.get_neighbours(0);
+        assert_eq!(n0_neighbors, &[1]);
+        assert_eq!(n0_weights, &[1.0]);
+    }
+
+    /// The unnormalised Laplacian is `D - A`, degrees on the diagonal.
+    #[test]
+    fn test_adjacency_to_laplacian() {
+        // Adjacency for 0 <-> 1
+        let mut adj: Mat<f64> = Mat::zeros(2, 2);
+        adj[(0, 1)] = 1.0;
+        adj[(1, 0)] = 1.0;
+
+        // Unnormalized Laplacian: L = D - A
+        // D is [[1, 0], [0, 1]]
+        let lap = adjacency_to_laplacian(&adj.as_ref(), false);
+
+        assert!((lap[(0, 0)] - 1.0).abs() < 1e-6);
+        assert!((lap[(1, 1)] - 1.0).abs() < 1e-6);
+        assert!((lap[(0, 1)] - (-1.0)).abs() < 1e-6);
+        assert!((lap[(1, 0)] - (-1.0)).abs() < 1e-6);
+    }
+
+    /// String node names map onto indices without dropping or duplicating edges.
+    #[test]
+    fn test_graph_from_strings_with_attributes() {
+        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let node_types = vec!["x".to_string(), "y".to_string(), "x".to_string()];
+        let from = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let to = vec!["B".to_string(), "C".to_string(), "B".to_string()];
+        let edge_types = vec!["e".to_string(), "f".to_string(), "e".to_string()];
+        let weights = vec![1.5, 2.5, 0.5];
+
+        let graph = graph_from_strings_with_attributes(
+            &nodes,
+            &node_types,
+            &from,
+            &to,
+            &edge_types,
+            &weights,
+        );
+
+        assert_eq!(graph.node_types, vec!["x", "y", "x"]);
+        assert_eq!(graph.from, vec![0, 1, 2]);
+        assert_eq!(graph.to, vec![1, 2, 1]);
+        assert_eq!(graph.edge_types, vec!["e", "f", "e"]);
+        assert_eq!(graph.weights, weights);
+    }
+}

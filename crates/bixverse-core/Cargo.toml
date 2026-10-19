@@ -1,0 +1,33 @@
+[package]
+name = "bixverse-core"
+description = "Core numerics for bixverse: sparse structures, linear algebra, statistics, SIMD and clustering."
+keywords = ["bioinformatics", "statistics", "linear-algebra", "sparse"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+
+[features]
+## Routes dense CPU GEMMs through Apple Accelerate on macOS (no effect
+## elsewhere). Decompositions (SVD, eigen) stay on faer, which is faster there.
+accelerate = ["ann-search-rs/accelerate"]
+
+[dependencies]
+ann-search-rs.workspace = true
+approx.workspace = true
+document-features.workspace = true
+faer.workspace = true
+faer-entity.workspace = true
+faer-traits.workspace = true
+num-traits.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+statrs.workspace = true
+thiserror.workspace = true
+thousands.workspace = true
+wide.workspace = true

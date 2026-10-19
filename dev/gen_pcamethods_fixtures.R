@@ -1,7 +1,7 @@
 # Parity fixtures for src/core/math/pca_missing.rs: pcaMethods' ppca() and
 # bpca() on data with missing values.
 #
-# Regenerates tests/pcamethods_fixtures/{tall,wide,large}.txt. Run from the
+# Regenerates crates/bixverse-rs/tests/pcamethods_fixtures/{tall,wide,large}.txt. Run from the
 # crate root with
 #   Rscript dev/gen_pcamethods_fixtures.R
 #
@@ -53,7 +53,7 @@ emit <- function(key, x) {
 PPCA_SEED <- 7L
 
 write_case <- function(cs, completed) {
-  sink(sprintf("tests/pcamethods_fixtures/%s.txt", cs$tag))
+  sink(sprintf("crates/bixverse-rs/tests/pcamethods_fixtures/%s.txt", cs$tag))
   on.exit(sink())
   cat("# pcaMethods ", as.character(packageVersion("pcaMethods")), ", R ",
       R.version$major, ".", R.version$minor, ". DO NOT EDIT; regenerate with\n",
@@ -81,7 +81,7 @@ write_case <- function(cs, completed) {
   if (completed) emit("BPCA_COMPLETED", completeObs(bp))
 }
 
-dir.create("tests/pcamethods_fixtures", showWarnings = FALSE)
+dir.create("crates/bixverse-rs/tests/pcamethods_fixtures", showWarnings = FALSE)
 write_case(list(tag = "tall", n = 60L, d = 12L, k = 3L, miss = 20L, seed = 20260926), TRUE)
 write_case(list(tag = "wide", n = 16L, d = 80L, k = 3L, miss = 25L, seed = 20260927), TRUE)
 write_case(list(tag = "large", n = 100L, d = 1000L, k = 5L, miss = 40L, seed = 11), FALSE)

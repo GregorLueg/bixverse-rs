@@ -1,0 +1,63 @@
+[package]
+name = "bixverse-r"
+description = "R bindings layer for bixverse: extendr conversions for the bixverse-* crates. Re-exports bixverse-rs."
+keywords = ["bioinformatics", "r", "extendr", "single-cell"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+
+# The only crate in the workspace that links libR. Its features mirror the
+# facade's and forward to it.
+[features]
+default = ["accelerate"]
+## See `bixverse-rs`.
+accelerate = ["bixverse-rs/accelerate"]
+## See `bixverse-rs`.
+dge = ["bixverse-rs/dge", "dep:edge-rs"]
+## See `bixverse-rs`.
+single-cell = ["dge", "bixverse-rs/single-cell"]
+## See `bixverse-rs`.
+h5 = ["single-cell", "bixverse-rs/h5"]
+## See `bixverse-rs`.
+hdf5-static = ["h5", "bixverse-rs/hdf5-static"]
+## See `bixverse-rs`.
+hdf5-filters = ["h5", "bixverse-rs/hdf5-filters"]
+## See `bixverse-rs`.
+multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
+## See `bixverse-rs`.
+bonsai = ["single-cell", "bixverse-rs/bonsai", "dep:bonsai-rs"]
+## See `bixverse-rs`.
+gpu = ["bixverse-rs/gpu", "ann-search-rs/gpu"]
+## See `bixverse-rs`.
+sc-gpu = ["gpu", "single-cell", "bixverse-rs/sc-gpu"]
+## See `bixverse-rs`.
+mlx = ["bixverse-rs/mlx"]
+
+[dependencies]
+ann-search-rs.workspace = true
+bixverse-rs.workspace = true
+bonsai-rs = { workspace = true, optional = true }
+document-features.workspace = true
+edge-rs = { workspace = true, optional = true }
+extendr-api.workspace = true
+faer.workspace = true
+faer-entity.workspace = true
+num-traits.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+extendr-engine.workspace = true
+
+###########
+# Benches #
+###########
+
+[[bench]]
+name = "r_ffi_bench"
+harness = false

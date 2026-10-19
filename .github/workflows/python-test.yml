@@ -8,14 +8,16 @@ on:
     branches: [ main ]
     paths:
       - 'python/**'
-      - 'src/**'
+      - 'crates/bixverse-core/**'
+      - 'crates/bixverse-sc-data/**'
       - 'Cargo.toml'
       - '.github/workflows/python-test.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'python/**'
-      - 'src/**'
+      - 'crates/bixverse-core/**'
+      - 'crates/bixverse-sc-data/**'
       - 'Cargo.toml'
       - '.github/workflows/python-test.yml'
 

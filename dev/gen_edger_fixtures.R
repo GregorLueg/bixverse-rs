@@ -1,7 +1,7 @@
 # Parity fixtures for src/methods/dge_bulk.rs: the edgeR quasi-likelihood
 # chain, limma-voom and limma-trend, all on the same counts and design.
 #
-# Regenerates the constants in tests/edger_fixtures/mod.rs. Run with
+# Regenerates the constants in crates/bixverse-rs/tests/edger_fixtures/mod.rs. Run with
 #   Rscript dev/gen_edger_fixtures.R
 # and paste the output into that file.
 #

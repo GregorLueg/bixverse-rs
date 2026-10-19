@@ -1,5 +1,94 @@
 # News
 
+## 0.8.0 (unreleased)
+
+### Breaking
+
+- The crate is now a workspace of crates under `crates/`, on one shared
+  version: `bixverse-core` (`core`, `utils`, `ml`), `bixverse-methods`
+  (`enrichment`, `graph`, `methods`, `ontology`), `bixverse-sc-data` (the
+  single cell data layer), `bixverse-sc` (the rest of `single_cell`),
+  `bixverse-gpu`, `bixverse-sc-gpu`, `bixverse-mlx` and `bixverse-r`.
+  `bixverse-rs` stays as a facade that re-exports them under the old module
+  paths, so most `bixverse_rs::...` imports keep working.
+- `BixverseErrors` is gone. Each crate has its own enum (`CoreErrors`,
+  `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`,
+  `MlxErrors`, `RErrors`), and each wraps the ones below it through
+  `#[from]`. Code that matches on variants has to go through the wrapper,
+  e.g. `ScErrors::ScData(ScDataErrors::ReaderModeMismatch { .. })`.
+- The `r` feature is gone. The R conversions moved to `bixverse-r`, the only
+  crate that links libR. It re-exports the facade and mirrors its features.
+  The `*_r_wrapper` modules now sit at `bixverse_r::...`, and the inherent
+  `from_r_list` constructors became impls of `FromRList`, plus `FromRMap` for
+  already flattened lists and `ToRList` for serialisers. All three are in
+  `bixverse_r::prelude`. The `KMeansGpuParamsFromR`, `NebulaParamsFromR`,
+  `ScTestedFromR` and `TestedFromR` extension traits were folded into them.
+  Constructors that take extra arguments are free functions now:
+  `hals_opts_from_r_list()`, `lda_params_from_r_list()`,
+  `dsb_params_from_r_list()`, `kmeans_params_from_r_list_with_iters()`,
+  `cell_sweep_fit_to_r_list()` and `named_matrix_from_r_matrix()`.
+- `single-cell` no longer pulls in HDF5. The h5ad and 10x h5 readers sit
+  behind a new `h5` feature, which `hdf5-static` and `hdf5-filters` imply.
+- `gpu` now covers the bulk GPU methods only. The single cell GPU methods
+  (`gpu::sc_gpu`) need the new `sc-gpu` feature. `mlx` implies
+  `single-cell`.
+- The 10x ADT reader moved from `single_cell::multi_modal::adt::h5_10x_adt_io`
+  to `single_cell::sc_data::h5_10x_adt_io`.
+- `FwArgminB` has an associated `type Error`, and the fastMNN drivers
+  (`fast_mnn_embedding()` and friends) are generic over the search closure's
+  error type, so a GPU or MLX backend can return its own errors.
+  `ScKnnResults<E>` and `SingleCellPcaRes<E>` take the error as a parameter,
+  defaulting to `ScErrors`.
+- The sNN builders are gone: `generate_snn_full()`, `generate_snn_limited()`,
+  `SnnSimilarityMethod` and `parse_snn_similiarity_method()` (with the typo)
+  from `single_cell::sc_processing::snn`. Use `build_knn_graph()` in
+  `graph::knn_graph` (see below). There is no limited sNN anymore.
+- The sNN prune default goes from `1/15` to `1/16` (`SNN_PRUNE_DEFAULT`). A
+  Jaccard threshold `p` asks for a shared fraction `2p / (1 + p)` of the
+  neighbourhood whatever `k` is, so `1/16` keeps Seurat's ~12%, and it no longer
+  sits on the discrete weight a 2-shared pair gets at `k = 15`.
+- Fast clustering was rewritten. `FastLouvainParams`, `FastLouvainGridResult`,
+  `fast_louvain_clusters()` and `fast_louvain_clusters_grid()` are replaced by
+  `fast_clusters()`, and the GPU `FastLouvainParamsGpu`,
+  `fast_louvain_clusters_gpu()` and `fast_louvain_clusters_grid_gpu()` by the
+  `GpuKMeans` coarsener into the same function. The seed grid is now
+  `n_seeds > 1` on the one call.
+- `LeidenParams::n_iterations` is an `Option<usize>` (`None` iterates until
+  stable) and defaults to 5 instead of 2. `LeidenParams` gains `min_gain` and
+  `local_moving`, and `LeidenParams::new()` takes the `Option`.
+- petgraph is no longer a dependency. `graph_from_strings()` and
+  `PageRankGraph::from_petgraph()` are gone: build with
+  `PageRankGraph::from_strings()` or the new `PageRankGraph::from_indices()`.
+  `personalised_page_rank()` takes a `&PageRankGraph` and wraps
+  `personalised_page_rank_optimised()`. `NodeData` and `EdgeData` are replaced
+  by `AttributedGraph`, which `graph_from_strings_with_attributes()` now
+  returns and `constrained_personalised_page_rank()` takes. `SValueCache` is
+  keyed by `usize`; the `WangSimOntology` API is otherwise unchanged.
+
+### Feature
+
+- Each layer can be used on its own: `bixverse-sc-data` without HDF5 or any
+  analysis code (the Python bindings now depend on nothing else), the single
+  cell suite and its GPU kernels without HDF5, the core layer without
+  petgraph, edge-rs or extendr.
+- A few items another crate now needs went from `pub(crate)` to `pub`, e.g.
+  `ScatterPtr`, `UnionFind`, `sparse_pca_accelerator_input()` and
+  `scenic_common_setup()`.
+- `build_knn_graph()` turns a kNN into an undirected weighted graph, picked
+  via `KnnSymmetrisation`: the bluster/Seurat sNN (Jaccard or rank weight,
+  prune, plus a rescue that reconnects the small components pruning cuts off),
+  the UMAP fuzzy simplicial set ScanPy uses as `connectivities` (matches
+  umap-learn's `fuzzy_simplicial_set`), or the plain kNN union.
+- `fast_clusters()` coarsens with k-means behind a `Coarsener` trait
+  (`CpuKMeans` standard or mini-batch, `GpuKMeans`, `MlxKMeans`), builds a
+  `CentroidGraph` (exact centroid kNN with any `KnnSymmetrisation`, or the
+  cell-mediated graph from Secuer) and runs Louvain or Leiden on it. With
+  several seeds it reports ARI and conductance per resolution (`GridStats`).
+- `community_detection()` exposes the evaluation cap, multi-level switch and
+  the full `LeidenParams` for Louvain as well, so Louvain can now take
+  `n_iterations`. `LocalMoving::Coloured` moves one colour class in parallel
+  on large levels.
+
 ## 0.7.0
 
 ### Breaking

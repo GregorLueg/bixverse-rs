@@ -18,6 +18,27 @@ its own crate means the numerics get tested, benchmarked and versioned
 independently of the wrapper that happens to call them. Design constraint
 throughout: atlas-scale analysis on a laptop, not on a cluster.
 
+## Crates
+
+Since 0.8.0 this is a workspace of smaller crates, so a consumer pulls in the
+layer it needs and not the dependency graph of everything else. They share one
+version and are released together.
+
+| Crate | What it holds | Builds on |
+| --- | --- | --- |
+| `bixverse-core` | `core`, `utils`, `ml`: sparse structures, linear algebra, statistics, SIMD, k-means, Gaussian processes | |
+| `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
+| `bixverse-sc-data` | The single cell data layer: the binary store, its readers and writers, MTX, and h5ad / 10x h5 behind `h5` | core |
+| `bixverse-sc` | The rest of the single cell suite | methods, sc-data |
+| `bixverse-gpu` | GPU linear algebra and bulk methods via `cubecl` | methods |
+| `bixverse-sc-gpu` | GPU single cell methods | sc, gpu |
+| `bixverse-mlx` | Experimental MLX backend, Apple Silicon only | sc |
+| `bixverse-rs` | Facade: everything above under the module paths the crate always had | all of them, optional |
+| `bixverse-r` | The extendr conversions; re-exports `bixverse-rs` | the facade |
+
+Only `bixverse-r` links libR, and only `bixverse-sc-data` with `h5` pulls in
+HDF5.
+
 ## What's in it
 
 Well over a hundred named methods, plus the shared numerical scaffolding they sit on.
@@ -31,7 +52,7 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
 | `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
-| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
+| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
 dense linear algebra (GEMM through Apple Accelerate on macOS), `rayon` for CPU
@@ -44,22 +65,25 @@ edgeR, limma and NEBULA numerics from [`edge-rs`](https://crates.io/crates/edge-
 
 ## Feature flags
 
-Everything past the base statistics and graph code is gated, so a consumer only
-pays for what it uses.
+The flags below are the facade's (`bixverse-rs`); `bixverse-r` has the same
+ones. Each forwards to the crate that owns the dependency, so a consumer of a
+single crate sets that crate's flag instead (`h5` on `bixverse-sc-data`,
+`dge` on `bixverse-methods`, and so on).
 
 | Flag | What it turns on |
 | --- | --- |
 | *(always on)* | Bulk statistics, enrichment, graph, ontology, matrix factorisation |
 | `accelerate` | On by default. Dense CPU GEMM through Apple Accelerate on macOS, no effect elsewhere. See below |
-| `r` | On by default. The `extendr-api` conversions: every `*_r_wrapper` module and `utils::r_rust_interface`. Turn it off for anything that must not link libR, such as the Python wheel |
-| `single-cell` | The `single_cell` module, HDF5 and mmap I/O, the binary sparse format |
-| `multi-modal` | `single_cell::multi_modal` (WNN, ADT), implies `single-cell` |
 | `dge` | Negative binomial DGE via `edge-rs`: bulk edgeR and limma-voom. Implied by `single-cell`, usable on its own |
-| `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5` |
-| `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load |
+| `single-cell` | The `single_cell` module, mmap I/O and the binary sparse format. No HDF5 |
+| `h5` | The h5ad and 10x h5 readers and writers. Pulls in HDF5, implies `single-cell` |
+| `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5`, implies `h5` |
+| `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load, implies `h5` |
+| `multi-modal` | `single_cell::multi_modal` (WNN, DSB), implies `single-cell` |
 | `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
-| `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
-| `mlx` | Experimental, Apple Silicon only: an MLX backend via [`mlx-c`](https://github.com/ml-explore/mlx-c) (f32) for correlation, SpMM, randomised SVD, NMF (dense and sparse, consensus, k sweeps), and with `single-cell` PCA, Harmony and SEACells. Independent of `gpu`. Needs `brew install mlx-c` or `MLX_C_PREFIX`; without the library the build warns and skips it |
+| `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek`: the bulk GPU methods |
+| `sc-gpu` | `gpu::sc_gpu`, the GPU single cell methods, implies `gpu` and `single-cell` |
+| `mlx` | Experimental, Apple Silicon only: an MLX backend via [`mlx-c`](https://github.com/ml-explore/mlx-c) (f32) for correlation, SpMM, randomised SVD, NMF (dense and sparse, consensus, k sweeps), single cell PCA, Harmony and SEACells. Independent of `gpu`, implies `single-cell`. Needs `brew install mlx-c` or `MLX_C_PREFIX`; without the library the build warns and skips it |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
 
@@ -69,8 +93,7 @@ On macOS the default `accelerate` feature sends every dense CPU GEMM
 (correlations, covariance, perturbation distances, NMF HALS, Hotspot, Markov
 chains, the landmark GP) through Apple's Accelerate framework. It ships with
 every macOS, so there is nothing to install. Turn it off with
-`default-features = false`, which also drops `r`; add `features = ["r"]` back if
-you still want the R conversions. End to end on an M1 Max:
+`default-features = false`. End to end on an M1 Max:
 
 | function | f32 | f64 |
 | --- | --- | --- |
@@ -81,17 +104,29 @@ you still want the R conversions. End to end on an M1 Max:
 
 ## Using it from Rust
 
+Everything through the facade:
+
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.7", features = ["single-cell"] }
+bixverse-rs = { version = "0.8", features = ["single-cell", "h5"] }
 ```
 
 ```rust
 use bixverse_rs::prelude::*;
 ```
 
-The prelude re-exports the errors, sparse structures, `SparseGraph`, matrix and
-vector helpers, the SIMD trait and the assertion macros.
+Or only the layer you need, e.g. the binary store without HDF5:
+
+```toml
+[dependencies]
+bixverse-sc-data = "0.8"
+```
+
+Every crate has a prelude that re-exports the ones below it: the errors, sparse
+structures, `SparseGraph`, matrix and vector helpers, the SIMD trait and the
+assertion macros. Each crate has its own error enum (`CoreErrors`,
+`MethodsErrors`, `ScDataErrors`, `ScErrors`, ...), and each wraps the ones
+below it, so `?` converts upwards.
 
 ## How it plugs into R
 
@@ -100,19 +135,23 @@ crate through [extendr](https://extendr.github.io/), and does the things R is
 good at: argument checking, S7 classes, documentation, plotting handoff. The
 Rust side owns the maths.
 
-Each top-level module carries a `*_r_wrapper.rs` sibling holding the R
-conversions: `from_r_list` deserialisers for the parameter structs and a handful
-of serialisers back to R lists. The `#[extendr]` entry points themselves live
-downstream in the R packages, so R types never touch the numerical surface.
-All of it sits behind the `r` feature, on by default; a consumer that builds
-with `default-features = false` never links libR.
+The R conversions live in their own crate, `bixverse-r`, which re-exports the
+facade, so an R package needs that one dependency. It holds the
+`*_r_wrapper.rs` files and three traits: `FromRList` deserialises a parameter
+struct from an R list, `FromRMap` does the same from an already flattened one,
+and `ToRList` serialises fitted structures back. The `#[extendr]` entry points
+themselves live downstream in the R packages, so R types never touch the
+numerical surface, and no crate other than `bixverse-r` links libR.
 
-Two R packages consume the crate:
+R packages that consume it:
 
-- [bixverse](https://github.com/GregorLueg/bixverse) with `single-cell` and
-  `multi-modal`. The main package.
-- [bixverse.gpu](https://github.com/GregorLueg/bixverse.gpu) with `gpu` and
-  `single-cell`, adding wgpu-backed versions of the expensive methods.
+- [bixverse](https://github.com/GregorLueg/bixverse) with `single-cell`, `h5`
+  and `multi-modal`. The main package.
+- [bixverse.gpu](https://github.com/GregorLueg/bixverse.gpu) with `sc-gpu`,
+  adding wgpu-backed versions of the expensive methods. It does not need
+  HDF5.
+- [manifoldsR](https://github.com/GregorLueg/manifoldsR), on the core layer
+  only.
 
 Anything on the Rust side that never crosses into R works standalone, so the
 crate is equally usable from a pure Rust binary or behind a PyO3 layer.
@@ -120,8 +159,8 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 ## Using it from Python
 
 The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
-Python package wraps the single cell streaming engine with PyO3 and maturin,
-built without the `r` feature, so the wheel needs no R install. It opens a
+Python package wraps the single cell streaming engine with PyO3 and maturin.
+It depends on `bixverse-sc-data` alone, so the wheel needs no R install. It opens a
 bixverse binary store and streams shuffled minibatches out of it, with the
 decode in Rust and the GIL released, fast enough to keep a GPU training loop
 fed. First consumer is scVI in `bixverse.nn`, on torch or MLX, trained straight

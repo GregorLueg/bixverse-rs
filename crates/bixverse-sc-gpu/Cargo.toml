@@ -1,0 +1,41 @@
+[package]
+name = "bixverse-sc-gpu"
+description = "GPU single cell methods for bixverse via cubecl: Harmony, PCA, kNN, SEACells, SCENIC and NEBULA."
+keywords = ["bioinformatics", "single-cell", "gpu", "cubecl"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+
+[features]
+## The GPU Sanity to Bonsai path
+bonsai = ["bixverse-sc/bonsai", "dep:bonsai-rs"]
+## Slow but asserting tests. Run in release.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read.
+large_scale_diagnostics = []
+
+[dependencies]
+ann-search-rs = { workspace = true, features = ["gpu"] }
+approx.workspace = true
+bixverse-core.workspace = true
+bixverse-gpu.workspace = true
+bixverse-methods.workspace = true
+bixverse-sc.workspace = true
+bixverse-sc-data.workspace = true
+bonsai-rs = { workspace = true, optional = true, features = ["gpu"] }
+cubecl.workspace = true
+cubecl-utils-rs.workspace = true
+document-features.workspace = true
+edge-rs = { workspace = true, features = ["gpu"] }
+faer.workspace = true
+half.workspace = true
+indexmap.workspace = true
+rand.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+thousands.workspace = true

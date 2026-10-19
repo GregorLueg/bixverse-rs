@@ -25,7 +25,7 @@ mod testing;
 #[pymodule]
 fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("__core_version__", bixverse_rs::VERSION)?;
+    m.add("__core_version__", bixverse_sc_data::VERSION)?;
 
     m.add("BixverseError", m.py().get_type::<error::BixverseError>())?;
     m.add(

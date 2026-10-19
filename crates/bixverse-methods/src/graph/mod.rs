@@ -1,0 +1,14 @@
+//! Module contains all of the graph-based algorithms within bixverse-rs.
+
+pub mod community_detections;
+pub mod graph_abstraction;
+pub mod graph_clustering;
+pub mod graph_components;
+pub mod graph_label_propagations;
+pub mod graph_metrics;
+pub mod graph_structures;
+pub mod knn_graph;
+pub mod leiden;
+pub mod page_rank;
+pub mod shortest_paths;
+pub mod spanning_tree;
