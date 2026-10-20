@@ -202,14 +202,14 @@ where
         data2: Option<&[U]>,
         shape: (usize, usize),
     ) -> Self {
-        Self {
-            data: data.to_vec(),
-            indices: indices.to_vec(),
-            indptr: indptr.to_vec(),
-            cs_type: CompressedSparseFormat::Csc,
-            data_2: data2.map(|d| d.to_vec()),
+        Self::from_parts(
+            data.to_vec(),
+            indices.to_vec(),
+            indptr.to_vec(),
+            data2.map(|d| d.to_vec()),
+            CompressedSparseFormat::Csc,
             shape,
-        }
+        )
     }
 
     /// Generate a nes CSR version of the matrix
@@ -232,14 +232,14 @@ where
         data2: Option<&[U]>,
         shape: (usize, usize),
     ) -> Self {
-        Self {
-            data: data.to_vec(),
-            indices: indices.to_vec(),
-            indptr: indptr.to_vec(),
-            cs_type: CompressedSparseFormat::Csr,
-            data_2: data2.map(|d| d.to_vec()),
+        Self::from_parts(
+            data.to_vec(),
+            indices.to_vec(),
+            indptr.to_vec(),
+            data2.map(|d| d.to_vec()),
+            CompressedSparseFormat::Csr,
             shape,
-        }
+        )
     }
 
     /// Take ownership of buffers that were built for this matrix
@@ -307,31 +307,15 @@ where
     ///
     /// The transformed/transposed version
     pub fn transpose_and_convert(&self) -> Self {
-        match self.cs_type {
-            CompressedSparseFormat::Csr => {
-                // convert first and then switch around
-                let csc_version = transpose_sparse(self);
-                CompressedSparseData2 {
-                    data: csc_version.data,
-                    indices: csc_version.indices,
-                    indptr: csc_version.indptr,
-                    cs_type: CompressedSparseFormat::Csr, // relabel as CSR
-                    data_2: csc_version.data_2,
-                    shape: (self.shape.1, self.shape.0), // swap dimensions
-                }
-            }
-            CompressedSparseFormat::Csc => {
-                // no conversion needed here! simple transpose is enough...
-                CompressedSparseData2 {
-                    data: self.data.clone(),
-                    indices: self.indices.clone(),
-                    indptr: self.indptr.clone(),
-                    cs_type: CompressedSparseFormat::Csr,
-                    data_2: self.data_2.clone(),
-                    shape: (self.shape.1, self.shape.0),
-                }
-            }
-        }
+        // A CSC matrix reads as the CSR of its transpose with no data movement.
+        // A CSR matrix is converted first, then relabelled the same way.
+        let mut out = match self.cs_type {
+            CompressedSparseFormat::Csr => transpose_sparse(self),
+            CompressedSparseFormat::Csc => self.clone(),
+        };
+        out.cs_type = CompressedSparseFormat::Csr;
+        out.shape = (self.shape.1, self.shape.0);
+        out
     }
 
     /// Generates a sparse matrix from a dense matrix
@@ -348,48 +332,7 @@ where
     where
         T: BixverseFloat,
     {
-        let (nrows, ncols) = (mat.nrows(), mat.ncols());
-        let mut data = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut indptr: Vec<u32> = Vec::new();
-
-        match format {
-            CompressedSparseFormat::Csr => {
-                indptr.push(0);
-                for i in 0..nrows {
-                    for j in 0..ncols {
-                        let val = mat[(i, j)];
-                        if val != T::zero() {
-                            data.push(val);
-                            indices.push(j as u32);
-                        }
-                    }
-                    indptr.push(data.len() as u32);
-                }
-            }
-            CompressedSparseFormat::Csc => {
-                indptr.push(0);
-                for j in 0..ncols {
-                    for i in 0..nrows {
-                        let val = mat[(i, j)];
-                        if val != T::zero() {
-                            data.push(val);
-                            indices.push(i as u32);
-                        }
-                    }
-                    indptr.push(data.len() as u32);
-                }
-            }
-        }
-
-        Self {
-            data,
-            indices,
-            indptr,
-            cs_type: format,
-            data_2: None,
-            shape: (nrows, ncols),
-        }
+        Self::from_entry_fn(mat.nrows(), mat.ncols(), format, |i, j| mat[(i, j)])
     }
 
     /// Create a sparse matrix from an upper triangular matrix.
@@ -440,47 +383,7 @@ where
             }
         };
 
-        let mut data = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut indptr: Vec<u32> = Vec::new();
-
-        match format {
-            CompressedSparseFormat::Csr => {
-                indptr.push(0);
-                for row in 0..n {
-                    for col in 0..n {
-                        let value = get_value(row, col);
-                        if value != T::zero() {
-                            data.push(value);
-                            indices.push(col as u32);
-                        }
-                    }
-                    indptr.push(data.len() as u32);
-                }
-            }
-            CompressedSparseFormat::Csc => {
-                indptr.push(0);
-                for col in 0..n {
-                    for row in 0..n {
-                        let value = get_value(row, col);
-                        if value != T::zero() {
-                            data.push(value);
-                            indices.push(row as u32);
-                        }
-                    }
-                    indptr.push(data.len() as u32);
-                }
-            }
-        }
-
-        Self {
-            data,
-            indices,
-            indptr,
-            cs_type: format,
-            data_2: None,
-            shape: (n, n),
-        }
+        Self::from_entry_fn(n, n, format, get_value)
     }
 
     /// Returns the shape of the matrix
@@ -539,11 +442,7 @@ where
     ///
     /// The axes in order, each sized to the minor dimension.
     pub fn to_sparse_axes(&self) -> Vec<SparseAxis<T, U>> {
-        let len = if self.cs_type.is_csc() {
-            self.shape.0
-        } else {
-            self.shape.1
-        };
+        let len = self.minor_dim();
         let has_data = self.data.len() == self.indices.len();
 
         self.indptr
@@ -752,6 +651,51 @@ where
     // Helpers //
     /////////////
 
+    /// Build a matrix by scanning every `(row, col)` entry of a virtual dense
+    /// matrix and storing the non-zeros.
+    ///
+    /// ### Params
+    ///
+    /// * `nrows` - Number of rows
+    /// * `ncols` - Number of columns
+    /// * `format` - Format to generate; the scan runs along its major axis
+    /// * `get` - Value at `(row, col)`
+    ///
+    /// ### Returns
+    ///
+    /// The sparse matrix, with no second layer.
+    fn from_entry_fn<G>(nrows: usize, ncols: usize, format: CompressedSparseFormat, get: G) -> Self
+    where
+        T: BixverseFloat,
+        G: Fn(usize, usize) -> T,
+    {
+        let (major, minor) = match format {
+            CompressedSparseFormat::Csr => (nrows, ncols),
+            CompressedSparseFormat::Csc => (ncols, nrows),
+        };
+
+        let mut data = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut indptr: Vec<u32> = Vec::with_capacity(major + 1);
+        indptr.push(0);
+
+        for outer in 0..major {
+            for inner in 0..minor {
+                let val = match format {
+                    CompressedSparseFormat::Csr => get(outer, inner),
+                    CompressedSparseFormat::Csc => get(inner, outer),
+                };
+                if val != T::zero() {
+                    data.push(val);
+                    indices.push(inner as u32);
+                }
+            }
+            indptr.push(data.len() as u32);
+        }
+
+        Self::from_parts(data, indices, indptr, None, format, (nrows, ncols))
+    }
+
     /// Return the major dimensions
     ///
     /// ### Returns
@@ -759,6 +703,18 @@ where
     /// Major dimension
     fn major_dim(&self) -> usize {
         self.indptr.len() - 1
+    }
+
+    /// Major dimension as declared by `shape`, which `indptr` must agree with.
+    ///
+    /// ### Returns
+    ///
+    /// Rows for CSR, columns for CSC.
+    fn expected_major(&self) -> usize {
+        match self.cs_type {
+            CompressedSparseFormat::Csr => self.shape.0,
+            CompressedSparseFormat::Csc => self.shape.1,
+        }
     }
 
     /// Returns the minor dimension
@@ -798,10 +754,7 @@ where
     /// [`CoreErrors::SliceIndexOutOfBounds`] for an index past the minor
     /// axis.
     pub fn validate(&self) -> Result<(), CoreErrors> {
-        let expected_major = match self.cs_type {
-            CompressedSparseFormat::Csr => self.shape.0,
-            CompressedSparseFormat::Csc => self.shape.1,
-        };
+        let expected_major = self.expected_major();
 
         if self.indptr.len() != expected_major + 1 {
             return Err(CoreErrors::SparseIndptrInvalid {
@@ -863,16 +816,97 @@ where
 
     /// Assertion helper for invariants
     pub fn assert_invariants(&self) {
-        let expected_major = match self.cs_type {
-            CompressedSparseFormat::Csr => self.shape.0,
-            CompressedSparseFormat::Csc => self.shape.1,
-        };
         debug_assert_eq!(self.indices.len(), self.data.len());
-        debug_assert_eq!(self.indptr.len(), expected_major + 1);
+        debug_assert_eq!(self.indptr.len(), self.expected_major() + 1);
         debug_assert_eq!(*self.indptr.last().unwrap() as usize, self.data.len());
         if let Some(d2) = &self.data_2 {
             debug_assert_eq!(d2.len(), self.data.len());
         }
+    }
+}
+
+/////////////////////////
+// Structures: helpers //
+/////////////////////////
+
+/// Fail unless the matrix is stored as CSR.
+///
+/// ### Params
+///
+/// * `mat` - The matrix to check
+///
+/// ### Returns
+///
+/// `Ok(())`, or [CoreErrors::SparseMatrixMustBeCsr].
+fn require_csr<T, U>(mat: &CompressedSparseData2<T, U>) -> Result<(), CoreErrors>
+where
+    T: Clone,
+    U: Clone,
+{
+    if mat.cs_type.is_csr() {
+        Ok(())
+    } else {
+        Err(CoreErrors::SparseMatrixMustBeCsr)
+    }
+}
+
+/// Fail unless the matrix is stored as CSC.
+///
+/// ### Params
+///
+/// * `mat` - The matrix to check
+///
+/// ### Returns
+///
+/// `Ok(())`, or [CoreErrors::SparseMatrixMustBeCsc].
+fn require_csc<T, U>(mat: &CompressedSparseData2<T, U>) -> Result<(), CoreErrors>
+where
+    T: Clone,
+    U: Clone,
+{
+    if mat.cs_type.is_csc() {
+        Ok(())
+    } else {
+        Err(CoreErrors::SparseMatrixMustBeCsc)
+    }
+}
+
+/// Fail unless both matrices are CSR and share a shape, as the element-wise
+/// operations need.
+///
+/// ### Params
+///
+/// * `a` - First matrix
+/// * `b` - Second matrix
+///
+/// ### Returns
+///
+/// `Ok(())`, [CoreErrors::SparseMatrixMustBeCsr] or
+/// [CoreErrors::ShapeMismatchSparse].
+fn require_csr_pair_same_shape<T>(
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> Result<(), CoreErrors>
+where
+    T: Clone,
+{
+    require_csr(a)?;
+    require_csr(b)?;
+    if a.shape != b.shape {
+        return Err(CoreErrors::ShapeMismatchSparse);
+    }
+    Ok(())
+}
+
+/// Turn per-run counts into offsets, in place.
+///
+/// ### Params
+///
+/// * `indptr` - Counts shifted by one, i.e. `indptr[i + 1]` holds the count of
+///   run `i` and `indptr[0]` is zero. Becomes the usual `indptr`.
+fn cumulate_indptr(indptr: &mut [u32]) {
+    for i in 1..indptr.len() {
+        indptr[i] += indptr[i - 1];
     }
 }
 
@@ -1022,6 +1056,32 @@ impl<T> ScatterPtr<T> {
 // Conversion: helpers //
 /////////////////////////
 
+/// Length of the major axis and the format of the other-format twin.
+///
+/// The old minor axis becomes the new major axis, so a CSC matrix of `nrow`
+/// rows converts into a CSR one with `nrow` runs and vice versa.
+///
+/// ### Params
+///
+/// * `sparse_data` - The matrix being converted
+///
+/// ### Returns
+///
+/// `(new_major, new_type)`.
+fn converted_layout<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+) -> (usize, CompressedSparseFormat)
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let new_type = match sparse_data.cs_type {
+        CompressedSparseFormat::Csc => CompressedSparseFormat::Csr,
+        CompressedSparseFormat::Csr => CompressedSparseFormat::Csc,
+    };
+    (sparse_data.minor_dim(), new_type)
+}
+
 /// Per-chunk write cursors and the transposed `indptr`.
 ///
 /// Runs the counting phase of the transpose: one histogram per chunk of the old
@@ -1075,9 +1135,7 @@ where
             *total += count;
         }
     }
-    for i in 0..new_major {
-        new_indptr[i + 1] += new_indptr[i];
-    }
+    cumulate_indptr(&mut new_indptr);
 
     // rewrite the counts as absolute starts. Both the cursor row and the
     // running offsets are swept contiguously, so this stays cache-friendly
@@ -1226,12 +1284,7 @@ where
 {
     let nnz = sparse_data.get_nnz();
     let (nrow, ncol) = sparse_data.shape();
-
-    // the "minor" dimension is what becomes the new indptr axis.
-    let (new_major, new_type) = match sparse_data.cs_type {
-        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
-        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
-    };
+    let (new_major, new_type) = converted_layout(sparse_data);
 
     let mut new_data: Vec<T> = vec![T::default(); nnz];
     let mut new_indices: Vec<u32> = vec![0u32; nnz];
@@ -1335,11 +1388,7 @@ where
 {
     let nnz = sparse_data.get_nnz();
     let (nrow, ncol) = sparse_data.shape();
-
-    let (new_major, new_type) = match sparse_data.cs_type {
-        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
-        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
-    };
+    let (new_major, new_type) = converted_layout(sparse_data);
 
     let mut new_indices: Vec<u32> = vec![0u32; nnz];
 
@@ -1453,10 +1502,7 @@ where
         indptr[(row + 1) as usize] += 1;
     }
 
-    // Convert counts to cumulative offsets
-    for i in 0..n_rows {
-        indptr[i + 1] += indptr[i];
-    }
+    cumulate_indptr(&mut indptr);
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
@@ -1505,11 +1551,9 @@ where
             let row = *rows.get_unchecked(i) as usize;
             *indptr_ptr.add(row + 1) += 1;
         }
-
-        for i in 0..n_rows {
-            *indptr_ptr.add(i + 1) += *indptr_ptr.add(i);
-        }
     }
+
+    cumulate_indptr(&mut indptr);
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
@@ -1527,14 +1571,15 @@ where
 /// owns both invariants. Violating them produces a *corrupt* CSR rather than a
 /// panic: unsorted input or `lo > hi` gives descending column indices,
 /// `lo == hi` duplicates a diagonal entry, and a repeated pair doubles the nnz.
-/// Every other consumer in the crate assumes ascending deduplicated rows, so the
-/// invariants are `debug_assert!`ed here and the function stays crate-private.
+/// Every other consumer in the crate assumes ascending deduplicated rows, so
+/// the invariants are `debug_assert!`ed here and the function stays
+/// crate-private.
 ///
 /// ### Params
 ///
 /// * `n` - Node count; the output is `n` square.
-/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi < n`, sorted
-///   strictly ascending by `(lo, hi)`.
+/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi < n`,
+///   sorted strictly ascending by `(lo, hi)`.
 ///
 /// ### Returns
 ///
@@ -1562,9 +1607,7 @@ where
         indptr[lo as usize + 1] += 1;
         indptr[hi as usize + 1] += 1;
     }
-    for i in 0..n {
-        indptr[i + 1] += indptr[i];
-    }
+    cumulate_indptr(&mut indptr);
 
     let nnz = 2 * edges.len();
     let mut indices = vec![0u32; nnz];
@@ -1602,8 +1645,23 @@ where
 // Arithmetic: consts //
 ////////////////////////
 
-/// Rows merged per rayon job in [sparse_add_csr].
-const SPARSE_ADD_ROW_CHUNK: usize = 1024;
+/// Rows merged per rayon job in [merge_csr_rows]. Not tuned; large enough that
+/// a job outweighs the scheduling cost, small enough to balance skewed rows.
+const SPARSE_MERGE_ROW_CHUNK: usize = 1024;
+
+/// Magnitude at or below which an overlap of two merged entries counts as
+/// cancelled and is dropped. Stored as `f32` to keep the threshold the
+/// callers have always seen.
+const SPARSE_MERGE_EPSILON: f32 = 1e-9;
+
+/// Output rows per rayon job in [csr_matmul_csr]. Each job reuses one
+/// [SparseAccumulator] of the output width, so this also bounds how often the
+/// accumulator is re-created. Not tuned.
+const SPARSE_MATMUL_ROW_CHUNK: usize = 256;
+
+/// Row or column sum at or below which the L1 normalisation treats the slice as
+/// empty, to avoid dividing by something indistinguishable from zero.
+const NORMALISE_MIN_SUM: f64 = 1e-15;
 
 /////////////////////////
 // Arithmetic: structs //
@@ -1693,48 +1751,78 @@ where
     }
 }
 
-//////////////////////////////////
-// Arithmetic: public functions //
-//////////////////////////////////
+/////////////////////////
+// Arithmetic: helpers //
+/////////////////////////
 
-/// Add two CSR matrices together
-///
-/// Rows are merged in parallel chunks of [SPARSE_ADD_ROW_CHUNK]. An overlap
-/// whose sum has magnitude at or below `1e-9` is dropped.
+/// Check that two CSR matrices can be multiplied, `a @ b`.
 ///
 /// ### Params
 ///
-/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
-/// * `b` - Reference to the second CompressedSparseData2 (in CSR format!)
+/// * `a` - Left matrix
+/// * `b` - Right matrix
 ///
 /// ### Returns
 ///
-/// `CompressedSparseData2` with added values between the two.
-pub fn sparse_add_csr<T>(
+/// `Ok(())`, [CoreErrors::SparseMatrixMustBeCsr] or
+/// [CoreErrors::SparseMatrixMultiplication] if `a` has a different number of
+/// columns than `b` has rows.
+fn require_matmul_operands<T>(
     a: &CompressedSparseData2<T>,
     b: &CompressedSparseData2<T>,
-) -> Result<CompressedSparseData2<T>, CoreErrors>
+) -> Result<(), CoreErrors>
 where
-    T: BixverseNumeric + Into<f64> + Add<Output = T>,
+    T: Clone,
 {
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if !b.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if a.shape != b.shape {
-        return Err(CoreErrors::ShapeMismatchSparse);
-    }
+    require_csr(a)?;
+    require_csr(b)?;
 
-    const EPSILON: f32 = 1e-9;
+    let (ncol_a, nrow_b) = (a.shape.1, b.shape.0);
+    if ncol_a != nrow_b {
+        return Err(CoreErrors::SparseMatrixMultiplication {
+            n_col_a: ncol_a,
+            n_row_b: nrow_b,
+        });
+    }
+    Ok(())
+}
+
+/// Merge two CSR matrices row by row over the union of their patterns.
+///
+/// Rows are merged in parallel chunks of [SPARSE_MERGE_ROW_CHUNK]. An entry
+/// present in only one matrix is carried over (through `lone_b` for `b`); an
+/// overlap is combined and dropped if the result has magnitude at or below
+/// [SPARSE_MERGE_EPSILON]. The per-chunk outputs are stitched into one CSR with
+/// ascending columns per row, assuming both inputs have them.
+///
+/// ### Params
+///
+/// * `a` - First matrix, CSR, same shape as `b`
+/// * `b` - Second matrix, CSR, same shape as `a`
+/// * `combine` - Value of an overlap, given the entries of `a` and `b`
+/// * `lone_b` - Value of an entry that only `b` stores
+///
+/// ### Returns
+///
+/// The merged matrix in CSR format.
+fn merge_csr_rows<T, C, N>(
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+    combine: C,
+    lone_b: N,
+) -> CompressedSparseData2<T>
+where
+    T: BixverseNumeric + Into<f64>,
+    C: Fn(T, T) -> T + Sync,
+    N: Fn(T) -> T + Sync,
+{
     let n_rows = a.shape.0;
 
-    let chunks: Vec<(Vec<u32>, Vec<T>, Vec<u32>)> = (0..n_rows.div_ceil(SPARSE_ADD_ROW_CHUNK))
+    let chunks: Vec<(Vec<u32>, Vec<T>, Vec<u32>)> = (0..n_rows.div_ceil(SPARSE_MERGE_ROW_CHUNK))
         .into_par_iter()
         .map(|chunk_idx| {
-            let start = chunk_idx * SPARSE_ADD_ROW_CHUNK;
-            let end = (start + SPARSE_ADD_ROW_CHUNK).min(n_rows);
+            let start = chunk_idx * SPARSE_MERGE_ROW_CHUNK;
+            let end = (start + SPARSE_MERGE_ROW_CHUNK).min(n_rows);
             let cap = (a.indptr[end] - a.indptr[start] + b.indptr[end] - b.indptr[start]) as usize;
             let mut cols: Vec<u32> = Vec::with_capacity(cap);
             let mut vals: Vec<T> = Vec::with_capacity(cap);
@@ -1756,11 +1844,11 @@ where
                         a_idx += 1;
                     } else if b_col < a_col {
                         cols.push(b_col);
-                        vals.push(b.data[b_idx]);
+                        vals.push(lone_b(b.data[b_idx]));
                         b_idx += 1;
                     } else {
-                        let val = a.data[a_idx] + b.data[b_idx];
-                        if val.into().abs() > EPSILON as f64 {
+                        let val = combine(a.data[a_idx], b.data[b_idx]);
+                        if val.into().abs() > SPARSE_MERGE_EPSILON as f64 {
                             cols.push(a_col);
                             vals.push(val);
                         }
@@ -1771,7 +1859,7 @@ where
                 cols.extend_from_slice(&a.indices[a_idx..a_end]);
                 vals.extend_from_slice(&a.data[a_idx..a_end]);
                 cols.extend_from_slice(&b.indices[b_idx..b_end]);
-                vals.extend_from_slice(&b.data[b_idx..b_end]);
+                vals.extend(b.data[b_idx..b_end].iter().map(|&v| lone_b(v)));
 
                 lengths.push((cols.len() - before) as u32);
             }
@@ -1795,14 +1883,42 @@ where
         data.extend_from_slice(&vals);
     }
 
-    Ok(CompressedSparseData2::from_parts(
+    CompressedSparseData2::from_parts(
         data,
         indices,
         indptr,
         None,
         CompressedSparseFormat::Csr,
         a.shape,
-    ))
+    )
+}
+
+//////////////////////////////////
+// Arithmetic: public functions //
+//////////////////////////////////
+
+/// Add two CSR matrices together
+///
+/// See [merge_csr_rows] for the merge itself; an overlap whose sum has
+/// magnitude at or below [SPARSE_MERGE_EPSILON] is dropped.
+///
+/// ### Params
+///
+/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
+/// * `b` - Reference to the second CompressedSparseData2 (in CSR format!)
+///
+/// ### Returns
+///
+/// `CompressedSparseData2` with added values between the two.
+pub fn sparse_add_csr<T>(
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> Result<CompressedSparseData2<T>, CoreErrors>
+where
+    T: BixverseNumeric + Into<f64> + Add<Output = T>,
+{
+    require_csr_pair_same_shape(a, b)?;
+    Ok(merge_csr_rows(a, b, |x, y| x + y, |y| y))
 }
 
 /// Scalar multiplication of CSR matrix
@@ -1830,6 +1946,9 @@ where
 
 /// Sparse matrix subtraction
 ///
+/// `a - b`, merged as for [sparse_add_csr]; an overlap whose difference has
+/// magnitude at or below [SPARSE_MERGE_EPSILON] is dropped.
+///
 /// ### Params
 ///
 /// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
@@ -1845,57 +1964,8 @@ pub fn sparse_subtract_csr<T>(
 where
     T: BixverseNumeric + Into<f64>,
 {
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if !b.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if a.shape != b.shape {
-        return Err(CoreErrors::ShapeMismatchSparse);
-    }
-
-    const EPSILON: f32 = 1e-9;
-    let n_rows = a.shape.0;
-
-    let mut rows: Vec<u32> = Vec::new();
-    let mut cols: Vec<u32> = Vec::new();
-    let mut vals = Vec::new();
-
-    for i in 0..n_rows {
-        let a_start = a.indptr[i] as usize;
-        let a_end = a.indptr[i + 1] as usize;
-        let b_start = b.indptr[i] as usize;
-        let b_end = b.indptr[i + 1] as usize;
-
-        let mut a_idx = a_start;
-        let mut b_idx = b_start;
-
-        while a_idx < a_end || b_idx < b_end {
-            if a_idx < a_end && (b_idx >= b_end || a.indices[a_idx] < b.indices[b_idx]) {
-                rows.push(i as u32);
-                cols.push(a.indices[a_idx]);
-                vals.push(a.data[a_idx]);
-                a_idx += 1;
-            } else if b_idx < b_end && (a_idx >= a_end || b.indices[b_idx] < a.indices[a_idx]) {
-                rows.push(i as u32);
-                cols.push(b.indices[b_idx]);
-                vals.push(T::default() - b.data[b_idx]);
-                b_idx += 1;
-            } else {
-                let val = a.data[a_idx] - b.data[b_idx];
-                if val.into().abs() > EPSILON as f64 {
-                    rows.push(i as u32);
-                    cols.push(a.indices[a_idx]);
-                    vals.push(val);
-                }
-                a_idx += 1;
-                b_idx += 1;
-            }
-        }
-    }
-
-    Ok(coo_to_csr_presorted(&rows, &cols, &vals, a.shape))
+    require_csr_pair_same_shape(a, b)?;
+    Ok(merge_csr_rows(a, b, |x, y| x - y, |y| T::default() - y))
 }
 
 /// Element-wise sparse multiplication
@@ -1916,15 +1986,7 @@ where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
 {
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if !b.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if a.shape != b.shape {
-        return Err(CoreErrors::ShapeMismatchSparse);
-    }
+    require_csr_pair_same_shape(a, b)?;
 
     let n_rows = a.shape.0;
     let mut rows: Vec<u32> = Vec::new();
@@ -1985,7 +2047,7 @@ where
 
     for (idx, &col) in csr.indices.iter().enumerate() {
         let sum = col_sums[col as usize];
-        if sum.into() > 1e-15 {
+        if sum.into() > NORMALISE_MIN_SUM {
             csr.data[idx] /= sum;
         }
     }
@@ -2017,9 +2079,7 @@ where
     T: BixverseNumeric + Into<f64>,
     T: std::iter::Sum<T>,
 {
-    if !csr.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
+    require_csr(csr)?;
 
     let nrows = csr.shape.0;
 
@@ -2030,7 +2090,7 @@ where
 
         let row_sum: T = row_data_slice.iter().copied().sum();
 
-        if row_sum.into() <= 1e-15 {
+        if row_sum.into() <= NORMALISE_MIN_SUM {
             return Err(CoreErrors::SparseMatrixIsolatedRow {
                 row: i,
                 row_sum: row_sum.into(),
@@ -2097,9 +2157,7 @@ where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
 {
-    if !mat.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
+    require_csr(mat)?;
 
     let mut result = vec![T::default(); mat.shape.0];
     for i in 0..mat.shape.0 {
@@ -2143,9 +2201,7 @@ pub fn csr_vecmat<T>(vec: &[T], mat: &CompressedSparseData2<T>) -> Result<Vec<T>
 where
     T: BixverseNumeric,
 {
-    if !mat.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
+    require_csr(mat)?;
 
     let n_cols = mat.ncols();
     let mut out = vec![T::default(); n_cols];
@@ -2181,35 +2237,20 @@ pub fn csr_matmul_csr<T>(
 where
     T: BixverseNumeric,
 {
-    let ncol_a = a.shape().1;
-    let nrow_b = b.shape().0;
-
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if !b.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if ncol_a != nrow_b {
-        return Err(CoreErrors::SparseMatrixMultiplication {
-            n_col_a: ncol_a,
-            n_row_b: nrow_b,
-        });
-    }
+    require_matmul_operands(a, b)?;
 
     let nrows = a.shape.0;
     let ncols = b.shape.1;
 
-    const CHUNK: usize = 256;
-    let n_chunks = nrows.div_ceil(CHUNK);
+    let n_chunks = nrows.div_ceil(SPARSE_MATMUL_ROW_CHUNK);
 
     let chunks: Vec<(Vec<usize>, Vec<T>, Vec<usize>)> = (0..n_chunks)
         .into_par_iter()
         .map_init(
             || SparseAccumulator::new(ncols),
             |acc, chunk_idx| {
-                let start = chunk_idx * CHUNK;
-                let end = ((chunk_idx + 1) * CHUNK).min(nrows);
+                let start = chunk_idx * SPARSE_MATMUL_ROW_CHUNK;
+                let end = ((chunk_idx + 1) * SPARSE_MATMUL_ROW_CHUNK).min(nrows);
 
                 let mut idx_buf = Vec::new();
                 let mut data_buf = Vec::new();
@@ -2298,21 +2339,7 @@ pub fn csr_sparse_matmul_dense<T>(
 where
     T: BixverseFloat + Send + Sync + Default,
 {
-    let ncol_a = a.shape().1;
-    let nrow_b = b.shape().0;
-
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if !b.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    if ncol_a != nrow_b {
-        return Err(CoreErrors::SparseMatrixMultiplication {
-            n_col_a: ncol_a,
-            n_row_b: nrow_b,
-        });
-    }
+    require_matmul_operands(a, b)?;
 
     let n_rows = a.nrows();
     let n_cols = b.ncols();
@@ -2405,9 +2432,7 @@ pub fn csr_matmul_dense_block<T>(
 where
     T: BixverseFloat + BixverseSimd,
 {
-    if !a.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
+    require_csr(a)?;
 
     let (n_rows, n_cols) = a.shape();
 
@@ -2448,6 +2473,63 @@ where
 /// Stored non-zeros from which the column statistics fan out over rayon
 const PAR_COLUMN_STATS_MIN_NNZ: usize = 1 << 20;
 
+/////////////////////////
+// Statistics: helpers //
+/////////////////////////
+
+/// The data layer a column statistic runs over.
+///
+/// ### Params
+///
+/// * `csc` - The matrix, which must be CSC
+/// * `use_second_layer` - Use `data_2` instead of `data`
+///
+/// ### Returns
+///
+/// The layer's stored values, or [CoreErrors::SparseMatrixMustBeCsc] /
+/// [CoreErrors::Data2NotAvailable].
+fn csc_layer<T>(csc: &CompressedSparseData2<T>, use_second_layer: bool) -> Result<&[T], CoreErrors>
+where
+    T: BixverseNumeric,
+{
+    require_csc(csc)?;
+
+    if use_second_layer {
+        Ok(csc
+            .data_2
+            .as_ref()
+            .ok_or(CoreErrors::Data2NotAvailable)?
+            .as_slice())
+    } else {
+        Ok(csc.data.as_slice())
+    }
+}
+
+/// Evaluate a per-column statistic for every column, in parallel once the
+/// matrix is large enough.
+///
+/// ### Params
+///
+/// * `ncols` - Number of columns
+/// * `nnz` - Stored values of the layer, gating the parallel path via
+///   [PAR_COLUMN_STATS_MIN_NNZ]
+/// * `stat` - Statistic of column `j`
+///
+/// ### Returns
+///
+/// One value per column.
+fn collect_per_column<T, F>(ncols: usize, nnz: usize, stat: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync + Send,
+{
+    if nnz >= PAR_COLUMN_STATS_MIN_NNZ {
+        (0..ncols).into_par_iter().map(stat).collect()
+    } else {
+        (0..ncols).map(stat).collect()
+    }
+}
+
 //////////////////////////////////
 // Statistics: public functions //
 //////////////////////////////////
@@ -2469,33 +2551,16 @@ pub fn sparse_col_means_csc<T>(
 where
     T: BixverseFloat + BixverseSimd,
 {
-    if csc.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsc);
-    }
-
-    let active_data: &[T] = if use_second_layer {
-        csc.data_2
-            .as_ref()
-            .ok_or(CoreErrors::Data2NotAvailable)?
-            .as_slice()
-    } else {
-        csc.data.as_slice()
-    };
+    let active_data = csc_layer(csc, use_second_layer)?;
 
     let (nrows, ncols) = csc.shape();
     let nrows_t = T::from_usize(nrows).unwrap();
 
-    let col_mean = |j: usize| {
+    Ok(collect_per_column(ncols, active_data.len(), |j| {
         let start = csc.indptr[j] as usize;
         let end = csc.indptr[j + 1] as usize;
         T::bxv_sum(&active_data[start..end]) / nrows_t
-    };
-
-    if active_data.len() >= PAR_COLUMN_STATS_MIN_NNZ {
-        Ok((0..ncols).into_par_iter().map(col_mean).collect())
-    } else {
-        Ok((0..ncols).map(col_mean).collect())
-    }
+    }))
 }
 
 /// Calculate the column standard deviations for CSC [CompressedSparseData2]
@@ -2515,24 +2580,13 @@ pub fn sparse_col_sds_csc<T>(
 where
     T: BixverseFloat + BixverseSimd,
 {
-    if csc.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsc);
-    }
-
-    let active_data: &[T] = if use_second_layer {
-        csc.data_2
-            .as_ref()
-            .ok_or(CoreErrors::Data2NotAvailable)?
-            .as_slice()
-    } else {
-        csc.data.as_slice()
-    };
+    let active_data = csc_layer(csc, use_second_layer)?;
 
     let (nrows, ncols) = csc.shape();
     let nrows_t = T::from_usize(nrows).unwrap();
     let denom = nrows_t - T::one();
 
-    let col_sd = |j: usize| {
+    Ok(collect_per_column(ncols, active_data.len(), |j| {
         let start = csc.indptr[j] as usize;
         let end = csc.indptr[j + 1] as usize;
         let col_slice = &active_data[start..end];
@@ -2542,13 +2596,7 @@ where
         let ssd_nonzero = T::bxv_sum_squared_deviation(col_slice, mean);
         let ssd_total = ssd_nonzero + implicit_zeros * mean * mean;
         (ssd_total / denom).sqrt()
-    };
-
-    if active_data.len() >= PAR_COLUMN_STATS_MIN_NNZ {
-        Ok((0..ncols).into_par_iter().map(col_sd).collect())
-    } else {
-        Ok((0..ncols).map(col_sd).collect())
-    }
+    }))
 }
 
 /// Compute Frobenius norm of sparse matrix
@@ -3570,6 +3618,28 @@ impl Default for BlockLanczosParams {
 // Block Lanczos: helpers //
 ////////////////////////////
 
+/// Check that a block operator returned the `n x width` block it was asked for.
+///
+/// ### Params
+///
+/// * `out` - What the operator returned
+/// * `n` - Dimension of the operator
+/// * `width` - Columns of the block that was applied
+///
+/// ### Returns
+///
+/// `Ok(())`, or [CoreErrors::InvalidArgument] naming both shapes.
+fn check_operator_output(out: &Mat<f64>, n: usize, width: usize) -> Result<(), CoreErrors> {
+    if out.nrows() != n || out.ncols() != width {
+        return Err(CoreErrors::InvalidArgument(format!(
+            "block Lanczos: operator returned {} x {}, expected {n} x {width}",
+            out.nrows(),
+            out.ncols()
+        )));
+    }
+    Ok(())
+}
+
 /// Leading eigenpairs of a small operator, formed densely.
 ///
 /// ### Params
@@ -3592,14 +3662,7 @@ where
         let w = b.min(n - col);
         let unit = Mat::<f64>::from_fn(n, w, |i, c| if i == col + c { 1.0 } else { 0.0 });
         let out = op(unit.as_ref())?;
-        if out.nrows() != n || out.ncols() != w {
-            return Err(CoreErrors::InvalidArgument(format!(
-                "block Lanczos: operator returned {} x {}, expected {n} x {w}",
-                out.nrows(),
-                out.ncols()
-            ))
-            .into());
-        }
+        check_operator_output(&out, n, w)?;
         a.subcols_mut(col, w).copy_from(&out);
     }
     // An f32 operator is only symmetric to round-off.
@@ -3824,14 +3887,7 @@ where
         while j < m {
             let width = j + b;
             let mut w = op(basis.subcols(j, b))?;
-            if w.nrows() != n || w.ncols() != b {
-                return Err(CoreErrors::InvalidArgument(format!(
-                    "block Lanczos: operator returned {} x {}, expected {n} x {b}",
-                    w.nrows(),
-                    w.ncols()
-                ))
-                .into());
-            }
+            check_operator_output(&w, n, b)?;
 
             // Rayleigh-Ritz coefficients against the basis so far, taken before
             // any subtraction so `h` is the exact projection.
