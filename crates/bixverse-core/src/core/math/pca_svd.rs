@@ -1,7 +1,8 @@
 //! Helper functions for Principal Component type analyses with implementations
 //! for randomised SVD on dense or sparse matrices.
 
-use faer::{Mat, MatRef};
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, MatRef, Par};
 use num_traits::Float;
 use rand::prelude::*;
 use rand_distr::Normal;
@@ -26,6 +27,11 @@ const TRANSPOSE_ROW_BLOCK: usize = 64;
 
 /// Columns written per task when filling a `Mat` from a row-major source
 const TRANSPOSE_COL_BLOCK: usize = 8;
+
+/// Rows per task in [tall_gram]. Large enough for each sequential GEMM to
+/// amortise its packing, small enough to keep every thread busy on a few tens
+/// of thousands of rows. Not tuned.
+const TALL_GRAM_ROW_CHUNK: usize = 8192;
 
 ////////////////
 // Structures //
@@ -562,7 +568,7 @@ where
 fn orthonormalise<F: BixverseFloat>(y: Mat<F>) -> Mat<F> {
     fn cholesky_qr<F: BixverseFloat>(y: &Mat<F>) -> Option<Mat<F>> {
         let k = y.ncols();
-        let gram = y.transpose() * y;
+        let gram = tall_gram(y.as_ref());
         let llt = gram.llt(faer::Side::Lower).ok()?;
         // Q = Y L^-T, with the small k x k inverse formed explicitly so the
         // tall product is a single GEMM
@@ -579,6 +585,43 @@ fn orthonormalise<F: BixverseFloat>(y: Mat<F>) -> Mat<F> {
         Some(q) => q,
         None => y.qr().compute_thin_Q(),
     }
+}
+
+/// `Y^T Y` for a tall-skinny `Y`, parallel over row chunks
+///
+/// faer parallelises a GEMM over output blocks. A `k x k` output with small
+/// `k` is a single block, so the long inner dimension runs on one thread and
+/// the rayon path ends up slower than a sequential call. Summing per-chunk
+/// Gram matrices from sequential GEMMs keeps every thread busy instead.
+///
+/// ### Params
+///
+/// * `y` - Tall matrix (n x k)
+///
+/// ### Returns
+///
+/// The `k x k` matrix `Y^T Y`.
+fn tall_gram<F: BixverseFloat>(y: MatRef<F>) -> Mat<F> {
+    let (n, k) = (y.nrows(), y.ncols());
+    (0..n.div_ceil(TALL_GRAM_ROW_CHUNK))
+        .into_par_iter()
+        .fold(
+            || Mat::<F>::zeros(k, k),
+            |mut acc, c| {
+                let start = c * TALL_GRAM_ROW_CHUNK;
+                let block = y.subrows(start, TALL_GRAM_ROW_CHUNK.min(n - start));
+                matmul(
+                    acc.as_mut(),
+                    Accum::Add,
+                    block.transpose(),
+                    block,
+                    F::one(),
+                    Par::Seq,
+                );
+                acc
+            },
+        )
+        .reduce(|| Mat::<F>::zeros(k, k), |a, b| a + b)
 }
 
 ///////////////////////////
