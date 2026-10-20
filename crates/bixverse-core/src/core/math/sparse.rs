@@ -2,7 +2,7 @@
 //! formats into each other.
 
 use crate::utils::gemm::gemm;
-use faer::{Accum, Mat, MatMut, MatRef};
+use faer::{Accum, Mat, MatMut, MatRef, Par};
 use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -3054,21 +3054,23 @@ where
     })
 }
 
-/// Ritz pairs and convergence diagnostics from [lanczos_thick_restart].
-struct RitzPairs {
+/// Ritz pairs and convergence diagnostics from [lanczos_thick_restart] and
+/// [block_lanczos_thick_restart].
+#[derive(Clone, Debug)]
+pub struct RitzPairs {
     /// Ritz values sorted descending.
-    values: Vec<f64>,
+    pub values: Vec<f64>,
     /// Unit-norm Ritz vectors, column-major, `n` rows by `values.len()`
     /// columns.
-    vectors: Vec<f64>,
+    pub vectors: Vec<f64>,
     /// Largest residual `||A x - lambda x||` over the returned pairs.
-    residual: f64,
+    pub residual: f64,
     /// Scale the residual was tested against, i.e. the `||A||` estimate.
-    norm_estimate: f64,
+    pub norm_estimate: f64,
     /// Whether `residual` met `tol * norm_estimate`.
-    converged: bool,
+    pub converged: bool,
     /// Restart cycles actually run.
-    restarts: usize,
+    pub restarts: usize,
 }
 
 /// Largest eigenpairs of a symmetric operator via thick-restarted Lanczos.
@@ -3395,6 +3397,497 @@ pub(crate) fn symmetric_eigen_descending(
     let vectors = Mat::<f64>::from_fn(size, size, |i, j| raw_vectors[(i, order[j])]);
 
     Ok((values, vectors))
+}
+
+///////////////////
+// Block Lanczos //
+///////////////////
+
+/// New blocks per restart cycle the derived basis leaves room for.
+///
+/// With a single new block per cycle the iteration degenerates into subspace
+/// iteration with Rayleigh-Ritz, which crawls on a clustered spectrum. Not
+/// tuned beyond that.
+const BLOCK_LANCZOS_MIN_NEW_BLOCKS: usize = 3;
+
+/// Parameters for the block thick-restart Lanczos eigensolver.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockLanczosParams {
+    /// Vectors per block, i.e. the width of every operator call. Wider blocks
+    /// mean fewer, larger calls, which is what pays where each call carries a
+    /// fixed launch and readback cost. Capped at half the operator dimension.
+    pub block_size: usize,
+    /// Krylov basis vectors held at once, rounded down to whole blocks. `None`
+    /// derives it as for [LanczosParams], rounded up to whole blocks, at least
+    /// twice the retained Ritz block and with room for
+    /// `BLOCK_LANCZOS_MIN_NEW_BLOCKS` new blocks per cycle.
+    pub basis_size: Option<usize>,
+    /// Maximum restart cycles.
+    pub max_restarts: usize,
+    /// Relative residual tolerance, tested against `tol * ||A||` as in
+    /// [LanczosParams::tol].
+    pub tol: f64,
+}
+
+impl BlockLanczosParams {
+    /// Defaults. Not tuned.
+    ///
+    /// ### Returns
+    ///
+    /// Self with blocks of 32, a derived basis size, 64 restarts and a
+    /// relative tolerance of `1e-6`. An f32 operator has a round-off floor
+    /// around `1e-7`, so the scalar solver's `1e-8` would only burn the budget
+    /// there.
+    pub fn new() -> Self {
+        Self {
+            block_size: 32,
+            basis_size: None,
+            max_restarts: 64,
+            tol: 1e-6,
+        }
+    }
+
+    /// Resolve block width, basis size and retained Ritz vectors.
+    ///
+    /// Everything is a whole number of blocks, so the operator is only ever
+    /// called at full width.
+    ///
+    /// ### Params
+    ///
+    /// * `n_keep` - Eigenpairs requested, already capped at `n`.
+    /// * `n` - Operator dimension.
+    ///
+    /// ### Returns
+    ///
+    /// `(block, basis, keep)`. `basis + block > n` means the operator is too
+    /// small for Lanczos to pay, see [block_lanczos_thick_restart].
+    fn resolve(&self, n_keep: usize, n: usize) -> (usize, usize, usize) {
+        let b = self.block_size.min(n / 2).max(1);
+        let round_up = |x: usize| x.div_ceil(b) * b;
+        let floor = |x: usize| (x / b) * b;
+
+        let keep_target = round_up(n_keep + LANCZOS_RESTART_GUARD);
+        let basis = match self.basis_size {
+            Some(size) => floor(size),
+            None => round_up((n_keep * 2 + 10).max(n_keep + 20))
+                .max(2 * keep_target)
+                .max(keep_target + BLOCK_LANCZOS_MIN_NEW_BLOCKS * b),
+        }
+        .max(2 * b)
+        .min(floor(n))
+        .max(b);
+        let keep = keep_target.min(floor(basis / 2)).max(b);
+
+        (b, basis, keep)
+    }
+}
+
+impl Default for BlockLanczosParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Largest eigenpairs of a symmetric operator via block thick-restarted
+/// Lanczos.
+///
+/// The block twin of [lanczos_thick_restart], with the same structure: an
+/// explicit projection `H = V^T A V` (arrow-shaped after a restart),
+/// classical Gram-Schmidt with a DGKS-conditional second pass, Rayleigh-Ritz,
+/// and a thick restart that keeps the best Ritz vectors plus the residual
+/// block. The operator is applied to a whole block per call, which is the
+/// point: on a device every call carries a fixed cost, and a block of `b`
+/// vectors pays it once instead of `b` times.
+///
+/// New blocks are orthonormalised among themselves by a Householder QR. If
+/// that block is rank deficient, the dependent directions are replaced by
+/// random vectors orthogonal to everything so far; the dropped residual is
+/// below the breakdown threshold, so the Arnoldi relation
+/// `A V = V H + Q R E^T` survives. A block that vanishes entirely means the
+/// basis spans an invariant subspace and the Ritz pairs are exact.
+///
+/// Convergence is the exact block residual `||R y_last||`, with `y_last` the
+/// last block of the Ritz coefficient vector, against `tol * ||A||`.
+///
+/// When the basis plus one block would reach the operator dimension, the
+/// residual block has no room left to stay orthogonal to the basis. The
+/// operator is then formed densely, a block of unit vectors per call, and
+/// decomposed exactly; that costs no more calls than a single cycle.
+///
+/// Internals are f64 regardless of the operator's precision.
+///
+/// ### Params
+///
+/// * `n` - Dimension of the operator.
+/// * `n_components` - Number of eigenpairs to compute. Capped at `n`.
+/// * `seed` - Seed for the starting block.
+/// * `params` - [BlockLanczosParams].
+/// * `op` - Symmetric operator, returns `A X` for an `n x b` block `X`.
+///
+/// ### Returns
+///
+/// [RitzPairs] with at most `min(n_components, n)` pairs, fewer if the
+/// iteration hit an invariant subspace first.
+pub fn block_lanczos_thick_restart<E, M>(
+    n: usize,
+    n_components: usize,
+    seed: u64,
+    params: BlockLanczosParams,
+    mut op: M,
+) -> Result<RitzPairs, E>
+where
+    E: From<CoreErrors>,
+    M: FnMut(MatRef<f64>) -> Result<Mat<f64>, E>,
+{
+    if n_components == 0 || n == 0 {
+        return Err(CoreErrors::MustBePositive(
+            "n_components and the operator dimension".to_string(),
+        )
+        .into());
+    }
+
+    let n_keep = n_components.min(n);
+    let (b, m, keep) = params.resolve(n_keep, n);
+    let par = faer_parallelism();
+
+    if m + b > n {
+        return dense_eigenpairs(n, n_keep, b, &mut op);
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut basis = Mat::<f64>::zeros(n, m);
+    let mut h = Mat::<f64>::zeros(m, m);
+    let start = Mat::<f64>::from_fn(n, b, |_, _| rng.random::<f64>() - 0.5);
+    basis
+        .subcols_mut(0, b)
+        .copy_from(start.qr().compute_thin_Q());
+
+    // Residual block of the last cycle, `A V = V H + resid_q resid_r E^T`.
+    let mut resid_q = Mat::<f64>::zeros(n, b);
+    let mut resid_r = Mat::<f64>::zeros(b, b);
+
+    let mut locked = 0usize;
+    let mut ritz_values: Vec<f64> = Vec::new();
+    let mut ritz_coeffs = Mat::<f64>::zeros(0, 0);
+    let mut m_final = 0usize;
+
+    let mut norm_estimate = 0.0f64;
+    let mut residual = f64::INFINITY;
+    let mut converged = false;
+    let mut restarts = 0usize;
+
+    let budget = params.max_restarts.max(1);
+
+    for cycle in 0..budget {
+        restarts = cycle + 1;
+        let mut m_eff = m;
+        let mut invariant = false;
+
+        let mut j = locked;
+        while j < m {
+            let width = j + b;
+            let mut w = op(basis.subcols(j, b))?;
+            if w.nrows() != n || w.ncols() != b {
+                return Err(CoreErrors::InvalidArgument(format!(
+                    "block Lanczos: operator returned {} x {}, expected {n} x {b}",
+                    w.nrows(),
+                    w.ncols()
+                ))
+                .into());
+            }
+
+            // Rayleigh-Ritz coefficients against the basis so far, taken before
+            // any subtraction so `h` is the exact projection.
+            let v = basis.subcols(0, width);
+            let mut coeffs = Mat::<f64>::zeros(width, b);
+            gemm(
+                coeffs.as_mut(),
+                Accum::Replace,
+                v.transpose(),
+                w.as_ref(),
+                1.0,
+                par,
+            );
+            for c in 0..b {
+                for i in 0..width {
+                    h[(i, j + c)] = coeffs[(i, c)];
+                    h[(j + c, i)] = coeffs[(i, c)];
+                }
+            }
+
+            let before = column_norms(w.as_ref());
+            norm_estimate = before.iter().fold(norm_estimate, |acc, &x| acc.max(x));
+
+            gemm(w.as_mut(), Accum::Add, v, coeffs.as_ref(), -1.0, par);
+            let after = column_norms(w.as_ref());
+
+            if after
+                .iter()
+                .zip(&before)
+                .any(|(&a, &bf)| a < LANCZOS_ORTHO_REFINE_RATIO * bf)
+            {
+                gemm(
+                    coeffs.as_mut(),
+                    Accum::Replace,
+                    v.transpose(),
+                    w.as_ref(),
+                    1.0,
+                    par,
+                );
+                gemm(w.as_mut(), Accum::Add, v, coeffs.as_ref(), -1.0, par);
+            }
+
+            let threshold = LANCZOS_BREAKDOWN_RATIO * norm_estimate;
+            let (q, r, n_deficient) = orthonormalise_block(w.as_ref(), v, threshold, &mut rng);
+
+            if n_deficient == b {
+                m_eff = width;
+                invariant = true;
+                break;
+            }
+
+            if width < m {
+                basis.subcols_mut(width, b).copy_from(&q);
+            } else {
+                resid_q = q;
+                resid_r = r;
+            }
+            j = width;
+        }
+
+        let (values, vectors) = symmetric_eigen_descending(h.as_ref(), m_eff)?;
+
+        let n_out = n_keep.min(m_eff);
+        residual = if invariant {
+            0.0
+        } else {
+            let mut y_last = Mat::<f64>::zeros(b, n_out);
+            y_last.copy_from(vectors.submatrix(m_eff - b, 0, b, n_out));
+            let mut ry = Mat::<f64>::zeros(b, n_out);
+            gemm(
+                ry.as_mut(),
+                Accum::Replace,
+                resid_r.as_ref(),
+                y_last.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            column_norms(ry.as_ref()).into_iter().fold(0.0f64, f64::max)
+        };
+
+        norm_estimate = norm_estimate
+            .max(values[0].abs())
+            .max(values[m_eff - 1].abs());
+        converged = residual <= params.tol * norm_estimate;
+
+        ritz_values = values;
+        ritz_coeffs = vectors;
+        m_final = m_eff;
+
+        if converged || invariant || cycle + 1 == budget {
+            break;
+        }
+
+        // Thick restart: best `keep` Ritz vectors, then the residual block.
+        let mut restarted = Mat::<f64>::zeros(n, keep);
+        gemm(
+            restarted.as_mut(),
+            Accum::Replace,
+            basis.subcols(0, m_eff),
+            ritz_coeffs.subcols(0, keep),
+            1.0,
+            par,
+        );
+
+        h.fill(0.0);
+        basis.subcols_mut(0, keep).copy_from(&restarted);
+        for (i, &value) in ritz_values.iter().take(keep).enumerate() {
+            h[(i, i)] = value;
+        }
+        basis.subcols_mut(keep, b).copy_from(&resid_q);
+        locked = keep;
+    }
+
+    let n_out = n_keep.min(m_final);
+    let mut ritz = Mat::<f64>::zeros(n, n_out);
+    gemm(
+        ritz.as_mut(),
+        Accum::Replace,
+        basis.subcols(0, m_final),
+        ritz_coeffs.subcols(0, n_out),
+        1.0,
+        par,
+    );
+
+    let mut vectors = vec![0.0f64; n * n_out];
+    for (c, column) in vectors.chunks_exact_mut(n).enumerate() {
+        let src = ritz.col(c);
+        let scale = src.norm_l2();
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        for (dst, &v) in column.iter_mut().zip(src.iter()) {
+            *dst = v * inv;
+        }
+    }
+
+    Ok(RitzPairs {
+        values: ritz_values[..n_out].to_vec(),
+        vectors,
+        residual,
+        norm_estimate,
+        converged,
+        restarts,
+    })
+}
+
+/// Leading eigenpairs of a small operator, formed densely.
+///
+/// ### Params
+///
+/// * `n` - Dimension of the operator.
+/// * `n_keep` - Eigenpairs to return, at most `n`.
+/// * `b` - Columns per operator call.
+/// * `op` - Symmetric operator, returns `A X` for an `n x w` block `X`.
+///
+/// ### Returns
+///
+/// [RitzPairs] with `n_keep` exact pairs, zero residual and zero restarts.
+fn dense_eigenpairs<E, M>(n: usize, n_keep: usize, b: usize, op: &mut M) -> Result<RitzPairs, E>
+where
+    E: From<CoreErrors>,
+    M: FnMut(MatRef<f64>) -> Result<Mat<f64>, E>,
+{
+    let mut a = Mat::<f64>::zeros(n, n);
+    for col in (0..n).step_by(b) {
+        let w = b.min(n - col);
+        let unit = Mat::<f64>::from_fn(n, w, |i, c| if i == col + c { 1.0 } else { 0.0 });
+        let out = op(unit.as_ref())?;
+        if out.nrows() != n || out.ncols() != w {
+            return Err(CoreErrors::InvalidArgument(format!(
+                "block Lanczos: operator returned {} x {}, expected {n} x {w}",
+                out.nrows(),
+                out.ncols()
+            ))
+            .into());
+        }
+        a.subcols_mut(col, w).copy_from(&out);
+    }
+    // An f32 operator is only symmetric to round-off.
+    let sym = Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+
+    let (values, vectors) = symmetric_eigen_descending(sym.as_ref(), n)?;
+    let flat: Vec<f64> = (0..n_keep)
+        .flat_map(|c| vectors.col(c).iter().copied().collect::<Vec<_>>())
+        .collect();
+
+    Ok(RitzPairs {
+        values: values[..n_keep].to_vec(),
+        vectors: flat,
+        residual: 0.0,
+        norm_estimate: values[0].abs().max(values[n - 1].abs()),
+        converged: true,
+        restarts: 0,
+    })
+}
+
+/// Euclidean norm of every column.
+///
+/// ### Params
+///
+/// * `x` - Matrix whose columns to measure.
+///
+/// ### Returns
+///
+/// One norm per column.
+fn column_norms(x: MatRef<f64>) -> Vec<f64> {
+    (0..x.ncols()).map(|c| x.col(c).norm_l2()).collect()
+}
+
+/// Orthonormalise a block against itself, column by column.
+///
+/// Two classical Gram-Schmidt passes per column against the columns before it.
+/// A column whose remainder falls below `threshold` is dependent: it gets a
+/// zero diagonal in `R` and a random replacement, orthogonalised twice against
+/// `basis` and the columns so far. Later columns are still projected onto the
+/// replacement and the coefficients land in `R`, so `W = Q R` holds exactly
+/// up to the dropped remainders, which is what keeps the Arnoldi relation
+/// intact. A Householder QR cannot do this without pivoting: zeroing a row of
+/// its `R` also drops the off-diagonal terms of every later column.
+///
+/// ### Params
+///
+/// * `w` - Block to orthonormalise, `n x b`, already orthogonal to `basis`.
+/// * `basis` - Basis the replacements must stay orthogonal to.
+/// * `threshold` - Remainder norm at or below which a column is dependent.
+/// * `rng` - Source of the replacement vectors.
+///
+/// ### Returns
+///
+/// `(q, r, n_deficient)`: orthonormal `q` (`n x b`), upper triangular `r`
+/// (`b x b`) and the number of dependent columns.
+fn orthonormalise_block(
+    w: MatRef<f64>,
+    basis: MatRef<f64>,
+    threshold: f64,
+    rng: &mut StdRng,
+) -> (Mat<f64>, Mat<f64>, usize) {
+    let (n, b) = w.shape();
+    let mut q = w.to_owned();
+    let mut r = Mat::<f64>::zeros(b, b);
+    let mut n_deficient = 0usize;
+
+    for c in 0..b {
+        for _ in 0..2 {
+            for i in 0..c {
+                let d = q.col(i).transpose() * q.col(c);
+                r[(i, c)] += d;
+                for k in 0..n {
+                    q[(k, c)] -= d * q[(k, i)];
+                }
+            }
+        }
+
+        let remainder = q.col(c).norm_l2();
+        if remainder > threshold {
+            r[(c, c)] = remainder;
+            let inv = 1.0 / remainder;
+            q.col_mut(c).iter_mut().for_each(|x| *x *= inv);
+            continue;
+        }
+
+        n_deficient += 1;
+        let mut x = Mat::<f64>::from_fn(n, 1, |_, _| rng.random::<f64>() - 0.5);
+        for _ in 0..2 {
+            let mut coeffs = Mat::<f64>::zeros(basis.ncols(), 1);
+            gemm(
+                coeffs.as_mut(),
+                Accum::Replace,
+                basis.transpose(),
+                x.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            gemm(
+                x.as_mut(),
+                Accum::Add,
+                basis,
+                coeffs.as_ref(),
+                -1.0,
+                Par::Seq,
+            );
+            for i in 0..c {
+                let d = q.col(i).transpose() * x.col(0);
+                for k in 0..n {
+                    x[(k, 0)] -= d * q[(k, i)];
+                }
+            }
+        }
+        let scale = x.col(0).norm_l2();
+        for k in 0..n {
+            q[(k, c)] = x[(k, 0)] / scale;
+        }
+    }
+
+    (q, r, n_deficient)
 }
 
 /////////////////
@@ -4086,7 +4579,8 @@ mod tests {
         let vals: Vec<f64> = (0..n * m).map(|_| rng.random::<f64>()).collect();
         let indices: Vec<u32> = (0..n).flat_map(|_| 0..m as u32).collect();
         let indptr: Vec<u32> = (0..=n).map(|i| (i * m) as u32).collect();
-        let csr = CompressedSparseData2::<f64, f64>::new_csr(&vals, &indices, &indptr, None, (n, m));
+        let csr =
+            CompressedSparseData2::<f64, f64>::new_csr(&vals, &indices, &indptr, None, (n, m));
 
         let means: Vec<f64> = (0..m)
             .map(|j| (0..n).map(|i| vals[i * m + j]).sum::<f64>() / n as f64)
@@ -4305,6 +4799,132 @@ mod tests {
         assert_relative_eq!(values[0], 40.0, epsilon = 1e-8);
         assert_relative_eq!(values[1], 39.0, epsilon = 1e-8);
         assert_relative_eq!(values[2], 38.0, epsilon = 1e-8);
+    }
+
+    ///////////////////
+    // Block Lanczos //
+    ///////////////////
+
+    /// Block operator over a symmetric CSR, as the GPU drivers present it.
+    fn block_op(
+        mat: &CompressedSparseData2<f64, f64>,
+        x: MatRef<f64>,
+    ) -> Result<Mat<f64>, CoreErrors> {
+        let n = mat.shape.0;
+        Ok(Mat::from_fn(n, x.ncols(), |i, c| {
+            (mat.indptr[i] as usize..mat.indptr[i + 1] as usize)
+                .map(|k| mat.data[k] * x[(mat.indices[k] as usize, c)])
+                .sum()
+        }))
+    }
+
+    /// Block Lanczos converges a clustered spectrum to the same values as the scalar solver.
+    #[test]
+    fn test_block_lanczos_matches_scalar_on_a_clustered_spectrum() {
+        let n = 300usize;
+        let mat = path_graph(n);
+        let scalar = compute_largest_eigenpairs_lanczos_diag(&mat, 4, 42, None).unwrap();
+
+        // Wider blocks need more restarts here: at a fixed basis they buy a
+        // shallower Krylov space per cycle, and this spectrum is clustered.
+        for block_size in [1usize, 4, 16] {
+            let params = BlockLanczosParams {
+                block_size,
+                basis_size: None,
+                max_restarts: 1000,
+                tol: 1e-8,
+            };
+            let res = block_lanczos_thick_restart(n, 4, 42, params, |x| block_op(&mat, x)).unwrap();
+
+            assert!(
+                res.converged,
+                "b = {block_size}: residual {:e}",
+                res.residual
+            );
+            for k in 0..4 {
+                assert_relative_eq!(res.values[k], scalar.eigenvalues[k], epsilon = 1e-7);
+                let v: Vec<Vec<f32>> = (0..n)
+                    .map(|i| vec![res.vectors[k * n + i] as f32])
+                    .collect();
+                let residual = pair_residual(&mat, &res.values[k..k + 1], &v, 0);
+                assert!(residual < 1e-5, "b = {block_size}, pair {k}: {residual:e}");
+            }
+        }
+    }
+
+    /// A low-rank operator closes the Krylov space mid-block; the dependent directions are replaced.
+    #[test]
+    fn test_block_lanczos_low_rank_recovers_the_nonzero_pairs() {
+        // Rank two with a block of four: the first residual block is rank
+        // deficient, so the replacement path runs before the space closes.
+        let mut diag = vec![0.0f64; 200];
+        diag[0] = 5.0;
+        diag[1] = 3.0;
+        let mat = diagonal(&diag);
+        let params = BlockLanczosParams {
+            block_size: 4,
+            ..BlockLanczosParams::new()
+        };
+
+        let res = block_lanczos_thick_restart(200, 2, 3, params, |x| block_op(&mat, x)).unwrap();
+
+        assert!(res.converged);
+        assert_relative_eq!(res.values[0], 5.0, epsilon = 1e-9);
+        assert_relative_eq!(res.values[1], 3.0, epsilon = 1e-9);
+        assert_relative_eq!(res.vectors[0].abs(), 1.0, epsilon = 1e-6);
+        assert_relative_eq!(res.vectors[200 + 1].abs(), 1.0, epsilon = 1e-6);
+    }
+
+    /// An operator too small for Lanczos is solved densely, every pair coming back.
+    #[test]
+    fn test_block_lanczos_caps_the_block_at_the_dimension() {
+        let mat = diagonal(&[4.0, 3.0, 2.0, 1.0]);
+        let params = BlockLanczosParams {
+            block_size: 64,
+            ..BlockLanczosParams::new()
+        };
+
+        let res = block_lanczos_thick_restart(4, 10, 1, params, |x| block_op(&mat, x)).unwrap();
+
+        assert_eq!(res.values.len(), 4);
+        assert_eq!(res.vectors.len(), 16);
+        assert_relative_eq!(res.values[0], 4.0, epsilon = 1e-9);
+        assert_relative_eq!(res.values[3], 1.0, epsilon = 1e-9);
+    }
+
+    /// Regression: a basis one block short of the dimension used to fill the residual block with noise.
+    #[test]
+    fn test_block_lanczos_ragged_dimension_is_exact() {
+        // 50 is not a multiple of 16, and 48 basis vectors leave the residual
+        // block 2 dimensions to live in. Replacements there were noise and the
+        // leading value came out several times too large.
+        let diag: Vec<f64> = (0..50).map(|i| 1.0 + i as f64).collect();
+        let mat = diagonal(&diag);
+        let params = BlockLanczosParams {
+            block_size: 16,
+            ..BlockLanczosParams::new()
+        };
+
+        let res = block_lanczos_thick_restart(50, 3, 9, params, |x| block_op(&mat, x)).unwrap();
+
+        assert!(res.converged);
+        assert_relative_eq!(res.values[0], 50.0, epsilon = 1e-9);
+        assert_relative_eq!(res.values[1], 49.0, epsilon = 1e-9);
+        assert_relative_eq!(res.values[2], 48.0, epsilon = 1e-9);
+    }
+
+    /// An operator returning the wrong shape is an error, not a panic.
+    #[test]
+    fn test_block_lanczos_rejects_a_misshapen_operator() {
+        let res = block_lanczos_thick_restart::<CoreErrors, _>(
+            10,
+            2,
+            1,
+            BlockLanczosParams::new(),
+            |_| Ok(Mat::<f64>::zeros(10, 1)),
+        );
+
+        assert!(matches!(res, Err(CoreErrors::InvalidArgument(_))));
     }
 
     ///////////////////////////

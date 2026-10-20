@@ -1,24 +1,27 @@
-//! Sparse randomised single-cell PCA on MLX. Same streaming, column statistics
-//! and CLR handling as `gpu::sc_gpu::pca_gpu`, with the SVD on
-//! `mlx::linalg::rand_svd`.
+//! Sparse single-cell PCA on MLX. Same streaming, column statistics, CLR
+//! handling and solver dispatch as `gpu::sc_gpu::pca_gpu`, with the SVD on
+//! `mlx::linalg::rand_svd` or `mlx::linalg::lanczos`.
 
 use std::time::Instant;
 
+use crate::linalg::lanczos::sparse_svd_lanczos_mlx;
 use crate::linalg::rand_svd::{RandSvdMlxParams, randomised_sparse_svd_mlx};
 use crate::prelude::*;
 use bixverse_core::core::math::pca_svd::*;
 use bixverse_core::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use bixverse_sc::sc_processing::pca::*;
 
-/////////////////////////////////
-// Sparse randomised PCA (MLX) //
-/////////////////////////////////
+//////////////////////
+// Sparse PCA (MLX) //
+//////////////////////
 
-/// Calculate a sparse randomised PCA on MLX.
+/// Calculate a sparse PCA on MLX.
 ///
 /// Streams the data in, computes the gene means and standard deviations on the
-/// host and runs the randomised sparse SVD on MLX with the centring and
-/// scaling applied implicitly, so the matrix is never densified.
+/// host and runs the sparse SVD on MLX with the centring and scaling applied
+/// implicitly, so the matrix is never densified. `PcaSolver::Randomised` runs
+/// the randomised SVD; every other solver runs the exact block Lanczos, as
+/// there is no MLX covariance path.
 ///
 /// ### Params
 ///
@@ -27,9 +30,8 @@ use bixverse_sc::sc_processing::pca::*;
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
 /// * `clr_offsets` - Per-cell CLR offsets, required if `params_pca.clr`.
-/// * `params_pca` - The [SingleCellPcaParams] for this run. `svd_solver` is
-///   ignored, this is always randomised.
-/// * `seed` - Seed for randomised SVD.
+/// * `params_pca` - The [SingleCellPcaParams] for this run.
+/// * `seed` - Seed for the random sketch or the Lanczos starting block.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -64,21 +66,38 @@ pub fn pca_on_sc_sparse_mlx<S: SingleCellReading>(
 
     let start_svd = Instant::now();
 
-    // safe guard against degenerate cases
-    let max_s = std::cmp::min(cell_indices.len(), gene_indices.len()).saturating_sub(1);
-    let oversampling = std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs));
-    let svd_params = RandSvdMlxParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
+    let svd_res = match params_pca.svd_solver {
+        PcaSolver::Randomised => {
+            // safe guard against degenerate cases
+            let max_s = std::cmp::min(cell_indices.len(), gene_indices.len()).saturating_sub(1);
+            let oversampling =
+                std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs));
+            let svd_params = RandSvdMlxParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
 
-    let svd_res = randomised_sparse_svd_mlx::<f32>(
-        csc,
-        &col_means,
-        &col_std,
-        clr_offsets,
-        no_pcs,
-        Some(svd_params),
-        seed as u64,
-        verbose,
-    )?;
+            randomised_sparse_svd_mlx::<f32>(
+                csc,
+                &col_means,
+                &col_std,
+                clr_offsets,
+                no_pcs,
+                Some(svd_params),
+                seed as u64,
+                verbose,
+            )?
+        }
+        PcaSolver::Exact | PcaSolver::Auto | PcaSolver::Covariance => {
+            sparse_svd_lanczos_mlx::<f32>(
+                csc,
+                &col_means,
+                &col_std,
+                clr_offsets,
+                no_pcs,
+                None,
+                seed as u64,
+                verbose,
+            )?
+        }
+    };
 
     let scores = compute_pc_scores(&svd_res);
 
