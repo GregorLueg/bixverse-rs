@@ -2855,40 +2855,6 @@ where
     v.par_iter_mut().for_each(|x| *x /= n);
 }
 
-/// Helper function to calculate eigenvalues
-///
-/// ### Params
-///
-/// * `alpha` - alpha vector
-/// * `beta` - beta vector
-///
-/// ### Returns
-///
-/// Tuple of `(eigenvectors, eigenvalues)`
-fn tridiag_eig<T>(alpha: &[T], beta: &[T]) -> Result<(Vec<T>, Mat<T>), CoreErrors>
-where
-    T: BixverseFloat,
-{
-    let n = alpha.len();
-    let mut t = Mat::<T>::zeros(n, n);
-
-    for i in 0..n {
-        t[(i, i)] = alpha[i];
-        if i < n - 1 {
-            t[(i, i + 1)] = beta[i];
-            t[(i + 1, i)] = beta[i];
-        }
-    }
-
-    let eig = t
-        .self_adjoint_eigen(faer::Side::Lower)
-        .map_err(|_| CoreErrors::FaerEigenError)?;
-    let evals = eig.S().column_vector().iter().copied().collect();
-    let evecs = eig.U().to_owned();
-
-    Ok((evals, evecs))
-}
-
 /// Ritz vectors retained across a restart, above the requested pair count.
 const LANCZOS_RESTART_GUARD: usize = 5;
 
@@ -3023,32 +2989,7 @@ where
 /// Compute the largest eigenpairs of a symmetric sparse matrix, with
 /// diagnostics.
 ///
-/// Thick-restarted Lanczos. Each cycle builds a Krylov basis of
-/// [LanczosParams::basis_size] vectors with full reorthogonalisation, does a
-/// Rayleigh-Ritz extraction, and restarts from the best Ritz vectors plus the
-/// residual direction. Restarting is the key point: the basis stays bounded
-/// while the iteration keeps going, so a clustered spectrum converges without
-/// the quadratic orthogonalisation cost a single long run would need.
-///
-/// The projected matrix is accumulated explicitly as `H[i][j] = <v_i, A v_j>`
-/// rather than as a tridiagonal recurrence. After a thick restart the leading
-/// basis vectors are Ritz vectors, not Lanczos vectors, so the projection is
-/// arrow-shaped rather than tridiagonal; forming it directly handles that
-/// without special-casing.
-///
-/// The basis is held column-major as one flat buffer, so the projection, the
-/// reorthogonalisation, the restart and the final Ritz vectors are all faer
-/// products rather than scalar loops. Orthogonalisation is classical
-/// Gram-Schmidt with a DGKS-conditional second pass, which matches the accuracy
-/// of two unconditional modified passes while being expressible as two matrix
-/// products instead of 2 * basis_size scalar loops.
-///
-/// Convergence uses the exact Arnoldi residual |beta_m| * |y[m-1]|, which
-/// still holds under thick restart because the relation A V = V H + beta v
-/// e^T is preserved across cycles, tested against tol * ||A||.
-///
-/// Internals are f64 regardless of the input type. Eigenvalues come back in
-/// f64, eigenvectors in f32.
+/// Thick-restarted Lanczos, see [lanczos_thick_restart] for the algorithm.
 ///
 /// ### Params
 ///
@@ -3072,17 +3013,7 @@ pub fn compute_largest_eigenpairs_lanczos_diag<T>(
 where
     T: BixverseNumeric + BixverseSimd + Into<f64>,
 {
-    let params = params.unwrap_or_default();
     let n = matrix.shape.0;
-
-    if n_components == 0 || n == 0 {
-        return Err(CoreErrors::MustBePositive(
-            "n_components and the matrix dimension".to_string(),
-        ));
-    }
-
-    let n_keep = n_components.min(n);
-    let m = params.resolve_basis(n_keep, n);
 
     // CSR gives contiguous rows for the matrix-vector product.
     let csr = match matrix.cs_type {
@@ -3101,6 +3032,104 @@ where
             *yi = sum;
         });
     };
+
+    let ritz = lanczos_thick_restart(n, n_components, seed, params.unwrap_or_default(), matvec)?;
+
+    let n_out = ritz.values.len();
+    let mut eigenvectors = vec![vec![0.0f32; n_out]; n];
+    for comp in 0..n_out {
+        let column = &ritz.vectors[comp * n..(comp + 1) * n];
+        for (point, &v) in column.iter().enumerate() {
+            eigenvectors[point][comp] = v as f32;
+        }
+    }
+
+    Ok(LanczosResult {
+        eigenvalues: ritz.values,
+        eigenvectors,
+        residual: ritz.residual,
+        norm_estimate: ritz.norm_estimate,
+        converged: ritz.converged,
+        restarts: ritz.restarts,
+    })
+}
+
+/// Ritz pairs and convergence diagnostics from [lanczos_thick_restart].
+struct RitzPairs {
+    /// Ritz values sorted descending.
+    values: Vec<f64>,
+    /// Unit-norm Ritz vectors, column-major, `n` rows by `values.len()`
+    /// columns.
+    vectors: Vec<f64>,
+    /// Largest residual `||A x - lambda x||` over the returned pairs.
+    residual: f64,
+    /// Scale the residual was tested against, i.e. the `||A||` estimate.
+    norm_estimate: f64,
+    /// Whether `residual` met `tol * norm_estimate`.
+    converged: bool,
+    /// Restart cycles actually run.
+    restarts: usize,
+}
+
+/// Largest eigenpairs of a symmetric operator via thick-restarted Lanczos.
+///
+/// Each cycle builds a Krylov basis of
+/// [LanczosParams::basis_size] vectors with full reorthogonalisation, does a
+/// Rayleigh-Ritz extraction, and restarts from the best Ritz vectors plus the
+/// residual direction. Restarting is the key point: the basis stays bounded
+/// while the iteration keeps going, so a clustered spectrum converges without
+/// the quadratic orthogonalisation cost a single long run would need.
+///
+/// The projected matrix is accumulated explicitly as `H[i][j] = <v_i, A v_j>`
+/// rather than as a tridiagonal recurrence. After a thick restart the leading
+/// basis vectors are Ritz vectors, not Lanczos vectors, so the projection is
+/// arrow-shaped rather than tridiagonal; forming it directly handles that
+/// without special-casing.
+///
+/// The basis is held column-major as one flat buffer, so the projection, the
+/// reorthogonalisation, the restart and the final Ritz vectors are all faer
+/// products rather than scalar loops. Orthogonalisation is classical
+/// Gram-Schmidt with a DGKS-conditional second pass, which matches the accuracy
+/// of two unconditional modified passes while being expressible as two matrix
+/// products instead of 2 * basis_size scalar loops.
+///
+/// Convergence uses the exact Arnoldi residual |beta_m| * |y[m-1]|, which
+/// still holds under thick restart because the relation A V = V H + beta v
+/// e^T is preserved across cycles, tested against tol * ||A||.
+///
+/// Internals are f64 regardless of the caller's float type, the operator
+/// included.
+///
+/// ### Params
+///
+/// * `n` - Dimension of the operator.
+/// * `n_components` - Number of eigenpairs to compute. Capped at `n`.
+/// * `seed` - Seed for the starting vector.
+/// * `params` - [LanczosParams] for basis size, restarts and tolerance.
+/// * `matvec` - Symmetric operator, writes `A x` into `y`.
+///
+/// ### Returns
+///
+/// [RitzPairs] with at most `min(n_components, n)` pairs, fewer if the
+/// iteration hit an invariant subspace first.
+fn lanczos_thick_restart<M>(
+    n: usize,
+    n_components: usize,
+    seed: u64,
+    params: LanczosParams,
+    matvec: M,
+) -> Result<RitzPairs, CoreErrors>
+where
+    M: Fn(&[f64], &mut [f64]),
+{
+    if n_components == 0 || n == 0 {
+        return Err(CoreErrors::MustBePositive(
+            "n_components and the matrix dimension".to_string(),
+        ));
+    }
+
+    let n_keep = n_components.min(n);
+    let m = params.resolve_basis(n_keep, n);
 
     // Column-major basis, one flat buffer, so every pass over it is a `faer`
     // product and column `j` is still a contiguous slice for the matrix product.
@@ -3235,21 +3264,15 @@ where
     let mut ritz = vec![0.0f64; n_out * n];
     basis_expand(&basis, n, m_final, ritz_coeffs.as_ref(), n_out, &mut ritz);
 
-    let eigenvalues: Vec<f64> = ritz_values[..n_out].to_vec();
-    let mut eigenvectors = vec![vec![0.0f32; n_out]; n];
-
-    for comp in 0..n_out {
-        let column = &ritz[comp * n..(comp + 1) * n];
+    for column in ritz.chunks_exact_mut(n) {
         let scale: f64 = column.iter().map(|v| v * v).sum::<f64>().sqrt();
         let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        for (point, &v) in column.iter().enumerate() {
-            eigenvectors[point][comp] = (v * inv) as f32;
-        }
+        column.iter_mut().for_each(|v| *v *= inv);
     }
 
-    Ok(LanczosResult {
-        eigenvalues,
-        eigenvectors,
+    Ok(RitzPairs {
+        values: ritz_values[..n_out].to_vec(),
+        vectors: ritz,
         residual,
         norm_estimate,
         converged,
@@ -3380,6 +3403,9 @@ pub(crate) fn symmetric_eigen_descending(
 
 /// Compute sparse SVD using Lanczos on A^T A or AA^T
 ///
+/// Thick-restarted with the default [LanczosParams], so the trailing
+/// components converge on a flat spectrum too.
+///
 /// ### Params
 ///
 /// * `matrix` - Sparse matrix (CSR or CSC)
@@ -3411,7 +3437,6 @@ where
     let (n, m) = matrix.shape;
     let use_ata = n > m;
     let krylov_dim = if use_ata { m } else { n };
-    let n_iter = (n_components * 2 + 10).max(n_components).min(krylov_dim);
 
     // keep both representations to make matvec operations fast
     let (csr, csc);
@@ -3526,82 +3551,43 @@ where
         })
     };
 
-    // lanczos iteration
-    let mut v_matrix = Mat::<F>::zeros(krylov_dim, n_iter);
-    let mut v = vec![F::zero(); krylov_dim];
-    let mut v_old = vec![F::zero(); krylov_dim];
-    let mut w = vec![F::zero(); krylov_dim];
-    let mut w_faer = faer::Col::<F>::zeros(krylov_dim);
-
-    let mut rng = StdRng::seed_from_u64(seed);
-    for i in 0..krylov_dim {
-        v[i] = F::from(rng.random::<f64>() - 0.5).unwrap();
-    }
-    normalise(&mut v);
-
-    let mut alpha = vec![F::zero(); n_iter];
-    let mut beta = vec![F::zero(); n_iter];
-
-    for j in 0..n_iter {
-        for i in 0..krylov_dim {
-            v_matrix[(i, j)] = v[i];
+    // the restarted solver runs in f64; the Gram operator stays in F
+    let matvec_gram_f64 = |x: &[f64], y: &mut [f64]| {
+        let x_f: Vec<F> = x
+            .iter()
+            .map(|&v| F::from(v).expect("f64 casts into any float type"))
+            .collect();
+        let mut y_f = vec![F::zero(); krylov_dim];
+        matvec_gram(&x_f, &mut y_f);
+        for (dst, src) in y.iter_mut().zip(y_f) {
+            *dst = src.to_f64().expect("float casts into f64");
         }
+    };
 
-        matvec_gram(&v, &mut w);
-        alpha[j] = dot(&w, &v);
-
-        for i in 0..krylov_dim {
-            w[i] -= alpha[j] * v[i];
-            if j > 0 {
-                w[i] -= beta[j - 1] * v_old[i];
-            }
-        }
-
-        // Gram-Schmidt / Orthogonalisation
-        // w -= Vj * (Vj^T * w)
-        for i in 0..krylov_dim {
-            w_faer[i] = w[i];
-        }
-        let vj = v_matrix.as_ref().subcols(0, j + 1);
-        let coeffs = vj.transpose() * w_faer.as_ref();
-        let proj = vj * coeffs.as_ref();
-        for i in 0..krylov_dim {
-            w[i] -= proj[i];
-        }
-
-        beta[j] = norm(&w);
-        if beta[j] < F::from(1e-12).unwrap() {
-            break;
-        }
-
-        v_old.copy_from_slice(&v);
-        v.copy_from_slice(&w);
-        normalise(&mut v);
-    }
-
-    // eigendecomposition and reconstruction
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
-
-    let mut indices: Vec<usize> = (0..evals.len()).collect();
-    indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
+    let ritz = lanczos_thick_restart(
+        krylov_dim,
+        n_components,
+        seed,
+        LanczosParams::default(),
+        matvec_gram_f64,
+    )?;
 
     let mut singular_values: Vec<F> = Vec::with_capacity(n_components);
     let mut u_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
     let mut v_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
 
-    for &idx in indices.iter().take(n_components) {
-        let eval = evals[idx];
-        if eval <= F::zero() {
+    for (idx, &eval) in ritz.values.iter().enumerate() {
+        if eval <= 0.0 {
             continue;
         }
 
-        let sigma = eval.sqrt();
+        let sigma = F::from(eval.sqrt()).expect("f64 casts into any float type");
         singular_values.push(sigma);
 
-        // gram_evec = v_matrix * evecs.col(idx) via faer operator overloading
-        let gram_col = &v_matrix * evecs.col(idx);
-        let norm_val: F = gram_col.iter().map(|x| *x * *x).sum::<F>().sqrt();
-        let gram_evec: Vec<F> = gram_col.iter().map(|x| *x / norm_val).collect();
+        let gram_evec: Vec<F> = ritz.vectors[idx * krylov_dim..(idx + 1) * krylov_dim]
+            .iter()
+            .map(|&v| F::from(v).expect("f64 casts into any float type"))
+            .collect();
 
         if use_ata {
             let mut u_vec = vec![F::zero(); n];
@@ -4087,6 +4073,34 @@ mod tests {
         let y_norm = 1.25_f64.sqrt();
         let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
         assert!(dot_v.abs() > 0.999);
+    }
+
+    /// Thirty components of a centred uniform noise matrix match a dense SVD.
+    ///
+    /// The spectrum is flat past the first component, which is where a single
+    /// unrestarted Lanczos pass leaves the trailing pairs unconverged.
+    #[test]
+    fn test_sparse_svd_lanczos_flat_spectrum() {
+        let (n, m, k) = (400usize, 200usize, 30usize);
+        let mut rng = StdRng::seed_from_u64(1);
+        let vals: Vec<f64> = (0..n * m).map(|_| rng.random::<f64>()).collect();
+        let indices: Vec<u32> = (0..n).flat_map(|_| 0..m as u32).collect();
+        let indptr: Vec<u32> = (0..=n).map(|i| (i * m) as u32).collect();
+        let csr = CompressedSparseData2::<f64, f64>::new_csr(&vals, &indices, &indptr, None, (n, m));
+
+        let means: Vec<f64> = (0..m)
+            .map(|j| (0..n).map(|i| vals[i * m + j]).sum::<f64>() / n as f64)
+            .collect();
+        let svd = sparse_svd_lanczos(&csr, k, 42, false, Some(&means[..]), None, None).unwrap();
+
+        let centred = Mat::<f64>::from_fn(n, m, |i, j| vals[i * m + j] - means[j]);
+        let reference = centred.thin_svd().unwrap();
+        let s_ref = reference.S().column_vector();
+
+        assert_eq!(svd.s.len(), k);
+        for i in 0..k {
+            assert_relative_eq!(svd.s[i], s_ref[i], max_relative = 1e-6);
+        }
     }
 
     use approx::assert_relative_eq;
