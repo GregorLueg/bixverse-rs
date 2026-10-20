@@ -505,7 +505,7 @@ pub fn project_cell_chunks_with_stats(
 /// * `no_pcs` - Number of principal components to compute.
 /// * `svd_solver` - [`PcaSolver::Covariance`] for the exact gene-gene
 ///   cross-product path, [`PcaSolver::Randomised`] for randomised sparse SVD,
-///   [`PcaSolver::Exact`] for Lanczos.
+///   [`PcaSolver::Exact`] or [`PcaSolver::Auto`] for Lanczos.
 /// * `seed` - Seed for reproducibility (randomised SVD and Lanczos init).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -606,7 +606,7 @@ pub fn pca_observed<S: SingleCellReading>(
             });
             (scores, loadings)
         }
-        PcaSolver::Exact => {
+        PcaSolver::Exact | PcaSolver::Auto => {
             let svd_res = sparse_svd_lanczos::<f32, f32, f64>(
                 &csc,
                 no_pcs,

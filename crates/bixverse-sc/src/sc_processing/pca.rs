@@ -99,13 +99,16 @@ pub enum PcaSolver {
     Randomised,
     /// Full thin SVD on the dense path, Lanczos on the sparse one.
     Exact,
+    /// Lanczos on the sparse path, the covariance solver on the dense one:
+    /// the fastest exact option on each.
+    Auto,
 }
 
 /// Parse the PCA solver
 ///
 /// ### Params
 ///
-/// * `s` - One of `"covariance"`, `"randomised"` or `"exact"`
+/// * `s` - One of `"covariance"`, `"randomised"`, `"exact"` or `"auto"`
 ///
 /// ### Returns
 ///
@@ -115,6 +118,7 @@ pub fn parse_pca_solver(s: &str) -> Option<PcaSolver> {
         "covariance" => Some(PcaSolver::Covariance),
         "randomised" => Some(PcaSolver::Randomised),
         "exact" => Some(PcaSolver::Exact),
+        "auto" => Some(PcaSolver::Auto),
         _ => None,
     }
 }
@@ -203,7 +207,7 @@ pub(crate) fn solve_dense_pca(
 ) -> SingleCellPcaRes {
     let (n_cells, n_genes) = (scaled.nrows(), scaled.ncols());
     let res: RandomSvdResults<f64> = match solver {
-        PcaSolver::Covariance => dense_covariance_svd(scaled, no_pcs)?,
+        PcaSolver::Covariance | PcaSolver::Auto => dense_covariance_svd(scaled, no_pcs)?,
         PcaSolver::Randomised => randomised_svd(
             scaled,
             no_pcs,
@@ -1307,7 +1311,7 @@ fn sparse_pca<S: SingleCellReading>(
             scale,
             clr_offsets,
         )?,
-        PcaSolver::Exact => {
+        PcaSolver::Exact | PcaSolver::Auto => {
             let res = sparse_svd_lanczos::<f32, f32, f64>(
                 &csc,
                 no_pcs,
