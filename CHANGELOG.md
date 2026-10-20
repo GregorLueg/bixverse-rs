@@ -1,6 +1,34 @@
 # News
 
-## 0.8.0 (unreleased)
+## 0.8.1
+
+### Feature
+
+- `PcaSolver::Auto` (`"auto"`): Lanczos on the sparse path, the covariance
+  solver on the dense one, i.e. the fastest exact option on each.
+- Exact sparse PCA on the GPU. `sparse_svd_lanczos_gpu()` (cubecl) and
+  `sparse_svd_lanczos_mlx()` run a block Lanczos on the gene-side Gram: the
+  device does the two SpMMs per block, the host does the orthogonalisation
+  and the small eigensolve in f64. Matches the CPU Lanczos to f32 precision.
+- `pca_on_sc_sparse_gpu()` and `pca_on_sc_sparse_mlx()` now honour
+  `svd_solver`. `Randomised` keeps the randomised SVD, every other solver
+  runs the block Lanczos (there is no GPU covariance path). Since the default
+  solver is `Covariance`, the GPU and MLX PCA are exact by default now, at
+  some extra run time over the randomised SVD.
+- `block_lanczos_thick_restart()` and `BlockLanczosParams` in
+  `core::math::sparse`: the block twin of the thick-restart Lanczos, generic
+  over the operator's error type so a device backend can plug in. Blocks of
+  32 and a relative tolerance of `1e-6` by default; the MLX path uses blocks
+  of 16. `RitzPairs` is public.
+
+### Fix
+
+- `sparse_svd_lanczos()` is thick-restarted, so the trailing components
+  converge on a flat spectrum too instead of coming back half-converged.
+- The tall `Y^T Y` in CholeskyQR (CPU randomised SVD) is folded over row chunks
+  in parallel.
+
+## 0.8.0
 
 ### Breaking
 
