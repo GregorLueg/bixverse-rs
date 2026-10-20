@@ -3430,14 +3430,16 @@ pub struct BlockLanczosParams {
 }
 
 impl BlockLanczosParams {
-    /// Defaults. Not tuned.
+    /// Defaults, chosen for the cubecl GPU path. Backends whose per-call cost
+    /// grows faster with the block width override the block size.
     ///
     /// ### Returns
     ///
     /// Self with blocks of 32, a derived basis size, 64 restarts and a
-    /// relative tolerance of `1e-6`. An f32 operator has a round-off floor
-    /// around `1e-7`, so the scalar solver's `1e-8` would only burn the budget
-    /// there.
+    /// relative tolerance of `1e-6`. That is tight enough that an f32
+    /// operator's singular values agree with an f64 solve to f32 precision,
+    /// while the scalar solver's `1e-8` sits near the f32 round-off and would
+    /// mostly burn the restart budget.
     pub fn new() -> Self {
         Self {
             block_size: 32,

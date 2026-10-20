@@ -17,6 +17,13 @@ use crate::prelude::*;
 use bixverse_core::core::math::pca_svd::SvdResults;
 use bixverse_core::core::math::sparse::{BlockLanczosParams, block_lanczos_thick_restart};
 
+/// Default block width on MLX, narrower than the shared default.
+///
+/// The MLX SpMM's cost per call grows faster with the dense width than the
+/// cubecl one, while wider blocks save few block steps, so a narrower block
+/// wins here.
+const MLX_LANCZOS_BLOCK_SIZE: usize = 16;
+
 /// `V / sigma` as a row-major f32 device array.
 ///
 /// ### Params
@@ -45,7 +52,8 @@ fn scaled_block(v: MatRef<f64>, sigma: &[f64]) -> Array {
 /// * `col_stds` - Column standard deviations `[m]`, floored > 0
 /// * `row_offsets` - Optional per-row offsets `[n]` (CLR)
 /// * `n_components` - Number of leading singular triples to return
-/// * `params` - Optional [`BlockLanczosParams`], defaulted when `None`
+/// * `params` - Optional [`BlockLanczosParams`]. `None` takes the defaults
+///   with blocks of `MLX_LANCZOS_BLOCK_SIZE`.
 /// * `seed` - Seed for the starting block
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -75,7 +83,10 @@ pub fn sparse_svd_lanczos_mlx<T: BixverseFloat>(
 ) -> Result<SvdResults<T>, MlxErrors> {
     let verbosity = parse_verbosity_level(verbose);
     let start = Instant::now();
-    let params = params.unwrap_or_default();
+    let params = params.unwrap_or(BlockLanczosParams {
+        block_size: MLX_LANCZOS_BLOCK_SIZE,
+        ..BlockLanczosParams::new()
+    });
 
     if !data.cs_type.is_csc() {
         return Err(MlxErrors::Core(CoreErrors::SparseLayoutMismatch {
