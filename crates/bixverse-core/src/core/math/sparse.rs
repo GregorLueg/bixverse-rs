@@ -16,52 +16,13 @@ use crate::prelude::*;
 use crate::utils::faer_parallelism;
 use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
 
-/////////////
-// Helpers //
-/////////////
+//////////////////////////////////
+// Compressed sparse structures //
+//////////////////////////////////
 
-/// Counts the zeroes in a given faer matrix
-///
-/// ### Params
-///
-/// * `mat` - The respective faer matrix
-///
-/// ### Returns
-///
-/// A tuple with the first being the total zeroes, the second the zeroes per
-/// row and the last element being the column zeroes.
-pub fn count_zeroes<T>(mat: &MatRef<T>) -> (usize, Vec<usize>, Vec<usize>)
-where
-    T: BixverseFloat,
-{
-    let (nrow, ncol) = mat.shape();
-    let mut total_zeroes = 0_usize;
-    let mut row_zeroes = vec![0_usize; nrow];
-    let mut col_zeroes = vec![0_usize; ncol];
-
-    let zero = T::zero();
-
-    for j in 0..ncol {
-        for i in 0..nrow {
-            let val = unsafe { mat.get_unchecked(i, j) };
-            if *val == zero {
-                total_zeroes += 1;
-                row_zeroes[i] += 1;
-                col_zeroes[j] += 1;
-            }
-        }
-    }
-
-    (total_zeroes, row_zeroes, col_zeroes)
-}
-
-///////////////////////
-// Sparse structures //
-///////////////////////
-
-///////////
-// Enums //
-///////////
+/////////////////////////
+// Structures: structs //
+/////////////////////////
 
 /// Type to describe the CompressedSparseFormat
 #[derive(Debug, Clone, Copy)]
@@ -102,27 +63,6 @@ impl CompressedSparseFormat {
         matches!(self, CompressedSparseFormat::Csr)
     }
 }
-
-/// Helper function to parse compressed sparse format
-///
-/// ### Params
-///
-/// * `s` - String specifying the type
-///
-/// ### Return
-///
-/// Returns an `Option<CompressedSparseFormat>`
-pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat> {
-    match s.to_lowercase().as_str() {
-        "csr" => Some(CompressedSparseFormat::Csr),
-        "csc" => Some(CompressedSparseFormat::Csc),
-        _ => None,
-    }
-}
-
-////////////////
-// SparseAxis //
-////////////////
 
 /// Generate structure to store sparse rows or columns
 pub struct SparseAxis<T, U = T> {
@@ -212,10 +152,6 @@ where
         })
     }
 }
-
-///////////////////////////
-// CompressedSparseData2 //
-///////////////////////////
 
 /// Structure to store compressed sparse data with two potential data layers.
 /// Think for example in single cell raw counts and normalised counts.
@@ -940,9 +876,116 @@ where
     }
 }
 
+//////////////////////////////////
+// Structures: public functions //
+//////////////////////////////////
+
+/// Helper function to parse compressed sparse format
+///
+/// ### Params
+///
+/// * `s` - String specifying the type
+///
+/// ### Return
+///
+/// Returns an `Option<CompressedSparseFormat>`
+pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat> {
+    match s.to_lowercase().as_str() {
+        "csr" => Some(CompressedSparseFormat::Csr),
+        "csc" => Some(CompressedSparseFormat::Csc),
+        _ => None,
+    }
+}
+
+/// Check that a matrix is a structurally sound square CSR and return its order
+///
+/// Callers that index `partitions[j]` or `parent[j]` from a stored column index
+/// rely on every invariant here, and a violated one is otherwise silent: a
+/// non-monotonic `indptr` gives an empty Rust range, so the row is skipped and
+/// the caller returns a plausible answer computed on a subset of the graph. An
+/// out-of-range column index panics through whatever boundary the caller sits
+/// behind instead of erroring.
+///
+/// ### Params
+///
+/// * `graph` - The adjacency to validate.
+///
+/// ### Returns
+///
+/// The node count, or an error naming the violated invariant.
+pub fn validate_square_csr<T>(graph: &CompressedSparseData2<T>) -> Result<usize, CoreErrors>
+where
+    T: Clone,
+{
+    if !graph.cs_type.is_csr() {
+        return Err(CoreErrors::SparseMatrixMustBeCsr);
+    }
+    let (rows, cols) = graph.shape;
+    if rows != cols {
+        return Err(CoreErrors::ShapeMismatch {
+            expected: (rows, rows),
+            got: (rows, cols),
+        });
+    }
+
+    if graph.indptr.len() != rows + 1 {
+        return Err(CoreErrors::MalformedCsr(
+            "indptr length must be the row count plus one",
+        ));
+    }
+    if graph.indices.len() != graph.data.len() {
+        return Err(CoreErrors::MalformedCsr(
+            "indices and data must have the same length",
+        ));
+    }
+    if graph.indptr.windows(2).any(|w| w[0] > w[1]) {
+        return Err(CoreErrors::MalformedCsr("indptr must be non-decreasing"));
+    }
+    // `indptr` is non-empty by the length check above.
+    if graph.indptr[rows] as usize != graph.indices.len() {
+        return Err(CoreErrors::MalformedCsr(
+            "the last indptr entry must equal the number of stored values",
+        ));
+    }
+    if graph.indices.iter().any(|&j| j as usize >= rows) {
+        return Err(CoreErrors::MalformedCsr(
+            "a column index sits outside the matrix",
+        ));
+    }
+
+    Ok(rows)
+}
+
+///////////////////////
+// Format conversion //
+///////////////////////
+
 ////////////////////////
-// Format conversions //
+// Conversion: consts //
 ////////////////////////
+
+/// Below this many stored values the transpose stays single-threaded.
+///
+/// The parallel path pays for `n_threads * new_major` counters plus two sweeps
+/// over them, which only earns its keep once the scatter itself is large enough
+/// to leave cache. A megabyte of stored values is comfortably past that point
+/// on every machine tested and well short of it for the small graphs and toy
+/// matrices most callers hand over.
+const PARALLEL_TRANSPOSE_MIN_NNZ: usize = 1 << 20;
+
+/// Width of the band of the new major axis the scatter fills at a time.
+///
+/// Unbanded, each chunk revisits every new major run once per old major index,
+/// so a short, wide input (2000 genes by 1M cells) streams its whole
+/// destination through the cache once per gene. Banding keeps each chunk's
+/// writes inside `band * nnz / new_major` slots. Measured on a 1M x 2000 CSC
+/// at 10% density (M1 Max, 10 threads): 633 ms unbanded, 194-207 ms for bands
+/// of 512 to 4096, 280 ms at 16384, 490 ms at 65536.
+const TRANSPOSE_MINOR_BAND: usize = 1024;
+
+/////////////////////////
+// Conversion: structs //
+/////////////////////////
 
 /// Destination pointer handed to every worker of the parallel scatter.
 ///
@@ -975,24 +1018,9 @@ impl<T> ScatterPtr<T> {
     }
 }
 
-/// Below this many stored values the transpose stays single-threaded.
-///
-/// The parallel path pays for `n_threads * new_major` counters plus two sweeps
-/// over them, which only earns its keep once the scatter itself is large enough
-/// to leave cache. A megabyte of stored values is comfortably past that point
-/// on every machine tested and well short of it for the small graphs and toy
-/// matrices most callers hand over.
-const PARALLEL_TRANSPOSE_MIN_NNZ: usize = 1 << 20;
-
-/// Width of the band of the new major axis the scatter fills at a time.
-///
-/// Unbanded, each chunk revisits every new major run once per old major index,
-/// so a short, wide input (2000 genes by 1M cells) streams its whole
-/// destination through the cache once per gene. Banding keeps each chunk's
-/// writes inside `band * nnz / new_major` slots. Measured on a 1M x 2000 CSC
-/// at 10% density (M1 Max, 10 threads): 633 ms unbanded, 194-207 ms for bands
-/// of 512 to 4096, 280 ms at 16384, 490 ms at 65536.
-const TRANSPOSE_MINOR_BAND: usize = 1024;
+/////////////////////////
+// Conversion: helpers //
+/////////////////////////
 
 /// Per-chunk write cursors and the transposed `indptr`.
 ///
@@ -1147,42 +1175,6 @@ fn transpose_scatter<T, U>(
         });
 }
 
-/// Re-express a compressed sparse matrix in the other format (CSC→CSR or
-/// CSR→CSC).
-///
-/// Despite the name this does **not** transpose: `shape` is carried over
-/// unchanged and only `cs_type` flips, so the result addresses the same
-/// elements by the same `(row, col)` pair. Reach for
-/// [`CompressedSparseData2::transpose_and_convert`] when the shape is meant to
-/// swap.
-///
-/// A counting sort in O(nnz) time. Above `PARALLEL_TRANSPOSE_MIN_NNZ` the
-/// count and the scatter both fan out over rayon: the scatter is a random-write
-/// pass over `nnz`-sized destinations, so leaving it single-threaded makes it
-/// the slowest step of anything that converts on the way in.
-///
-/// ### Params
-///
-/// * `sparse_data`: The input compressed sparse matrix to be converted.
-///
-/// ### Returns
-///
-/// The same matrix in the other compressed sparse format, with `shape`
-/// unchanged and the indices of each new major run ascending.
-pub fn transpose_sparse<T, U>(
-    sparse_data: &CompressedSparseData2<T, U>,
-) -> CompressedSparseData2<T, U>
-where
-    T: BixverseNumeric,
-    U: BixverseNumeric,
-{
-    transpose_sparse_chunked(
-        sparse_data,
-        &major_axis_chunks(sparse_data),
-        TRANSPOSE_MINOR_BAND,
-    )
-}
-
 /// Half-open ranges the transpose should split the old major axis into.
 ///
 /// One range keeps the whole thing single-threaded, which is what small inputs
@@ -1275,6 +1267,46 @@ where
     }
 }
 
+//////////////////////////////////
+// Conversion: public functions //
+//////////////////////////////////
+
+/// Re-express a compressed sparse matrix in the other format (CSC→CSR or
+/// CSR→CSC).
+///
+/// Despite the name this does **not** transpose: `shape` is carried over
+/// unchanged and only `cs_type` flips, so the result addresses the same
+/// elements by the same `(row, col)` pair. Reach for
+/// [`CompressedSparseData2::transpose_and_convert`] when the shape is meant to
+/// swap.
+///
+/// A counting sort in O(nnz) time. Above `PARALLEL_TRANSPOSE_MIN_NNZ` the
+/// count and the scatter both fan out over rayon: the scatter is a random-write
+/// pass over `nnz`-sized destinations, so leaving it single-threaded makes it
+/// the slowest step of anything that converts on the way in.
+///
+/// ### Params
+///
+/// * `sparse_data`: The input compressed sparse matrix to be converted.
+///
+/// ### Returns
+///
+/// The same matrix in the other compressed sparse format, with `shape`
+/// unchanged and the indices of each new major run ascending.
+pub fn transpose_sparse<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+) -> CompressedSparseData2<T, U>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    transpose_sparse_chunked(
+        sparse_data,
+        &major_axis_chunks(sparse_data),
+        TRANSPOSE_MINOR_BAND,
+    )
+}
+
 /// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC), keeping only
 /// one of the two data layers.
 ///
@@ -1355,65 +1387,6 @@ where
         data_2: new_data2,
         shape: (nrow, ncol),
     })
-}
-
-/// Check that a matrix is a structurally sound square CSR and return its order
-///
-/// Callers that index `partitions[j]` or `parent[j]` from a stored column index
-/// rely on every invariant here, and a violated one is otherwise silent: a
-/// non-monotonic `indptr` gives an empty Rust range, so the row is skipped and
-/// the caller returns a plausible answer computed on a subset of the graph. An
-/// out-of-range column index panics through whatever boundary the caller sits
-/// behind instead of erroring.
-///
-/// ### Params
-///
-/// * `graph` - The adjacency to validate.
-///
-/// ### Returns
-///
-/// The node count, or an error naming the violated invariant.
-pub fn validate_square_csr<T>(graph: &CompressedSparseData2<T>) -> Result<usize, CoreErrors>
-where
-    T: Clone,
-{
-    if !graph.cs_type.is_csr() {
-        return Err(CoreErrors::SparseMatrixMustBeCsr);
-    }
-    let (rows, cols) = graph.shape;
-    if rows != cols {
-        return Err(CoreErrors::ShapeMismatch {
-            expected: (rows, rows),
-            got: (rows, cols),
-        });
-    }
-
-    if graph.indptr.len() != rows + 1 {
-        return Err(CoreErrors::MalformedCsr(
-            "indptr length must be the row count plus one",
-        ));
-    }
-    if graph.indices.len() != graph.data.len() {
-        return Err(CoreErrors::MalformedCsr(
-            "indices and data must have the same length",
-        ));
-    }
-    if graph.indptr.windows(2).any(|w| w[0] > w[1]) {
-        return Err(CoreErrors::MalformedCsr("indptr must be non-decreasing"));
-    }
-    // `indptr` is non-empty by the length check above.
-    if graph.indptr[rows] as usize != graph.indices.len() {
-        return Err(CoreErrors::MalformedCsr(
-            "the last indptr entry must equal the number of stored values",
-        ));
-    }
-    if graph.indices.iter().any(|&j| j as usize >= rows) {
-        return Err(CoreErrors::MalformedCsr(
-            "a column index sits outside the matrix",
-        ));
-    }
-
-    Ok(rows)
 }
 
 /// Transform COO stored data into CSR
@@ -1622,11 +1595,107 @@ where
 }
 
 ///////////////////////
-// Sparse operations //
+// Sparse arithmetic //
 ///////////////////////
+
+////////////////////////
+// Arithmetic: consts //
+////////////////////////
 
 /// Rows merged per rayon job in [sparse_add_csr].
 const SPARSE_ADD_ROW_CHUNK: usize = 1024;
+
+/////////////////////////
+// Arithmetic: structs //
+/////////////////////////
+
+/// Sparse accumulator for efficient sparse matrix multiplication
+///
+/// ### Fields
+///
+/// * `values` - Vector storing accumulated values for each index
+/// * `indices` - Vector of active (non-zero) indices
+/// * `flags` - Boolean flags indicating which indices are active
+struct SparseAccumulator<T>
+where
+    T: Copy + Default + AddAssign,
+{
+    values: Vec<T>,
+    indices: Vec<usize>,
+    flags: Vec<bool>,
+}
+
+impl<T> SparseAccumulator<T>
+where
+    T: Copy + Default + AddAssign,
+{
+    /// Create a new sparse accumulator
+    ///
+    /// ### Params
+    ///
+    /// * `size` - Maximum number of indices to accumulate
+    fn new(size: usize) -> Self {
+        Self {
+            values: vec![T::default(); size],
+            indices: Vec::with_capacity(size / 10),
+            flags: vec![false; size],
+        }
+    }
+
+    /// Add a value to the accumulator at the given index
+    ///
+    /// ### Params
+    ///
+    /// * `idx` - Index to accumulate at
+    /// * `val` - Value to add
+    ///
+    /// ### Safety
+    ///
+    /// `idx` must be less than the size specified during construction
+    #[inline]
+    unsafe fn add(&mut self, idx: usize, val: T) {
+        unsafe {
+            if !*self.flags.get_unchecked(idx) {
+                *self.flags.get_unchecked_mut(idx) = true;
+                self.indices.push(idx);
+                *self.values.get_unchecked_mut(idx) = val;
+            } else {
+                *self.values.get_unchecked_mut(idx) += val;
+            }
+        }
+    }
+
+    /// Drain accumulated values into caller-provided buffers and reset the
+    /// accumulator.
+    ///
+    /// ### Params
+    ///
+    /// * `indices_out` - Buffer to append active indices into
+    /// * `data_out` - Buffer to append accumulated values into
+    ///
+    /// ### Returns
+    ///
+    /// Number of entries written
+    #[inline]
+    fn extract_into(&mut self, indices_out: &mut Vec<usize>, data_out: &mut Vec<T>) -> usize {
+        self.indices.sort_unstable();
+        let n = self.indices.len();
+        unsafe {
+            for &i in &self.indices {
+                indices_out.push(i);
+                data_out.push(*self.values.get_unchecked(i));
+                *self.flags.get_unchecked_mut(i) = false;
+                *self.values.get_unchecked_mut(i) = T::default();
+            }
+        }
+        self.indices.clear();
+        n
+    }
+}
+
+//////////////////////////////////
+// Arithmetic: public functions //
+//////////////////////////////////
 
 /// Add two CSR matrices together
 ///
@@ -1976,46 +2045,6 @@ where
     Ok(())
 }
 
-/// Compute Frobenius norm of sparse matrix
-///
-/// Accumulated in `f64` via [`sum_sq_f64`] and narrowed once at the end. Summing
-/// in `f32` drifts by percentage points over tens of millions of non-zeros, and
-/// the square root then hides how far off it was.
-///
-/// ### Params
-///
-/// * `mat` - Sparse matrix in CSR or CSC format
-///
-/// ### Returns
-///
-/// Frobenius norm ||A||_F = sqrt(sum(A_ij^2))
-pub fn frobenius_norm<T>(mat: &CompressedSparseData2<T>) -> f32
-where
-    T: BixverseNumeric + ToPrimitive,
-{
-    sum_sq_f64(&mat.data).sqrt() as f32
-}
-
-/// Squared Frobenius norm of a sparse matrix, in `f64`.
-///
-/// Prefer this over squaring [`frobenius_norm`] wherever the result is one of
-/// several large terms that cancel: narrowing to `f32` and squaring again throws
-/// away the precision the cancellation needs.
-///
-/// ### Params
-///
-/// * `mat` - Sparse matrix in CSR or CSC format
-///
-/// ### Returns
-///
-/// `||A||_F^2`.
-pub fn frobenius_norm_sq_f64<T>(mat: &CompressedSparseData2<T>) -> f64
-where
-    T: BixverseNumeric + ToPrimitive,
-{
-    sum_sq_f64(&mat.data)
-}
-
 /// Remove zeros from sparse matrix
 ///
 /// ### Params
@@ -2135,90 +2164,6 @@ where
     Ok(out)
 }
 
-/// Sparse accumulator for efficient sparse matrix multiplication
-///
-/// ### Fields
-///
-/// * `values` - Vector storing accumulated values for each index
-/// * `indices` - Vector of active (non-zero) indices
-/// * `flags` - Boolean flags indicating which indices are active
-struct SparseAccumulator<T>
-where
-    T: Copy + Default + AddAssign,
-{
-    values: Vec<T>,
-    indices: Vec<usize>,
-    flags: Vec<bool>,
-}
-
-impl<T> SparseAccumulator<T>
-where
-    T: Copy + Default + AddAssign,
-{
-    /// Create a new sparse accumulator
-    ///
-    /// ### Params
-    ///
-    /// * `size` - Maximum number of indices to accumulate
-    fn new(size: usize) -> Self {
-        Self {
-            values: vec![T::default(); size],
-            indices: Vec::with_capacity(size / 10),
-            flags: vec![false; size],
-        }
-    }
-
-    /// Add a value to the accumulator at the given index
-    ///
-    /// ### Params
-    ///
-    /// * `idx` - Index to accumulate at
-    /// * `val` - Value to add
-    ///
-    /// ### Safety
-    ///
-    /// `idx` must be less than the size specified during construction
-    #[inline]
-    unsafe fn add(&mut self, idx: usize, val: T) {
-        unsafe {
-            if !*self.flags.get_unchecked(idx) {
-                *self.flags.get_unchecked_mut(idx) = true;
-                self.indices.push(idx);
-                *self.values.get_unchecked_mut(idx) = val;
-            } else {
-                *self.values.get_unchecked_mut(idx) += val;
-            }
-        }
-    }
-
-    /// Drain accumulated values into caller-provided buffers and reset the
-    /// accumulator.
-    ///
-    /// ### Params
-    ///
-    /// * `indices_out` - Buffer to append active indices into
-    /// * `data_out` - Buffer to append accumulated values into
-    ///
-    /// ### Returns
-    ///
-    /// Number of entries written
-    #[inline]
-    fn extract_into(&mut self, indices_out: &mut Vec<usize>, data_out: &mut Vec<T>) -> usize {
-        self.indices.sort_unstable();
-        let n = self.indices.len();
-        unsafe {
-            for &i in &self.indices {
-                indices_out.push(i);
-                data_out.push(*self.values.get_unchecked(i));
-                *self.flags.get_unchecked_mut(i) = false;
-                *self.values.get_unchecked_mut(i) = T::default();
-            }
-        }
-        self.indices.clear();
-        n
-    }
-}
-
 /// Multiply two CSR matrices using sparse accumulators and parallel processing
 ///
 /// ### Params
@@ -2322,8 +2267,16 @@ where
 // Sparse dense operations //
 /////////////////////////////
 
+//////////////////////////
+// Sparse dense: consts //
+//////////////////////////
+
 /// Output rows accumulated per tile in [`csr_sparse_matmul_dense`]
 const MATMUL_DENSE_ROW_BLOCK: usize = 256;
+
+////////////////////////////////////
+// Sparse dense: public functions //
+////////////////////////////////////
 
 /// Sparse CSR @ sparse CSR -> dense
 ///
@@ -2488,8 +2441,16 @@ where
 // Sparse statistics //
 ///////////////////////
 
+////////////////////////
+// Statistics: consts //
+////////////////////////
+
 /// Stored non-zeros from which the column statistics fan out over rayon
 const PAR_COLUMN_STATS_MIN_NNZ: usize = 1 << 20;
+
+//////////////////////////////////
+// Statistics: public functions //
+//////////////////////////////////
 
 /// Calculate the column means for CSC [CompressedSparseData2]
 ///
@@ -2590,13 +2551,96 @@ where
     }
 }
 
+/// Compute Frobenius norm of sparse matrix
+///
+/// Accumulated in `f64` via [`sum_sq_f64`] and narrowed once at the end. Summing
+/// in `f32` drifts by percentage points over tens of millions of non-zeros, and
+/// the square root then hides how far off it was.
+///
+/// ### Params
+///
+/// * `mat` - Sparse matrix in CSR or CSC format
+///
+/// ### Returns
+///
+/// Frobenius norm ||A||_F = sqrt(sum(A_ij^2))
+pub fn frobenius_norm<T>(mat: &CompressedSparseData2<T>) -> f32
+where
+    T: BixverseNumeric + ToPrimitive,
+{
+    sum_sq_f64(&mat.data).sqrt() as f32
+}
+
+/// Squared Frobenius norm of a sparse matrix, in `f64`.
+///
+/// Prefer this over squaring [`frobenius_norm`] wherever the result is one of
+/// several large terms that cancel: narrowing to `f32` and squaring again throws
+/// away the precision the cancellation needs.
+///
+/// ### Params
+///
+/// * `mat` - Sparse matrix in CSR or CSC format
+///
+/// ### Returns
+///
+/// `||A||_F^2`.
+pub fn frobenius_norm_sq_f64<T>(mat: &CompressedSparseData2<T>) -> f64
+where
+    T: BixverseNumeric + ToPrimitive,
+{
+    sum_sq_f64(&mat.data)
+}
+
+/// Counts the zeroes in a given faer matrix
+///
+/// ### Params
+///
+/// * `mat` - The respective faer matrix
+///
+/// ### Returns
+///
+/// A tuple with the first being the total zeroes, the second the zeroes per
+/// row and the last element being the column zeroes.
+pub fn count_zeroes<T>(mat: &MatRef<T>) -> (usize, Vec<usize>, Vec<usize>)
+where
+    T: BixverseFloat,
+{
+    let (nrow, ncol) = mat.shape();
+    let mut total_zeroes = 0_usize;
+    let mut row_zeroes = vec![0_usize; nrow];
+    let mut col_zeroes = vec![0_usize; ncol];
+
+    let zero = T::zero();
+
+    for j in 0..ncol {
+        for i in 0..nrow {
+            let val = unsafe { mat.get_unchecked(i, j) };
+            if *val == zero {
+                total_zeroes += 1;
+                row_zeroes[i] += 1;
+                col_zeroes[j] += 1;
+            }
+        }
+    }
+
+    (total_zeroes, row_zeroes, col_zeroes)
+}
+
 /////////////////////////
 // Sparse correlations //
 /////////////////////////
 
+//////////////////////////
+// Correlations: consts //
+//////////////////////////
+
 /// Below this a column counts as constant and its correlations are reported as
 /// `0.0` rather than as a division by a vanishing standard deviation.
 const SPARSE_COR_SD_EPS: f64 = 1e-8;
+
+///////////////////////////
+// Correlations: structs //
+///////////////////////////
 
 /// One sparse column reduced to what [`sparse_pairwise_correlations`] needs.
 ///
@@ -2616,6 +2660,10 @@ pub struct SparseColMoments {
     /// denominator.
     pub sd: f64,
 }
+
+///////////////////////////
+// Correlations: helpers //
+///////////////////////////
 
 /// Average ranks of one sparse column, shifted so the zero block sits at zero.
 ///
@@ -2672,6 +2720,10 @@ fn shifted_ranks_sparse(values: &[f32], n_rows: usize) -> Vec<f32> {
 
     ranks
 }
+
+////////////////////////////////////
+// Correlations: public functions //
+////////////////////////////////////
 
 /// Reduce one sparse column to its moments without densifying it.
 ///
@@ -2803,57 +2855,13 @@ pub fn sparse_pairwise_correlations(
     res
 }
 
-////////////////////////
-// Lanczos Eigenvalue //
-////////////////////////
+/////////////////////////
+// Lanczos eigensolver //
+/////////////////////////
 
-/// Helper function for dot product of two vectors
-///
-/// ### Params
-///
-/// * `a` - Vector a
-/// * `b` - Vector b
-///
-/// ### Returns
-///
-/// Dot product of the two vectors
-fn dot<T>(a: &[T], b: &[T]) -> T
-where
-    T: BixverseSimd,
-{
-    assert_same_len!(a, b);
-    T::bxv_dot_simd(a, b)
-}
-
-/// Helper function to normalise a vector
-///
-/// ### Params
-///
-/// * `v` - Initial vector
-///
-/// ### Returns
-///
-/// Normalised dot product of the vector `v`
-fn norm<T>(v: &[T]) -> T
-where
-    T: BixverseSimd + BixverseFloat,
-{
-    let dot = dot(v, v);
-    dot.sqrt()
-}
-
-/// Helper function to normalise a vector
-///
-/// ### Params
-///
-/// * `v` - Mutable reference of the vector to normalise
-fn normalise<T>(v: &mut [T])
-where
-    T: BixverseSimd + BixverseFloat,
-{
-    let n = norm(v);
-    v.par_iter_mut().for_each(|x| *x /= n);
-}
+/////////////////////
+// Lanczos: consts //
+/////////////////////
 
 /// Ritz vectors retained across a restart, above the requested pair count.
 const LANCZOS_RESTART_GUARD: usize = 5;
@@ -2872,6 +2880,10 @@ const LANCZOS_ORTHO_REFINE_RATIO: f64 = 0.707;
 /// `~eps * sqrt(n) * ||A||`, so this sits comfortably above it while still only
 /// firing on a genuinely invariant subspace.
 const LANCZOS_BREAKDOWN_RATIO: f64 = 1e-12;
+
+//////////////////////
+// Lanczos: structs //
+//////////////////////
 
 /// Parameters for the restarted Lanczos eigensolver.
 #[derive(Clone, Copy, Debug)]
@@ -2955,105 +2967,6 @@ pub struct LanczosResult {
     pub restarts: usize,
 }
 
-/// Compute the largest eigenpairs of a symmetric sparse matrix.
-///
-/// Thin wrapper over [compute_largest_eigenpairs_lanczos_diag] for callers that
-/// do not inspect the convergence diagnostics.
-///
-/// ### Params
-///
-/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
-/// * `n_components` - Number of eigenpairs to compute.
-/// * `seed` - Seed for the starting vector.
-/// * `params` - Optional [LanczosParams], defaulted when `None`.
-///
-/// ### Returns
-///
-/// `(eigenvalues, eigenvectors)` sorted by descending eigenvalue, where
-/// `eigenvectors[i][j]` is element `i` of eigenvector `j`. Both outputs carry
-/// the same number of components, which is `min(n_components, n)` and can be
-/// smaller still if the iteration hit an invariant subspace first.
-pub fn compute_largest_eigenpairs_lanczos<T>(
-    matrix: &CompressedSparseData2<T>,
-    n_components: usize,
-    seed: u64,
-    params: Option<LanczosParams>,
-) -> Result<(Vec<f64>, Vec<Vec<f32>>), CoreErrors>
-where
-    T: BixverseNumeric + BixverseSimd + Into<f64>,
-{
-    let res = compute_largest_eigenpairs_lanczos_diag(matrix, n_components, seed, params)?;
-    Ok((res.eigenvalues, res.eigenvectors))
-}
-
-/// Compute the largest eigenpairs of a symmetric sparse matrix, with
-/// diagnostics.
-///
-/// Thick-restarted Lanczos, see [lanczos_thick_restart] for the algorithm.
-///
-/// ### Params
-///
-/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
-/// * `n_components` - Number of eigenpairs to compute. Capped at the matrix
-///   dimension rather than erroring, so a request for more pairs than the
-///   matrix has simply returns all of them.
-/// * `seed` - Seed for the starting vector.
-/// * `params` - Optional [LanczosParams], defaulted when None.
-///
-/// ### Returns
-///
-/// A [LanczosResult]. The eigenvalue count and the eigenvector column count
-/// are always equal.
-pub fn compute_largest_eigenpairs_lanczos_diag<T>(
-    matrix: &CompressedSparseData2<T>,
-    n_components: usize,
-    seed: u64,
-    params: Option<LanczosParams>,
-) -> Result<LanczosResult, CoreErrors>
-where
-    T: BixverseNumeric + BixverseSimd + Into<f64>,
-{
-    let n = matrix.shape.0;
-
-    // CSR gives contiguous rows for the matrix-vector product.
-    let csr = match matrix.cs_type {
-        CompressedSparseFormat::Csr => matrix.clone(),
-        CompressedSparseFormat::Csc => matrix.transform(),
-    };
-    let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
-
-    let matvec = |x: &[f64], y: &mut [f64]| {
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            let mut sum = 0.0;
-            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
-                let j = csr.indices[idx] as usize;
-                sum += data_f64[idx] * x[j];
-            }
-            *yi = sum;
-        });
-    };
-
-    let ritz = lanczos_thick_restart(n, n_components, seed, params.unwrap_or_default(), matvec)?;
-
-    let n_out = ritz.values.len();
-    let mut eigenvectors = vec![vec![0.0f32; n_out]; n];
-    for comp in 0..n_out {
-        let column = &ritz.vectors[comp * n..(comp + 1) * n];
-        for (point, &v) in column.iter().enumerate() {
-            eigenvectors[point][comp] = v as f32;
-        }
-    }
-
-    Ok(LanczosResult {
-        eigenvalues: ritz.values,
-        eigenvectors,
-        residual: ritz.residual,
-        norm_estimate: ritz.norm_estimate,
-        converged: ritz.converged,
-        restarts: ritz.restarts,
-    })
-}
-
 /// Ritz pairs and convergence diagnostics from [lanczos_thick_restart] and
 /// [block_lanczos_thick_restart].
 #[derive(Clone, Debug)]
@@ -3071,6 +2984,58 @@ pub struct RitzPairs {
     pub converged: bool,
     /// Restart cycles actually run.
     pub restarts: usize,
+}
+
+//////////////////////
+// Lanczos: helpers //
+//////////////////////
+
+/// Helper function for dot product of two vectors
+///
+/// ### Params
+///
+/// * `a` - Vector a
+/// * `b` - Vector b
+///
+/// ### Returns
+///
+/// Dot product of the two vectors
+fn dot<T>(a: &[T], b: &[T]) -> T
+where
+    T: BixverseSimd,
+{
+    assert_same_len!(a, b);
+    T::bxv_dot_simd(a, b)
+}
+
+/// Helper function to normalise a vector
+///
+/// ### Params
+///
+/// * `v` - Initial vector
+///
+/// ### Returns
+///
+/// Normalised dot product of the vector `v`
+fn norm<T>(v: &[T]) -> T
+where
+    T: BixverseSimd + BixverseFloat,
+{
+    let dot = dot(v, v);
+    dot.sqrt()
+}
+
+/// Helper function to normalise a vector
+///
+/// ### Params
+///
+/// * `v` - Mutable reference of the vector to normalise
+fn normalise<T>(v: &mut [T])
+where
+    T: BixverseSimd + BixverseFloat,
+{
+    let n = norm(v);
+    v.par_iter_mut().for_each(|x| *x /= n);
 }
 
 /// Largest eigenpairs of a symmetric operator via thick-restarted Lanczos.
@@ -3399,9 +3364,116 @@ pub(crate) fn symmetric_eigen_descending(
     Ok((values, vectors))
 }
 
+///////////////////////////////
+// Lanczos: public functions //
+///////////////////////////////
+
+/// Compute the largest eigenpairs of a symmetric sparse matrix.
+///
+/// Thin wrapper over [compute_largest_eigenpairs_lanczos_diag] for callers that
+/// do not inspect the convergence diagnostics.
+///
+/// ### Params
+///
+/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
+/// * `n_components` - Number of eigenpairs to compute.
+/// * `seed` - Seed for the starting vector.
+/// * `params` - Optional [LanczosParams], defaulted when `None`.
+///
+/// ### Returns
+///
+/// `(eigenvalues, eigenvectors)` sorted by descending eigenvalue, where
+/// `eigenvectors[i][j]` is element `i` of eigenvector `j`. Both outputs carry
+/// the same number of components, which is `min(n_components, n)` and can be
+/// smaller still if the iteration hit an invariant subspace first.
+pub fn compute_largest_eigenpairs_lanczos<T>(
+    matrix: &CompressedSparseData2<T>,
+    n_components: usize,
+    seed: u64,
+    params: Option<LanczosParams>,
+) -> Result<(Vec<f64>, Vec<Vec<f32>>), CoreErrors>
+where
+    T: BixverseNumeric + BixverseSimd + Into<f64>,
+{
+    let res = compute_largest_eigenpairs_lanczos_diag(matrix, n_components, seed, params)?;
+    Ok((res.eigenvalues, res.eigenvectors))
+}
+
+/// Compute the largest eigenpairs of a symmetric sparse matrix, with
+/// diagnostics.
+///
+/// Thick-restarted Lanczos, see [lanczos_thick_restart] for the algorithm.
+///
+/// ### Params
+///
+/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
+/// * `n_components` - Number of eigenpairs to compute. Capped at the matrix
+///   dimension rather than erroring, so a request for more pairs than the
+///   matrix has simply returns all of them.
+/// * `seed` - Seed for the starting vector.
+/// * `params` - Optional [LanczosParams], defaulted when None.
+///
+/// ### Returns
+///
+/// A [LanczosResult]. The eigenvalue count and the eigenvector column count
+/// are always equal.
+pub fn compute_largest_eigenpairs_lanczos_diag<T>(
+    matrix: &CompressedSparseData2<T>,
+    n_components: usize,
+    seed: u64,
+    params: Option<LanczosParams>,
+) -> Result<LanczosResult, CoreErrors>
+where
+    T: BixverseNumeric + BixverseSimd + Into<f64>,
+{
+    let n = matrix.shape.0;
+
+    // CSR gives contiguous rows for the matrix-vector product.
+    let csr = match matrix.cs_type {
+        CompressedSparseFormat::Csr => matrix.clone(),
+        CompressedSparseFormat::Csc => matrix.transform(),
+    };
+    let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
+
+    let matvec = |x: &[f64], y: &mut [f64]| {
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = 0.0;
+            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                let j = csr.indices[idx] as usize;
+                sum += data_f64[idx] * x[j];
+            }
+            *yi = sum;
+        });
+    };
+
+    let ritz = lanczos_thick_restart(n, n_components, seed, params.unwrap_or_default(), matvec)?;
+
+    let n_out = ritz.values.len();
+    let mut eigenvectors = vec![vec![0.0f32; n_out]; n];
+    for comp in 0..n_out {
+        let column = &ritz.vectors[comp * n..(comp + 1) * n];
+        for (point, &v) in column.iter().enumerate() {
+            eigenvectors[point][comp] = v as f32;
+        }
+    }
+
+    Ok(LanczosResult {
+        eigenvalues: ritz.values,
+        eigenvectors,
+        residual: ritz.residual,
+        norm_estimate: ritz.norm_estimate,
+        converged: ritz.converged,
+        restarts: ritz.restarts,
+    })
+}
+
 ///////////////////
 // Block Lanczos //
 ///////////////////
+
+///////////////////////////
+// Block Lanczos: consts //
+///////////////////////////
 
 /// New blocks per restart cycle the derived basis leaves room for.
 ///
@@ -3409,6 +3481,10 @@ pub(crate) fn symmetric_eigen_descending(
 /// iteration with Rayleigh-Ritz, which crawls on a clustered spectrum. Not
 /// tuned beyond that.
 const BLOCK_LANCZOS_MIN_NEW_BLOCKS: usize = 3;
+
+////////////////////////////
+// Block Lanczos: structs //
+////////////////////////////
 
 /// Parameters for the block thick-restart Lanczos eigensolver.
 #[derive(Clone, Copy, Debug)]
@@ -3489,6 +3565,165 @@ impl Default for BlockLanczosParams {
         Self::new()
     }
 }
+
+////////////////////////////
+// Block Lanczos: helpers //
+////////////////////////////
+
+/// Leading eigenpairs of a small operator, formed densely.
+///
+/// ### Params
+///
+/// * `n` - Dimension of the operator.
+/// * `n_keep` - Eigenpairs to return, at most `n`.
+/// * `b` - Columns per operator call.
+/// * `op` - Symmetric operator, returns `A X` for an `n x w` block `X`.
+///
+/// ### Returns
+///
+/// [RitzPairs] with `n_keep` exact pairs, zero residual and zero restarts.
+fn dense_eigenpairs<E, M>(n: usize, n_keep: usize, b: usize, op: &mut M) -> Result<RitzPairs, E>
+where
+    E: From<CoreErrors>,
+    M: FnMut(MatRef<f64>) -> Result<Mat<f64>, E>,
+{
+    let mut a = Mat::<f64>::zeros(n, n);
+    for col in (0..n).step_by(b) {
+        let w = b.min(n - col);
+        let unit = Mat::<f64>::from_fn(n, w, |i, c| if i == col + c { 1.0 } else { 0.0 });
+        let out = op(unit.as_ref())?;
+        if out.nrows() != n || out.ncols() != w {
+            return Err(CoreErrors::InvalidArgument(format!(
+                "block Lanczos: operator returned {} x {}, expected {n} x {w}",
+                out.nrows(),
+                out.ncols()
+            ))
+            .into());
+        }
+        a.subcols_mut(col, w).copy_from(&out);
+    }
+    // An f32 operator is only symmetric to round-off.
+    let sym = Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+
+    let (values, vectors) = symmetric_eigen_descending(sym.as_ref(), n)?;
+    let flat: Vec<f64> = (0..n_keep)
+        .flat_map(|c| vectors.col(c).iter().copied().collect::<Vec<_>>())
+        .collect();
+
+    Ok(RitzPairs {
+        values: values[..n_keep].to_vec(),
+        vectors: flat,
+        residual: 0.0,
+        norm_estimate: values[0].abs().max(values[n - 1].abs()),
+        converged: true,
+        restarts: 0,
+    })
+}
+
+/// Euclidean norm of every column.
+///
+/// ### Params
+///
+/// * `x` - Matrix whose columns to measure.
+///
+/// ### Returns
+///
+/// One norm per column.
+fn column_norms(x: MatRef<f64>) -> Vec<f64> {
+    (0..x.ncols()).map(|c| x.col(c).norm_l2()).collect()
+}
+
+/// Orthonormalise a block against itself, column by column.
+///
+/// Two classical Gram-Schmidt passes per column against the columns before it.
+/// A column whose remainder falls below `threshold` is dependent: it gets a
+/// zero diagonal in `R` and a random replacement, orthogonalised twice against
+/// `basis` and the columns so far. Later columns are still projected onto the
+/// replacement and the coefficients land in `R`, so `W = Q R` holds exactly
+/// up to the dropped remainders, which is what keeps the Arnoldi relation
+/// intact. A Householder QR cannot do this without pivoting: zeroing a row of
+/// its `R` also drops the off-diagonal terms of every later column.
+///
+/// ### Params
+///
+/// * `w` - Block to orthonormalise, `n x b`, already orthogonal to `basis`.
+/// * `basis` - Basis the replacements must stay orthogonal to.
+/// * `threshold` - Remainder norm at or below which a column is dependent.
+/// * `rng` - Source of the replacement vectors.
+///
+/// ### Returns
+///
+/// `(q, r, n_deficient)`: orthonormal `q` (`n x b`), upper triangular `r`
+/// (`b x b`) and the number of dependent columns.
+fn orthonormalise_block(
+    w: MatRef<f64>,
+    basis: MatRef<f64>,
+    threshold: f64,
+    rng: &mut StdRng,
+) -> (Mat<f64>, Mat<f64>, usize) {
+    let (n, b) = w.shape();
+    let mut q = w.to_owned();
+    let mut r = Mat::<f64>::zeros(b, b);
+    let mut n_deficient = 0usize;
+
+    for c in 0..b {
+        for _ in 0..2 {
+            for i in 0..c {
+                let d = q.col(i).transpose() * q.col(c);
+                r[(i, c)] += d;
+                for k in 0..n {
+                    q[(k, c)] -= d * q[(k, i)];
+                }
+            }
+        }
+
+        let remainder = q.col(c).norm_l2();
+        if remainder > threshold {
+            r[(c, c)] = remainder;
+            let inv = 1.0 / remainder;
+            q.col_mut(c).iter_mut().for_each(|x| *x *= inv);
+            continue;
+        }
+
+        n_deficient += 1;
+        let mut x = Mat::<f64>::from_fn(n, 1, |_, _| rng.random::<f64>() - 0.5);
+        for _ in 0..2 {
+            let mut coeffs = Mat::<f64>::zeros(basis.ncols(), 1);
+            gemm(
+                coeffs.as_mut(),
+                Accum::Replace,
+                basis.transpose(),
+                x.as_ref(),
+                1.0,
+                Par::Seq,
+            );
+            gemm(
+                x.as_mut(),
+                Accum::Add,
+                basis,
+                coeffs.as_ref(),
+                -1.0,
+                Par::Seq,
+            );
+            for i in 0..c {
+                let d = q.col(i).transpose() * x.col(0);
+                for k in 0..n {
+                    x[(k, 0)] -= d * q[(k, i)];
+                }
+            }
+        }
+        let scale = x.col(0).norm_l2();
+        for k in 0..n {
+            q[(k, c)] = x[(k, 0)] / scale;
+        }
+    }
+
+    (q, r, n_deficient)
+}
+
+/////////////////////////////////////
+// Block Lanczos: public functions //
+/////////////////////////////////////
 
 /// Largest eigenpairs of a symmetric operator via block thick-restarted
 /// Lanczos.
@@ -3741,160 +3976,13 @@ where
     })
 }
 
-/// Leading eigenpairs of a small operator, formed densely.
-///
-/// ### Params
-///
-/// * `n` - Dimension of the operator.
-/// * `n_keep` - Eigenpairs to return, at most `n`.
-/// * `b` - Columns per operator call.
-/// * `op` - Symmetric operator, returns `A X` for an `n x w` block `X`.
-///
-/// ### Returns
-///
-/// [RitzPairs] with `n_keep` exact pairs, zero residual and zero restarts.
-fn dense_eigenpairs<E, M>(n: usize, n_keep: usize, b: usize, op: &mut M) -> Result<RitzPairs, E>
-where
-    E: From<CoreErrors>,
-    M: FnMut(MatRef<f64>) -> Result<Mat<f64>, E>,
-{
-    let mut a = Mat::<f64>::zeros(n, n);
-    for col in (0..n).step_by(b) {
-        let w = b.min(n - col);
-        let unit = Mat::<f64>::from_fn(n, w, |i, c| if i == col + c { 1.0 } else { 0.0 });
-        let out = op(unit.as_ref())?;
-        if out.nrows() != n || out.ncols() != w {
-            return Err(CoreErrors::InvalidArgument(format!(
-                "block Lanczos: operator returned {} x {}, expected {n} x {w}",
-                out.nrows(),
-                out.ncols()
-            ))
-            .into());
-        }
-        a.subcols_mut(col, w).copy_from(&out);
-    }
-    // An f32 operator is only symmetric to round-off.
-    let sym = Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
-
-    let (values, vectors) = symmetric_eigen_descending(sym.as_ref(), n)?;
-    let flat: Vec<f64> = (0..n_keep)
-        .flat_map(|c| vectors.col(c).iter().copied().collect::<Vec<_>>())
-        .collect();
-
-    Ok(RitzPairs {
-        values: values[..n_keep].to_vec(),
-        vectors: flat,
-        residual: 0.0,
-        norm_estimate: values[0].abs().max(values[n - 1].abs()),
-        converged: true,
-        restarts: 0,
-    })
-}
-
-/// Euclidean norm of every column.
-///
-/// ### Params
-///
-/// * `x` - Matrix whose columns to measure.
-///
-/// ### Returns
-///
-/// One norm per column.
-fn column_norms(x: MatRef<f64>) -> Vec<f64> {
-    (0..x.ncols()).map(|c| x.col(c).norm_l2()).collect()
-}
-
-/// Orthonormalise a block against itself, column by column.
-///
-/// Two classical Gram-Schmidt passes per column against the columns before it.
-/// A column whose remainder falls below `threshold` is dependent: it gets a
-/// zero diagonal in `R` and a random replacement, orthogonalised twice against
-/// `basis` and the columns so far. Later columns are still projected onto the
-/// replacement and the coefficients land in `R`, so `W = Q R` holds exactly
-/// up to the dropped remainders, which is what keeps the Arnoldi relation
-/// intact. A Householder QR cannot do this without pivoting: zeroing a row of
-/// its `R` also drops the off-diagonal terms of every later column.
-///
-/// ### Params
-///
-/// * `w` - Block to orthonormalise, `n x b`, already orthogonal to `basis`.
-/// * `basis` - Basis the replacements must stay orthogonal to.
-/// * `threshold` - Remainder norm at or below which a column is dependent.
-/// * `rng` - Source of the replacement vectors.
-///
-/// ### Returns
-///
-/// `(q, r, n_deficient)`: orthonormal `q` (`n x b`), upper triangular `r`
-/// (`b x b`) and the number of dependent columns.
-fn orthonormalise_block(
-    w: MatRef<f64>,
-    basis: MatRef<f64>,
-    threshold: f64,
-    rng: &mut StdRng,
-) -> (Mat<f64>, Mat<f64>, usize) {
-    let (n, b) = w.shape();
-    let mut q = w.to_owned();
-    let mut r = Mat::<f64>::zeros(b, b);
-    let mut n_deficient = 0usize;
-
-    for c in 0..b {
-        for _ in 0..2 {
-            for i in 0..c {
-                let d = q.col(i).transpose() * q.col(c);
-                r[(i, c)] += d;
-                for k in 0..n {
-                    q[(k, c)] -= d * q[(k, i)];
-                }
-            }
-        }
-
-        let remainder = q.col(c).norm_l2();
-        if remainder > threshold {
-            r[(c, c)] = remainder;
-            let inv = 1.0 / remainder;
-            q.col_mut(c).iter_mut().for_each(|x| *x *= inv);
-            continue;
-        }
-
-        n_deficient += 1;
-        let mut x = Mat::<f64>::from_fn(n, 1, |_, _| rng.random::<f64>() - 0.5);
-        for _ in 0..2 {
-            let mut coeffs = Mat::<f64>::zeros(basis.ncols(), 1);
-            gemm(
-                coeffs.as_mut(),
-                Accum::Replace,
-                basis.transpose(),
-                x.as_ref(),
-                1.0,
-                Par::Seq,
-            );
-            gemm(
-                x.as_mut(),
-                Accum::Add,
-                basis,
-                coeffs.as_ref(),
-                -1.0,
-                Par::Seq,
-            );
-            for i in 0..c {
-                let d = q.col(i).transpose() * x.col(0);
-                for k in 0..n {
-                    x[(k, 0)] -= d * q[(k, i)];
-                }
-            }
-        }
-        let scale = x.col(0).norm_l2();
-        for k in 0..n {
-            q[(k, c)] = x[(k, 0)] / scale;
-        }
-    }
-
-    (q, r, n_deficient)
-}
-
 /////////////////
 // Lanczos SVD //
 /////////////////
+
+///////////////////////////////////
+// Lanczos SVD: public functions //
+///////////////////////////////////
 
 /// Compute sparse SVD using Lanczos on A^T A or AA^T
 ///
