@@ -15,8 +15,9 @@
 //!    precomputed.
 //! 4. CholeskyQR2 -> `Q` orthonormal.
 //! 5. Power iterations: `Z = (A^T Q - mu * q_sum^T) / sigma^2`, i.e.
-//!    `D^-1 X^T Q`, then `Y = A * Z - 1 * c^T`, then CholeskyQR2. Two
-//!    iterations is the default; the gain past that is small.
+//!    `D^-1 X^T Q`, then `Y = A * Z - 1 * c^T`, then CholeskyQR2. The
+//!    params default is two; the single-cell callers pass
+//!    `N_POWER_ITERS_SINGLE_CELL` (four).
 //! 6. Final `Z = (A^T Q - mu * q_sum^T) / sigma`, which equals `B^T` for
 //!    the standard randomised SVD with `B = Q^T * X` where `X` is the
 //!    centred-scaled A.
@@ -690,7 +691,7 @@ mod tests {
         let want = scaled.thin_svd().unwrap();
 
         // Sweep the power iterations. Zero is what actually exercises the
-        // sketch; two is the production setting, where power iteration is
+        // sketch; two is the params default, where power iteration is
         // expected to hide most of the sketch's quality.
         let mut worst_at = Vec::new();
         for n_power in [0usize, 1, 2] {

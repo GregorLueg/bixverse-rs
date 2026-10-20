@@ -207,26 +207,23 @@ fn lap(
     Ok(())
 }
 
-/// Device state shared by the SpMM calls of one run.
-struct Operator {
+/// Device state shared by the SpMM calls of one run. Also drives the block
+/// Lanczos in [`super::lanczos`].
+pub(crate) struct Operator {
     /// The SpMM kernel
-    kernel: MetalKernel,
+    pub(crate) kernel: MetalKernel,
     /// CSR of A `[n, m]`
-    csr: MlxCsr,
+    pub(crate) csr: MlxCsr,
     /// CSC of A, i.e. the CSR of `A^T` `[m, n]`
-    csc: MlxCsr,
+    pub(crate) csc: MlxCsr,
     /// Column means `[m, 1]`
-    mu: Array,
+    pub(crate) mu: Array,
     /// Row offsets `[n, 1]`, zeros without CLR
-    offsets: Array,
+    pub(crate) offsets: Array,
     /// Ones `[n]`, the forward divisor
-    ones_n: Array,
-    /// Zeros `[s]`, the correction vectors without CLR
-    zeros_s: Array,
+    pub(crate) ones_n: Array,
     /// Whether row offsets are in play
-    use_clr: bool,
-    /// Sketch width
-    s_width: usize,
+    pub(crate) use_clr: bool,
 }
 
 impl Operator {
@@ -235,17 +232,23 @@ impl Operator {
     /// ### Params
     ///
     /// * `x` - Dense operand `[m, s]`, pre-divided by `sigma`
+    /// * `s_width` - Columns of `x`
     /// * `st` - Stream to run on
     ///
     /// ### Returns
     ///
     /// The (lazy) `[n, s]` product
-    fn forward(&self, x: &Array, st: &Stream) -> Result<Array, MlxErrors> {
+    pub(crate) fn forward(
+        &self,
+        x: &Array,
+        s_width: usize,
+        st: &Stream,
+    ) -> Result<Array, MlxErrors> {
         let c = self.mu.transpose(st)?.matmul(x, st)?;
         let x_sum = if self.use_clr {
-            Some(x.sum_axis(0, st)?)
+            x.sum_axis(0, st)?
         } else {
-            None
+            Array::from_f32(&vec![0.0; s_width], &[s_width as i32])
         };
         spmm_affine(
             &self.kernel,
@@ -253,9 +256,9 @@ impl Operator {
             x,
             &c,
             &self.offsets,
-            x_sum.as_ref().unwrap_or(&self.zeros_s),
+            &x_sum,
             &self.ones_n,
-            self.s_width,
+            s_width,
             st,
         )
     }
@@ -266,27 +269,34 @@ impl Operator {
     ///
     /// * `q` - Dense operand `[n, s]`
     /// * `div` - Per-gene divisor `[m]`, `sigma` or `sigma^2`
+    /// * `s_width` - Columns of `q`
     /// * `st` - Stream to run on
     ///
     /// ### Returns
     ///
     /// The (lazy) `[m, s]` product
-    fn transpose(&self, q: &Array, div: &Array, st: &Stream) -> Result<Array, MlxErrors> {
+    pub(crate) fn transpose(
+        &self,
+        q: &Array,
+        div: &Array,
+        s_width: usize,
+        st: &Stream,
+    ) -> Result<Array, MlxErrors> {
         let q_sum = q.sum_axis(0, st)?;
         let m_dot_q = if self.use_clr {
-            Some(self.offsets.transpose(st)?.matmul(q, st)?)
+            self.offsets.transpose(st)?.matmul(q, st)?
         } else {
-            None
+            Array::from_f32(&vec![0.0; s_width], &[s_width as i32])
         };
         spmm_affine(
             &self.kernel,
             &self.csc,
             q,
-            m_dot_q.as_ref().unwrap_or(&self.zeros_s),
+            &m_dot_q,
             &self.mu,
             &q_sum,
             div,
-            self.s_width,
+            s_width,
             st,
         )
     }
@@ -408,9 +418,7 @@ fn rand_svd_impl<T: BixverseFloat>(
         mu: Array::from_f32(&mu, &[m_i, 1]),
         offsets: Array::from_f32(&offsets, &[n_i, 1]),
         ones_n: Array::from_f32(&vec![1.0; n], &[n_i]),
-        zeros_s: Array::from_f32(&vec![0.0; s_width], &[s_i]),
         use_clr,
-        s_width,
     };
     let sigma_dev = Array::from_f32(&sigma, &[m_i]);
     let sigma_sq_dev = Array::from_f32(&sigma_sq, &[m_i]);
@@ -418,23 +426,23 @@ fn rand_svd_impl<T: BixverseFloat>(
     lap(&[], false, &mut clock, &mut st_times.upload)?;
 
     // -- initial sketch --
-    let y = op.forward(&omega_dev, &st)?;
+    let y = op.forward(&omega_dev, s_width, &st)?;
     lap(&[&y], staged, &mut clock, &mut st_times.spmm_forward)?;
     let mut q = cholesky_qr2(&y, s_width, &st)?;
     lap(&[&q], staged, &mut clock, &mut st_times.qr)?;
 
     // -- power iterations --
     for _ in 0..params.n_power_iters {
-        let z = op.transpose(&q, &sigma_sq_dev, &st)?;
+        let z = op.transpose(&q, &sigma_sq_dev, s_width, &st)?;
         lap(&[&z], staged, &mut clock, &mut st_times.spmm_transpose)?;
-        let y = op.forward(&z, &st)?;
+        let y = op.forward(&z, s_width, &st)?;
         lap(&[&y], staged, &mut clock, &mut st_times.spmm_forward)?;
         q = cholesky_qr2(&y, s_width, &st)?;
         lap(&[&q], staged, &mut clock, &mut st_times.qr)?;
     }
 
     // -- final Z --
-    let z = op.transpose(&q, &sigma_dev, &st)?;
+    let z = op.transpose(&q, &sigma_dev, s_width, &st)?;
     lap(&[&z], staged, &mut clock, &mut st_times.spmm_transpose)?;
 
     // -- finalise --
