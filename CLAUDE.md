@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|---|
 | `bixverse-core` | `core`, `utils`, `ml` (sparse structures, linear algebra, stats, SIMD, k-means, GPs) | nothing in the workspace |
 | `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
-| `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `h5ad_io`, `sc_traits`, ...) | core |
+| `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `v4_io`, `h5ad_io`, `sc_traits`, ...) | core |
 | `bixverse-sc` | the rest of `single_cell`, flattened (`sc_processing`, `sc_analysis`, ...) | methods (with `dge`), sc-data |
 | `bixverse-gpu` | `linalg`, `methods_gpu` | methods |
 | `bixverse-sc-gpu` | the old `gpu::sc_gpu`, flattened | sc, gpu |
@@ -20,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The rule that keeps the graph sane: a crate never depends on a sibling through an optional feature, except the two leaves (`bixverse-rs`, `bixverse-r`). Optional features only gate external dependencies (hdf5, edge-rs, bonsai-rs).
 
-`python/` is its own workspace root (excluded from this one) and depends on `bixverse-sc-data` only.
+`python/` is its own workspace root (excluded from this one) and depends on `bixverse-sc-data` only. Its version is independent (`python/Cargo.toml`, `python/CHANGELOG.md`) and its changelog names the `bixverse-sc-data` version it requires, so bump and note it whenever the data layer changes in a way the wheel sees.
 
 ## Sister crates: ann-search-rs, cubecl-utils-rs and edge-rs
 
@@ -98,7 +98,7 @@ Each crate is organised by domain, not by algorithmic layer. Module trees were k
 
 - `bixverse-core`: `core/` (math primitives, `faer` linear algebra, `CompressedSparseData2`, PCA/SVD, correlations, RBF kernels, synthetic data), `utils/` (SIMD via `BixverseSimd`, matrix helpers, traits, heap structures, assertion macros), `ml/` (k-means, Gaussian processes)
 - `bixverse-methods`: `enrichment/` (fgsea, GSVA, singscore, mitch, OAE, blitzGSEA), `graph/` (`SparseGraph`, community detection, PageRank), `methods/` (NMF, ICA, LDA, diffcor, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, `dge_bulk`), `ontology/`
-- `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 3, bumping it invalidates files on disk), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`
+- `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 4, the previous `SC_FILE_VERSION_V3` still reads; see "Single cell binary format" below), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`
 - `bixverse-sc`: processing, kNN, batch correction, annotation, analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), trajectories, multi-modal (WNN)
 - `bixverse-gpu`, `bixverse-sc-gpu`: GPU kernels via `cubecl` / `cubek`. K-means comes from `ann-search-rs`
 - `bixverse-mlx`: experimental MLX backend via `mlx-c`, f32 only
@@ -107,6 +107,14 @@ Where an sc algorithm has a GPU or MLX twin, the seam is generic over the backen
 
 **Errors.** One `thiserror` enum per crate: `CoreErrors`, `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`, `MlxErrors`, `RErrors`. Each upper enum wraps the ones below with `#[error(transparent)] Core(#[from] CoreErrors)` and so on, so `?` converts upwards; constructing a lower variant in an upper crate needs `.into()` (`Err(CoreErrors::InvalidArgument(..).into())`), and a test matching on it needs the wrapper (`Err(ScErrors::Core(CoreErrors::X { .. }))`). Add a variant to the lowest crate that raises it, in the matching subsystem section. The facade's `errors` module re-exports all of them.
 
+**Single cell binary format.** Two files per store, cell-major (CSR) and gene-major (CSC), one independently compressed chunk per cell or gene, offsets plus an index map in a tail header, `mmap` reads. Version 4 (the writers' default) stores indices and raw counts delta bit-packed in blocks of 128 behind an uncompressed 32 byte chunk header and a per-chunk codec (`ChunkCodec`: lz4 by default, zstd, none), and drops the normalised layer: it is recomputed on read from the raw counts, library size and target size, bit for bit, and a chunk where it does not recompute keeps it verbatim. A gene file carries a per-cell library-size table in its tail (pointed at by `library_index_offset`) for that recompute, and a table of normalised values for counts 1 to 4 is built when it opens. All of it lives in `v4_io`. Rules that follow from it:
+
+- `CellGeneSparseWriter::new` writes v4, `new_v3` and `write_gene_file_v3` the legacy layout (tests of v3 internals, conversion input). Parallel payload builders encode through `writer.format()` (`ChunkFormat::encode_cell` / `encode_gene`); `to_compressed_bytes` still emits v3 payloads, so never hand it to a v4 writer.
+- The reader dispatches on the file version, so v3 stores keep opening. `peek_file_version` reads the version from the 64 byte header, `upgrade_store_to_v4` swaps a v3 store for its conversion (temporary files first, optional `.v3.bak`), `convert_*_to_v4` write it elsewhere. The gene file needs the cell file for its library table, so convert them together.
+- The norm recompute goes through `norm_value`, the single definition of the layer. Changing it breaks bit identity with every file written before, as before. It uses the platform `ln_1p`; cross-platform identity of the recompute is untested.
+- Reads prefetch their byte range into the page cache (unix only, sampled residency probe first, so warm stores pay almost nothing). Cold-read benchmarks must verify coldness with `mincore`; sizing chunks by reading their mapped bytes warms the cache.
+- The archive (`archive_io`) only reads cells through the reader API and restores through the regular writers, so it is format independent and restores to v4.
+
 **Preludes.** Each crate has a `prelude` that re-exports the preludes below it plus its own errors and common types. Prefer `use crate::prelude::*;` in new modules. The facade prelude is the union.
 
 ## Performance conventions
@@ -114,6 +122,7 @@ Where an sc algorithm has a GPU or MLX twin, the seam is generic over the backen
 Performance is a first-class concern. This crate is the fast core underneath an R package.
 
 - Linear algebra: prefer `faer` (`Mat`, `MatRef`, `MatMut`) over `ndarray`. `ndarray` is only pulled in for HDF5 interop under `single-cell`.
+- `faer` is a workspace dependency with default features off (`std`, `rayon`, `sparse-linalg`, `rand` on). Its default `npy` feature drags `npyz`, `py_literal`, `pest_derive` and `stacker` into the tree, and `stacker`'s build script fails on the Windows ARM64 r-universe build. Cargo unifies features, so one crate or upstream dependency on the defaults brings it back for everyone: check with `cargo tree -e all --target all | grep -E "npyz|stacker|pest"`, which should print nothing.
 - Parallelism: `rayon` for CPU fan-out. `Par::Rayon(n_threads.try_into().unwrap())` is the standard `faer` parallelism knob.
 - SIMD: use `BixverseSimd` in `utils::simd` rather than hand-writing `wide` calls.
 - Hash maps/sets: use `FxHashMap` / `FxHashSet` from `rustc_hash`, not `std::collections::HashMap`.
@@ -137,6 +146,7 @@ The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaul
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file. A unit test that needs a crate above its own moves up: `crates/bixverse-sc/tests/in_memory_cell_subset.rs` exists because those tests use `sc_processing`
 - Integration tests and benches that span crates live in the facade, `crates/bixverse-rs/{tests,benches}`, under the old module paths, each gated by a file-level `#![cfg(...)]` on facade features (`single-cell`, `h5`, `dge`, `bonsai`, `sc-gpu`, `large-test`, ...). The MLX ones live in `crates/bixverse-mlx/{tests,benches}`, because `cfg(mlx_available)` only exists in that crate. `r_ffi_bench` lives in `crates/bixverse-r/benches`
+- Tests that write a store through `CellGeneSparseWriter::new` now exercise v4 end to end. A test that needs v3 on purpose (the reader's v3 path, conversion input) writes it with `new_v3` and `write_gene_file_v3`, as `v4_io`'s tests do.
 - Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `crates/bixverse-rs/tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `crates/bixverse-rs/tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text. Run the generators from the repository root
 - CI matrix: Ubuntu / macOS / Windows for the CPU and R lanes (Windows uses msvc on the CPU lane and gnu on the R lane); Ubuntu / macOS for GPU (Linux uses Vulkan via `WGPU_BACKEND=vulkan`); plus a per-member `cargo check` on Ubuntu
 
