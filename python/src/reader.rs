@@ -39,7 +39,8 @@ impl PyCellReader {
     /// ### Returns
     ///
     /// The reader, or an exception if the file is missing, foreign, truncated
-    /// or of a different format version.
+    /// or of an unsupported format version. Stores of file version 3 and 4
+    /// both open.
     #[new]
     fn new(py: Python<'_>, path: &str) -> PyResult<Self> {
         let inner = py
