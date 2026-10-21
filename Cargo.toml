@@ -53,7 +53,7 @@ cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
 cubek = { version = "0.3.0", features = ["matmul"] }
 document-features = "0.2.12"
-edge-rs = "0.3.0"
+edge-rs = "0.3.1"
 either = "1.15.0"
 extendr-api = "0.9.0"
 extendr-engine = "0.9.0"

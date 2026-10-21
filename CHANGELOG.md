@@ -15,8 +15,9 @@
   the chunk types still emits version 3 payloads.
 - `faer` is a workspace dependency without its default features (`std`,
   `rayon`, `sparse-linalg` and `rand` stay), so `npy` and everything behind it
-  leaves the tree once every upstream crate does the same. `ann-search-rs` is
-  `0.11.2` from crates.io; the git patch on a branch is gone.
+  (`npyz`, `py_literal`, `pest_derive`, `stacker`) is out of the dependency
+  tree, which the Windows ARM64 build needed. `ann-search-rs` is `0.11.2` and
+  `edge-rs` is `0.3.1`.
 
 ### Feature
 
