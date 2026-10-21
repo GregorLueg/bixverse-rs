@@ -46,7 +46,7 @@ bixverse-rs = { path = "crates/bixverse-rs", version = "0.8.1", default-features
 
 # External
 approx = "0.5.1"
-ann-search-rs = { version = "0.11.0", default-features = false }
+ann-search-rs = { version = "0.11.2", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"] }
 bonsai-rs = { version = "0.3.0", features = ["sanity"] }
 cubecl = { version = "0.11.0", features = ["wgpu"] }
@@ -57,7 +57,7 @@ edge-rs = "0.3.0"
 either = "1.15.0"
 extendr-api = "0.9.0"
 extendr-engine = "0.9.0"
-faer = "0.24.4"
+faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg", "rand"] }
 faer-traits = "0.24.0"
 faer-entity = "0.20.1"
 half = "2.7.1"
@@ -78,7 +78,3 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 zstd = "0.14.0"
-
-# Patch
-[patch.crates-io]
-ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs.git", branch = "feat-mlx-kmean-update" }

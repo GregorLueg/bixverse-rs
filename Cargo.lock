@@ -100,8 +100,9 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.11.1"
-source = "git+https://github.com/GregorLueg/ann-search-rs.git?branch=feat-mlx-kmean-update#7183ffda070c8de7ee5315e4a66843f6680ad4f1"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f0a027c4f7f7184c69ebae62918a6f7a540a51f80a07a715ba3571e3c6e1ee4"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
