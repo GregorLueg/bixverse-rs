@@ -553,6 +553,7 @@ pub fn restore_archive(
 
     let mut writer =
         CellGeneSparseWriter::new(cell_path, true, total_cells, total_genes, target_size)?;
+    let format = writer.format();
 
     let batch_size = rayon::current_num_threads().max(1);
     let mut pos = ARCHIVE_HEADER_LEN as u64;
@@ -591,7 +592,7 @@ pub fn restore_archive(
                         Ok(CellPayload {
                             original_index: c.original_index,
                             library_size: c.library_size,
-                            bytes: c.to_compressed_bytes()?,
+                            bytes: format.encode_cell(&c)?,
                         })
                     })
                     .collect::<Result<Vec<_>, ScDataErrors>>()

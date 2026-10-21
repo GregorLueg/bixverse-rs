@@ -22,6 +22,10 @@ use std::{
 };
 
 use crate::prelude::*;
+use crate::v4_io::{
+    ChunkCodec, ChunkFormat, V4Ctx, V4Decoded, V4Header, V4Run, decode_v4, decode_v4_into,
+    gene_norm_table, v4_cell_chunk, v4_gene_chunk,
+};
 
 ///////////////////
 // Count wrapper //
@@ -1512,10 +1516,21 @@ pub struct CellGeneSparseWriter {
     /// Library size of every cell chunk, in chunk order. Written as the
     /// library-size index on finalisation (cell-based files only).
     library_sizes: Vec<u64>,
+    /// File format version written into the header.
+    version: u32,
+    /// Body codec of v4 chunks, see [`ChunkFormat`].
+    codec: ChunkCodec,
+    /// Library size per original cell index, written as the cell table of a
+    /// v4 gene-based file on finalisation.
+    cell_library_table: Option<Vec<u64>>,
 }
 
 impl CellGeneSparseWriter {
     /// Create a new sparse writer instance
+    ///
+    /// Writes the current file format (v4, lz4 bodies). Use
+    /// [`Self::with_codec`] to pick another body codec, or [`Self::new_v3`]
+    /// for the legacy format.
     ///
     /// This writer assumes that rows represent genes and columns represent
     /// cells.
@@ -1581,7 +1596,96 @@ impl CellGeneSparseWriter {
             flush_frequency,
             target_size,
             library_sizes: Vec::new(),
+            version: SC_FILE_VERSION,
+            codec: ChunkCodec::Lz4,
+            cell_library_table: None,
         })
+    }
+
+    /// Create a writer for the legacy v3 format.
+    ///
+    /// Only needed to produce v3 files on purpose, such as the input of a
+    /// conversion test. Same parameters as [`Self::new`].
+    ///
+    /// ### Params
+    ///
+    /// * `path_f` - Path to the .bin file to which to write to.
+    /// * `cell_based` - Cell-based (`true`) or gene-based chunks.
+    /// * `total_cells` - Total cells in the data.
+    /// * `total_genes` - Total genes in the data.
+    /// * `target_size` - Library size the normalised layer is scaled to.
+    ///
+    /// ### Returns
+    ///
+    /// The `CellGeneSparseWriter`.
+    pub fn new_v3<P: AsRef<Path>>(
+        path_f: P,
+        cell_based: bool,
+        total_cells: usize,
+        total_genes: usize,
+        target_size: f32,
+    ) -> Result<Self, ScDataErrors> {
+        let mut writer = Self::new(path_f, cell_based, total_cells, total_genes, target_size)?;
+        writer.version = SC_FILE_VERSION_V3;
+        Ok(writer)
+    }
+
+    /// Set the body codec of the v4 chunks this writer encodes.
+    ///
+    /// Chunks that do not shrink are stored uncompressed whatever the codec.
+    ///
+    /// ### Params
+    ///
+    /// * `codec` - The codec
+    ///
+    /// ### Returns
+    ///
+    /// The writer, with the codec set.
+    pub fn with_codec(mut self, codec: ChunkCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// How this writer encodes chunks.
+    ///
+    /// Parallel payload builders copy this out and encode with it, so what
+    /// they hand to the `write_compressed_*` methods matches the file.
+    ///
+    /// ### Returns
+    ///
+    /// The format: file version, body codec and the header target size.
+    pub fn format(&self) -> ChunkFormat {
+        ChunkFormat {
+            version: self.version,
+            codec: self.codec,
+            target_size: self.target_size,
+        }
+    }
+
+    /// Set the per-cell library-size table of a v4 gene-based file.
+    ///
+    /// Gene chunks that drop their norm layer recompute it from the library
+    /// size of each cell, so the table has to be set before
+    /// [`Self::finalise`]. The chunks must have been encoded against the same
+    /// table, see [`ChunkFormat::encode_gene`].
+    ///
+    /// ### Params
+    ///
+    /// * `table` - Library size per original cell index
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or an error unless this is a v4 gene-based writer.
+    pub fn set_cell_library_table(&mut self, table: Vec<u64>) -> Result<(), ScDataErrors> {
+        if self.version != SC_FILE_VERSION {
+            return Err(ScDataErrors::FileVersionMismatch {
+                expected: SC_FILE_VERSION,
+                found: self.version,
+            });
+        }
+        self.check_mode(false)?;
+        self.cell_library_table = Some(table);
+        Ok(())
     }
 
     /// Verify the writer was opened in the orientation the caller expects.
@@ -1604,30 +1708,13 @@ impl CellGeneSparseWriter {
         })
     }
 
-    /// Compress a serialised chunk, append it, and record its offset.
-    ///
-    /// Tail of [`Self::write_gene_chunk`]; cell chunks go through
-    /// [`Self::append_cell`] so their library sizes are recorded.
-    ///
-    /// ### Params
-    ///
-    /// * `buffer` - The chunk serialised via its `write_to_bytes`.
-    /// * `original_index` - Original index of the cell or gene in the data.
-    ///
-    /// ### Returns
-    ///
-    /// `Ok(())` on success, an I/O error otherwise.
-    fn append_chunk(&mut self, buffer: &[u8], original_index: usize) -> Result<(), ScDataErrors> {
-        self.append_compressed(&compress_prepend_size(buffer), original_index)
-    }
-
     /// Append an already compressed chunk and record its offset.
     ///
     /// Flushes the underlying [`BufWriter`] every `flush_frequency` chunks.
     ///
     /// ### Params
     ///
-    /// * `compressed` - Size-prepended lz4 payload of a serialised chunk.
+    /// * `compressed` - The encoded chunk, in the format of this writer.
     /// * `original_index` - Original index of the cell or gene in the data.
     ///
     /// ### Returns
@@ -1697,14 +1784,15 @@ impl CellGeneSparseWriter {
     pub fn write_cell_chunk(&mut self, cell_chunk: CsrCellChunk) -> Result<(), ScDataErrors> {
         self.check_mode(true)?;
 
-        self.append_cell(
-            &compress_prepend_size(&cell_chunk.to_bytes()),
-            cell_chunk.original_index,
-            cell_chunk.library_size,
-        )
+        let bytes = self.format().encode_cell(&cell_chunk)?;
+        self.append_cell(&bytes, cell_chunk.original_index, cell_chunk.library_size)
     }
 
     /// Write a Gene to the file
+    ///
+    /// A v4 gene chunk written this way keeps its normalised layer verbatim,
+    /// since there is no per-cell library table to recompute it from. The bulk
+    /// path, `write_gene_file`, drops it.
     ///
     /// ### Params
     ///
@@ -1717,14 +1805,12 @@ impl CellGeneSparseWriter {
     pub fn write_gene_chunk(&mut self, gene_chunk: CscGeneChunk) -> Result<(), ScDataErrors> {
         self.check_mode(false)?;
 
-        let mut buffer = Vec::new();
-        gene_chunk.write_to_bytes(&mut buffer)?;
-
-        self.append_chunk(&buffer, gene_chunk.original_index)
+        let bytes = self.format().encode_gene(&gene_chunk, &[])?;
+        self.append_compressed(&bytes, gene_chunk.original_index)
     }
 
     /// Write genes whose payloads were already built via
-    /// [`CscGeneChunk::to_compressed_bytes`].
+    /// [`ChunkFormat::encode_gene`] of this writer's [`Self::format`].
     ///
     /// ### Params
     ///
@@ -1744,7 +1830,7 @@ impl CellGeneSparseWriter {
     }
 
     /// Write cells whose payloads were already built via
-    /// [`CsrCellChunk::to_compressed_bytes`].
+    /// [`ChunkFormat::encode_cell`] of this writer's [`Self::format`].
     ///
     /// ### Params
     ///
@@ -1803,9 +1889,12 @@ impl CellGeneSparseWriter {
         self.writer.write_all(&header_data)?;
 
         let mut file_header = FileHeader::new(self.cell_based, self.target_size);
+        file_header.version = self.version;
         file_header.main_header_offset = main_header_offset;
         if self.cell_based {
             file_header.library_index_offset = self.write_library_index()?;
+        } else if let Some(table) = self.cell_library_table.take() {
+            file_header.library_index_offset = self.write_library_table(&table)?;
         }
 
         self.writer.seek(SeekFrom::Start(0))?;
@@ -1845,6 +1934,25 @@ impl CellGeneSparseWriter {
         self.writer
             .write_all(&(self.library_sizes.len() as u64).to_le_bytes())?;
         for library_size in &self.library_sizes {
+            self.writer.write_all(&library_size.to_le_bytes())?;
+        }
+        Ok(offset)
+    }
+
+    /// Write the per-cell library-size table of a v4 gene file at the current
+    /// position: a `u64` count, then one `u64` per original cell index.
+    ///
+    /// ### Params
+    ///
+    /// * `table` - Library size per original cell index
+    ///
+    /// ### Returns
+    ///
+    /// The offset the table starts at, for the [`FileHeader`].
+    fn write_library_table(&mut self, table: &[u64]) -> Result<u64, ScDataErrors> {
+        let offset = self.writer.stream_position()?;
+        self.writer.write_all(&(table.len() as u64).to_le_bytes())?;
+        for library_size in table {
             self.writer.write_all(&library_size.to_le_bytes())?;
         }
         Ok(offset)
@@ -1945,6 +2053,7 @@ pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
 /// * `row` - The cell's `(gene, count)` pairs, sorted by gene here if needed
 /// * `original_index` - Index the cell is stored under
 /// * `target_size` - Target size for the library normalisation
+/// * `format` - The format of the writer the payload goes to
 ///
 /// ### Returns
 ///
@@ -1953,7 +2062,8 @@ pub fn compress_cell_row(
     row: &mut [(u32, u32)],
     original_index: usize,
     target_size: f32,
-) -> std::io::Result<(usize, CellPayload)> {
+    format: ChunkFormat,
+) -> Result<(usize, CellPayload), ScDataErrors> {
     if row.windows(2).any(|w| w[0].0 > w[1].0) {
         row.sort_by_key(|&(g, _)| g);
     }
@@ -1964,7 +2074,7 @@ pub fn compress_cell_row(
     let payload = CellPayload {
         original_index,
         library_size,
-        bytes: chunk.to_compressed_bytes()?,
+        bytes: format.encode_cell(&chunk)?,
     };
     Ok((nnz, payload))
 }
@@ -1994,6 +2104,7 @@ pub fn write_cell_rows(
 ) -> Result<(Vec<usize>, Vec<usize>), ScDataErrors> {
     let mut nnz = Vec::with_capacity(rows.len());
     let mut lib_size = Vec::with_capacity(rows.len());
+    let format = writer.format();
 
     for (batch_idx, batch) in rows.chunks_mut(CELL_WRITE_BATCH).enumerate() {
         let first = cell_offset + batch_idx * CELL_WRITE_BATCH;
@@ -2002,7 +2113,7 @@ pub fn write_cell_rows(
             .enumerate()
             .map(|(k, row)| {
                 let mut row = std::mem::take(row);
-                Ok(compress_cell_row(&mut row, first + k, target_size)?)
+                compress_cell_row(&mut row, first + k, target_size, format)
             })
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
 
@@ -2043,6 +2154,7 @@ where
 {
     let mut nnz = Vec::with_capacity(n_chunks);
     let mut lib_size = Vec::with_capacity(n_chunks);
+    let format = writer.format();
 
     for start in (0..n_chunks).step_by(CELL_WRITE_BATCH) {
         let end = (start + CELL_WRITE_BATCH).min(n_chunks);
@@ -2056,7 +2168,7 @@ where
                     CellPayload {
                         original_index: chunk.original_index,
                         library_size: lib_i,
-                        bytes: chunk.to_compressed_bytes()?,
+                        bytes: format.encode_cell(&chunk)?,
                     },
                 ))
             })
@@ -2088,6 +2200,7 @@ pub fn write_cell_chunks_parallel(
     chunks: &[CsrCellChunk],
     writer: &mut CellGeneSparseWriter,
 ) -> Result<(), ScDataErrors> {
+    let format = writer.format();
     for batch in chunks.chunks(CELL_WRITE_BATCH) {
         let payloads = batch
             .par_iter()
@@ -2095,7 +2208,7 @@ pub fn write_cell_chunks_parallel(
                 Ok::<_, ScDataErrors>(CellPayload {
                     original_index: chunk.original_index,
                     library_size: chunk.library_size,
-                    bytes: chunk.to_compressed_bytes()?,
+                    bytes: format.encode_cell(chunk)?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2463,12 +2576,44 @@ pub fn peek_target_size<P: AsRef<Path>>(f_path: P) -> Result<Option<f32>, ScData
     Ok((file_header.target_size != 0.0).then_some(file_header.target_size))
 }
 
+/// Read the format version out of a bin file without mapping the whole file.
+///
+/// Only the fixed 64-byte file header is touched, so callers can check a store
+/// of any size before opening it, and decide whether it needs
+/// `upgrade_store_to_v4`.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the .bin file.
+///
+/// ### Returns
+///
+/// The version, [`SC_FILE_VERSION`] or [`SC_FILE_VERSION_V3`] for files this
+/// build reads, or [`ScDataErrors::HeaderDecodeFailed`] for a file that is not
+/// a bixverse store.
+pub fn peek_file_version<P: AsRef<Path>>(f_path: P) -> Result<u32, ScDataErrors> {
+    use std::io::Read;
+
+    let mut buffer = [0u8; 64];
+    File::open(f_path)?.read_exact(&mut buffer)?;
+
+    let (file_header, _) = decode_from_slice::<FileHeader, _>(&buffer, config::standard())
+        .map_err(|_| ScDataErrors::HeaderDecodeFailed)?;
+    if &file_header.magic != FILE_MAGIC {
+        return Err(ScDataErrors::HeaderDecodeFailed);
+    }
+
+    Ok(file_header.version)
+}
+
 /// ParallelSparseReader
 pub struct ParallelSparseReader {
     /// The file header
     header: SparseDataHeader,
     /// Reference to the memory map for safe sharing across threads
     mmap: Arc<memmap2::Mmap>,
+    /// The open file, for the explicit reads of [`Self::prefetch`].
+    file: File,
     /// Start position of the chunks after the header file
     chunks_start: u64,
     /// Library size the `data_norm` layer was normalised against, as recorded
@@ -2479,6 +2624,14 @@ pub struct ParallelSparseReader {
     library_index: Option<usize>,
     /// Whether `index_map` is the identity, letting every lookup skip the hash.
     identity_index_map: bool,
+    /// Format version of the file, [`SC_FILE_VERSION_V3`] or [`SC_FILE_VERSION`].
+    version: u32,
+    /// Library size per original cell index as `f32`, on v4 gene-based files
+    /// that carry the table. Gene chunks recompute their norm from it.
+    cell_lib: Option<Arc<Vec<f32>>>,
+    /// Normalised value of small counts per cell, built from `cell_lib` when
+    /// the file has a target size. See [`gene_norm_table`].
+    cell_norm: Option<Arc<Vec<u16>>>,
 }
 
 impl ParallelSparseReader {
@@ -2522,7 +2675,7 @@ impl ParallelSparseReader {
             return Err(ScDataErrors::HeaderDecodeFailed);
         }
 
-        if file_header.version != SC_FILE_VERSION {
+        if file_header.version != SC_FILE_VERSION_V3 && file_header.version != SC_FILE_VERSION {
             return Err(ScDataErrors::FileVersionMismatch {
                 expected: SC_FILE_VERSION,
                 found: file_header.version,
@@ -2552,8 +2705,17 @@ impl ParallelSparseReader {
             decode_from_slice::<SparseDataHeader, _>(header_bytes, config::standard())
                 .map_err(|_| ScDataErrors::HeaderDecodeFailed)?;
 
-        let library_index =
-            Self::check_library_index(&mmap, file_header.library_index_offset, &header)?;
+        let is_v4_gene = file_header.version == SC_FILE_VERSION && !header.cell_based;
+        let library_index = if is_v4_gene {
+            None
+        } else {
+            Self::check_library_index(&mmap, file_header.library_index_offset, &header)?
+        };
+        let cell_lib = if is_v4_gene {
+            Self::load_cell_library_table(&mmap, file_header.library_index_offset)?
+        } else {
+            None
+        };
         let identity_index_map = header.index_map.len() == header.chunk_offsets.len()
             && header
                 .index_map
@@ -2563,11 +2725,87 @@ impl ParallelSparseReader {
         Ok(Self {
             header,
             mmap: Arc::new(mmap),
+            file,
             chunks_start: 64,
             target_size: file_header.target_size,
             library_index,
             identity_index_map,
+            version: file_header.version,
+            cell_norm: cell_lib
+                .as_ref()
+                .filter(|_| file_header.target_size != 0.0)
+                .map(|lib| Arc::new(gene_norm_table(lib, file_header.target_size))),
+            cell_lib,
         })
+    }
+
+    /// Load the per-cell library-size table of a v4 gene-based file.
+    ///
+    /// ### Params
+    ///
+    /// * `mmap` - The mapped file.
+    /// * `offset` - `library_index_offset` from the file header; `0` means the
+    ///   file has no table.
+    ///
+    /// ### Returns
+    ///
+    /// The library sizes as `f32`, `None` without a table, or
+    /// [`ScDataErrors::HeaderDecodeFailed`] if the table is malformed.
+    fn load_cell_library_table(
+        mmap: &memmap2::Mmap,
+        offset: u64,
+    ) -> Result<Option<Arc<Vec<f32>>>, ScDataErrors> {
+        if offset == 0 {
+            return Ok(None);
+        }
+        let offset = offset as usize;
+        if offset.saturating_add(8) > mmap.len() {
+            return Err(ScDataErrors::HeaderDecodeFailed);
+        }
+        let count = le_u64_at(mmap, offset) as usize;
+        let end = count
+            .checked_mul(8)
+            .and_then(|bytes| bytes.checked_add(offset + 8));
+        if end.is_none_or(|end| end > mmap.len()) {
+            return Err(ScDataErrors::HeaderDecodeFailed);
+        }
+        Ok(Some(Arc::new(
+            (0..count)
+                .map(|i| le_u64_at(mmap, offset + 8 + 8 * i) as f32)
+                .collect(),
+        )))
+    }
+
+    /// Format version of the file this reader maps.
+    ///
+    /// ### Returns
+    ///
+    /// [`SC_FILE_VERSION_V3`] or [`SC_FILE_VERSION`].
+    pub fn file_version(&self) -> u32 {
+        self.version
+    }
+
+    /// Whether the mapped file is v4.
+    ///
+    /// ### Returns
+    ///
+    /// `true` for a v4 file.
+    fn is_v4(&self) -> bool {
+        self.version == SC_FILE_VERSION
+    }
+
+    /// Decode context for v4 chunks of this file.
+    ///
+    /// ### Returns
+    ///
+    /// The context.
+    fn v4_ctx(&self) -> V4Ctx<'_> {
+        V4Ctx {
+            target_size: self.target_size,
+            cell_lib: self.cell_lib.as_deref().map(Vec::as_slice),
+            cell_norm: self.cell_norm.as_deref().map(Vec::as_slice),
+            is_cell: self.header.cell_based,
+        }
     }
 
     /// Validate the library-size index a file header points at.
@@ -2756,6 +2994,170 @@ impl ParallelSparseReader {
     }
 }
 
+/////////////
+// Prefetch //
+/////////////
+
+/// Bytes per explicit read in [`ParallelSparseReader::prefetch`].
+///
+/// Large reads keep the SSD at a useful queue depth with few syscalls, which
+/// page faults on a memory map do not: they arrive one page at a time per
+/// thread. Not tuned beyond being large.
+#[cfg(unix)]
+const PREFETCH_BLOCK: usize = 8 * 1024 * 1024;
+
+/// Smallest total span worth prefetching. Below it the faults of the decode
+/// itself are cheaper than setting the reads up. One byte under test, so the
+/// unit tests' small stores exercise the prefetch path.
+#[cfg(unix)]
+const PREFETCH_MIN_BYTES: usize = if cfg!(test) { 1 } else { 16 * 1024 * 1024 };
+
+/// Two chunk spans closer than this are read as one range, so a sparse index
+/// set does not turn into many tiny reads.
+#[cfg(unix)]
+const PREFETCH_MERGE_GAP: usize = 256 * 1024;
+
+/// Ranges probed for residency before deciding whether to prefetch at all.
+#[cfg(unix)]
+const PREFETCH_SAMPLES: usize = 32;
+
+/// A block with at least this fraction of its pages already cached is skipped,
+/// so prefetching a warm store costs a residency probe instead of a copy.
+#[cfg(unix)]
+const PREFETCH_SKIP_RESIDENT: f64 = 0.9;
+
+impl ParallelSparseReader {
+    /// Pull the chunks about to be read into the page cache.
+    ///
+    /// Best effort: an I/O error or an out-of-range index is ignored here and
+    /// surfaces in the read that follows. Chunk spans are merged, cut into
+    /// [`PREFETCH_BLOCK`] reads and issued in parallel, skipping blocks that
+    /// are already resident. The pages then serve the memory map the decode
+    /// reads from.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Original indices of the cells or genes about to be read
+    #[cfg(unix)]
+    fn prefetch(&self, indices: &[usize]) {
+        use std::os::unix::fs::FileExt;
+
+        let offsets = &self.header.chunk_offsets;
+        let mut spans: Vec<(usize, usize)> = indices
+            .iter()
+            .filter_map(|&i| {
+                let chunk = self.chunk_index_of(i).ok()?;
+                let start = (self.chunks_start + offsets[chunk]) as usize;
+                let end = offsets
+                    .get(chunk + 1)
+                    .map_or(start + 8, |&next| (self.chunks_start + next) as usize);
+                Some((start, end))
+            })
+            .collect();
+        if spans.iter().map(|&(s, e)| e - s).sum::<usize>() < PREFETCH_MIN_BYTES {
+            return;
+        }
+
+        spans.sort_unstable();
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in spans {
+            match ranges.last_mut() {
+                Some(last) if start <= last.1 + PREFETCH_MERGE_GAP => last.1 = last.1.max(end),
+                _ => ranges.push((start, end)),
+            }
+        }
+
+        // SAFETY: `sysconf` with a valid name has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as usize;
+
+        // A handful of probes decide whether any of this is needed, so a warm
+        // store pays almost nothing.
+        let step = (ranges.len() / PREFETCH_SAMPLES).max(1);
+        let probed: Vec<f64> = ranges
+            .iter()
+            .step_by(step)
+            .filter(|&&(s, e)| s / page * page < self.mmap.len() && e > s)
+            .map(|&(s, e)| {
+                let s = s / page * page;
+                let e = e.min(self.mmap.len());
+                self.resident_fraction(s, e - s, page)
+            })
+            .collect();
+        if probed.is_empty()
+            || probed.iter().sum::<f64>() / probed.len() as f64 >= PREFETCH_SKIP_RESIDENT
+        {
+            return;
+        }
+        let blocks: Vec<(usize, usize)> = ranges
+            .iter()
+            .flat_map(|&(start, end)| {
+                let start = start / page * page;
+                (start..end)
+                    .step_by(PREFETCH_BLOCK)
+                    .map(move |s| (s, (s + PREFETCH_BLOCK).min(end)))
+            })
+            .filter(|&(s, e)| s < self.mmap.len() && e > s)
+            .collect();
+
+        blocks.par_iter().for_each_init(
+            || vec![0u8; PREFETCH_BLOCK],
+            |buf, &(start, end)| {
+                let end = end.min(self.mmap.len());
+                if self.resident_fraction(start, end - start, page) >= PREFETCH_SKIP_RESIDENT {
+                    return;
+                }
+                let mut done = 0;
+                while done < end - start {
+                    match self
+                        .file
+                        .read_at(&mut buf[..end - start - done], (start + done) as u64)
+                    {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => done += n,
+                    }
+                }
+            },
+        );
+    }
+
+    /// Fraction of the pages of a byte range that sit in the page cache.
+    ///
+    /// ### Params
+    ///
+    /// * `start` - Page-aligned byte offset into the file
+    /// * `len` - Length in bytes
+    /// * `page` - System page size
+    ///
+    /// ### Returns
+    ///
+    /// The resident fraction, `0.0` if the probe fails.
+    #[cfg(unix)]
+    fn resident_fraction(&self, start: usize, len: usize, page: usize) -> f64 {
+        let mut vec = vec![0u8; len.div_ceil(page)];
+        // SAFETY: `start..start + len` lies inside the mapping, `start` is
+        // page aligned, and `vec` holds one byte per page as `mincore` needs.
+        let rc = unsafe {
+            libc::mincore(
+                self.mmap.as_ptr().add(start) as *mut libc::c_void,
+                len,
+                vec.as_mut_ptr().cast(),
+            )
+        };
+        if rc != 0 {
+            return 0.0;
+        }
+        vec.iter().filter(|&&b| b & 1 != 0).count() as f64 / vec.len().max(1) as f64
+    }
+
+    /// No-op where explicit prefetching is not implemented.
+    ///
+    /// ### Params
+    ///
+    /// * `_indices` - Unused
+    #[cfg(not(unix))]
+    fn prefetch(&self, _indices: &[usize]) {}
+}
+
 ////////////////////////
 // Fused batch reads  //
 ////////////////////////
@@ -2823,6 +3225,61 @@ impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
             lengths: Vec::with_capacity(n_runs),
             kept: Vec::new(),
         }
+    }
+
+    /// Append one v4 run.
+    ///
+    /// Without a `row_map` the chunk is decoded straight into this fragment's
+    /// vectors, with no intermediate copy. With one, the run is decoded into
+    /// `scratch` and filtered through [`Self::push_run`].
+    ///
+    /// ### Params
+    ///
+    /// * `chunk` - The v4 chunk, header first
+    /// * `ctx` - File context
+    /// * `scratch` - The worker's reusable buffers
+    /// * `row_map` - Optional dense `index -> output row` map
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or the first decode or [`ScDataErrors::RawCountOverflow`]
+    /// error.
+    pub(crate) fn push_v4(
+        &mut self,
+        chunk: &[u8],
+        ctx: &V4Ctx,
+        scratch: &mut V4Decoded,
+        row_map: Option<&[u32]>,
+    ) -> Result<(), ScDataErrors> {
+        let (want_raw, want_norm) = self.layers();
+        if row_map.is_some() {
+            decode_v4(chunk, ctx, want_raw, want_norm, scratch)?;
+            return self.push_run(&V4Run::new(scratch), row_map);
+        }
+
+        let h = decode_v4_into(
+            chunk,
+            ctx,
+            want_raw,
+            &mut scratch.bytes,
+            &mut scratch.raw,
+            &mut self.indices,
+            self.data_2.as_mut(),
+        )?;
+        if let Some(data) = self.data.as_mut() {
+            extend_raw_checked(data, scratch.raw.iter().copied())?;
+        }
+        self.lengths.push(h.nnz);
+        Ok(())
+    }
+
+    /// Which layers this fragment materialises.
+    ///
+    /// ### Returns
+    ///
+    /// `(raw, norm)`.
+    pub(crate) fn layers(&self) -> (bool, bool) {
+        (self.data.is_some(), self.data_2.is_some())
     }
 
     /// Append one run.
@@ -2925,8 +3382,8 @@ fn wanted_layers(data_layer: &DataLayerReturn) -> (bool, bool) {
 /// * `data_layer` - Which layer(s) to materialise
 /// * `cs_type` - Layout of the output: CSR for cell runs, CSC for gene runs
 /// * `shape` - `(cells, genes)` of the output
-/// * `fill` - Appends run `indices[i]` to the fragment; the `Vec<u8>` is the
-///   worker's reusable scratch buffer
+/// * `fill` - Appends run `indices[i]` to the fragment; the [`V4Decoded`] is
+///   the worker's reusable scratch
 ///
 /// ### Returns
 ///
@@ -2941,7 +3398,7 @@ pub(crate) fn read_fused<T, F>(
 ) -> Result<CompressedSparseData2<T, f32>, ScDataErrors>
 where
     T: BixverseNumeric + FromPrimitive,
-    F: Fn(usize, &mut Vec<u8>, &mut SparseFragment<T>) -> Result<(), ScDataErrors> + Sync,
+    F: Fn(usize, &mut V4Decoded, &mut SparseFragment<T>) -> Result<(), ScDataErrors> + Sync,
 {
     let layers = wanted_layers(data_layer);
     let n_pieces = rayon::current_num_threads().max(1) * FUSED_PIECES_PER_THREAD;
@@ -2950,7 +3407,7 @@ where
     let fragments: Vec<SparseFragment<T>> = indices
         .par_chunks(piece)
         .map(|runs| {
-            let mut scratch: Vec<u8> = Vec::new();
+            let mut scratch = V4Decoded::default();
             let mut fragment = SparseFragment::new(layers, runs.len());
             for &run in runs {
                 fill(run, &mut scratch, &mut fragment)?;
@@ -3155,6 +3612,19 @@ impl SingleCellReading for ParallelSparseReader {
             });
         }
 
+        self.prefetch(indices);
+
+        if self.is_v4() {
+            let ctx = self.v4_ctx();
+            return indices
+                .par_iter()
+                .map_init(V4Decoded::default, |scratch, &original_index| {
+                    let (chunk, _) = self.locate_chunk(original_index)?;
+                    v4_cell_chunk(chunk, &ctx, scratch)
+                })
+                .collect();
+        }
+
         indices
             .par_iter()
             .map(|&original_index| {
@@ -3193,14 +3663,20 @@ impl SingleCellReading for ParallelSparseReader {
             });
         }
 
+        self.prefetch(indices);
+
         read_fused(
             indices,
             data_layer,
             CompressedSparseFormat::Csr,
             (indices.len(), self.header.total_genes),
             |cell, scratch, fragment| {
-                self.decompress_chunk_into(cell, scratch)?;
-                let p = csr_payload(scratch)?;
+                if self.is_v4() {
+                    let (chunk, _) = self.locate_chunk(cell)?;
+                    return fragment.push_v4(chunk, &self.v4_ctx(), scratch, None);
+                }
+                self.decompress_chunk_into(cell, &mut scratch.bytes)?;
+                let p = csr_payload(&scratch.bytes)?;
                 fragment.push_run(&p, None)
             },
         )
@@ -3239,14 +3715,20 @@ impl SingleCellReading for ParallelSparseReader {
 
         let (row_map, n_rows) = cell_row_map(cells_to_keep, self.header.total_cells);
 
+        self.prefetch(indices);
+
         read_fused(
             indices,
             data_layer,
             CompressedSparseFormat::Csc,
             (n_rows, indices.len()),
             |gene, scratch, fragment| {
-                self.decompress_chunk_into(gene, scratch)?;
-                let p = csc_payload(scratch)?;
+                if self.is_v4() {
+                    let (chunk, _) = self.locate_chunk(gene)?;
+                    return fragment.push_v4(chunk, &self.v4_ctx(), scratch, row_map.as_deref());
+                }
+                self.decompress_chunk_into(gene, &mut scratch.bytes)?;
+                let p = csc_payload(&scratch.bytes)?;
                 fragment.push_run(&p, row_map.as_deref())
             },
         )
@@ -3267,6 +3749,19 @@ impl SingleCellReading for ParallelSparseReader {
                 actual: "cell-based",
                 requested: "gene-based",
             });
+        }
+
+        self.prefetch(indices);
+
+        if self.is_v4() {
+            let ctx = self.v4_ctx();
+            return indices
+                .par_iter()
+                .map_init(V4Decoded::default, |scratch, &original_index| {
+                    let (chunk, _) = self.locate_chunk(original_index)?;
+                    v4_gene_chunk(chunk, &ctx, scratch)
+                })
+                .collect();
         }
 
         indices
@@ -3305,6 +3800,21 @@ impl SingleCellReading for ParallelSparseReader {
         }
 
         let cell_map = keep_set_index_map(cells_to_keep);
+
+        self.prefetch(indices);
+
+        if self.is_v4() {
+            let ctx = self.v4_ctx();
+            return indices
+                .par_iter()
+                .map_init(V4Decoded::default, |scratch, &original_index| {
+                    let (chunk, _) = self.locate_chunk(original_index)?;
+                    let mut chunk = v4_gene_chunk(chunk, &ctx, scratch)?;
+                    chunk.filter_selected_cells_dense(&cell_map);
+                    Ok(chunk)
+                })
+                .collect();
+        }
 
         indices
             .par_iter()
@@ -3355,6 +3865,16 @@ impl SingleCellReading for ParallelSparseReader {
             return self.library_sizes_from_index(start, indices);
         }
 
+        if self.is_v4() {
+            return indices
+                .iter()
+                .map(|&original_index| {
+                    let (chunk, _) = self.locate_chunk(original_index)?;
+                    Ok(V4Header::parse(chunk)?.aux as usize)
+                })
+                .collect();
+        }
+
         indices
             .par_iter()
             .map(|&original_index| {
@@ -3392,6 +3912,16 @@ impl SingleCellReading for ParallelSparseReader {
                 actual: "cell-based",
                 requested: "gene-based",
             });
+        }
+
+        if self.is_v4() {
+            return indices
+                .iter()
+                .map(|&original_index| {
+                    let (chunk, _) = self.locate_chunk(original_index)?;
+                    Ok(V4Header::parse(chunk)?.nnz)
+                })
+                .collect();
         }
 
         indices
@@ -4084,6 +4614,11 @@ mod tests {
     ///
     /// The temp guard and an open reader over it.
     fn csr_test_store(name: &str) -> (TempBin, ParallelSparseReader) {
+        csr_test_store_with(name, false)
+    }
+
+    /// [`csr_test_store`] in the legacy v3 format when `legacy` is set.
+    fn csr_test_store_with(name: &str, legacy: bool) -> (TempBin, ParallelSparseReader) {
         let temp = TempBin::new(name);
         let chunks = vec![
             cell_chunk(&[5, 70_000], &[0, 2], 0),
@@ -4091,8 +4626,12 @@ mod tests {
             cell_chunk(&[9], &[3], 2),
         ];
 
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), true, 3, 4, 1e4).expect("writer opens");
+        let ctor = if legacy {
+            CellGeneSparseWriter::new_v3
+        } else {
+            CellGeneSparseWriter::new
+        };
+        let mut writer = ctor(temp.path(), true, 3, 4, 1e4).expect("writer opens");
         for chunk in chunks {
             writer.write_cell_chunk(chunk).expect("write");
         }
@@ -4345,7 +4884,7 @@ mod tests {
 
     #[test]
     fn test_decompress_chunk_into_matches_allocating_path() {
-        let (_temp, reader) = csr_test_store("csr_scratch");
+        let (_temp, reader) = csr_test_store_with("csr_scratch", true);
 
         // A dirty buffer must be overwritten, not appended to: the scratch is
         // reused across every cell a worker owns.
@@ -4394,7 +4933,7 @@ mod tests {
     }
 
     /// Regression: `ParallelSparseReader::new` rejects any file whose version is
-    /// not `SC_FILE_VERSION`, and nothing exercised that guard.
+    /// not a supported version, and nothing exercised that guard.
     #[test]
     fn test_reader_rejects_a_version_mismatch() {
         let temp = TempBin::new("version_mismatch");
@@ -4554,7 +5093,7 @@ mod tests {
     fn test_legacy_header_decodes_with_zero_target_size() {
         let legacy = LegacyFileHeader {
             magic: *b"SCRNASEQ",
-            version: SC_FILE_VERSION,
+            version: SC_FILE_VERSION_V3,
             main_header_offset: 123_456,
             cell_based: true,
             _reserved_1: [0; 32],
@@ -4566,7 +5105,7 @@ mod tests {
             decode_from_slice::<FileHeader, _>(&slot, config::standard()).expect("decode as v3");
 
         assert_eq!(decoded.magic, *b"SCRNASEQ");
-        assert_eq!(decoded.version, SC_FILE_VERSION);
+        assert_eq!(decoded.version, SC_FILE_VERSION_V3);
         assert_eq!(decoded.main_header_offset, 123_456);
         assert!(decoded.cell_based);
         assert_eq!(decoded.target_size, 0.0);
@@ -4620,7 +5159,7 @@ mod tests {
     fn test_pre_index_header_decodes_with_no_library_index() {
         let old = TargetSizeFileHeader {
             magic: *b"SCRNASEQ",
-            version: SC_FILE_VERSION,
+            version: SC_FILE_VERSION_V3,
             main_header_offset: 123_456,
             cell_based: true,
             target_size: 1e4,

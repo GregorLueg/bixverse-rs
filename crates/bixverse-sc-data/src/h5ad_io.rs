@@ -1590,11 +1590,7 @@ pub(crate) fn write_h5_cell_major_cells(
                             buf.push((new, data[idx] as u32));
                         }
                     }
-                    Ok(compress_cell_row(
-                        buf,
-                        cell_offset + offset + k,
-                        target_size,
-                    )?)
+                    compress_cell_row(buf, cell_offset + offset + k, target_size, writer.format())
                 })
                 .collect::<Result<Vec<_>, ScDataErrors>>()?;
 
@@ -2135,7 +2131,7 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
                         buf.push((new_gene, val as u32));
                     }
                 }
-                Ok(compress_cell_row(buf, offset + k, cell_qc.target_size)?)
+                compress_cell_row(buf, offset + k, cell_qc.target_size, writer.format())
             })
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
 

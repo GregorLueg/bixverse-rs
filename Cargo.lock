@@ -608,6 +608,7 @@ dependencies = [
  "half",
  "hdf5-metno",
  "indexmap",
+ "libc",
  "lz4_flex",
  "memmap2",
  "ndarray",

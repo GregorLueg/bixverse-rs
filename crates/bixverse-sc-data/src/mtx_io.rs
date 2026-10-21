@@ -657,7 +657,7 @@ impl MtxReader {
                         .iter()
                         .map(|&(_, g, v)| (g, v))
                         .collect();
-                    Ok(compress_cell_row(&mut row, cell, target_size)?)
+                    compress_cell_row(&mut row, cell, target_size, writer.format())
                 })
                 .collect::<Result<Vec<_>, ScDataErrors>>()?;
 

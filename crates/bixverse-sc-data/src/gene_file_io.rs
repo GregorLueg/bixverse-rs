@@ -142,6 +142,54 @@ pub fn write_gene_file(
     max_nnz_in_memory: Option<usize>,
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
+    write_gene_file_impl(cell_path, gene_path, max_nnz_in_memory, verbose, false)
+}
+
+/// [`write_gene_file`] in the legacy v3 format.
+///
+/// Only for producing v3 input on purpose, such as a conversion test. Same
+/// parameters and output as [`write_gene_file`], except for the file format.
+///
+/// ### Params
+///
+/// * `cell_path` - Path to the cell-based binary
+/// * `gene_path` - Path of the gene-based binary to write
+/// * `max_nnz_in_memory` - Non-zeros held per phase. `None` converts in a
+///   single phase.
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// `Ok(())` once the gene file is finalised.
+pub fn write_gene_file_v3(
+    cell_path: &str,
+    gene_path: &str,
+    max_nnz_in_memory: Option<usize>,
+    verbose: bool,
+) -> Result<(), ScDataErrors> {
+    write_gene_file_impl(cell_path, gene_path, max_nnz_in_memory, verbose, true)
+}
+
+/// Body of [`write_gene_file`] and [`write_gene_file_v3`].
+///
+/// ### Params
+///
+/// * `cell_path` - Path to the cell-based binary
+/// * `gene_path` - Path of the gene-based binary to write
+/// * `max_nnz_in_memory` - Non-zeros held per phase
+/// * `verbose` - Controls verbosity
+/// * `legacy` - Write the v3 format
+///
+/// ### Returns
+///
+/// `Ok(())` once the gene file is finalised.
+fn write_gene_file_impl(
+    cell_path: &str,
+    gene_path: &str,
+    max_nnz_in_memory: Option<usize>,
+    verbose: bool,
+    legacy: bool,
+) -> Result<(), ScDataErrors> {
     let reader = ParallelSparseReader::new(cell_path)?;
     let header = reader.get_header();
     let n_cells = header.total_cells;
@@ -177,13 +225,33 @@ pub fn write_gene_file(
 
     // The gene file inherits the cell file's normalisation, so it has to carry
     // the same target size in its header.
-    let mut writer = CellGeneSparseWriter::new(
+    let ctor = if legacy {
+        CellGeneSparseWriter::new_v3
+    } else {
+        CellGeneSparseWriter::new
+    };
+    let mut writer = ctor(
         gene_path,
         false,
         n_cells,
         n_genes,
         reader.target_size().unwrap_or(0.0),
     )?;
+    let format = writer.format();
+
+    // A v4 gene chunk drops its norm layer and recomputes it from the library
+    // size of each cell, so the file carries that table and the chunks are
+    // encoded against it.
+    let cell_lib_sizes: Vec<u64> = if format.is_v4() {
+        reader
+            .read_cell_library_sizes(&(0..n_cells).collect::<Vec<_>>())?
+            .into_iter()
+            .map(|l| l as u64)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cell_lib: Vec<f32> = cell_lib_sizes.iter().map(|&l| l as f32).collect();
 
     let mut raw = vec![0u32; max_phase_nnz];
     let mut norm = vec![F16::default(); max_phase_nnz];
@@ -271,7 +339,7 @@ pub fn write_gene_file(
                         original_index: g,
                         to_keep: true,
                     };
-                    Ok((g, chunk.to_compressed_bytes()?))
+                    Ok((g, format.encode_gene(&chunk, &cell_lib)?))
                 })
                 .collect::<Result<Vec<_>, ScDataErrors>>()?;
             writer.write_compressed_gene_chunks(&payloads)?;
@@ -290,6 +358,9 @@ pub fn write_gene_file(
         }
     }
 
+    if format.is_v4() {
+        writer.set_cell_library_table(cell_lib_sizes)?;
+    }
     writer.finalise()?;
 
     if verbose {
