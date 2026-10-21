@@ -1,5 +1,48 @@
 # News
 
+## 0.9.0
+
+### Breaking
+
+- Single cell files are version 4 now. `SC_FILE_VERSION` is 4 and
+  `SC_FILE_VERSION_V3` holds the old value. `CellGeneSparseWriter::new()`
+  writes version 4 and `new_v3()` the legacy layout. Readers open both, so
+  existing stores keep working, but a version 4 file cannot be read by 0.8.x.
+- `compress_cell_row()` takes a fourth parameter, `format: ChunkFormat`, which
+  comes from `CellGeneSparseWriter::format()`. Code that builds its own
+  payloads for a version 4 writer has to encode with
+  `ChunkFormat::encode_cell()` and `encode_gene()`: `to_compressed_bytes()` on
+  the chunk types still emits version 3 payloads.
+- `faer` is a workspace dependency without its default features (`std`,
+  `rayon`, `sparse-linalg` and `rand` stay), so `npy` and everything behind it
+  (`npyz`, `py_literal`, `pest_derive`, `stacker`) is out of the dependency
+  tree, which the Windows ARM64 build needed. `ann-search-rs` is `0.11.2` and
+  `edge-rs` is `0.3.1`.
+
+### Feature
+
+- Version 4 of the single cell binary. Indices and raw counts are delta
+  bit-packed in blocks of 128, and the normalised layer is no longer stored: it
+  is recomputed on read from the raw counts, the library size and the target
+  size, bit for bit, and kept verbatim for any chunk where it does not
+  recompute. Cell chunks carry a plain header, so nnz and library size are
+  readable without decompressing. Gene files carry a per-cell library-size
+  table for the recompute. The body codec is chosen per writer with
+  `CellGeneSparseWriter::with_codec()` (`ChunkCodec::Lz4` by default,
+  `Zstd` for smaller files).
+- `upgrade_store_to_v4()` replaces a version 3 store by its conversion in
+  place, converting into temporary files first and optionally keeping the
+  originals as `<path>.v3.bak`. `convert_store_v3_to_v4()`,
+  `convert_cell_file_to_v4()` and `convert_gene_file_to_v4()` write the
+  conversion elsewhere. `peek_file_version()` reads the version from the file
+  header without mapping the file, and `ParallelSparseReader::file_version()`
+  reports it for an open reader.
+- `write_gene_file_v3()` writes the legacy gene file, for producing version 3
+  input on purpose.
+- Reads prefetch their byte range into the page cache with large parallel
+  reads before decoding, unix only. It samples residency first, so a warm
+  store pays almost nothing, and it applies to version 3 files as well.
+
 ## 0.8.1
 
 ### Feature

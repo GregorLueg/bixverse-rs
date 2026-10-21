@@ -3,6 +3,24 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.2.0
+
+Requires `bixverse-sc-data` 0.9.0.
+
+**Features**
+
+- Reads stores of file version 4, the new format of the crate: delta
+  bit-packed chunks that are about five times smaller on disk. Stores of
+  version 3 keep opening, so no existing file needs converting.
+- Cold reads prefetch their byte range into the page cache with large
+  parallel reads (unix), which roughly doubled cold read throughput on the
+  stores measured.
+
+**Notes**
+
+- Version 4 files are not readable by wheels built against `bixverse-sc-data`
+  0.8.x.
+
 ## 0.1.1
 
 Requires `bixverse-sc-data` 0.8.0.

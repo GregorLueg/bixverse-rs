@@ -40,12 +40,18 @@ pub mod prelude;
 pub mod r_obj_io;
 pub mod sc_synthetic_data;
 pub mod sc_traits;
+pub mod v4_io;
 
 /// How many cells to read in per given batch - global constant
 pub const CELL_BATCH_SIZE: usize = 50_000;
 
-/// Version of the single cell files
-pub const SC_FILE_VERSION: u32 = 3;
+/// Version of the single cell files writers emit: delta bit-packed chunks with
+/// the normalised layer recomputed on read.
+pub const SC_FILE_VERSION: u32 = 4;
+
+/// Previous file version: absolute `u32` indices, normalised layer stored.
+/// Readers still open it; `v4_io::upgrade_store_to_v4` converts it.
+pub const SC_FILE_VERSION_V3: u32 = 3;
 
 /// Number of cell rows requested per HDF5 hyperslab read.
 ///

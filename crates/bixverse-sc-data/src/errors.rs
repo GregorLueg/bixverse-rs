@@ -116,6 +116,17 @@ pub enum ScDataErrors {
     #[error("Invalid raw count element size discriminant: {0}")]
     RawElemSizeInvalid(u8),
 
+    /// A v4 chunk is malformed: a bad codec byte, a bit width above 32, a
+    /// body that ends before its own header says it should, or layers of
+    /// unequal length handed to the encoder.
+    #[error("Corrupt v4 chunk: {0}")]
+    V4ChunkCorrupt(String),
+
+    /// A v4 chunk drops its norm layer and recomputes it per entry, but the
+    /// file carries no per-cell library-size table to recompute it from.
+    #[error("v4 gene chunk needs the per-cell library-size table, which the file does not carry")]
+    V4MissingCellLibraryTable,
+
     /// The file is not a bixverse count archive.
     #[error("Not a bixverse count archive (magic string mismatch)")]
     ArchiveMagicMismatch,

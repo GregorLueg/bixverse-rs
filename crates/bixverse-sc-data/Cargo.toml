@@ -53,5 +53,8 @@ thiserror.workspace = true
 thousands.workspace = true
 zstd.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [package.metadata.docs.rs]
 features = ["h5", "hdf5-static", "hdf5-filters"]

@@ -607,7 +607,7 @@ pub fn write_h5_dense_row_cells(
                         buf.push((final_gene, val as u32));
                     }
                 }
-                Ok(compress_cell_row(buf, first + k, target_size)?)
+                compress_cell_row(buf, first + k, target_size, writer.format())
             })
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
 

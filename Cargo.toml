@@ -6,7 +6,7 @@ members = ["crates/*"]
 exclude = ["python"]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -35,34 +35,35 @@ codegen-units = 4
 [workspace.dependencies]
 # Workspace crates. Every internal dependency drops default features, so a
 # feature switched off at the top cannot be switched back on underneath.
-bixverse-core = { path = "crates/bixverse-core", version = "0.8.1", default-features = false }
-bixverse-methods = { path = "crates/bixverse-methods", version = "0.8.1", default-features = false }
-bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.8.1", default-features = false }
-bixverse-sc = { path = "crates/bixverse-sc", version = "0.8.1", default-features = false }
-bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.8.1", default-features = false }
-bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.8.1", default-features = false }
-bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.8.1", default-features = false }
-bixverse-rs = { path = "crates/bixverse-rs", version = "0.8.1", default-features = false }
+bixverse-core = { path = "crates/bixverse-core", version = "0.9.0", default-features = false }
+bixverse-methods = { path = "crates/bixverse-methods", version = "0.9.0", default-features = false }
+bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.9.0", default-features = false }
+bixverse-sc = { path = "crates/bixverse-sc", version = "0.9.0", default-features = false }
+bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.9.0", default-features = false }
+bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.9.0", default-features = false }
+bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.9.0", default-features = false }
+bixverse-rs = { path = "crates/bixverse-rs", version = "0.9.0", default-features = false }
 
 # External
 approx = "0.5.1"
-ann-search-rs = { version = "0.11.0", default-features = false }
+ann-search-rs = { version = "0.11.2", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"] }
 bonsai-rs = { version = "0.3.0", features = ["sanity"] }
 cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
 cubek = { version = "0.3.0", features = ["matmul"] }
 document-features = "0.2.12"
-edge-rs = "0.3.0"
+edge-rs = "0.3.1"
 either = "1.15.0"
 extendr-api = "0.9.0"
 extendr-engine = "0.9.0"
-faer = "0.24.4"
+faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg", "rand"] }
 faer-traits = "0.24.0"
 faer-entity = "0.20.1"
 half = "2.7.1"
 hdf5 = { package = "hdf5-metno", version = "0.15.0", features = ["zlib"] }
 indexmap = "2.13.0"
+libc = "0.2.178"
 lz4_flex = "0.12.0"
 memmap2 = "0.9.9"
 ndarray = "0.17.2"
@@ -78,7 +79,3 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 zstd = "0.14.0"
-
-# Patch
-[patch.crates-io]
-ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs.git", branch = "feat-mlx-kmean-update" }
