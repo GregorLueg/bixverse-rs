@@ -2994,9 +2994,9 @@ impl ParallelSparseReader {
     }
 }
 
-/////////////
+//////////////
 // Prefetch //
-/////////////
+//////////////
 
 /// Bytes per explicit read in [`ParallelSparseReader::prefetch`].
 ///
@@ -3158,9 +3158,9 @@ impl ParallelSparseReader {
     fn prefetch(&self, _indices: &[usize]) {}
 }
 
-////////////////////////
-// Fused batch reads  //
-////////////////////////
+///////////////////////
+// Fused batch reads //
+///////////////////////
 
 /// Pieces per rayon thread in [`read_fused`].
 ///

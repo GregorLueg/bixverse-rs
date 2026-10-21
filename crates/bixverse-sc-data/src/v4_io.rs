@@ -134,9 +134,9 @@ impl ChunkCodec {
     }
 }
 
-////////////////
+/////////////////
 // Bit packing //
-////////////////
+/////////////////
 
 /// Bit-pack values in blocks of [`PACK_BLOCK`]: per block one width byte, then
 /// the values at that width, padded to a whole byte.
@@ -958,9 +958,9 @@ pub(crate) fn v4_gene_chunk(
     })
 }
 
-////////////////
+/////////////////
 // ChunkFormat //
-////////////////
+/////////////////
 
 /// How a writer encodes the chunks it appends.
 ///

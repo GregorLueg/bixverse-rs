@@ -43,14 +43,6 @@
   reads before decoding, unix only. It samples residency first, so a warm
   store pays almost nothing, and it applies to version 3 files as well.
 
-### Performance
-
-- On a 2.2M cell, 8.8e9 non-zero store the two views go from 115.8 GB to
-  20.6 GB, and a full cold scan of either view takes about half the time. Cell
-  reads decode faster than before when warm; gene reads with both layers are
-  about 1.2x slower warm because of the norm recompute. The cold archive of
-  the cell view is still about 30% smaller than the lz4 version 4 cell file.
-
 ## 0.8.1
 
 ### Feature
