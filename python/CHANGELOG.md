@@ -3,6 +3,15 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.2.1
+
+Requires `bixverse-sc-data` 0.9.1.
+
+**Features**
+
+- Smaller wheel: depends on `bixverse-sc-data` without its `analysis` feature,
+  which drops `faer`, `ann-search-rs`, `statrs` and `wide` from the build.
+
 ## 0.2.0
 
 Requires `bixverse-sc-data` 0.9.0.
