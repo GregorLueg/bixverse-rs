@@ -11,6 +11,11 @@ readme.workspace = true
 categories.workspace = true
 
 [features]
+default = ["analysis"]
+## Plotting helpers and synthetic data generators. Pulls in `bixverse-core`,
+## and with it `faer`, SIMD and nearest neighbour search. Switch it off for a
+## reader that only needs the store formats.
+analysis = ["dep:bixverse-core", "dep:faer"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
 h5 = ["dep:hdf5", "dep:ndarray"]
 ## Compile the bundled HDF5 C library from source. Leave it off to link an
@@ -34,9 +39,10 @@ hdf5-filters = ["h5", "hdf5/lzf", "hdf5/blosc-lz4", "hdf5/blosc-zlib", "hdf5/blo
 [dependencies]
 approx.workspace = true
 bincode.workspace = true
-bixverse-core.workspace = true
+bixverse-core = { workspace = true, optional = true }
+bixverse-sparse.workspace = true
 document-features.workspace = true
-faer.workspace = true
+faer = { workspace = true, optional = true }
 half.workspace = true
 hdf5 = { workspace = true, optional = true }
 indexmap.workspace = true

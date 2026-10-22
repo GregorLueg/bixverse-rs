@@ -35,9 +35,11 @@ pub mod h5ad_multifile_io;
 pub mod in_memory_io;
 pub mod mtx_io;
 pub mod mtx_multifile_io;
+#[cfg(feature = "analysis")]
 pub mod plotting;
 pub mod prelude;
 pub mod r_obj_io;
+#[cfg(feature = "analysis")]
 pub mod sc_synthetic_data;
 pub mod sc_traits;
 pub mod v4_io;

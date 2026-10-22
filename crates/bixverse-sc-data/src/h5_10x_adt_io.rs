@@ -54,7 +54,7 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
     let version = resolve_tenx_version(file_path, version)?;
 
     let ft_path = version.get_feature_type().ok_or_else(|| {
-        CoreErrors::InvalidArgument(
+        ScDataErrors::InvalidArgument(
             "modality extraction requires a v3 file (v2 has no feature types)".to_string(),
         )
     })?;

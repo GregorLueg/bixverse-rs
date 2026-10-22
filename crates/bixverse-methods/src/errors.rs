@@ -251,3 +251,11 @@ pub enum MethodsErrors {
         got: usize,
     },
 }
+
+/// Sparse structure errors surface through the core variant, as before the
+/// sparse structures moved to `bixverse-sparse`.
+impl From<bixverse_core::errors::SparseErrors> for MethodsErrors {
+    fn from(err: bixverse_core::errors::SparseErrors) -> Self {
+        MethodsErrors::Core(err.into())
+    }
+}

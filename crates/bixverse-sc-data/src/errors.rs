@@ -9,9 +9,19 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ScDataErrors {
     // -- lower crates --
+    /// Propagates an error from `bixverse-sparse`.
+    #[error(transparent)]
+    Sparse(#[from] bixverse_sparse::errors::SparseErrors),
+
     /// Propagates an error from `bixverse-core`.
+    #[cfg(feature = "analysis")]
     #[error(transparent)]
     Core(#[from] bixverse_core::errors::CoreErrors),
+
+    // -- arguments --
+    /// A caller-supplied argument is invalid.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the

@@ -670,43 +670,38 @@ impl DialogueSyntheticParams {
     ///
     /// ### Returns
     ///
-    /// `Ok(())`, or [CoreErrors::InvalidArgument] describing the first
+    /// `Ok(())`, or [ScDataErrors::InvalidArgument] describing the first
     /// problem found.
     pub fn validate(&self) -> Result<(), ScDataErrors> {
         if self.n_cell_types < 2 {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "DIALOGUE needs at least two cell types; got {}.",
                 self.n_cell_types
-            ))
-            .into());
+            )));
         }
         if self.n_samples == 0 || self.cells_per_sample == 0 {
-            return Err(CoreErrors::InvalidArgument(
+            return Err(ScDataErrors::InvalidArgument(
                 "n_samples and cells_per_sample must both be positive.".to_string(),
-            )
-            .into());
+            ));
         }
         if self.n_features < 2 {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "DIALOGUE needs at least two feature columns; got {}.",
                 self.n_features
-            ))
-            .into());
+            )));
         }
         if self.n_sample_features == 0 || self.n_sample_features > self.n_features {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "n_sample_features must lie in 1..={}; got {}.",
                 self.n_features, self.n_sample_features
-            ))
-            .into());
+            )));
         }
         if self.n_planted * self.n_cell_types > self.n_genes {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "the planted blocks need {} genes but only {} exist.",
                 self.n_planted * self.n_cell_types,
                 self.n_genes
-            ))
-            .into());
+            )));
         }
         Ok(())
     }
@@ -970,65 +965,60 @@ impl CellSweepSyntheticParams {
     ///
     /// ### Returns
     ///
-    /// `Ok(())`, or [CoreErrors::InvalidArgument] describing the first
+    /// `Ok(())`, or [ScDataErrors::InvalidArgument] describing the first
     /// problem found.
     pub fn validate(&self) -> Result<(), ScDataErrors> {
         if self.n_real == 0 {
-            return Err(CoreErrors::InvalidArgument("n_real must be positive.".to_string()).into());
+            return Err(ScDataErrors::InvalidArgument(
+                "n_real must be positive.".to_string(),
+            ));
         }
         if self.n_empty < MIN_EMPTY_DROPLETS {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "CellSweep needs at least {} empty droplets; got {}.",
                 MIN_EMPTY_DROPLETS, self.n_empty
-            ))
-            .into());
+            )));
         }
         if self.n_celltypes == 0 {
-            return Err(
-                CoreErrors::InvalidArgument("n_celltypes must be positive.".to_string()).into(),
-            );
+            return Err(ScDataErrors::InvalidArgument(
+                "n_celltypes must be positive.".to_string(),
+            ));
         }
         if self.n_markers == 0 || self.n_markers * self.n_celltypes > self.n_genes {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "the marker blocks need {} genes but only {} exist.",
                 self.n_markers * self.n_celltypes,
                 self.n_genes
-            ))
-            .into());
+            )));
         }
         if self.marker_weight <= 1.0 {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "marker_weight must exceed 1; got {}.",
                 self.marker_weight
-            ))
-            .into());
+            )));
         }
         if !(0.0..=1.0).contains(&self.ambient_dominance) {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "ambient_dominance must lie in [0, 1]; got {}.",
                 self.ambient_dominance
-            ))
-            .into());
+            )));
         }
         if !(CELLSWEEP_ALPHA_MIN..=CELLSWEEP_ALPHA_MAX).contains(&self.alpha_mean) {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "alpha_mean must lie in [{}, {}]; got {}.",
                 CELLSWEEP_ALPHA_MIN, CELLSWEEP_ALPHA_MAX, self.alpha_mean
-            ))
-            .into());
+            )));
         }
         if self.alpha_sd < 0.0 {
-            return Err(CoreErrors::InvalidArgument(format!(
+            return Err(ScDataErrors::InvalidArgument(format!(
                 "alpha_sd must not be negative; got {}.",
                 self.alpha_sd
-            ))
-            .into());
+            )));
         }
         if self.real_lib_size == 0 || self.empty_lib_size == 0 {
-            return Err(CoreErrors::InvalidArgument(
+            return Err(ScDataErrors::InvalidArgument(
                 "real_lib_size and empty_lib_size must both be positive.".to_string(),
-            )
-            .into());
+            ));
         }
         Ok(())
     }

@@ -25,7 +25,7 @@ bixverse-core.workspace = true
 bixverse-gpu.workspace = true
 bixverse-methods.workspace = true
 bixverse-sc.workspace = true
-bixverse-sc-data.workspace = true
+bixverse-sc-data = { workspace = true, features = ["analysis"] }
 bonsai-rs = { workspace = true, optional = true, features = ["gpu"] }
 cubecl.workspace = true
 cubecl-utils-rs.workspace = true

@@ -328,7 +328,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
     let start = Instant::now();
 
     let reader = ParallelSparseReader::new(in_path.as_ref().to_str().ok_or(
-        CoreErrors::InvalidArgument("input path is not valid UTF-8".to_string()),
+        ScDataErrors::InvalidArgument("input path is not valid UTF-8".to_string()),
     )?)?;
 
     if !reader.is_gene_based() {

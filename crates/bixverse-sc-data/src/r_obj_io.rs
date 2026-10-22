@@ -6,7 +6,7 @@ use thousands::Separable;
 
 use crate::data_io::{CellGeneSparseWriter, write_cell_chunks_parallel};
 use crate::prelude::*;
-use bixverse_core::core::math::sparse::transpose_sparse;
+use bixverse_sparse::sparse::transpose_sparse;
 
 //////////
 // Main //

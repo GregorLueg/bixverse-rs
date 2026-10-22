@@ -27,7 +27,7 @@ ann-search-rs.workspace = true
 approx.workspace = true
 bixverse-core.workspace = true
 bixverse-methods = { workspace = true, features = ["dge"] }
-bixverse-sc-data.workspace = true
+bixverse-sc-data = { workspace = true, features = ["analysis"] }
 bonsai-rs = { workspace = true, optional = true }
 document-features.workspace = true
 edge-rs.workspace = true

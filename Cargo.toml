@@ -35,6 +35,7 @@ codegen-units = 4
 [workspace.dependencies]
 # Workspace crates. Every internal dependency drops default features, so a
 # feature switched off at the top cannot be switched back on underneath.
+bixverse-sparse = { path = "crates/bixverse-sparse", version = "0.9.0", default-features = false }
 bixverse-core = { path = "crates/bixverse-core", version = "0.9.0", default-features = false }
 bixverse-methods = { path = "crates/bixverse-methods", version = "0.9.0", default-features = false }
 bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.9.0", default-features = false }

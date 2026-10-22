@@ -31,7 +31,7 @@ use crate::data_io::{
 };
 use crate::prelude::*;
 use crate::sc_traits::F16;
-use bixverse_core::core::math::sparse::transpose_sparse;
+use bixverse_sparse::sparse::transpose_sparse;
 
 //////////////////////////
 // InMemorySparseReader //
@@ -77,18 +77,18 @@ impl<'a> InMemorySparseReader<'a> {
     ///
     /// ### Returns
     ///
-    /// The reader, or [`CoreErrors::SparseMatrixMustBeCsc`] for a CSR input
-    /// and [`CoreErrors::Data2NotAvailable`] when the normalised layer is
+    /// The reader, or [`SparseErrors::SparseMatrixMustBeCsc`] for a CSR input
+    /// and [`SparseErrors::Data2NotAvailable`] when the normalised layer is
     /// missing.
     pub fn new(
         matrix: &'a CompressedSparseData2<u32, f32>,
         target_size: Option<f32>,
     ) -> Result<Self, ScDataErrors> {
         if !matrix.cs_type.is_csc() {
-            return Err(CoreErrors::SparseMatrixMustBeCsc.into());
+            return Err(SparseErrors::SparseMatrixMustBeCsc.into());
         }
         if matrix.data_2.is_none() {
-            return Err(CoreErrors::Data2NotAvailable.into());
+            return Err(SparseErrors::Data2NotAvailable.into());
         }
 
         let (n_cells, n_genes) = matrix.shape;
@@ -135,8 +135,8 @@ impl<'a> InMemorySparseReader<'a> {
     ///
     /// ### Returns
     ///
-    /// The reader, or [`CoreErrors::SparseMatrixMustBeCsc`] for a CSR input
-    /// and [`CoreErrors::Data2NotAvailable`] when the normalised layer is
+    /// The reader, or [`SparseErrors::SparseMatrixMustBeCsc`] for a CSR input
+    /// and [`SparseErrors::Data2NotAvailable`] when the normalised layer is
     /// missing.
     pub fn new_cell_major(
         matrix: &'a CompressedSparseData2<u32, f32>,
