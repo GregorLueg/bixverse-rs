@@ -18,6 +18,7 @@ accelerate = ["ann-search-rs/accelerate"]
 [dependencies]
 ann-search-rs.workspace = true
 approx.workspace = true
+bixverse-sparse.workspace = true
 document-features.workspace = true
 faer.workspace = true
 faer-entity.workspace = true

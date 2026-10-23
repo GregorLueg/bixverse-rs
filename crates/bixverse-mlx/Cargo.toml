@@ -29,7 +29,7 @@ approx.workspace = true
 bixverse-core.workspace = true
 bixverse-methods.workspace = true
 bixverse-sc.workspace = true
-bixverse-sc-data.workspace = true
+bixverse-sc-data = { workspace = true, features = ["analysis"] }
 faer.workspace = true
 rand.workspace = true
 rand_distr.workspace = true

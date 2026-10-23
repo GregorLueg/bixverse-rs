@@ -1297,3 +1297,11 @@ pub enum ScErrors {
         found: usize,
     },
 }
+
+/// Sparse structure errors surface through the core variant, as before the
+/// sparse structures moved to `bixverse-sparse`.
+impl From<bixverse_core::errors::SparseErrors> for ScErrors {
+    fn from(err: bixverse_core::errors::SparseErrors) -> Self {
+        ScErrors::Core(err.into())
+    }
+}

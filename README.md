@@ -108,7 +108,7 @@ Everything through the facade:
 
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.8", features = ["single-cell", "h5"] }
+bixverse-rs = { version = "0.9", features = ["single-cell", "h5"] }
 ```
 
 ```rust
@@ -119,7 +119,7 @@ Or only the layer you need, e.g. the binary store without HDF5:
 
 ```toml
 [dependencies]
-bixverse-sc-data = "0.8"
+bixverse-sc-data = "0.9"
 ```
 
 Every crate has a prelude that re-exports the ones below it: the errors, sparse
@@ -160,9 +160,9 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 
 The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
 Python package wraps the single cell streaming engine with PyO3 and maturin.
-It depends on `bixverse-sc-data` alone, so the wheel needs no R install. It opens a
-bixverse binary store and streams shuffled minibatches out of it, with the
-decode in Rust and the GIL released, fast enough to keep a GPU training loop
+It depends on `bixverse-sc-data` alone, so the wheel needs no R install. It
+opens a bixverse binary store and streams shuffled minibatches out of it, with
+the decode in Rust and the GIL released, fast enough to keep a GPU training loop
 fed. First consumer is scVI in `bixverse.nn`, on torch or MLX, trained straight
 off the store.
 

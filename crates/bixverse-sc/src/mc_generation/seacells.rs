@@ -2698,7 +2698,7 @@ impl<'a> SEACells<'a> {
         let verbosity = parse_verbosity_level(verbose);
 
         let t2 = k2_b.transpose_and_convert();
-        let t1 = csr_matmul_csr(&t2, b)?;
+        let t1 = csr_matmul_csr(&t2, b).map_err(CoreErrors::from)?;
         drop(t2);
         let a_prev_t = a_prev.transpose_and_convert();
 
@@ -2849,7 +2849,7 @@ impl<'a> SEACells<'a> {
             .ok_or(ScErrors::SEACellsKernelMatrixMissing)?;
 
         let a_t = a.transpose_and_convert();
-        let t1 = csr_matmul_csr(a, &a_t)?;
+        let t1 = csr_matmul_csr(a, &a_t).map_err(CoreErrors::from)?;
         let t2 = self.k_squared_matmul(&a_t)?;
         backend.begin(&t1, &t2)?;
         drop(t2);
@@ -2885,7 +2885,7 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            b = sparse_add_csr(&b, &e_scaled)?;
+            b = sparse_add_csr(&b, &e_scaled).map_err(CoreErrors::from)?;
 
             // `E` is one unit entry per column, so `K² E` is one column of `K²`
             // per archetype and the whole update is rank-k. Pruning folds into
@@ -2908,7 +2908,7 @@ impl<'a> SEACells<'a> {
 
             k2_b.data.par_iter_mut().for_each(|val| *val *= retain);
             let delta = k_squared_column_combination(kernel, &contributions, n);
-            k2_b = sparse_add_csr(&k2_b, &transpose_sparse(&delta))?;
+            k2_b = sparse_add_csr(&k2_b, &transpose_sparse(&delta)).map_err(CoreErrors::from)?;
             if let Some(factors) = renorm {
                 k2_b.data
                     .par_iter_mut()

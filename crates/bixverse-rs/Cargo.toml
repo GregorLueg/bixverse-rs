@@ -63,7 +63,7 @@ large_scale_diagnostics = ["bixverse-methods/large_scale_diagnostics", "bixverse
 [dependencies]
 bixverse-core.workspace = true
 bixverse-methods.workspace = true
-bixverse-sc-data = { workspace = true, optional = true }
+bixverse-sc-data = { workspace = true, optional = true, features = ["analysis"] }
 bixverse-sc = { workspace = true, optional = true }
 bixverse-gpu = { workspace = true, optional = true }
 bixverse-sc-gpu = { workspace = true, optional = true }

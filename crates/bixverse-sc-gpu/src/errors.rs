@@ -71,3 +71,11 @@ pub enum ScGpuErrors {
         limit: usize,
     },
 }
+
+/// Sparse structure errors surface through the core variant, as before the
+/// sparse structures moved to `bixverse-sparse`.
+impl From<bixverse_core::errors::SparseErrors> for ScGpuErrors {
+    fn from(err: bixverse_core::errors::SparseErrors) -> Self {
+        ScGpuErrors::Core(err.into())
+    }
+}

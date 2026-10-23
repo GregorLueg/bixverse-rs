@@ -2,7 +2,52 @@
 
 use crate::core::math::sparse::CompressedSparseFormat;
 use ann_search_rs::utils::dist::Dist;
+pub use bixverse_sparse::errors::SparseErrors;
 use thiserror::Error;
+
+/// Maps each `SparseErrors` variant onto the identically named `CoreErrors`
+/// variant, so callers keep matching on `CoreErrors` after the sparse structures
+/// moved to `bixverse-sparse`.
+impl From<SparseErrors> for CoreErrors {
+    fn from(err: SparseErrors) -> Self {
+        match err {
+            SparseErrors::Data2NotAvailable => CoreErrors::Data2NotAvailable,
+            SparseErrors::SliceIndexOutOfBounds { index, len } => {
+                CoreErrors::SliceIndexOutOfBounds { index, len }
+            }
+            SparseErrors::DuplicateSliceIndex(i) => CoreErrors::DuplicateSliceIndex(i),
+            SparseErrors::SparseMatrixMultiplication { n_col_a, n_row_b } => {
+                CoreErrors::SparseMatrixMultiplication { n_col_a, n_row_b }
+            }
+            SparseErrors::DimensionMisMatchSparse {
+                indices_len,
+                data_len,
+            } => CoreErrors::DimensionMisMatchSparse {
+                indices_len,
+                data_len,
+            },
+            SparseErrors::SparseIndptrInvalid {
+                detail,
+                expected,
+                got,
+            } => CoreErrors::SparseIndptrInvalid {
+                detail,
+                expected,
+                got,
+            },
+            SparseErrors::ShapeMismatchSparse => CoreErrors::ShapeMismatchSparse,
+            SparseErrors::SparseMatrixMustBeCsr => CoreErrors::SparseMatrixMustBeCsr,
+            SparseErrors::SparseMatrixIsolatedRow { row, row_sum } => {
+                CoreErrors::SparseMatrixIsolatedRow { row, row_sum }
+            }
+            SparseErrors::MalformedCsr(s) => CoreErrors::MalformedCsr(s),
+            SparseErrors::SparseMatrixMustBeCsc => CoreErrors::SparseMatrixMustBeCsc,
+            SparseErrors::ShapeMismatch { expected, got } => {
+                CoreErrors::ShapeMismatch { expected, got }
+            }
+        }
+    }
+}
 
 /// Error variants raised by `bixverse-core`.
 ///

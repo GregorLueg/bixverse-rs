@@ -1,6 +1,9 @@
-//! Re-exports for `use crate::prelude::*`: the core prelude plus the single
-//! cell data layer.
+//! Re-exports for `use crate::prelude::*`: the sparse prelude (plus the core
+//! prelude under `analysis`) and the single cell data layer.
 
+pub use bixverse_sparse::prelude::*;
+
+#[cfg(feature = "analysis")]
 pub use bixverse_core::prelude::*;
 
 pub use crate::data_io::{

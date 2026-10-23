@@ -55,3 +55,11 @@ pub enum MlxErrors {
     #[error("Harmony MLX: Only a single co-variate is supported for the MLX path")]
     MlxHarmonySupportsSingleCovariateOnly,
 }
+
+/// Sparse structure errors surface through the core variant, as before the
+/// sparse structures moved to `bixverse-sparse`.
+impl From<bixverse_core::errors::SparseErrors> for MlxErrors {
+    fn from(err: bixverse_core::errors::SparseErrors) -> Self {
+        MlxErrors::Core(err.into())
+    }
+}

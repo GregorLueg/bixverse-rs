@@ -13,7 +13,7 @@ use thousands::Separable;
 
 use crate::data_io::*;
 use crate::prelude::*;
-use bixverse_core::core::math::sparse::ScatterPtr;
+use bixverse_sparse::sparse::ScatterPtr;
 
 /// Cells decoded per read inside one worker's chunk.
 ///

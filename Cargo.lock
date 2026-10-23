@@ -446,10 +446,11 @@ dependencies = [
 
 [[package]]
 name = "bixverse-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
+ "bixverse-sparse",
  "document-features",
  "faer",
  "faer-entity",
@@ -467,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "bixverse-core",
@@ -486,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-methods"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -506,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-mlx"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -525,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-r"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "bixverse-rs",
@@ -544,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -574,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -598,11 +599,12 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "approx",
  "bincode",
  "bixverse-core",
+ "bixverse-sparse",
  "document-features",
  "faer",
  "half",
@@ -625,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-gpu"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -647,6 +649,16 @@ dependencies = [
  "rustc-hash 2.1.3",
  "thiserror 2.0.21",
  "thousands",
+]
+
+[[package]]
+name = "bixverse-sparse"
+version = "0.9.1"
+dependencies = [
+ "approx",
+ "num-traits",
+ "rayon",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

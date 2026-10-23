@@ -1,0 +1,19 @@
+[package]
+name = "bixverse-sparse"
+description = "Compressed sparse structures for bixverse: CSR/CSC storage, transposition and sparse arithmetic, with no dense linear algebra dependency."
+keywords = ["bioinformatics", "sparse", "csr"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+
+[dependencies]
+num-traits.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+approx.workspace = true

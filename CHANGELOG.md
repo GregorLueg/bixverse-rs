@@ -1,5 +1,33 @@
 # News
 
+## 0.9.1
+
+### Feature
+
+- New crate `bixverse-sparse` holds the compressed sparse structures
+  (`CompressedSparseData2`, transposition, coo conversion, sparse arithmetic),
+  `BixverseNumeric`, `VecIndexCast`, `Verbosity` and `thread_chunks`, with no
+  `faer`, SIMD or nearest neighbour dependency. `bixverse-core` re-exports all
+  of it, so existing paths such as `core::math::sparse::*` are unchanged.
+- `bixverse-sc-data` depends on `bixverse-sparse` instead of `bixverse-core`.
+  Its new `analysis` feature (default on) gates `plotting` and
+  `sc_synthetic_data`, the only modules that need core. With
+  `default-features = false` the dependency tree drops from 145 to 59 crates and
+  contains no `faer`, `ann-search-rs`, `statrs` or `wide`.
+
+### Notes
+
+- `CompressedSparseData2::from_dense_matrix()` is now the `SparseFromDense`
+  trait method, exported in the core prelude. Calls compile unchanged where the
+  prelude is imported.
+- Sparse functions return `SparseErrors`. `CoreErrors` and the upper error
+  enums convert it, so `?` keeps working, but code that matches on the result of
+  a sparse function directly matches `SparseErrors` now.
+- `ScDataErrors` gains `Sparse` and `InvalidArgument`. `Core` remains under the
+  `analysis` feature.
+- Crates that use `bixverse-sc-data` for plotting or synthetic data need its
+  `analysis` feature, as workspace dependencies drop default features.
+
 ## 0.9.0
 
 ### Breaking
