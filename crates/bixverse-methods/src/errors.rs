@@ -304,8 +304,17 @@ pub enum MethodsErrors {
         "MLM: the feature set design is rank deficient (eigenvalue ratio {ratio:e}); drop or merge collinear sets."
     )]
     LmActivityRankDeficient {
-        /// Smallest over largest eigenvalue of `XᵀX`
+        /// Smallest over largest eigenvalue of `XᵀX` scaled to unit diagonal
         ratio: f64,
+    },
+
+    /// An observation holds a NaN or infinite value.
+    #[error(
+        "Linear model activity: observation {observation} of the batch contains NaN or infinite values."
+    )]
+    LmActivityNonFinite {
+        /// Index of the observation within the scored batch
+        observation: usize,
     },
 }
 

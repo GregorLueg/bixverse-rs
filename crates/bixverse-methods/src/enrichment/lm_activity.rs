@@ -22,10 +22,17 @@ use bixverse_core::core::math::distributions::t_pval_two_sided;
 /// perfect correlation gives the same large finite t as the reference.
 const ULM_R_EPS: f64 = 2.2e-16;
 
-/// Smallest accepted ratio of the extreme eigenvalues of `XᵀX` before the MLM
-/// design counts as rank deficient. `XᵀX` squares the condition number of
-/// `X`, so this lets `X` reach a condition number of 1e5. Not tuned.
+/// Smallest accepted ratio of the extreme eigenvalues of `XᵀX`, scaled to unit
+/// diagonal, before the MLM design counts as rank deficient. The scaling keeps
+/// the scale of the weights out of the rank decision; `XᵀX` squares the
+/// condition number of `X`, so this lets the scaled `X` reach 1e5. Not tuned.
 const MLM_RANK_TOL: f64 = 1e-10;
+
+/// Relative tolerance below which a sum of squares computed from sums
+/// (`Σy² - (Σy)²/n`, `yᵀy - βᵀXᵀy`, `Σw² - (Σw)²/n`) counts as zero, relative
+/// to the uncentred sum. The cancellation leaves rounding of up to about
+/// `n_features * eps` instead of an exact zero. Not tuned.
+const LM_SS_REL_TOL: f64 = 1e-10;
 
 ///////////
 // Enums //
@@ -384,7 +391,11 @@ impl UlmModel {
             .zip(&w_sum)
             .map(|(&sq, &s)| sq - s * s / n)
             .collect();
-        if let Some(set) = w_ss.iter().position(|&x| x <= 0.0) {
+        if let Some(set) = w_ss
+            .iter()
+            .zip(&w_sq)
+            .position(|(&ss, &sq)| ss <= LM_SS_REL_TOL * sq)
+        {
             return Err(MethodsErrors::FeatureSetInvalid {
                 set,
                 reason: "its weights are constant across the features",
@@ -400,7 +411,7 @@ impl UlmModel {
 
     /// Score one observation
     ///
-    /// An observation without variance (an empty cell) scores 0 with p = 1.
+    /// A constant observation (an empty cell) scores 0 with p = 1.
     ///
     /// ### Params
     ///
@@ -421,7 +432,7 @@ impl UlmModel {
     ) {
         let syy = sum_sq - sum * sum / self.n;
         for j in 0..xty.len() {
-            let (score, p) = if syy <= 0.0 {
+            let (score, p) = if syy <= LM_SS_REL_TOL * sum_sq {
                 (0.0, 1.0)
             } else {
                 let sxy = xty[j] - sum * self.w_mean[j];
@@ -451,6 +462,8 @@ impl UlmModel {
 struct MlmModel {
     /// `(XᵀX)⁻¹` with `X = [1, W]`, `(n_sets + 1)` squared
     g: Mat<f64>,
+    /// Number of features
+    n: f64,
     /// Residual degrees of freedom, `n_features - n_sets - 1`
     df: f64,
 }
@@ -460,7 +473,8 @@ impl MlmModel {
     ///
     /// `WᵀW` comes from the feature-major storage, one outer product per
     /// feature over the sets it belongs to. The inverse goes through the
-    /// symmetric eigendecomposition so the rank check falls out of it.
+    /// symmetric eigendecomposition of `D XᵀX D`, `D = diag(XᵀX)^-1/2`, so
+    /// the rank check falls out of it and does not depend on the weight scale.
     ///
     /// ### Params
     ///
@@ -493,7 +507,14 @@ impl MlmModel {
             }
         }
 
-        let eig = xtx
+        // a set whose weights are all zero is a zero column
+        if (1..p).any(|j| xtx[(j, j)] <= 0.0) {
+            return Err(MethodsErrors::LmActivityRankDeficient { ratio: 0.0 });
+        }
+        let d: Vec<f64> = (0..p).map(|j| xtx[(j, j)].sqrt().recip()).collect();
+        let scaled = Mat::<f64>::from_fn(p, p, |i, j| xtx[(i, j)] * d[i] * d[j]);
+
+        let eig = scaled
             .self_adjoint_eigen(Side::Lower)
             .map_err(|_| MethodsErrors::from(CoreErrors::FaerEigenError))?;
         let lambda = eig.S().column_vector();
@@ -507,11 +528,14 @@ impl MlmModel {
         if ratio.is_nan() || ratio <= MLM_RANK_TOL {
             return Err(MethodsErrors::LmActivityRankDeficient { ratio });
         }
-        let u_scaled = Mat::<f64>::from_fn(p, p, |i, j| u[(i, j)] / lambda[j]);
-        let g = &u_scaled * u.transpose();
+        // (XᵀX)⁻¹ = (D U Λ⁻¹)(D U)ᵀ
+        let du_inv = Mat::<f64>::from_fn(p, p, |i, j| d[i] * u[(i, j)] / lambda[j]);
+        let du = Mat::<f64>::from_fn(p, p, |i, j| d[i] * u[(i, j)]);
+        let g = &du_inv * du.transpose();
 
         Ok(Self {
             g,
+            n: net.n_features as f64,
             df: (net.n_features - p) as f64,
         })
     }
@@ -519,9 +543,10 @@ impl MlmModel {
     /// Score a batch of observations
     ///
     /// `β = G [Σy, Wᵀy]` for the whole batch is one GEMM against the shared
-    /// inverse; the residuals then follow from `SSE = yᵀy - βᵀXᵀy`. An
-    /// observation without residual variance (an empty cell) scores 0 with
-    /// p = 1.
+    /// inverse; the residuals then follow from `SSE = yᵀy - βᵀXᵀy`. A constant
+    /// observation (an empty cell) scores 0 with p = 1. An exact fit has
+    /// slopes but no t, so it reports its slopes as coefficients and t = 0,
+    /// always with p = 1.
     ///
     /// ### Params
     ///
@@ -552,23 +577,27 @@ impl MlmModel {
             for j in 0..n_sets {
                 fitted += beta(j + 1) * xty_row[j];
             }
-            let sse = cp.sum_sq[o] - fitted;
+            let sum_sq = cp.sum_sq[o];
+            let constant = sum_sq - sum * sum / self.n <= LM_SS_REL_TOL * sum_sq;
+            let sse = sum_sq - fitted;
+            let exact_fit = sse <= LM_SS_REL_TOL * sum_sq;
             let sigma2 = sse / self.df;
 
             for j in 0..n_sets {
-                let (score, p) = if sse <= 0.0 {
+                let (score, p) = if constant {
                     (0.0, 1.0)
                 } else {
                     let b = beta(j + 1);
-                    let t = b / (sigma2 * g[(j + 1, j + 1)]).sqrt();
+                    let t = (!exact_fit).then(|| b / (sigma2 * g[(j + 1, j + 1)]).sqrt());
                     let score = match stat {
-                        LmStat::TValue => t,
+                        LmStat::TValue => t.unwrap_or(0.0),
                         LmStat::Coefficient => b,
                     };
-                    let p = if pv_row.is_some() {
-                        t_pval_two_sided(t, self.df).expect("df > 0 checked in MlmModel::new")
-                    } else {
-                        1.0
+                    let p = match t {
+                        Some(t) if pv_row.is_some() => {
+                            t_pval_two_sided(t, self.df).expect("df > 0 checked in MlmModel::new")
+                        }
+                        _ => 1.0,
                     };
                     (score, p)
                 };
@@ -598,6 +627,8 @@ impl MlmModel {
 pub struct LmScorer {
     /// The prepared model
     model: LmModel,
+    /// Number of feature sets
+    n_sets: usize,
     /// Statistic to report
     stat: LmStat,
     /// Whether to compute p-values
@@ -631,6 +662,7 @@ impl LmScorer {
         };
         Ok(Self {
             model,
+            n_sets: net.n_sets,
             stat: params.stat,
             p_values: params.p_values,
         })
@@ -645,10 +677,19 @@ impl LmScorer {
     /// ### Returns
     ///
     /// Tuple of the scores and the optional p-values, each row-major
-    /// observations x sets.
-    pub fn score(&self, cp: &ObsCrossProducts) -> (Vec<f64>, Option<Vec<f64>>) {
+    /// observations x sets, or an error if an observation holds a NaN or
+    /// infinite value.
+    #[allow(clippy::type_complexity)]
+    pub fn score(
+        &self,
+        cp: &ObsCrossProducts,
+    ) -> Result<(Vec<f64>, Option<Vec<f64>>), MethodsErrors> {
+        // Σy² is non-finite iff some value is (or the squares overflow)
+        if let Some(observation) = cp.sum_sq.iter().position(|x| !x.is_finite()) {
+            return Err(MethodsErrors::LmActivityNonFinite { observation });
+        }
+        let n_sets = self.n_sets;
         let len = cp.xty.len();
-        let n_sets = len / cp.n_obs().max(1);
         let mut es = vec![0.0_f64; len];
         let mut pv = self.p_values.then(|| vec![1.0_f64; len]);
 
@@ -673,7 +714,7 @@ impl LmScorer {
             LmModel::Mlm(m) => m.score_batch(cp, self.stat, &mut es, pv.as_deref_mut()),
         }
 
-        (es, pv)
+        Ok((es, pv))
     }
 }
 
@@ -714,7 +755,7 @@ pub fn lm_activity<T: BixverseFloat>(
             .enumerate()
             .map(|(i, v)| (i, v.to_f64().expect("float converts to f64")))
     });
-    let (es, pv) = scorer.score(&cp);
+    let (es, pv) = scorer.score(&cp)?;
 
     let n_sets = net.n_sets;
     let to_mat = |v: Vec<f64>| {
@@ -868,7 +909,7 @@ mod tests {
                     .filter(move |&i| m[(i, o)] != 0.0)
                     .map(move |i| (i, m[(i, o)]))
             });
-            let (es, _) = scorer.score(&cp);
+            let (es, _) = scorer.score(&cp).unwrap();
             for o in 0..5 {
                 for s in 0..2 {
                     assert_relative_eq!(dense.es[(o, s)], es[o * 2 + s], max_relative = 1e-12);
@@ -915,5 +956,110 @@ mod tests {
             FeatureSetWeights::new(&[vec![1, 2]], Some(&[vec![1.0]]), 20),
             Err(MethodsErrors::FeatureSetInvalid { set: 0, .. })
         ));
+    }
+
+    #[test]
+    fn test_non_finite_input_errors() {
+        let net = FeatureSetWeights::new::<f64>(&[vec![0, 1, 2]], None, 20).unwrap();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut mat = toy_mat(20, 3);
+            mat[(5, 2)] = bad;
+            for method in [LmMethod::Ulm, LmMethod::Mlm] {
+                for p_values in [false, true] {
+                    let params = LmActivityParams::new(method, LmStat::TValue, p_values);
+                    assert!(matches!(
+                        lm_activity(mat.as_ref(), &net, Some(params)),
+                        Err(MethodsErrors::LmActivityNonFinite { observation: 2 })
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_empty_batch() {
+        let mat = Mat::<f64>::zeros(20, 0);
+        let net = FeatureSetWeights::new::<f64>(&[vec![0, 1, 2], vec![3, 4]], None, 20).unwrap();
+        for method in [LmMethod::Ulm, LmMethod::Mlm] {
+            let params = LmActivityParams::new(method, LmStat::TValue, true);
+            let res = lm_activity(mat.as_ref(), &net, Some(params)).unwrap();
+            assert_eq!((res.es.nrows(), res.es.ncols()), (0, 2));
+        }
+    }
+
+    #[test]
+    fn test_constant_observation_scores_zero() {
+        let n = 2000;
+        let mat = Mat::from_fn(n, 1, |_, _| 1.7_f64);
+        let net = FeatureSetWeights::new::<f64>(&[vec![0, 1, 2], vec![5, 9, 40]], None, n).unwrap();
+        for method in [LmMethod::Ulm, LmMethod::Mlm] {
+            for stat in [LmStat::TValue, LmStat::Coefficient] {
+                let params = LmActivityParams::new(method, stat, true);
+                let res = lm_activity(mat.as_ref(), &net, Some(params)).unwrap();
+                let pv = res.p_values.unwrap();
+                for s in 0..2 {
+                    assert_eq!(res.es[(0, s)], 0.0);
+                    assert_eq!(pv[(0, s)], 1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ulm_rejects_constant_cover_all_set() {
+        let n = 1000;
+        let all: Vec<usize> = (0..n).collect();
+        let params = LmActivityParams::new(LmMethod::Ulm, LmStat::TValue, false);
+        // 0.1 leaves a positive rounding residue in Σw² - (Σw)²/n, 0.3 a negative one
+        for w in [0.1, 0.3, 1.0] {
+            let net = FeatureSetWeights::new(
+                &[vec![0, 1, 2], all.clone()],
+                Some(&[vec![1.0; 3], vec![w; n]]),
+                n,
+            )
+            .unwrap();
+            assert!(matches!(
+                LmScorer::new(&net, &params),
+                Err(MethodsErrors::FeatureSetInvalid { set: 1, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_mlm_rank_check_ignores_weight_scale() {
+        let n = 2000;
+        let mat = toy_mat(n, 2);
+        let sets = vec![(0..5).collect::<Vec<_>>(), (3..303).collect()];
+        let params = LmActivityParams::new(LmMethod::Mlm, LmStat::TValue, false);
+        let t_at = |scale: f64| {
+            let weights = vec![vec![scale; 5], vec![1.0; 300]];
+            let net = FeatureSetWeights::new(&sets, Some(&weights), n).unwrap();
+            lm_activity(mat.as_ref(), &net, Some(params)).unwrap().es
+        };
+        // t values do not depend on the scale of a design column
+        let (small, unit) = (t_at(1e-4), t_at(1.0));
+        for o in 0..2 {
+            for s in 0..2 {
+                assert_relative_eq!(small[(o, s)], unit[(o, s)], max_relative = 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mlm_exact_fit_keeps_coefficient() {
+        let n = 30;
+        let set: Vec<usize> = (0..8).collect();
+        let w: Vec<f64> = (0..8).map(|i| 0.5 + i as f64 * 0.25).collect();
+        let mat = Mat::from_fn(n, 1, |i, _| 2.0 + if i < 8 { 3.0 * w[i] } else { 0.0 });
+        let net = FeatureSetWeights::new(&[set], Some(&[w]), n).unwrap();
+
+        let coef = LmActivityParams::new(LmMethod::Mlm, LmStat::Coefficient, true);
+        let res = lm_activity(mat.as_ref(), &net, Some(coef)).unwrap();
+        assert_relative_eq!(res.es[(0, 0)], 3.0, max_relative = 1e-9);
+        assert_eq!(res.p_values.unwrap()[(0, 0)], 1.0);
+
+        let tval = LmActivityParams::new(LmMethod::Mlm, LmStat::TValue, false);
+        let res = lm_activity(mat.as_ref(), &net, Some(tval)).unwrap();
+        assert_eq!(res.es[(0, 0)], 0.0);
     }
 }

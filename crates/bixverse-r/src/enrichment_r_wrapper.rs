@@ -359,14 +359,69 @@ pub fn r_list_to_feature_set_weights(
             .and_then(|v| v.as_integer_vector())
             .ok_or_else(|| Error::Other(format!("Feature set {} has no integer 'idx'.", i + 1)))?
             .iter()
-            .map(|&x| x as usize)
-            .collect();
-        let w = set
-            .get("weight")
-            .and_then(|v| v.as_real_vector())
-            .unwrap_or_else(|| vec![1.0; idx.len()]);
+            // NA_integer_ is i32::MIN, so this catches it too
+            .map(|&x| usize::try_from(x))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|_| {
+                Error::Other(format!("Feature set {} has a negative or NA 'idx'.", i + 1))
+            })?;
+        // integer weights (e.g. a mode of regulation of 1L / -1L) are not a
+        // real vector to extendr, so they need their own branch
+        let w = match set.get("weight") {
+            None => vec![1.0; idx.len()],
+            Some(v) => match (v.as_real_vector(), v.as_integer_vector()) {
+                (Some(w), _) => w,
+                (None, Some(w)) if !w.contains(&i32::MIN) => w.iter().map(|&x| x as f64).collect(),
+                _ => {
+                    return Err(Error::Other(format!(
+                        "Feature set {} has a non-numeric or NA 'weight'.",
+                        i + 1
+                    )));
+                }
+            },
+        };
         sets.push(idx);
         weights.push(w);
     }
     FeatureSetWeights::new(&sets, Some(&weights), n_features).to_extendr()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bixverse_rs::enrichment::lm_activity::lm_activity;
+    use faer::Mat;
+
+    #[test]
+    fn test_feature_set_weights_accept_integer_weights() {
+        test! {
+            let as_int = List::from_values([list!(idx = r!([0, 3, 5]), weight = r!([1, -1, 1]))]);
+            let as_real =
+                List::from_values([list!(idx = r!([0, 3, 5]), weight = r!([1.0, -1.0, 1.0]))]);
+            let mat = Mat::from_fn(10, 2, |i, j| ((i * 3 + j * 7) % 5) as f64);
+            let a = lm_activity(mat.as_ref(), &r_list_to_feature_set_weights(as_int, 10)?, None)
+                .unwrap();
+            let b = lm_activity(mat.as_ref(), &r_list_to_feature_set_weights(as_real, 10)?, None)
+                .unwrap();
+            assert_eq!(a.es, b.es);
+        }
+    }
+
+    #[test]
+    fn test_feature_set_weights_reject_bad_input() {
+        test! {
+            let bad = [
+                list!(idx = r!([0, -1, 5])),
+                list!(idx = r!([0, 3, 5]), weight = r!([Some(1), NA_INTEGER, Some(1)])),
+                list!(idx = r!([0, 3, 5]), weight = r!(["a", "b", "c"])),
+            ];
+            for set in bad {
+                assert!(r_list_to_feature_set_weights(List::from_values([set]), 10).is_err());
+            }
+        }
+    }
 }

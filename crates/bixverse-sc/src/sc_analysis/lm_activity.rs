@@ -73,7 +73,7 @@ pub fn calculate_lm_activity<S: SingleCellReading>(
                 .zip(&cell.data_norm)
                 .map(|(&i, v)| (i as usize, v.to_f32() as f64))
         });
-        let (chunk_es, chunk_pv) = scorer.score(&cp);
+        let (chunk_es, chunk_pv) = scorer.score(&cp)?;
 
         es.extend(chunk_es.iter().map(|&x| x as f32));
         if let (Some(pv), Some(chunk_pv)) = (pv.as_mut(), chunk_pv) {
