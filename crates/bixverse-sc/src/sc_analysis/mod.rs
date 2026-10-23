@@ -11,6 +11,7 @@ pub mod dialogue;
 pub mod fast_clusters;
 pub mod fast_ranking;
 pub mod hotspot;
+pub mod lm_activity;
 pub mod meld;
 pub mod milo_r;
 pub mod module_scoring;
