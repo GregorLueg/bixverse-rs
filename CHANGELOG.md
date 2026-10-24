@@ -1,5 +1,32 @@
 # News
 
+## 0.9.2
+
+### Feature
+
+- ULM and MLM activity scores from decoupler (Badia-i-Mompel et al., 2022) in
+  `enrichment::lm_activity`. Weighted, signed feature sets (CollecTRI,
+  PROGENy) via `FeatureSetWeights`; t values or slopes, optional two-sided
+  p-values. MLM fits all sets jointly per observation, so targets shared
+  between sets are credited to the set that explains them. The design is shared
+  across observations, so `(XᵀX)⁻¹` is factored once and each observation only
+  touches its non-zeros. Matches decoupler 2.2.1 to 1e-10 relative on t and
+  slope, 1e-8 on p.
+- `lm_activity` scores a dense features x observations matrix (bulk,
+  pseudobulk, contrast statistics); `sc_analysis::lm_activity::calculate_lm_activity`
+  streams cells from the cell store in chunks on the normalised counts.
+- `bixverse-r`: `FromRList` for `LmActivityParams` and
+  `r_list_to_feature_set_weights` (0-based `idx`, optional integer or double
+  `weight` per set).
+
+### Notes
+
+- `MethodsErrors` gains `FeatureSetIndexOutOfRange`, `FeatureSetInvalid`,
+  `LmActivityShapeMismatch`, `LmActivityDegreesOfFreedom`,
+  `LmActivityRankDeficient` and `LmActivityNonFinite`.
+- Unlike decoupler, the single cell path keeps genes that are zero in every
+  cell, and tmin pruning and FDR correction are left to the caller.
+
 ## 0.9.1
 
 ### Feature

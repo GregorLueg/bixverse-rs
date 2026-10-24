@@ -250,6 +250,72 @@ pub enum MethodsErrors {
         /// Dimension that was supplied
         got: usize,
     },
+
+    // -- linear model activity --
+    /// A feature set points at a feature outside the feature universe.
+    #[error("Feature set {set}: feature index {index} is out of range for {n_features} features.")]
+    FeatureSetIndexOutOfRange {
+        /// Index of the offending set
+        set: usize,
+        /// The offending feature index
+        index: usize,
+        /// Size of the feature universe
+        n_features: usize,
+    },
+
+    /// A feature set is empty, repeats a feature, carries a non-finite weight
+    /// or has a weight vector of the wrong length.
+    #[error("Feature set {set} is invalid: {reason}.")]
+    FeatureSetInvalid {
+        /// Index of the offending set
+        set: usize,
+        /// What is wrong with it
+        reason: &'static str,
+    },
+
+    /// The data and the feature sets disagree on the number of features.
+    #[error(
+        "Linear model activity: the data has {got} features, the feature sets expect {expected}."
+    )]
+    LmActivityShapeMismatch {
+        /// Feature universe of the feature sets
+        expected: usize,
+        /// Features in the data
+        got: usize,
+    },
+
+    /// The model leaves no residual degrees of freedom.
+    #[error(
+        "Linear model activity: {n_features} features cannot fit {n_params} parameters with residual degrees of freedom left."
+    )]
+    LmActivityDegreesOfFreedom {
+        /// Number of features (the observations of each fit)
+        n_features: usize,
+        /// Number of fitted parameters, intercept included
+        n_params: usize,
+    },
+
+    /// The MLM design is (numerically) rank deficient.
+    ///
+    /// Two sets with identical or proportional weights, or a set covering every
+    /// feature with one weight (collinear with the intercept), make `XᵀX`
+    /// singular.
+    #[error(
+        "MLM: the feature set design is rank deficient (eigenvalue ratio {ratio:e}); drop or merge collinear sets."
+    )]
+    LmActivityRankDeficient {
+        /// Smallest over largest eigenvalue of `XᵀX` scaled to unit diagonal
+        ratio: f64,
+    },
+
+    /// An observation holds a NaN or infinite value.
+    #[error(
+        "Linear model activity: observation {observation} of the batch contains NaN or infinite values."
+    )]
+    LmActivityNonFinite {
+        /// Index of the observation within the scored batch
+        observation: usize,
+    },
 }
 
 /// Sparse structure errors surface through the core variant, as before the

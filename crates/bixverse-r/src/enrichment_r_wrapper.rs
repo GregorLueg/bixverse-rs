@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use crate::prelude::*;
 use bixverse_rs::enrichment::blitzgsea::{BlitzGseaNull, BlitzGseaParams};
 use bixverse_rs::enrichment::gsea::GseaParams;
+use bixverse_rs::enrichment::lm_activity::{
+    FeatureSetWeights, LmActivityParams, parse_lm_method, parse_lm_stat,
+};
 use bixverse_rs::enrichment::mitch::MitchPathways;
 
 //////////
@@ -285,4 +288,140 @@ pub fn blitzgsea_null_from_list(r_list: List) -> Result<BlitzGseaNull> {
         centred,
         anchor_sizes,
     })
+}
+
+/////////////////
+// LM activity //
+/////////////////
+
+impl FromRList for LmActivityParams {
+    /// Generate LmActivityParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list with `"method"` (`"ulm"`, `"mlm"`), `"stat"`
+    ///   (`"t"`, `"coef"`) and `"p_values"`.
+    ///
+    /// ### Returns
+    ///
+    /// The populated [LmActivityParams]
+    fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let method = match params.get("method").and_then(|v| v.as_str()) {
+            Some(s) => parse_lm_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid linear model method: {}", s)))?,
+            None => defaults.method,
+        };
+
+        let stat = match params.get("stat").and_then(|v| v.as_str()) {
+            Some(s) => parse_lm_stat(s)
+                .ok_or_else(|| Error::Other(format!("Invalid linear model statistic: {}", s)))?,
+            None => defaults.stat,
+        };
+
+        let p_values = params
+            .get("p_values")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.p_values);
+
+        Ok(Self {
+            method,
+            stat,
+            p_values,
+        })
+    }
+}
+
+/// Transform an R list of weighted feature sets into `FeatureSetWeights`
+///
+/// ### Params
+///
+/// * `gs_list` - R list with one list per set holding `"idx"` (0-based
+///   feature positions) and optionally `"weight"` (numeric, aligned with
+///   `"idx"`). A set without weights gets weight 1 on every member.
+/// * `n_features` - Size of the feature universe.
+///
+/// ### Returns
+///
+/// The feature sets
+pub fn r_list_to_feature_set_weights(
+    gs_list: List,
+    n_features: usize,
+) -> Result<FeatureSetWeights> {
+    let mut sets: Vec<Vec<usize>> = Vec::with_capacity(gs_list.len());
+    let mut weights: Vec<Vec<f64>> = Vec::with_capacity(gs_list.len());
+    for i in 0..gs_list.len() {
+        let set: HashMap<&str, Robj> = r_list_to_map(gs_list.elt(i)?.try_into()?)?;
+        let idx: Vec<usize> = set
+            .get("idx")
+            .and_then(|v| v.as_integer_vector())
+            .ok_or_else(|| Error::Other(format!("Feature set {} has no integer 'idx'.", i + 1)))?
+            .iter()
+            // NA_integer_ is i32::MIN, so this catches it too
+            .map(|&x| usize::try_from(x))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|_| {
+                Error::Other(format!("Feature set {} has a negative or NA 'idx'.", i + 1))
+            })?;
+        // integer weights (e.g. a mode of regulation of 1L / -1L) are not a
+        // real vector to extendr, so they need their own branch
+        let w = match set.get("weight") {
+            None => vec![1.0; idx.len()],
+            Some(v) => match (v.as_real_vector(), v.as_integer_vector()) {
+                (Some(w), _) => w,
+                (None, Some(w)) if !w.contains(&i32::MIN) => w.iter().map(|&x| x as f64).collect(),
+                _ => {
+                    return Err(Error::Other(format!(
+                        "Feature set {} has a non-numeric or NA 'weight'.",
+                        i + 1
+                    )));
+                }
+            },
+        };
+        sets.push(idx);
+        weights.push(w);
+    }
+    FeatureSetWeights::new(&sets, Some(&weights), n_features).to_extendr()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bixverse_rs::enrichment::lm_activity::lm_activity;
+    use faer::Mat;
+
+    #[test]
+    fn test_feature_set_weights_accept_integer_weights() {
+        test! {
+            let as_int = List::from_values([list!(idx = r!([0, 3, 5]), weight = r!([1, -1, 1]))]);
+            let as_real =
+                List::from_values([list!(idx = r!([0, 3, 5]), weight = r!([1.0, -1.0, 1.0]))]);
+            let mat = Mat::from_fn(10, 2, |i, j| ((i * 3 + j * 7) % 5) as f64);
+            let a = lm_activity(mat.as_ref(), &r_list_to_feature_set_weights(as_int, 10)?, None)
+                .unwrap();
+            let b = lm_activity(mat.as_ref(), &r_list_to_feature_set_weights(as_real, 10)?, None)
+                .unwrap();
+            assert_eq!(a.es, b.es);
+        }
+    }
+
+    #[test]
+    fn test_feature_set_weights_reject_bad_input() {
+        test! {
+            let bad = [
+                list!(idx = r!([0, -1, 5])),
+                list!(idx = r!([0, 3, 5]), weight = r!([Some(1), NA_INTEGER, Some(1)])),
+                list!(idx = r!([0, 3, 5]), weight = r!(["a", "b", "c"])),
+            ];
+            for set in bad {
+                assert!(r_list_to_feature_set_weights(List::from_values([set]), 10).is_err());
+            }
+        }
+    }
 }

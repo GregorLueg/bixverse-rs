@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "approx",
  "bincode",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "num-traits",
  "rayon",

@@ -6,7 +6,7 @@ members = ["crates/*"]
 exclude = ["python"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -35,15 +35,15 @@ codegen-units = 4
 [workspace.dependencies]
 # Workspace crates. Every internal dependency drops default features, so a
 # feature switched off at the top cannot be switched back on underneath.
-bixverse-sparse = { path = "crates/bixverse-sparse", version = "0.9.1", default-features = false }
-bixverse-core = { path = "crates/bixverse-core", version = "0.9.1", default-features = false }
-bixverse-methods = { path = "crates/bixverse-methods", version = "0.9.1", default-features = false }
-bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.9.1", default-features = false }
-bixverse-sc = { path = "crates/bixverse-sc", version = "0.9.1", default-features = false }
-bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.9.1", default-features = false }
-bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.9.1", default-features = false }
-bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.9.1", default-features = false }
-bixverse-rs = { path = "crates/bixverse-rs", version = "0.9.1", default-features = false }
+bixverse-sparse = { path = "crates/bixverse-sparse", version = "0.9.2", default-features = false }
+bixverse-core = { path = "crates/bixverse-core", version = "0.9.2", default-features = false }
+bixverse-methods = { path = "crates/bixverse-methods", version = "0.9.2", default-features = false }
+bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.9.2", default-features = false }
+bixverse-sc = { path = "crates/bixverse-sc", version = "0.9.2", default-features = false }
+bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.9.2", default-features = false }
+bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.9.2", default-features = false }
+bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.9.2", default-features = false }
+bixverse-rs = { path = "crates/bixverse-rs", version = "0.9.2", default-features = false }
 
 # External
 approx = "0.5.1"
