@@ -2,893 +2,354 @@
 
 ## 0.9.2
 
+### Breaking
+
+- MetaCells2 parameters follow upstream metacells 0.9.5: `SimilarityMethod` is
+  `AbsPearson` (default) | `Pearson` plus a `log_data` flag, the kNN factors
+  are `f64`, `DeviantsParams` drops `max_gene_fraction` and gains the noisy-gene
+  fields, and `MetacellsParams::random_seed` is gone (the seed is an argument).
+- `select_features()`, `choose_seeds()`, `compute_candidate_metacells()` and
+  `find_deviant_cells()` return `Result`; `dissolve_metacells()` takes a mass
+  vector; `Pile` gains `mass_per_cell` and `Pile::from_raw()`.
+
 ### Feature
 
-- ULM and MLM activity scores from decoupler (Badia-i-Mompel et al., 2022) in
-  `enrichment::lm_activity`. Weighted, signed feature sets (CollecTRI,
-  PROGENy) via `FeatureSetWeights`; t values or slopes, optional two-sided
-  p-values. MLM fits all sets jointly per observation, so targets shared
-  between sets are credited to the set that explains them. The design is shared
-  across observations, so `(XᵀX)⁻¹` is factored once and each observation only
-  touches its non-zeros. Matches decoupler 2.2.1 to 1e-10 relative on t and
-  slope, 1e-8 on p.
-- `lm_activity` scores a dense features x observations matrix (bulk,
-  pseudobulk, contrast statistics); `sc_analysis::lm_activity::calculate_lm_activity`
-  streams cells from the cell store in chunks on the normalised counts.
-- `bixverse-r`: `FromRList` for `LmActivityParams` and
-  `r_list_to_feature_set_weights` (0-based `idx`, optional integer or double
-  `weight` per set).
+- MetaCells2 divide and conquer (`compute_dac_metacells()`, `DacParams`),
+  including rare gene modules (`RareParams`, on by default), streaming piles
+  from the cell store.
+- Hierarchical clustering matching SciPy's `linkage` (ward, complete, average,
+  weighted) in `ml::clustering::hierarchical`.
+- decoupler ULM and MLM activity scores in `enrichment::lm_activity`, dense and
+  on the cell store (`calculate_lm_activity()`). Matches decoupler 2.2.1.
+- `bixverse-r`: `FromRList` for the MetaCells2, divide-and-conquer, rare-module
+  and `LmActivityParams` params, and `r_list_to_feature_set_weights()`.
 
-### Notes
+### Fix
 
-- `MethodsErrors` gains `FeatureSetIndexOutOfRange`, `FeatureSetInvalid`,
-  `LmActivityShapeMismatch`, `LmActivityDegreesOfFreedom`,
-  `LmActivityRankDeficient` and `LmActivityNonFinite`.
-- Unlike decoupler, the single cell path keeps genes that are zero in every
-  cell, and tmin pruning and FDR correction are left to the caller.
+- The direct MetaCells2 pipeline now matches metacells 0.9.5 (parity tests on
+  every deterministic stage). Among others: min-cut strength, similarity
+  transform, kNN ranks and degree retry, deviant gap skip, top-3 statistic,
+  relative-variance window and the candidates loop. Deviants no longer build
+  dense cells x genes matrices.
 
 ## 0.9.1
 
 ### Feature
 
-- New crate `bixverse-sparse` holds the compressed sparse structures
-  (`CompressedSparseData2`, transposition, coo conversion, sparse arithmetic),
-  `BixverseNumeric`, `VecIndexCast`, `Verbosity` and `thread_chunks`, with no
-  `faer`, SIMD or nearest neighbour dependency. `bixverse-core` re-exports all
-  of it, so existing paths such as `core::math::sparse::*` are unchanged.
-- `bixverse-sc-data` depends on `bixverse-sparse` instead of `bixverse-core`.
-  Its new `analysis` feature (default on) gates `plotting` and
-  `sc_synthetic_data`, the only modules that need core. With
-  `default-features = false` the dependency tree drops from 145 to 59 crates and
-  contains no `faer`, `ann-search-rs`, `statrs` or `wide`.
+- New crate `bixverse-sparse` with the compressed sparse structures, re-exported
+  by `bixverse-core`. `bixverse-sc-data` depends on it instead of core; with
+  its `analysis` feature off the tree drops from 145 to 59 crates.
 
-### Notes
+### Breaking
 
-- `CompressedSparseData2::from_dense_matrix()` is now the `SparseFromDense`
-  trait method, exported in the core prelude. Calls compile unchanged where the
-  prelude is imported.
-- Sparse functions return `SparseErrors`. `CoreErrors` and the upper error
-  enums convert it, so `?` keeps working, but code that matches on the result of
-  a sparse function directly matches `SparseErrors` now.
-- `ScDataErrors` gains `Sparse` and `InvalidArgument`. `Core` remains under the
+- `from_dense_matrix()` is now the `SparseFromDense` trait method (in the
+  prelude). Sparse functions return `SparseErrors`, which the upper error
+  enums convert. Plotting and synthetic data in `bixverse-sc-data` need its
   `analysis` feature.
-- Crates that use `bixverse-sc-data` for plotting or synthetic data need its
-  `analysis` feature, as workspace dependencies drop default features.
 
 ## 0.9.0
 
 ### Breaking
 
-- Single cell files are version 4 now. `SC_FILE_VERSION` is 4 and
-  `SC_FILE_VERSION_V3` holds the old value. `CellGeneSparseWriter::new()`
-  writes version 4 and `new_v3()` the legacy layout. Readers open both, so
-  existing stores keep working, but a version 4 file cannot be read by 0.8.x.
-- `compress_cell_row()` takes a fourth parameter, `format: ChunkFormat`, which
-  comes from `CellGeneSparseWriter::format()`. Code that builds its own
-  payloads for a version 4 writer has to encode with
-  `ChunkFormat::encode_cell()` and `encode_gene()`: `to_compressed_bytes()` on
-  the chunk types still emits version 3 payloads.
-- `faer` is a workspace dependency without its default features (`std`,
-  `rayon`, `sparse-linalg` and `rand` stay), so `npy` and everything behind it
-  (`npyz`, `py_literal`, `pest_derive`, `stacker`) is out of the dependency
-  tree, which the Windows ARM64 build needed. `ann-search-rs` is `0.11.2` and
-  `edge-rs` is `0.3.1`.
+- Single cell files are version 4 (`SC_FILE_VERSION`). Readers open version 3
+  too; 0.8.x cannot read version 4. `new_v3()` writes the old layout.
+- `compress_cell_row()` takes a `ChunkFormat`; version 4 payloads come from
+  `ChunkFormat::encode_cell()` / `encode_gene()`.
+- `faer` without default features (drops `npy` and `stacker`); `ann-search-rs`
+  0.11.2, `edge-rs` 0.3.1.
 
 ### Feature
 
-- Version 4 of the single cell binary. Indices and raw counts are delta
-  bit-packed in blocks of 128, and the normalised layer is no longer stored: it
-  is recomputed on read from the raw counts, the library size and the target
-  size, bit for bit, and kept verbatim for any chunk where it does not
-  recompute. Cell chunks carry a plain header, so nnz and library size are
-  readable without decompressing. Gene files carry a per-cell library-size
-  table for the recompute. The body codec is chosen per writer with
-  `CellGeneSparseWriter::with_codec()` (`ChunkCodec::Lz4` by default,
-  `Zstd` for smaller files).
-- `upgrade_store_to_v4()` replaces a version 3 store by its conversion in
-  place, converting into temporary files first and optionally keeping the
-  originals as `<path>.v3.bak`. `convert_store_v3_to_v4()`,
-  `convert_cell_file_to_v4()` and `convert_gene_file_to_v4()` write the
-  conversion elsewhere. `peek_file_version()` reads the version from the file
-  header without mapping the file, and `ParallelSparseReader::file_version()`
-  reports it for an open reader.
-- `write_gene_file_v3()` writes the legacy gene file, for producing version 3
-  input on purpose.
-- Reads prefetch their byte range into the page cache with large parallel
-  reads before decoding, unix only. It samples residency first, so a warm
-  store pays almost nothing, and it applies to version 3 files as well.
+- Version 4 format: delta bit-packed indices and counts, the normalised layer
+  recomputed on read, a choice of lz4 or zstd per writer.
+- `upgrade_store_to_v4()` and `convert_*_to_v4()` for existing stores,
+  `peek_file_version()` to check one.
+- Reads prefetch into the page cache (unix).
 
 ## 0.8.1
 
 ### Feature
 
-- `PcaSolver::Auto` (`"auto"`): Lanczos on the sparse path, the covariance
-  solver on the dense one, i.e. the fastest exact option on each.
-- Exact sparse PCA on the GPU. `sparse_svd_lanczos_gpu()` (cubecl) and
-  `sparse_svd_lanczos_mlx()` run a block Lanczos on the gene-side Gram: the
-  device does the two SpMMs per block, the host does the orthogonalisation
-  and the small eigensolve in f64. Matches the CPU Lanczos to f32 precision.
-- `pca_on_sc_sparse_gpu()` and `pca_on_sc_sparse_mlx()` now honour
-  `svd_solver`. `Randomised` keeps the randomised SVD, every other solver
-  runs the block Lanczos (there is no GPU covariance path). Since the default
-  solver is `Covariance`, the GPU and MLX PCA are exact by default now, at
-  some extra run time over the randomised SVD.
-- `block_lanczos_thick_restart()` and `BlockLanczosParams` in
-  `core::math::sparse`: the block twin of the thick-restart Lanczos, generic
-  over the operator's error type so a device backend can plug in. Blocks of
-  32 and a relative tolerance of `1e-6` by default; the MLX path uses blocks
-  of 16. `RitzPairs` is public.
+- `PcaSolver::Auto`, and exact sparse PCA on the GPU and MLX via a block
+  Lanczos (`block_lanczos_thick_restart()`). GPU and MLX PCA honour
+  `svd_solver`, so they are exact by default.
 
 ### Fix
 
-- `sparse_svd_lanczos()` is thick-restarted, so the trailing components
-  converge on a flat spectrum too instead of coming back half-converged.
-- The tall `Y^T Y` in CholeskyQR (CPU randomised SVD) is folded over row chunks
-  in parallel.
+- `sparse_svd_lanczos()` is thick-restarted, so trailing components converge.
 
 ## 0.8.0
 
 ### Breaking
 
-- The crate is now a workspace of crates under `crates/`, on one shared
-  version: `bixverse-core` (`core`, `utils`, `ml`), `bixverse-methods`
-  (`enrichment`, `graph`, `methods`, `ontology`), `bixverse-sc-data` (the
-  single cell data layer), `bixverse-sc` (the rest of `single_cell`),
-  `bixverse-gpu`, `bixverse-sc-gpu`, `bixverse-mlx` and `bixverse-r`.
-  `bixverse-rs` stays as a facade that re-exports them under the old module
-  paths, so most `bixverse_rs::...` imports keep working.
-- `BixverseErrors` is gone. Each crate has its own enum (`CoreErrors`,
-  `MethodsErrors`, `ScDataErrors`, `ScErrors`, `GpuErrors`, `ScGpuErrors`,
-  `MlxErrors`, `RErrors`), and each wraps the ones below it through
-  `#[from]`. Code that matches on variants has to go through the wrapper,
-  e.g. `ScErrors::ScData(ScDataErrors::ReaderModeMismatch { .. })`.
-- The `r` feature is gone. The R conversions moved to `bixverse-r`, the only
-  crate that links libR. It re-exports the facade and mirrors its features.
-  The `*_r_wrapper` modules now sit at `bixverse_r::...`, and the inherent
-  `from_r_list` constructors became impls of `FromRList`, plus `FromRMap` for
-  already flattened lists and `ToRList` for serialisers. All three are in
-  `bixverse_r::prelude`. The `KMeansGpuParamsFromR`, `NebulaParamsFromR`,
-  `ScTestedFromR` and `TestedFromR` extension traits were folded into them.
-  Constructors that take extra arguments are free functions now:
-  `hals_opts_from_r_list()`, `lda_params_from_r_list()`,
-  `dsb_params_from_r_list()`, `kmeans_params_from_r_list_with_iters()`,
-  `cell_sweep_fit_to_r_list()` and `named_matrix_from_r_matrix()`.
-- `single-cell` no longer pulls in HDF5. The h5ad and 10x h5 readers sit
-  behind a new `h5` feature, which `hdf5-static` and `hdf5-filters` imply.
-- `gpu` now covers the bulk GPU methods only. The single cell GPU methods
-  (`gpu::sc_gpu`) need the new `sc-gpu` feature. `mlx` implies
-  `single-cell`.
-- The 10x ADT reader moved from `single_cell::multi_modal::adt::h5_10x_adt_io`
-  to `single_cell::sc_data::h5_10x_adt_io`.
-- `FwArgminB` has an associated `type Error`, and the fastMNN drivers
-  (`fast_mnn_embedding()` and friends) are generic over the search closure's
-  error type, so a GPU or MLX backend can return its own errors.
-  `ScKnnResults<E>` and `SingleCellPcaRes<E>` take the error as a parameter,
-  defaulting to `ScErrors`.
-- The sNN builders are gone: `generate_snn_full()`, `generate_snn_limited()`,
-  `SnnSimilarityMethod` and `parse_snn_similiarity_method()` (with the typo)
-  from `single_cell::sc_processing::snn`. Use `build_knn_graph()` in
-  `graph::knn_graph` (see below). There is no limited sNN anymore.
-- The sNN prune default goes from `1/15` to `1/16` (`SNN_PRUNE_DEFAULT`). A
-  Jaccard threshold `p` asks for a shared fraction `2p / (1 + p)` of the
-  neighbourhood whatever `k` is, so `1/16` keeps Seurat's ~12%, and it no longer
-  sits on the discrete weight a 2-shared pair gets at `k = 15`.
-- Fast clustering was rewritten. `FastLouvainParams`, `FastLouvainGridResult`,
-  `fast_louvain_clusters()` and `fast_louvain_clusters_grid()` are replaced by
-  `fast_clusters()`, and the GPU `FastLouvainParamsGpu`,
-  `fast_louvain_clusters_gpu()` and `fast_louvain_clusters_grid_gpu()` by the
-  `GpuKMeans` coarsener into the same function. The seed grid is now
-  `n_seeds > 1` on the one call.
-- `LeidenParams::n_iterations` is an `Option<usize>` (`None` iterates until
-  stable) and defaults to 5 instead of 2. `LeidenParams` gains `min_gain` and
-  `local_moving`, and `LeidenParams::new()` takes the `Option`.
-- petgraph is no longer a dependency. `graph_from_strings()` and
-  `PageRankGraph::from_petgraph()` are gone: build with
-  `PageRankGraph::from_strings()` or the new `PageRankGraph::from_indices()`.
-  `personalised_page_rank()` takes a `&PageRankGraph` and wraps
-  `personalised_page_rank_optimised()`. `NodeData` and `EdgeData` are replaced
-  by `AttributedGraph`, which `graph_from_strings_with_attributes()` now
-  returns and `constrained_personalised_page_rank()` takes. `SValueCache` is
-  keyed by `usize`; the `WangSimOntology` API is otherwise unchanged.
+- The crate is a workspace (`bixverse-core`, `-methods`, `-sc-data`, `-sc`,
+  `-gpu`, `-sc-gpu`, `-mlx`, `-r`); `bixverse-rs` re-exports them under the old
+  paths.
+- One error enum per crate replaces `BixverseErrors`.
+- R conversions moved to `bixverse-r` (`FromRList`, `FromRMap`, `ToRList`);
+  the `r` feature is gone.
+- `single-cell` no longer pulls in HDF5 (new `h5` feature); `gpu` is bulk only,
+  single cell GPU needs `sc-gpu`.
+- sNN builders replaced by `graph::knn_graph::build_knn_graph()`; the sNN prune
+  default is 1/16.
+- Fast clustering rewritten as `fast_clusters()`; `LeidenParams::n_iterations`
+  is optional and defaults to 5.
+- petgraph is gone; build PageRank graphs with `PageRankGraph::from_strings()`
+  or `from_indices()`.
 
 ### Feature
 
-- Each layer can be used on its own: `bixverse-sc-data` without HDF5 or any
-  analysis code (the Python bindings now depend on nothing else), the single
-  cell suite and its GPU kernels without HDF5, the core layer without
-  petgraph, edge-rs or extendr.
-- A few items another crate now needs went from `pub(crate)` to `pub`, e.g.
-  `ScatterPtr`, `UnionFind`, `sparse_pca_accelerator_input()` and
-  `scenic_common_setup()`.
-- `build_knn_graph()` turns a kNN into an undirected weighted graph, picked
-  via `KnnSymmetrisation`: the bluster/Seurat sNN (Jaccard or rank weight,
-  prune, plus a rescue that reconnects the small components pruning cuts off),
-  the UMAP fuzzy simplicial set ScanPy uses as `connectivities` (matches
-  umap-learn's `fuzzy_simplicial_set`), or the plain kNN union.
-- `fast_clusters()` coarsens with k-means behind a `Coarsener` trait
-  (`CpuKMeans` standard or mini-batch, `GpuKMeans`, `MlxKMeans`), builds a
-  `CentroidGraph` (exact centroid kNN with any `KnnSymmetrisation`, or the
-  cell-mediated graph from Secuer) and runs Louvain or Leiden on it. With
-  several seeds it reports ARI and conductance per resolution (`GridStats`).
-- `community_detection()` exposes the evaluation cap, multi-level switch and
-  the full `LeidenParams` for Louvain as well, so Louvain can now take
-  `n_iterations`. `LocalMoving::Coloured` moves one colour class in parallel
-  on large levels.
+- Each layer works on its own, e.g. the data layer without HDF5 or analysis code.
+- `build_knn_graph()` with sNN, UMAP fuzzy simplicial set or plain union.
+- `fast_clusters()` with CPU, GPU or MLX k-means coarsening and Louvain or
+  Leiden on the centroid graph.
 
 ## 0.7.0
 
 ### Breaking
 
-- Moved to `cubecl = "0.11"` and `cubek = "0.3"`. The GPU surface is no longer
-  generic over `R: Runtime`: functions take a `cubecl::Device` instead of
-  `R::Device`, launchers take `&Client` instead of `&ComputeClient<R>`, and
-  `GpuTensor<T>`, `GpuCompressedSparseData<T>` and `GpuFwArgminB` lose their
-  runtime parameter.
-- Moved to `faer = "0.24"`, `ann-search-rs = "0.11"`,
-  `cubecl-utils-rs = "0.2"`, `edge-rs = "0.3"` and `bonsai-rs = "0.3"`.
-- The R bindings sit behind a new `r` feature, on by default. Builds with
-  `default-features = false` drop `extendr-api`, every `*_r_wrapper` module
-  and `utils::r_rust_interface`, so they also no longer test them.
-- `louvain_sparse_graph()` now lives in `graph::leiden` (still re-exported from
-  `graph::community_detections`) and runs on the Leiden engine with the
-  refinement off. The signature is unchanged; partitions for a given seed may
-  differ from 0.6.x.
-- Removed the register-blocked SEACells B-argmin kernel and its helpers from
-  `gpu::sc_gpu::kernels::seacells_kernels`: `fw_argmin_b`,
-  `launch_fw_argmin_b`, `b_argmin_workgroup`, `B_ARGMIN_WG_TIERS` and
-  `B_ARGMIN_BLOCKS`. Use `launch_fw_argmin_b_tiled`.
-- `SingleCellReading` gains two required methods, `read_cells_sparse()` and
-  `read_genes_sparse()`. Implementations outside the crate need to add them.
+- `cubecl` 0.11, `cubek` 0.3, `faer` 0.24; the GPU API takes a
+  `cubecl::Device` and is no longer generic over the runtime.
+- `louvain_sparse_graph()` runs on the Leiden engine, so partitions may differ.
+- `SingleCellReading` gains `read_cells_sparse()` and `read_genes_sparse()`.
 
 ### Feature
 
-- Leiden community detection, `leiden_sparse_graph()` with `LeidenParams`,
-  following igraph's `igraph_community_leiden`. Seeded and independent of the
-  thread count. Also `modularity()` and `edge_pairs_to_sparse_graph()`.
-- Fast clustering can build a cell-mediated centroid graph instead of the
-  kNN/sNN one: `cell_mediated` and `n_anchors` on the fast Louvain params, CPU
-  and GPU.
-- Fused CSR batch reader for cell-based files, `read_cells_csr()` returning a
-  `CsrBatch`, which walks the decompressed chunks without a per-cell
-  allocation.
-- Fused sparse batch readers on `SingleCellReading`: `read_cells_sparse()`
-  returns one CSR and `read_genes_sparse()` one CSC (optionally on a cell
-  subset), without a chunk per cell or gene in between. SCENIC, Scrublet,
-  NEBULA, CellPhoneDB, NMF, PCA, CellSweep, Bonsai, MetaCells2 and the doublet
-  helpers build their matrices through them.
-- Python bindings for the single cell streaming engine in `python/`, built
-  with maturin and without libR. The first consumer is scVI in the `nn`
-  module (see [Lopez et al.](https://www.nature.com/articles/s41592-018-0229-2)),
-  trained straight off a bixverse cell store.
-- Experimental `mlx` feature: an MLX backend via `mlx-c` for Apple Silicon,
-  f32 only and independent of `gpu`. Covers pairwise correlation, sparse
-  randomised SVD, HALS NMF (dense and sparse, single, stabilised and
-  consensus) and, with `single-cell`, Harmony and SEACells. It turns on
-  `ann-search-rs/mlx`, which finds and links `libmlxc`; without the library
-  the build warns and the module is absent.
-- MLX also does sparse single cell PCA (`pca_on_sc_sparse_mlx()`) and sparse
-  multi-run NMF with the k sweep (`nmf_multiple_run_sparse_mlx()`,
-  `nmf_k_sweep_mlx()`, `nmf_k_sweep_run_sparse_mlx()`). `HarmonyParamsV2Gpu`
-  converts into `HarmonyParamsV2`, so the GPU Harmony v2 params drive the MLX
-  path as well.
-- Small cell subsets can skip the gene-major sweep:
-  `read_cell_subset_csc()` reads them from the cell-major file into a CSC
-  matrix for `InMemorySparseReader`, and `prefer_cell_subset()` decides when
-  to use it (at most 10 % of the store and 100k cells). HVG and the
-  scTransform fit give identical results on either path, with HVG on 6k of
-  985k cells going from 0.82 s to 43 ms.
+- Leiden community detection.
+- Fused sparse batch readers on the cell store.
+- Python bindings for the streaming engine, first used by scVI.
+- Experimental MLX backend for Apple Silicon.
+- Small cell subsets skip the gene-major sweep.
 
 ### Performance
 
-- SEACells GPU B update uses a column-tiled shared-memory argmin: no ceiling
-  on the number of SEACells any more and no CPU fallback.
-- `sparse_add_csr` merges rows in parallel, which speeds up the SEACells B
-  update and every other caller.
-- The parallel CSC/CSR transpose scatters in bands of rows.
-- `filter_selected_cells()` and `read_gene_parallel_filtered()` drop the
-  per-gene hash map for a single walk over the gene's non-zeros. A filtered
-  read of a 985k-cell store goes from 1.5 s to 0.6 s, and the scTransform fit
-  on a small subset roughly halves.
-- Exact covariance PCA, dense and sparse, eigendecomposes the cell Gram instead
-  of the gene one when there are fewer cells than genes. Small cell subsets no
-  longer pay for an HVG-sized eigendecomposition.
-- The unfiltered fused read path copies each stored cell or gene out in bulk,
-  with a vectorised f16 to f32 widening, instead of entry by entry.
-
-### Fix
-
-- The GPU kNN parser accepts a bare `"nndescent"` and maps it to CAGRA, like
-  `"nndescent_gpu"` already did.
+- Faster SEACells GPU B update, sparse addition, transposes, filtered reads and
+  exact covariance PCA on few cells.
 
 ## 0.6.4
 
 ### Breaking
 
-- `CellGeneSparseWriter::write_compressed_cell_chunks()` takes `&[CellPayload]`
-  instead of `&[(usize, Vec<u8>)]`, and `compress_cell_row()` returns
-  `(nnz, CellPayload)`. The payload carries the library size.
+- `write_compressed_cell_chunks()` takes `&[CellPayload]`.
 
 ### Feature
 
-- Cell-based binaries carry a library-size index, so `read_cell_library_sizes`
-  no longer decompresses every cell chunk. Files written before this fall back
-  to the previous path; no file version bump.
+- Cell files carry a library-size index.
 
 ## 0.6.3
 
-### Breaking
-
-- `tied_diffusion_parallel()` now takes `damping_factor`, `max_iter` and `tol`
-  instead of hard-coding 0.85, 1000 and 1e-7.
-
 ### Fix
 
-- Personalised PageRank stopped far too early: convergence was checked on the
-  squared L2 norm of the update. All power iterations now use the L1 change and
-  the default tolerance is 1e-12 (also in `LigandTargetParams`). Matches
-  igraph/prpack now.
-- Dangling nodes in personalised PageRank are handled consistently (mass leaks
-  and is restored by the final renormalisation) instead of an unreachable
-  branch that redistributed it to the wrong nodes.
+- Personalised PageRank converges properly (L1 change, tolerance 1e-12) and
+  handles dangling nodes consistently. `tied_diffusion_parallel()` takes the
+  damping, iterations and tolerance.
 
 ## 0.6.2
 
-### Feature
-
-- Wired in the changes from `edge-rs="0.2.1"` with faster fitting.
-
-### Fix
-
-- Small h5ad could cause panics due to out-of-bounds indexing.
+- `edge-rs` 0.2.1; fixed a panic on small h5ad.
 
 ## 0.6.1
 
-### Feature
-
-- Wired in the changes from `edge-rs="0.2.0"` to enable minimum sample filtering
-  for Nebula on the CPU and GPU path.
+- `edge-rs` 0.2.0, with minimum sample filtering for NEBULA.
 
 ## 0.6.0
 
-**Large performance updates included in this version**
-(Due to that some of the previous observed numbers might shift ever so slighty.)
-
-### Feature
-
-- GPU-accelerated mNN implemented.
-- The GPU-accelerated randomised SVD has been made faster.
-- The exact co-variance PCA path has been wired into the doublet detection
-  methods.
-- Compression method implemented for the binary files to archive an analysis
-  easily to reduce needed disk space.
-- sNN pruning updated so that isolated communities do not occur anymore in the
-  subsequent clustering. This reduces number of detected tiny clusters while
-  keeping the sNN graph small in memory.
-- Version bumps to `ann-search-rs` to benefit from the faster GPU indices and
-  k-means clustering.
-- CellPhoneDB from [Efremova et al.](https://pubmed.ncbi.nlm.nih.gov/32103204/)
-  wired in.
-- Faster conversion between Rust and R.
-- Massive performance sweep:
-  * What was sequential is parallel now.
-  * Allocation churn reduced, scratch memory implemented where appicable.
-  * Unchecked indexing used where bounds can be guaranteed.
-  * Harmony v1 updated massively with massive speed improvements.
-  * SIMD used where scalar vector operations were used.
-  * GEMM used where applicable.
+- GPU mNN, faster GPU randomised SVD, store archiving, CellPhoneDB.
+- sNN pruning without isolated communities.
+- Performance sweep across the crate; some numbers shift slightly.
 
 ## 0.5.10
 
-### Feature
-
-- Version bump on `ann-search-rs` to benefit from faster Annoy and NNDescent.
+- `ann-search-rs` bump for faster Annoy and NNDescent.
 
 ## 0.5.9
 
-### Fix
-
-- Added reverse edges for the kNN graph in miloR
+- Fix: reverse edges for the miloR kNN graph.
 
 ## 0.5.8
 
-### Features
-
-- Faster one-vs-many DGE patterns for both Wilcox and AUROC tests leveraging
-  the gene-specific view into the data.
+- Faster one-vs-many Wilcox and AUROC DGE.
 
 ## 0.5.7
 
-### Features
-
-- [Bonsai](https://doi.org/10.1038/s41587-026-03220-2) trees wired in via
-  [`bonsai-rs`](https://crates.io/crates/bonsai-rs) behind the new `bonsai`
-  feature. Raw counts go through Sanity in gene chunks, so all genes fit, not
-  only the HVGs. Works on the binary single cell files and on in-memory
-  metacells, CPU and GPU (Sanity on the device).
-- Dense CPU GEMM now goes through Apple Accelerate on macOS via the new default
-  `accelerate` feature. Covers correlations, covariance, perturbation
-  distances, NMF HALS, Hotspot, Markov chains and the landmark GP. No effect on
-  Linux and Windows; turn off with `default-features = false`.
-
-### Fix
-
-- Bumped `hdf5-metno` to 0.15 to work with `ndarray` 0.17.
+- Bonsai trees (`bonsai` feature), CPU and GPU.
+- Apple Accelerate GEMM on macOS (`accelerate`, default).
+- Fix: `hdf5-metno` 0.15 for `ndarray` 0.17.
 
 ## 0.5.6
 
-### Features
-
-- Faster i/o engine for the various single cell formats: mtx, h5 and h5ad.
-  Substantial speed-ups in the 1.5x to 2x faster.
+- Faster mtx, h5 and h5ad readers.
 
 ## 0.5.5
 
-### Features
-
-- Faster solvers for PCA for single cell which affects both CPU and GPU.
-- Bayesian and propabilistic PCA implemented.
-- For the single cell sNN graphs no singletons are possible anymore. Nodes
-  without edges get reconned to the graph by their strongest kNN edge.
-
-### Fix
-
-- Fixed a drift bug in the GPU-accelerated SVD.
+- Faster single cell PCA solvers; Bayesian and probabilistic PCA.
+- No singletons in sNN graphs.
+- Fix: drift in the GPU SVD.
 
 ## 0.5.4
 
-### Fix
-
-- Take in the fix on the GPU-accelerated Nebula to work with any number of
-  lanes.
+- Fix: GPU NEBULA with any number of lanes.
 
 ## 0.5.3
 
-### Fix
-
-- Removed snappy compression from Blosc compressions for h5ad to avoid C++
-  linkage with R.
+- Fix: no snappy in h5ad Blosc, to avoid C++ linkage with R.
 
 ## 0.5.2
 
-### Features
-
-- The [scTransform v2](https://pmc.ncbi.nlm.nih.gov/articles/PMC8764781/) has
-  been integrated. It also gives the option to write the corrected counts to
-  a binary file similar to the normal versions.
-- [CellSweep](https://www.biorxiv.org/content/10.64898/2026.03.04.709349v1.full)
-  is also wired in for denoising data.
-- GPU-accelerated NEBULA from `edge-rs` wired into the single-cell adapter as
-  `run_nebula_gpu()`. Stage two of the fit runs on the device, so the results
-  sit within the tolerance `edge-rs` gates rather than on the CPU's values.
-
-### Bug fixes
-
-- More compression types are allowed now for h5ad to get more informative
-  errors.
+- scTransform v2, CellSweep, GPU NEBULA.
+- More informative h5ad compression errors.
 
 ## 0.5.1
 
-### Features
-
-- Cosine distance added to `DistanceType`, i.e., `DistanceType::Correlation`.
-- Limma-Voom wired up from `edge-rs` with the batch correction ported over.
-- Additional metrics for batch analysis for single cell added: PC regression
-  (PCR), cell-type ASW, graph connectivity.
-- Updates to the constrained PageRank approach with fast paths for lots of
-  personalisation vectors over the same graph.
+- Cosine distance, limma-voom, batch metrics (PCR, cell-type ASW, graph
+  connectivity), faster constrained PageRank.
 
 ## 0.5.0
 
+### Breaking
 
-### Features
+- `single-cell` no longer builds HDF5 from source (`hdf5-static`).
+- kNN graphs return Euclidean, not squared Euclidean, distances.
+- `ann-search-rs` 0.8.1 trait bounds.
 
-- NEBULA and bulkDGEs wired in
-- Added exhaustive approximate nearest neighbour search to miloR due to improved
-  speed.
-- CAGRA GPU graph wired in.
+### Feature
 
-### Breaking changes
-
-- The `"single-cell"` no longer implies HDF5-from-source. Old behaviour can be
-  set again with the addition of the `"hdf5-static"` feature flag. Or you
-  provide a system libhdf5.
-- With the updates to `ann-search-rs` to version `"0.8.1"` old trait boundaries
-  will not behave anymore.
-- The whole `is_squared` machinery is gone now avoiding patchwork fixes across
-  the crate. This means the kNN graphs are now returning Euclidean distance,
-  **not** squared Euclidean anymore. Fixed on the way some kernels where this
-  caused issues.
+- NEBULA, bulk DGE, exhaustive search for miloR, CAGRA.
 
 ## 0.4.7
 
-- DIALOGUE implemented
-- Better hotspot membership algorithm
-- Latent dirichlet allocation (LDA) for generating representations of sparse
-  count-like data.
+- DIALOGUE, better Hotspot membership, LDA.
 
 ## 0.4.6
 
-### Features
-
-- Vision scores available for meta cells, too.
+- Vision scores for metacells.
 
 ## 0.4.5
 
-### Features
-
-- Consensus NMF added with entry points for single cells, meta cells and bulk
-  data.
-- GPU-accelerated NMF solvers.
+- Consensus NMF; GPU NMF solvers.
 
 ## 0.4.4
 
-### Features
-
-- GPU-accelerated Scrublet available.
-
-### Breaking change
-
-- The GPU-accelerated k-means clustering was moved into `ann-search-rs ≥ 0.5.2`.
-  This is a breaking change in terms of availability of the API! However, the
-  same k-means can be now found in `ann-search-rs`.
+- GPU Scrublet.
+- Breaking: GPU k-means moved to `ann-search-rs` 0.5.2.
 
 ## 0.4.3
 
-### Features
-
-- Speed improvements for meta cell HVG detection
-- Hotspot wiring for meta cells + updates to its kernel to be more faithful to
-  to original implementation.
-- SCENIC Regulon binariser improved.
-
-### Fix
-
-- Make the dimension conversion in R less harsh to avoid future problems.
-- Various small bug fixes during a massive sweep of the test suite
-
-### Chores
-
-- Complete refactor of the testing suite.
+- Faster metacell HVG, Hotspot for metacells, better SCENIC binariser.
+- Test suite refactor and small fixes.
 
 ## 0.4.2
 
-### Fix
-
-- Problem with the k-means GPU cluster under certain circumstances.
+- Fix: GPU k-means edge case.
 
 ## 0.4.1
 
-### Features
-
-- Faster HVG detections for single cell with a fix for the Loess function.
-- GPU-accelerated FastClusters for single cell (k-means executed on the GPU).
-- [Palantir](https://www.nature.com/articles/s41587-019-0068-4) for trajectory
-  inference.
-- [PAGA](https://link.springer.com/article/10.1186/s13059-019-1663-x) for
-  trajectory analysis.
+- Faster HVG, GPU fast clusters, Palantir, PAGA.
 
 ## 0.4.0
 
-Breaking changes in the streaming engine.
+### Breaking
 
-### Features
+- `CellGeneSparseWriter::new()` takes a `target_size`, stored in the header.
+- Writer functions return `Result`.
 
-- Improved SEACell GPU code to work on larger data sets.
+### Fix
 
-### Breaking changes
-
-- `CellGeneSparseWriter::new` takes a fifth `target_size: f32`. It is stored in
-  the file header and exposed via `SingleCellReading::target_size`, so CLR
-  transforms and bin merges can verify the normalisation instead of assuming it.
-  Carved out of reserved bytes, so existing files still open and report `None`.
-- `write_cell_chunk`, `write_gene_chunk`, `finalise`, `write_r_counts` and
-  `write_r_counts_csr` return `Result<_, BixverseErrors>`. Writer orientation
-  asserts and the remaining h5ad panics are now typed errors.
-
-### Fixes
-
-- Fixed a potential panic in `CscGeneChunk::read_from_buffer`.
-- Fixed `migrate_v2_to_v3`, which compared against `SC_FILE_VERSION` (3) instead
-  of 2.
-- Chunk parsers now validate the total payload against the buffer before
-  slicing. The three length fields are untrusted and previously fed two `unsafe`
-  out-of-bounds reads.
-- Raw counts no longer saturate at `u16::MAX`. `from_gene_chunks` /
-  `from_cell_chunks` are generic over `FromPrimitive` and return
-  `RawCountOverflow` instead of clipping; mtx ingest and the Scrublet doublet
-  simulation keep full u32 width.
-- The binary format is consistently little-endian.
-- CLR transformations now verify the requested size factor against the one
-  recorded in the file header, and hard-error on a mismatch. Files written
-  before the header carried it warn under detailed verbosity instead.
+- Chunk parsers validate lengths; raw counts no longer saturate at `u16::MAX`;
+  little-endian throughout; CLR checks the stored size factor.
 
 ## 0.3.12
 
-### Features
-
-- GPU-accelerated SEACells
-- Speed improvements on the CPU SEACells version
-- AVX-2 and AVX-512 SIMD arms now actually run on x86. They were gated behind
-  `cfg(target_feature)`, which is compile-time, so stock builds fell all the
-  way back to SSE2; they are runtime-dispatched via `target_feature` now.
+- GPU SEACells, faster CPU SEACells, runtime-dispatched AVX2 / AVX-512.
 
 ## 0.3.11
 
-### Features
-
-- Large refactor for the streaming engine for single cell.
+- Streaming engine refactor.
 
 ## 0.3.10
-
-### Features
 
 - ScType with kNN smoothing.
 
 ## 0.3.9
 
-### Features
-
-- **GPU improvements**:
-  * An actually fast GPU-accelerated SCENIC version that beats CPU.
-  * Improved k-means clustering on the GPU.
-  * Faster randomised sparse SVD on the GPU.
-  * Custom kernels for the correlations which beat `cubek` (at least on Apple
-    Silicon).
-- Different AUCell methods with true alternatives.
+- Faster GPU SCENIC, k-means, randomised SVD and correlations; AUCell variants.
 
 ## 0.3.8
 
-### Features
-
-- Updated synthetic data set generation for bulk RNAseq.
-- Attempt at a GPU-accelerated SCENIC version. Individual tree-building is
-  faster; however, parallelised CPU smokes GPU (at least on Apple Silicon).
-- Faster GPU correlations.
-- Implementation of two additional batch correction methods:
-  * Seurat rPCA batch correction.
-  * Seurat CCA batch correction.
+- Bulk synthetic data, GPU SCENIC attempt, Seurat rPCA and CCA integration.
 
 ## 0.3.7
 
-### Fix
-
-- Bumped to `ann-search-rs = "0.4.4"` to ensure the IVF kNN search always
-  returns k neighbours.
+- Fix: IVF always returns k neighbours (`ann-search-rs` 0.4.4).
 
 ## 0.3.6
 
-### Features
-
-- Speed improvements to the fgsea multi-level implementation removing
-  unnecessary computations and allocations.
-
-### Fix
-
-- Fixed an edge case in the multi-level implementation that caused panics.
+- Faster fgsea multi-level, plus a panic fix.
 
 ## 0.3.5
 
-### Features
-
-- Implemented singscore from Foroutan et al., BMC Bioinform., 2018
+- singscore.
 
 ## 0.3.4
 
-### Features
-
-- Added E-Distance calculations for perturbation experiments
+- E-distance for perturbation experiments.
 
 ## 0.3.3
 
-### Fix
-
-- Guard against too much oversampling in the single cell randomised, sparse SVD
-  with GPU-acceleration.
+- Fix: oversampling guard in the GPU sparse SVD.
 
 ## 0.3.2
 
-### Features
-
-#### Single cells
-
-- H5Ad reading in for DENSE formats in single cell
+- Dense h5ad reading.
 
 ## 0.3.1
 
-Another big one
-
-### Features
-
-#### General
-
-- NMF implementation that is exposed to both dense (for example RNAseq) and
-  sparse data sets (for example single cell transcriptomics).
-
-#### Single cells
-
-- Improved verbosity on Harmony and better performance (version 1 and 2).
-- Multi file support for h5 reading from 10x genomics
-- PFlogPF normalisation prior to PCAs enabled for single cells, see
-  [Booeshaghi et al.](https://www.biorxiv.org/content/10.1101/2022.05.06.490859v3)
-- NicheNet, see [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
-
-#### GPU-accelerated methods:
-
-- Sparse, randomised SVD for single cell
-- Harmony (version 2) on GPU.
-- GPU-accelerated covariance and correlations (column-wise).
-
-#### Fixes
-
-- `f64` overflow problem with mitch when using large data sets. This is now
-  fixed and regression tests are in place.
+- NMF, faster Harmony, multi-file 10x h5, PFlogPF, NicheNet.
+- GPU sparse SVD, Harmony v2 and correlations.
+- Fix: f64 overflow in mitch.
 
 ## 0.3.0
 
-Major update / release
-
-### Features
-
-#### General
-
-- Better error handling
-
-#### Single cells:
-
-- Multi file support for MTX reading (several 10x experiments to ingest).
-- MELD implementation from Burkhardt, et al., Nat Biotechnol, 2021.
-- Merging single cell binary files
-- New feature gate `"multi-modal"`:
-  * Weighted nearest neighbour graph method behind a new feature gate.
-  * DSB normalisation for CITE Seq ADT
-- First annotation helpers... ScType implemented
-- Improved Harmony (version 1 and 2) and HotSpot with increased speed
-- h5ad ingest automatically recognises where raw counts are being stored
-- Updates to various package editions
-- SEACells and SuperCells that are actually memory efficient. Run on a million
-  cells in a ~20 GB memory pressure range.
-- Improved batching for SCENIC
-
-#### GPU-accelerated methods:
-
-- First implementation of GPU-accelerated method (behind the feature gate
-  `"gpu"`):
-  * k-means clustering -> to be integrated in the future in some of the methods
+- Multi-file MTX, MELD, store merging, `multi-modal` (WNN, DSB), ScType,
+  faster Harmony and Hotspot, memory-efficient SEACells and SuperCells.
+- First GPU method: k-means (`gpu`).
 
 ## 0.2.0
 
-Major update / release
-
-### Features
-
-#### Single cell methods
-
-- scDblFinder implemented
-- Refactor out of shared tree structure between scDblFinder and SCENIC
-- Implementation of Harmony v2
-- First methods (HVG selection, PCA, AUCell and SCENIC) for meta cells directly
-- Made the kNN validation optional and improved the distance calculation with
-  SIMD.
-- Better loading in of MTX files that do not blow up during counting of cells
-  per gene.
-- Faster, better Louvain clustering for the doublet detection methods.
-- Fast cluster version for Louvain for single cell that allows sweeping over a
-  a set of resolutions.
-- Actual proper implementation of WalkTrap community detection and not just
-  pseudo hierarchical clustering.
-- SuperCell 2.0 approach for SuperCells.
-- Reduced memory pressure for the sparse SVDs that are streaming in from binary
-  files due to discarding unneeded raw counts.
-- Faster SEACells with better cache locality.
-
-#### General
-
-- Proper Rust-based error handling across the crate. Less `.unwrap()`, less
-  panics!
-- k-means implementation (mini batch) + clustering quality methods ported over
-- Faster correlations, covariances and Euclidean distance calculations
-- Version bump to extendr `0.9.0` and other crates.
-- Some restructuring of modules: the meta cell generations live in their own
-  module now.
+- scDblFinder, Harmony v2, metacell methods, Walktrap, SuperCell 2.0, faster
+  SEACells, mini-batch k-means, proper error handling.
 
 ## 0.1.7
 
-### Features
-
-- Version bump for `ann-search-rs`.
+- `ann-search-rs` bump.
 
 ## 0.1.6
 
-### Features
-
-- Various plotting helpers for single cell (gene-based).
-- Leverage sparse SVD for doublet detection methods.
-- Version bump on `ann-search-rs` for KnnValidation error.
-- Updates to the doublet detection parts: improved thresholding for Scrublet
-  and refactor of the code to extract shared elements.
-- Improved fastMNN code. Prior version was a mixture of mnnCorrect and fastMNN ->
-  refactor to pure fastMNN.
-- Fix: bug fix in the Harmony code.
-- Fix: fix numerical stability issue in the SVD code for large data sets.
-- Moved SIMD code over, so `ann-search-rs` dependency only pops up with
-  single-cell features.
+- Single cell plotting helpers, sparse SVD in doublet detection, pure fastMNN,
+  Harmony and SVD fixes.
 
 ## 0.1.5
 
-### Features
-
-- Improved Hotspot performance
-- Improved SEACells performance and reduced memory pressure
-- Thresholded GRNBoost2 pending the data set size
-- IVF index added after improvements in ann-search-rs
-- Updated the files to be able to have more than u16::MAX features and deal with
-  situations where the raw counts are larger than u16::MAX. Additionally, a
-  function has been added to transform old `v2` files to `v3`.
-
-### Fixes
-
-- Bug in the Hotspot streaming version
-- R can actually call GRNBoost2
+- Faster Hotspot and SEACells, IVF index, files beyond `u16::MAX` genes and
+  counts (v2 to v3 migration).
 
 ## 0.1.4
 
-### Features
-
-- Sparse SVD and sparse randomised SVD were added for single cell.
-- SIMD instructions for the single cell Hotspot method.
-- Harmony batch correction for single cell.
-- SCENIC-like approach for gene regulatory network (GRN) generation.
-- Multi-file support for reading in several h5ad files at once.
-- h5ad reader for situations where the file only has normalised counts.
-
-### Fixes
-
-*NA*
+- Sparse SVDs, Harmony, SCENIC-like GRNs, multi-file and normalised-only h5ad.
 
 ## 0.1.3
 
-### Features
-
-*NA*
-
-### Fixes
-
-- Hot fix in the auto detection in Scrublet which was broken.
+- Fix: Scrublet auto detection.
 
 ## 0.1.2
 
-### Features
-
-- Modified graph label propagation algorithm to support max_hops, weights and
-  directed graphs.
-
-### Fixes
-
-*NA*
+- Label propagation with max hops, weights and directed graphs.
 
 ## 0.1.1
 
-### Features
+- `ann-search-rs` bump.
 
-`NA`
+## 0.1.0
 
-### Fixes
-
-- Bumped the version of `ann-search-rs` to ensure consistency across packages/
-  crates.
-
-## 0.1.0 (official release)
-
-This version ported over all of the Rust code from
-[bixverse](https://github.com/GregorLueg/bixverse) as an independent crate.
-
-### Features
-
-- The hardcoded f32/f64 types were replaced with generic types.
-- Redundancy in the codebase was removed.
-- Restructuring of the codebase for better organisation.
-- Wrong copy/paste documentation was properly updated.
-
-### Fixes
-
-*NA*
+- Ported from [bixverse](https://github.com/GregorLueg/bixverse) as an
+  independent crate, generic over the float type.
