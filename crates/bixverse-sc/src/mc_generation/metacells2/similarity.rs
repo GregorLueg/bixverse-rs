@@ -1,22 +1,10 @@
 //! Cell-cell similarity computation.
 //!
-//! Operates on `pile.selected_dense` (cells × features). For Pearson-based
-//! methods, applies optional preprocessing (regularisation, `log2`) and
-//! delegates to `column_pairwise_cor` after a layout transpose. For Spearman,
-//! preprocessing is skipped — rank-based correlation is invariant to any
-//! monotonic transform of the input, so `column_pairwise_cor` does its own
-//! per-column ranking internally.
-//!
-//! ### Preprocessing semantics
-//!
-//! * `LogPearson` (default): `log2(x + 1 + reg)`. The hard-coded `+ 1`
-//!   guarantees a finite, well-defined output regardless of `reg` or the
-//!   presence of zeros. With the default `reg = 0` this is `log2(x + 1)`
-//!   (log1p in log2 form), the canonical scRNA-seq choice for Pearson on
-//!   counts.
-//! * `Pearson`: `x + reg`. No log; behaves badly on raw counts and is
-//!   provided mainly for parity testing.
-//! * `Spearman`: no pre-processing needed.
+//! Operates on `pile.selected_dense` (cells × features). As upstream
+//! (`direct.py`), adds `value_regularisation` to every value, optionally takes
+//! `log2`, and correlates cells; `AbsPearson` (the default) then takes the
+//! absolute value. The preprocessed matrix is written straight into the
+//! features × cells layout `column_pairwise_cor` expects.
 
 use faer::Mat;
 use rayon::prelude::*;
@@ -31,42 +19,28 @@ use bixverse_core::core::base::cors_similarity::column_pairwise_cor;
 // Helpers //
 /////////////
 
-/// Apply method-specific preprocessing into a freshly allocated matrix.
-///
-/// Always allocates a full copy, including for `Spearman` where the
-/// transform is a no-op, to keep the call site uniform. At typical pile
-/// sizes (10K cells × 2K features) this is ~80 MB — dominated by the
-/// `n_cells × n_cells` similarity matrix allocated downstream.
+/// Regularise, optionally log, and transpose into features × cells.
 ///
 /// ### Params
 ///
-/// * `dense`  - Input matrix of shape `(n_cells, n_features)`.
-/// * `params` - Similarity parameters; reads `method` and `value_regularisation`.
+/// * `dense` - Input matrix of shape `(n_cells, n_features)`.
+/// * `params` - Similarity parameters.
 ///
 /// ### Returns
 ///
-/// A new `Mat<f32>` of the same shape with the transform applied.
+/// A `Mat<f32>` of shape `(n_features, n_cells)`.
 fn preprocess(dense: &Mat<f32>, params: &SimilarityParams) -> Mat<f32> {
     let reg = params.value_regularisation;
-    match params.method {
-        SimilarityMethod::LogPearson => {
-            let mut out = Mat::<f32>::zeros(dense.nrows(), dense.ncols());
-            out.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
-                for i in 0..col.nrows() {
-                    col[i] = (dense[(i, j)] + reg + 1.0).log2();
-                }
-            });
-            out
-        }
-        SimilarityMethod::Pearson => {
-            if reg == 0.0 {
-                dense.clone()
-            } else {
-                Mat::from_fn(dense.nrows(), dense.ncols(), |i, j| dense[(i, j)] + reg)
+    let mut out = Mat::<f32>::zeros(dense.ncols(), dense.nrows());
+    out.par_col_iter_mut()
+        .enumerate()
+        .for_each(|(cell, mut col)| {
+            for g in 0..col.nrows() {
+                let v = dense[(cell, g)] + reg;
+                col[g] = if params.log_data { v.log2() } else { v };
             }
-        }
-        SimilarityMethod::Spearman => dense.clone(),
-    }
+        });
+    out
 }
 
 //////////
@@ -76,18 +50,14 @@ fn preprocess(dense: &Mat<f32>, params: &SimilarityParams) -> Mat<f32> {
 /// Compute the `n_cells × n_cells` similarity matrix from
 /// `pile.selected_dense`.
 ///
-/// Preprocesses the dense feature matrix according to `params.method`, then
-/// delegates to `column_pairwise_cor` on the transposed `(features × cells)`
-/// layout so that each cell is a column.
-///
 /// ### Params
 ///
-/// * `pile`   - Pile with a populated `selected_dense`; see errors below.
-/// * `params` - Similarity parameters; controls method and regularisation.
+/// * `pile` - Pile with a populated `selected_dense`.
+/// * `params` - Similarity parameters.
 ///
 /// ### Returns
 ///
-/// A `Mat<f32>` of shape `(n_cells, n_cells)` with pairwise correlation scores.
+/// A symmetric `Mat<f32>` of shape `(n_cells, n_cells)`.
 ///
 /// ### Errors
 ///
@@ -99,7 +69,13 @@ pub fn compute_similarity(pile: &Pile, params: &SimilarityParams) -> Result<Mat<
         .as_ref()
         .ok_or(ScErrors::SelectFeaturesBeforeSimilariy)?;
     let preprocessed = preprocess(dense, params);
-    let transposed = preprocessed.as_ref().transpose();
-    let spearman = matches!(params.method, SimilarityMethod::Spearman);
-    Ok(column_pairwise_cor(&transposed, spearman))
+    let mut sim = column_pairwise_cor(&preprocessed.as_ref(), false);
+    if params.method == SimilarityMethod::AbsPearson {
+        sim.par_col_iter_mut().for_each(|col| {
+            for v in col.iter_mut() {
+                *v = v.abs();
+            }
+        });
+    }
+    Ok(sim)
 }

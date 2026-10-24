@@ -126,24 +126,7 @@ fn build_fixture() -> Fixture {
         shape: (N_CELLS, N_GENES),
     };
 
-    let umis_per_cell: Vec<f32> = (0..N_CELLS)
-        .map(|i| {
-            let s: u64 = (raw.indptr[i]..raw.indptr[i + 1])
-                .map(|idx| raw.data[idx as usize] as u64)
-                .sum();
-            s as f32
-        })
-        .collect();
-
-    let pile = Pile {
-        cell_indices: (0..N_CELLS).collect(),
-        raw,
-        umis_per_cell,
-        n_genes: N_GENES,
-        downsampled: None,
-        selected_gene_indices: None,
-        selected_dense: None,
-    };
+    let pile = Pile::from_raw(raw, (0..N_CELLS).collect(), None).expect("valid pile");
 
     Fixture {
         pile,
@@ -286,7 +269,6 @@ fn full_params() -> MetacellsParams {
             min_convincing_gene_fold_factor: None,
         },
         must_complete_cover: false,
-        random_seed: 42,
     }
 }
 
@@ -341,7 +323,7 @@ fn test_stage2_select_recovers_marker_genes() {
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params);
+    select_features(&mut fix.pile, &params).expect("selection failed");
 
     let selected = fix
         .pile
@@ -385,7 +367,7 @@ fn test_stage3_similarity_separates_clusters() {
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params);
+    select_features(&mut fix.pile, &params).expect("selection failed");
     let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
 
     assert_eq!(sim.nrows(), N_CELLS);
@@ -429,7 +411,7 @@ fn test_stage4_knn_graph_is_normalised_and_clusters_dominate() {
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params);
+    select_features(&mut fix.pile, &params).expect("selection failed");
     let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
 
     let graph = build_knn_graph(&sim, KNN_K, &knn_params());
@@ -488,7 +470,7 @@ fn test_stage5_seeds_assigned_with_high_purity() {
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params);
+    select_features(&mut fix.pile, &params).expect("selection failed");
     let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
     let graph = build_knn_graph(&sim, KNN_K, &knn_params());
 
@@ -515,7 +497,8 @@ fn test_stage5_seeds_assigned_with_high_purity() {
         0.0,
         1.0,
         FIXTURE_SEED,
-    );
+    )
+    .expect("seeding failed");
 
     assert!(seeds.iter().all(|&s| s >= 0));
     assert!(seeds.iter().copied().all(|s| (s as usize) < n_seeds));
@@ -552,7 +535,7 @@ fn test_stage6_candidate_metacells_recover_clusters() {
     let params = full_params();
 
     downsample_pile(&mut fix.pile, &params.select, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params.select);
+    select_features(&mut fix.pile, &params.select).expect("selection failed");
     let sim = compute_similarity(&fix.pile, &params.similarity).expect("similarity failed");
     let outgoing = build_knn_graph(&sim, KNN_K, &params.knn);
     let incoming = make_incoming_view(&outgoing);
@@ -563,7 +546,8 @@ fn test_stage6_candidate_metacells_recover_clusters() {
         &fix.pile.umis_per_cell,
         &params,
         FIXTURE_SEED,
-    );
+    )
+    .expect("candidates failed");
 
     assert!(candidates.iter().all(|&c| c >= 0));
     let n_candidates = (*candidates.iter().max().expect("non-empty candidates") + 1) as usize;
@@ -593,7 +577,7 @@ fn test_stage7_deviants_dont_flag_well_behaved_cells() {
     let params = full_params();
 
     downsample_pile(&mut fix.pile, &params.select, FIXTURE_SEED);
-    select_features(&mut fix.pile, &params.select);
+    select_features(&mut fix.pile, &params.select).expect("selection failed");
     let sim = compute_similarity(&fix.pile, &params.similarity).expect("similarity failed");
     let outgoing = build_knn_graph(&sim, KNN_K, &params.knn);
     let incoming = make_incoming_view(&outgoing);
@@ -603,14 +587,16 @@ fn test_stage7_deviants_dont_flag_well_behaved_cells() {
         &fix.pile.umis_per_cell,
         &params,
         FIXTURE_SEED,
-    );
+    )
+    .expect("candidates failed");
 
     let deviants = find_deviant_cells(
         &fix.pile.raw,
         &fix.pile.umis_per_cell,
         &candidates,
         &params.deviants,
-    );
+    )
+    .expect("deviants failed");
 
     let n_deviants = deviants.iter().filter(|&&d| d).count();
     let frac = n_deviants as f64 / N_CELLS as f64;

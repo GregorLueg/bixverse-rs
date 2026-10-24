@@ -1,19 +1,19 @@
 //! Feature gene selection on the per-pile downsampled data.
 //!
-//! Three filters are applied to each gene:
+//! Three filters are applied to each gene, as in `metacells.pipeline.select`:
 //!
 //! 1. **High total**: column sum across cells `>= min_gene_total`.
-//! 2. **High top-N** (`N = 3`): the gene's N-th highest cell value
-//!    `>= min_gene_topN`. A gene with fewer than N non-zero cells fails
-//!    automatically.
-//! 3. **High relative variance**: `log2(var/mean)` minus the median of
-//!    `log2(var/mean)` over a centred window of genes with nearest mean
-//!    `>= min_gene_relative_variance`.
+//! 2. **High top-3**: upstream's `topN = 3` statistic, which is the value at
+//!    ascending rank `n - 3 - 1`, i.e. the 4th highest cell value counting
+//!    implicit zeros, `>= min_gene_top3`.
+//! 3. **High relative variance**: `log2(var/mean)` minus the sliding median of
+//!    `log2(var/mean)` over genes ordered by mean, `>= min_gene_relative_variance`.
 //!
-//! Active filters are ANDed; the optional lateral gene mask is then subtracted.
-//! If fewer than `min_genes` survive, the relative-variance threshold is
-//! stepped down (1/8 per step) until the count is met. If even at the floor the
-//! count is short, the variance filter is dropped entirely.
+//! Active filters are ANDed and the lateral gene mask is subtracted. If fewer
+//! than `min_genes` survive, the relative variance threshold is stepped down
+//! by 1/8 until enough pass and then bisected four times, unless the other
+//! filters alone leave `<= min_genes`, in which case the variance filter is
+//! dropped. All statistics come from one CSC transpose.
 
 use faer::Mat;
 use rayon::prelude::*;
@@ -24,406 +24,427 @@ use bixverse_core::core::math::sparse::transpose_sparse;
 use super::params::SelectParams;
 use super::pile::Pile;
 
-/// "Top-3" filter: gene's 3rd-highest cell value must clear the threshold.
+/// Upstream's `topN` for the top-3 filter. The statistic is the value at
+/// ascending rank `n_cells - TOP_N - 1`, so it reads the 4th highest value.
 const TOP_N: usize = 3;
 
-/// Per-iteration relaxation step on the relative-variance threshold when
-/// fewer than `min_genes` survive at the configured threshold. Matches the
-/// upstream `1 / 8` step. Below `RELAX_FLOOR` we give up and drop the
-/// variance filter entirely.
-const RELAX_STEP: f32 = 1.0 / 8.0;
-const RELAX_FLOOR: f32 = -10.0;
+/// Step of the relative variance relaxation, as upstream.
+const RELAX_STEP: f64 = 1.0 / 8.0;
+
+/// Bisection steps between the last failing and first passing threshold, as
+/// upstream.
+const RELAX_BISECTIONS: usize = 4;
+
+/// Safety floor for the relaxation. Upstream loops without one, which only
+/// terminates because enough genes have a finite relative variance. Below
+/// this the variance filter is dropped instead of looping.
+const RELAX_FLOOR: f64 = -64.0;
+
+/// Fewest genes a correlation over cells can be computed on.
+const MIN_CORRELATION_GENES: usize = 2;
+
+//////////
+// Main //
+//////////
 
 /// Run the selection pipeline. Reads `pile.downsampled`; populates
 /// `pile.selected_gene_indices` and `pile.selected_dense`.
+///
+/// ### Params
+///
+/// * `pile` - Pile with `downsampled` populated.
+/// * `params` - Selection parameters.
+///
+/// ### Returns
+///
+/// `Ok(())` on success, populating the pile.
+///
+/// ### Errors
+///
+/// * `Mc2LengthMismatch` if the lateral mask does not cover every gene.
+/// * `Mc2TooFewGenes` if the variance filter is disabled and fewer than
+///   `min_genes` pass (as upstream), or if fewer than two genes pass at all.
 ///
 /// ### Panics
 ///
 /// Panics if `pile.downsampled` is `None`. Caller must run `downsample_pile`
 /// first.
-pub fn select_features(pile: &mut Pile, params: &SelectParams) {
+pub fn select_features(pile: &mut Pile, params: &SelectParams) -> Result<(), ScErrors> {
     let downsampled = pile
         .downsampled
         .as_ref()
         .expect("downsample_pile must be called before select_features");
     let n_genes = downsampled.shape.1;
 
-    // --- per-gene statistics (computed once, reused across threshold attempts).
-    let total_per_gene = sum_columns_csr(downsampled);
-    let top_n_per_gene = top_n_per_column(downsampled, TOP_N);
-    let (mean_per_gene, log_norm_var_per_gene) = mean_and_log_norm_var(downsampled);
-    let rel_var_per_gene = relative_variance(
-        &log_norm_var_per_gene,
-        &mean_per_gene,
+    if let Some(lateral) = params.lateral_gene_mask.as_deref()
+        && lateral.len() != n_genes
+    {
+        return Err(ScErrors::Mc2LengthMismatch {
+            what: "lateral_gene_mask",
+            expected: n_genes,
+            got: lateral.len(),
+        });
+    }
+
+    let csc = transpose_sparse(downsampled);
+    let stats = gene_stats(&csc);
+    // upstream orders by its f32 means
+    let mut order: Vec<usize> = (0..n_genes).collect();
+    order.sort_by(|&a, &b| (stats.mean[a] as f32).total_cmp(&(stats.mean[b] as f32)));
+    let rel_var = relative_variance(
+        &stats.log_norm_var,
+        &order,
         params.relative_variance_window_size,
     );
 
-    // --- per-filter masks (None = filter disabled).
-    let high_total = params.min_gene_total.map(|t| {
-        total_per_gene
-            .iter()
-            .map(|&v| v >= t)
-            .collect::<Vec<bool>>()
-    });
-    let high_top_n = params.min_gene_top3.map(|t| {
-        top_n_per_gene
-            .iter()
-            .map(|&v| v >= t)
-            .collect::<Vec<bool>>()
-    });
+    // mask of the filters other than relative variance, lateral genes removed
+    let base: Vec<bool> = (0..n_genes)
+        .map(|g| {
+            params
+                .min_gene_total
+                .is_none_or(|t| stats.total[g] >= t as f64)
+                && params.min_gene_top3.is_none_or(|t| stats.top3[g] >= t)
+                && !params.lateral_gene_mask.as_deref().is_some_and(|l| l[g])
+        })
+        .collect();
+    let base_count = base.iter().filter(|&&b| b).count();
 
-    // --- variance filter with relaxation loop.
-    let lateral = params.lateral_gene_mask.as_deref();
-
-    let try_threshold = |t: f32| -> (Vec<bool>, usize) {
-        let var_mask: Vec<bool> = rel_var_per_gene.iter().map(|&v| v >= t).collect();
-        let combined = combine_masks(
-            n_genes,
-            high_total.as_deref(),
-            high_top_n.as_deref(),
-            Some(&var_mask),
-            lateral,
-        );
-        let count = combined.iter().filter(|&&b| b).count();
-        (combined, count)
+    let with_var = |t: f64| -> (Vec<bool>, usize) {
+        let mask: Vec<bool> = base
+            .iter()
+            .zip(&rel_var)
+            .map(|(&b, &v)| b && v >= t)
+            .collect();
+        let count = mask.iter().filter(|&&b| b).count();
+        (mask, count)
     };
 
-    let (mut mask, mut count) = match params.min_gene_relative_variance {
-        Some(t) => try_threshold(t),
+    let mask = match params.min_gene_relative_variance {
         None => {
-            let m = combine_masks(
-                n_genes,
-                high_total.as_deref(),
-                high_top_n.as_deref(),
-                None,
-                lateral,
-            );
-            let c = m.iter().filter(|&&b| b).count();
-            (m, c)
+            if base_count < params.min_genes {
+                return Err(ScErrors::Mc2TooFewGenes {
+                    selected: base_count,
+                    required: params.min_genes,
+                });
+            }
+            base.clone()
+        }
+        Some(t0) => {
+            let t0 = t0 as f64;
+            let (mask, count) = with_var(t0);
+            if count >= params.min_genes {
+                mask
+            } else if base_count <= params.min_genes {
+                base.clone()
+            } else {
+                relax_threshold(t0, params.min_genes, &with_var).unwrap_or_else(|| base.clone())
+            }
         }
     };
-
-    if count < params.min_genes
-        && let Some(t0) = params.min_gene_relative_variance
-    {
-        let mut t = t0;
-        while count < params.min_genes && t > RELAX_FLOOR {
-            t -= RELAX_STEP;
-            let (m, c) = try_threshold(t);
-            mask = m;
-            count = c;
-        }
-    }
-
-    // If still short, drop the variance filter entirely.
-    if count < params.min_genes {
-        mask = combine_masks(
-            n_genes,
-            high_total.as_deref(),
-            high_top_n.as_deref(),
-            None,
-            lateral,
-        );
-        // We accept whatever count is now; orchestrator decides if zero is fatal.
-    }
 
     let selected: Vec<usize> = mask
         .iter()
         .enumerate()
-        .filter_map(|(i, &b)| if b { Some(i) } else { None })
+        .filter_map(|(i, &b)| b.then_some(i))
         .collect();
 
-    let dense = extract_dense_columns(downsampled, &selected);
+    if selected.len() < MIN_CORRELATION_GENES {
+        return Err(ScErrors::Mc2TooFewGenes {
+            selected: selected.len(),
+            required: MIN_CORRELATION_GENES,
+        });
+    }
 
+    pile.selected_dense = Some(extract_dense_columns(&csc, &selected));
     pile.selected_gene_indices = Some(selected);
-    pile.selected_dense = Some(dense);
+
+    Ok(())
 }
 
-/// Sum the values of each column of a CSR matrix.
+/////////////
+// Helpers //
+/////////////
+
+/// Per-gene statistics of the downsampled data.
+pub(super) struct GeneStats {
+    /// Column sums.
+    pub(super) total: Vec<f64>,
+    /// Upstream's top-3 statistic (4th highest value, implicit zeros counted).
+    pub(super) top3: Vec<u32>,
+    /// Column means over all cells.
+    pub(super) mean: Vec<f64>,
+    /// `log2(var / mean)`, `0` (`log2` of upstream's `zero_value = 1`) for an
+    /// all-zero gene and `-inf` for a constant non-zero gene.
+    pub(super) log_norm_var: Vec<f64>,
+}
+
+/// Compute every per-gene statistic in one parallel pass over the CSC view.
 ///
-/// Uses saturating addition; true overflow is implausible on downsampled data
-/// but the cost is nil.
+/// The variance uses upstream's `(sum_sq - sum^2 / n) / n` clipped at zero,
+/// in `f64`.
 ///
 /// ### Params
 ///
-/// * `mat` - CSR matrix of `u32` counts.
+/// * `csc` - Downsampled counts, gene-major.
 ///
 /// ### Returns
 ///
-/// A `Vec<u32>` of length `n_cols` with the column-wise totals.
-fn sum_columns_csr(mat: &CompressedSparseData2<u32, f32>) -> Vec<u32> {
-    let n_cols = mat.shape.1;
-    let mut sums = vec![0u32; n_cols];
-    for (idx, &col) in mat.indices.iter().enumerate() {
-        sums[col as usize] = sums[col as usize].saturating_add(mat.data[idx]);
-    }
-    sums
-}
+/// The [`GeneStats`].
+pub(super) fn gene_stats(csc: &CompressedSparseData2<u32, f32>) -> GeneStats {
+    let n_cells = csc.shape.0;
+    let n_genes = csc.shape.1;
+    let n = n_cells as f64;
 
-/// Per-column N-th largest value, counting implicit zeros for sparse entries.
-///
-/// Transposes to CSC once, then runs `select_nth_unstable` per column in
-/// parallel. A column with fewer than `n` non-zeros returns `0`, as the
-/// implicit zeros would fill the bottom of the ranking.
-///
-/// ### Params
-///
-/// * `mat` - CSR matrix of `u32` counts.
-/// * `n` - Rank to query (e.g. `3` for the 3rd-highest value).
-///
-/// ### Returns
-///
-/// A `Vec<u32>` of length `n_cols` with the N-th largest value per column.
-fn top_n_per_column(mat: &CompressedSparseData2<u32, f32>, n: usize) -> Vec<u32> {
-    debug_assert!(mat.cs_type.is_csr());
-    let csc = transpose_sparse(mat);
-    let n_genes = mat.shape.1;
-
-    let csc_data = &csc.data;
-    let csc_indptr = &csc.indptr;
-
-    (0..n_genes)
+    let per_gene: Vec<(f64, u32, f64, f64)> = (0..n_genes)
         .into_par_iter()
-        .map(|col| {
-            let start = csc_indptr[col] as usize;
-            let end = csc_indptr[col + 1] as usize;
-            let nnz = end - start;
-            if nnz < n {
-                return 0u32;
+        .map(|g| {
+            let values = &csc.data[csc.indptr[g] as usize..csc.indptr[g + 1] as usize];
+            let (sum, sum_sq) = values.iter().fold((0.0f64, 0.0f64), |(s, s2), &v| {
+                let v = v as f64;
+                (s + v, s2 + v * v)
+            });
+            let top3 = top_n_value(values, n_cells, TOP_N);
+            if n_cells == 0 || sum == 0.0 {
+                return (sum, top3, 0.0, 0.0);
             }
-            // N-th largest = (nnz - n)-th smallest among the non-zeros.
-            let mut buf: Vec<u32> = csc_data[start..end].to_vec();
-            let pos = nnz - n;
-            let (_, mid, _) = buf.select_nth_unstable(pos);
-            *mid
+            let mean = sum / n;
+            let var = ((sum_sq - sum * sum / n) / n).max(0.0);
+            (sum, top3, mean, (var / mean).log2())
         })
-        .collect()
+        .collect();
+
+    let mut stats = GeneStats {
+        total: Vec::with_capacity(n_genes),
+        top3: Vec::with_capacity(n_genes),
+        mean: Vec::with_capacity(n_genes),
+        log_norm_var: Vec::with_capacity(n_genes),
+    };
+    for (t, t3, m, l) in per_gene {
+        stats.total.push(t);
+        stats.top3.push(t3);
+        stats.mean.push(m);
+        stats.log_norm_var.push(l);
+    }
+    stats
 }
 
-/// Per-column population mean and `log2(var/mean)`.
-///
-/// Accumulates in `f64` to guard against cancellation in `E[X²] - E[X]²`.
-/// Returns `0.0` for `log_norm_var` when `mean == 0` (matching upstream's
-/// `zero_value = 1.0`). Returns `NEG_INFINITY` when variance is zero but mean
-/// is not, so the gene definitively fails the relative-variance filter.
+/// Value at ascending rank `n_cells - top_n - 1` of a sparse column, implicit
+/// zeros included.
 ///
 /// ### Params
 ///
-/// * `mat` - CSR matrix of `u32` counts.
+/// * `values` - Stored values of the column (may include explicit zeros).
+/// * `n_cells` - Column length.
+/// * `top_n` - Upstream's `topN`.
 ///
 /// ### Returns
 ///
-/// A tuple `(mean, log_norm_var)`, each a `Vec<f32>` of length `n_cols`.
-fn mean_and_log_norm_var(mat: &CompressedSparseData2<u32, f32>) -> (Vec<f32>, Vec<f32>) {
-    let n_rows = mat.shape.0 as f64;
-    let n_cols = mat.shape.1;
-
-    let mut sum = vec![0.0f64; n_cols];
-    let mut sum_sq = vec![0.0f64; n_cols];
-    for (idx, &col) in mat.indices.iter().enumerate() {
-        let v = mat.data[idx] as f64;
-        sum[col as usize] += v;
-        sum_sq[col as usize] += v * v;
+/// The value, `0` when the rank falls among the implicit zeros.
+fn top_n_value(values: &[u32], n_cells: usize, top_n: usize) -> u32 {
+    let above = top_n + 1;
+    if values.len() < above || n_cells < above {
+        return 0;
     }
-
-    let mut mean = vec![0.0f32; n_cols];
-    let mut log_norm_var = vec![0.0f32; n_cols];
-
-    if n_rows == 0.0 {
-        return (mean, log_norm_var);
-    }
-
-    for col in 0..n_cols {
-        let m = sum[col] / n_rows;
-        mean[col] = m as f32;
-        if m == 0.0 {
-            log_norm_var[col] = 0.0; // log2(zero_value=1.0)
-            continue;
-        }
-        let var = (sum_sq[col] / n_rows - m * m).max(0.0);
-        let norm_var = var / m;
-        log_norm_var[col] = if norm_var > 0.0 {
-            (norm_var as f32).log2()
-        } else {
-            f32::NEG_INFINITY
-        };
-    }
-
-    (mean, log_norm_var)
+    let mut buf = values.to_vec();
+    let pos = buf.len() - above;
+    *buf.select_nth_unstable(pos).1
 }
 
-/// Per-gene relative variance: `log_norm_var[g]` minus the median of the window
-/// of genes with nearest mean, ordered by mean ascending.
+/// Step the relative variance threshold down until `min_genes` pass, then
+/// bisect between the last failing and first passing threshold.
 ///
-/// Window size is forced odd; near the edges the window is clipped rather
-/// than padded or reflected.
+/// ### Params
+///
+/// * `t0` - Configured threshold, known to fail.
+/// * `min_genes` - Genes required.
+/// * `with_var` - Mask and count at a threshold.
+///
+/// ### Returns
+///
+/// The last passing mask, or `None` if nothing passes above [`RELAX_FLOOR`].
+fn relax_threshold(
+    t0: f64,
+    min_genes: usize,
+    with_var: &impl Fn(f64) -> (Vec<bool>, usize),
+) -> Option<Vec<bool>> {
+    let mut low = t0;
+    let (mut valid, mut high) = loop {
+        let failing = low;
+        low -= RELAX_STEP;
+        if low < RELAX_FLOOR {
+            return None;
+        }
+        let (mask, count) = with_var(low);
+        if count >= min_genes {
+            break (mask, failing);
+        }
+    };
+    for _ in 0..RELAX_BISECTIONS {
+        let mid = (high + low) / 2.0;
+        let (mask, count) = with_var(mid);
+        if count >= min_genes {
+            low = mid;
+            valid = mask;
+        } else {
+            high = mid;
+        }
+    }
+    Some(valid)
+}
+
+/// Per-gene relative variance: `log_norm_var[g]` minus the median of a sliding
+/// window over genes ordered by mean.
+///
+/// Mirrors `sliding_window_function` in `metacells.utilities.computation`:
+/// the window is forced odd, a window covering every gene uses the global
+/// median, and the edges are padded with sorted positions
+/// `[w - h, w)` in front and `[n - w, n - w + h)` behind, not clipped.
 ///
 /// ### Params
 ///
 /// * `log_norm_var` - `log2(var/mean)` per gene.
-/// * `mean` - Population mean per gene; used to define window order.
-/// * `window_size` - Number of neighbours to include; forced odd internally.
+/// * `order` - Genes by ascending mean. Upstream's order among equal means
+///   is whatever numpy's unstable argsort yields; callers here use a stable
+///   sort, so genes tied on the mean can see slightly different windows.
+/// * `window_size` - Window size; forced odd.
 ///
 /// ### Returns
 ///
-/// A `Vec<f32>` of length `n` with the relative variance score per gene.
-fn relative_variance(log_norm_var: &[f32], mean: &[f32], window_size: usize) -> Vec<f32> {
+/// The relative variance per gene.
+pub(super) fn relative_variance(
+    log_norm_var: &[f64],
+    order: &[usize],
+    window_size: usize,
+) -> Vec<f64> {
     let n = log_norm_var.len();
-    let mut out = vec![0.0f32; n];
     if n == 0 {
-        return out;
+        return Vec::new();
+    }
+    let w = window_size | 1;
+    let h = (w - 1) / 2;
+
+    if w >= n {
+        let med = median_inplace(&mut log_norm_var.to_vec());
+        return log_norm_var.iter().map(|&v| v - med).collect();
     }
 
-    let w = if window_size.is_multiple_of(2) {
-        window_size + 1
-    } else {
-        window_size
-    };
-    let half = w / 2;
+    let extended: Vec<f64> = (w - h..w)
+        .chain(0..n)
+        .chain(n - w..n - w + h)
+        .map(|pos| log_norm_var[order[pos]])
+        .collect();
 
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        mean[a]
-            .partial_cmp(&mean[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut buf: Vec<f32> = Vec::with_capacity(w);
-    for sort_pos in 0..n {
-        let lo = sort_pos.saturating_sub(half);
-        let hi = (sort_pos + half + 1).min(n);
-
+    let mut out = vec![0.0; n];
+    let mut buf = Vec::with_capacity(w);
+    for (sort_pos, &gene) in order.iter().enumerate() {
         buf.clear();
-        for k in lo..hi {
-            buf.push(log_norm_var[order[k]]);
-        }
-        let med = median_inplace(&mut buf);
-        let original_idx = order[sort_pos];
-        out[original_idx] = log_norm_var[original_idx] - med;
+        buf.extend_from_slice(&extended[sort_pos..sort_pos + w]);
+        out[gene] = log_norm_var[gene] - median_inplace(&mut buf);
     }
-
     out
 }
 
-/// In-place median via `select_nth_unstable_by`.
-///
-/// Returns the average of the two middle values for even-length input, matching
-/// numpy's default. `NEG_INFINITY` and `NaN` are treated as equaq to any
-/// non-comparable value; sufficient here as such entries either fail the
-/// downstream threshold or land in stable positions.
+/// Median of an odd-length slice via `select_nth_unstable_by`, mean of the
+/// two middle values for even length. Partially reorders the slice.
 ///
 /// ### Params
 ///
-/// * `values` - Mutable slice of `f32`; partially reordered in place.
+/// * `values` - Values; `NaN` sorts last under `total_cmp`.
 ///
 /// ### Returns
 ///
-/// The median value, or `0.0` if `values` is empty.
-fn median_inplace(values: &mut [f32]) -> f32 {
-    if values.is_empty() {
+/// The median, `0` for an empty slice.
+fn median_inplace(values: &mut [f64]) -> f64 {
+    let n = values.len();
+    if n == 0 {
         return 0.0;
     }
-    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-    let n = values.len();
-
+    let upper = n / 2;
+    let upper_val = *values.select_nth_unstable_by(upper, f64::total_cmp).1;
     if n % 2 == 1 {
-        let mid = n / 2;
-        values.select_nth_unstable_by(mid, cmp);
-        values[mid]
-    } else {
-        let upper = n / 2;
-        values.select_nth_unstable_by(upper, cmp);
-        let upper_val = values[upper];
-        // After selection, values[..upper] are all <= upper_val. The lower
-        // middle is their maximum.
-        let mut lower_val = f32::NEG_INFINITY;
-        for &v in &values[..upper] {
-            if v > lower_val {
-                lower_val = v;
-            }
-        }
-        (lower_val + upper_val) / 2.0
+        return upper_val;
     }
+    let lower_val = values[..upper]
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    (lower_val + upper_val) / 2.0
 }
 
-/// AND a set of optional boolean masks, then subtract the lateral mask.
-///
-/// `None` arguments are treated as all-true. The lateral mask is subtracted
-/// last: genes set in it are excluded regardless of the other filters.
+/// Extract selected genes into a dense `n_cells × n_selected` matrix.
 ///
 /// ### Params
 ///
-/// * `n` - Length of the output mask.
-/// * `a, b, c` - Optional per-gene filter masks; each `None` is a no-op.
-/// * `lateral` - Optional lateral gene mask; matched genes are excluded.
+/// * `csc` - Gene-major counts.
+/// * `selected` - Gene indices, each at most once.
 ///
 /// ### Returns
 ///
-/// A `Vec<bool>` of length `n` with the combined selection mask.
-fn combine_masks(
-    n: usize,
-    a: Option<&[bool]>,
-    b: Option<&[bool]>,
-    c: Option<&[bool]>,
-    lateral: Option<&[bool]>,
-) -> Vec<bool> {
-    let mut out = vec![true; n];
-    for m in [a, b, c].iter().flatten() {
-        for (o, &v) in out.iter_mut().zip(m.iter()) {
-            *o &= v;
-        }
-    }
-    if let Some(l) = lateral {
-        for (o, &v) in out.iter_mut().zip(l.iter()) {
-            *o &= !v;
-        }
-    }
-    out
-}
-
-/// Extract selected columns from a CSR matrix into a dense
-/// `n_cells × n_selected` matrix.
-///
-/// Builds a reverse-lookup from gene index to position in `selected`, then
-/// fills each selected column from the CSC view of the matrix. Unselected or absent
-/// entries remain zero.
-///
-/// ### Params
-///
-/// * `csr` - Source CSR matrix of `u32` counts.
-/// * `selected` - Sorted or unsorted slice of column indices to extract.
-///
-/// ### Returns
-///
-/// A `Mat<f32>` of shape `(n_cells, selected.len())`.
-fn extract_dense_columns(csr: &CompressedSparseData2<u32, f32>, selected: &[usize]) -> Mat<f32> {
-    let n_rows = csr.shape.0;
-    let n_sel = selected.len();
-
-    // a repeated gene keeps its last position, the others stay zero
-    let mut gene_to_pos = vec![None; csr.shape.1];
-    for (pos, &g) in selected.iter().enumerate() {
-        gene_to_pos[g] = Some(pos);
-    }
-
-    // `dense` is column-major, so fill each selected gene's column from the
-    // CSC view rather than scattering row by row
-    let csc = transpose_sparse(csr);
-    let mut dense = Mat::<f32>::zeros(n_rows, n_sel);
+/// A column-major `Mat<f32>` of shape `(n_cells, selected.len())`.
+fn extract_dense_columns(csc: &CompressedSparseData2<u32, f32>, selected: &[usize]) -> Mat<f32> {
+    let mut dense = Mat::<f32>::zeros(csc.shape.0, selected.len());
     dense
         .par_col_iter_mut()
-        .enumerate()
-        .for_each(|(pos, mut col)| {
-            let g = selected[pos];
-            if gene_to_pos[g] != Some(pos) {
-                return;
-            }
-            let start = csc.indptr[g] as usize;
-            let end = csc.indptr[g + 1] as usize;
-            for idx in start..end {
+        .zip(selected.par_iter())
+        .for_each(|(mut col, &g)| {
+            for idx in csc.indptr[g] as usize..csc.indptr[g + 1] as usize {
                 col[csc.indices[idx] as usize] = csc.data[idx] as f32;
             }
         });
-
     dense
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_top_n_value_counts_implicit_zeros() {
+        // ten cells, five non-zeros: 4th highest is 2
+        assert_eq!(top_n_value(&[9, 1, 7, 2, 5], 10, 3), 2);
+        // three non-zeros: the 4th highest is an implicit zero
+        assert_eq!(top_n_value(&[9, 7, 5], 10, 3), 0);
+        // dense column of four: the 4th highest is the minimum
+        assert_eq!(top_n_value(&[4, 3, 2, 1], 4, 3), 1);
+    }
+
+    #[test]
+    fn test_relative_variance_full_window_uses_global_median() {
+        let lnv = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let rv = relative_variance(&lnv, &[4, 3, 2, 1, 0], 100);
+        assert_eq!(rv, vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_relative_variance_pads_edges_like_upstream() {
+        // n = 7, w = 3, h = 1, identity order: front pad is sorted position 2,
+        // back pad is position 4
+        let lnv: Vec<f64> = vec![0.0, 10.0, 1.0, 9.0, 2.0, 8.0, 3.0];
+        let order: Vec<usize> = (0..7).collect();
+        let rv = relative_variance(&lnv, &order, 3);
+        // windows over [1, 0..7, 2]: [1,0,10] [0,10,1] [10,1,9] [1,9,2]
+        // [9,2,8] [2,8,3] [8,3,2]
+        let medians = [1.0, 1.0, 9.0, 2.0, 8.0, 3.0, 3.0];
+        for g in 0..7 {
+            assert_eq!(rv[g], lnv[g] - medians[g]);
+        }
+    }
+
+    #[test]
+    fn test_relax_threshold_bisects_to_last_passing() {
+        // count passing at t = number of integers in [0, 10) with i >= 8 t
+        let with_var = |t: f64| {
+            let mask: Vec<bool> = (0..10).map(|i| i as f64 >= 8.0 * t).collect();
+            let count = mask.iter().filter(|&&b| b).count();
+            (mask, count)
+        };
+        // need 5 genes: pass when 8 t <= 5; first step from 1.0 down to 0.625
+        // passes, bisection then pushes up between 0.625 and 0.75
+        let mask = relax_threshold(1.0, 5, &with_var).unwrap();
+        assert_eq!(mask.iter().filter(|&&b| b).count(), 5);
+    }
 }

@@ -25,6 +25,11 @@ pub struct Pile {
     /// `library_size` field because subsetting (and downstream downsampling)
     /// changes the row totals.
     pub umis_per_cell: Vec<f32>,
+    /// Per-cell mass driving `knn_k`, the candidate size budget and the
+    /// robust-UMIs dissolve rule (upstream's `cell_umis`). Equal to
+    /// `umis_per_cell` unless overridden, e.g. by cells per metacell when
+    /// the "cells" are metacells in divide and conquer.
+    pub mass_per_cell: Vec<f32>,
     /// Total gene count from the reader. All gene indices in this pile (in
     /// `raw.indices`, `selected_gene_indices`, etc.) live in `[0, n_genes)`.
     pub n_genes: usize,
@@ -61,14 +66,55 @@ impl Pile {
     ) -> Result<Self, ScErrors> {
         let raw: CompressedSparseData2<u32, f32> =
             reader.read_cells_sparse(cell_indices, &DataLayerReturn::Raw)?;
-        let n_genes = raw.shape.1;
-        let umis_per_cell = sum_rows_csr(&raw);
+        Self::from_raw(raw, cell_indices.to_vec(), None)
+    }
 
+    /// Build a pile from an in-memory cell-major count matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `raw` - Cells × genes counts, CSR.
+    /// * `cell_indices` - Index of each row in the caller's cell space.
+    /// * `mass_per_cell` - Optional mass override; the row sums if `None`.
+    ///
+    /// ### Returns
+    ///
+    /// The [`Pile`].
+    ///
+    /// ### Errors
+    ///
+    /// `Mc2LengthMismatch` if `cell_indices` or the mass do not match the rows.
+    pub fn from_raw(
+        raw: CompressedSparseData2<u32, f32>,
+        cell_indices: Vec<usize>,
+        mass_per_cell: Option<Vec<f32>>,
+    ) -> Result<Self, ScErrors> {
+        let n_cells = raw.shape.0;
+        if cell_indices.len() != n_cells {
+            return Err(ScErrors::Mc2LengthMismatch {
+                what: "cell_indices",
+                expected: n_cells,
+                got: cell_indices.len(),
+            });
+        }
+        let umis_per_cell = sum_rows_csr(&raw);
+        let mass_per_cell = match mass_per_cell {
+            Some(m) if m.len() != n_cells => {
+                return Err(ScErrors::Mc2LengthMismatch {
+                    what: "mass_per_cell",
+                    expected: n_cells,
+                    got: m.len(),
+                });
+            }
+            Some(m) => m,
+            None => umis_per_cell.clone(),
+        };
         Ok(Self {
-            cell_indices: cell_indices.to_vec(),
+            cell_indices,
+            n_genes: raw.shape.1,
             raw,
             umis_per_cell,
-            n_genes,
+            mass_per_cell,
             downsampled: None,
             selected_gene_indices: None,
             selected_dense: None,

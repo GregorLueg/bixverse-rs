@@ -19,6 +19,11 @@ pub mod seeds;
 pub mod select;
 pub mod similarity;
 
+#[cfg(test)]
+mod parity;
+#[cfg(test)]
+mod parity_fixtures;
+
 // export the stuff
 pub use candidates::{compute_candidate_metacells, make_incoming_view};
 pub use deviants::find_deviant_cells;

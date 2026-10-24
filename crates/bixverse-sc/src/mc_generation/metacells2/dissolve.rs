@@ -20,35 +20,19 @@ use super::params::DissolveParams;
 // Helpers //
 /////////////
 
-/// Sum UMI counts per gene across cells matching a predicate.
+/// Sum UMI counts per gene over every cell.
 ///
 /// ### Params
 ///
 /// * `raw_umis` - CSR matrix of raw UMI counts.
-/// * `pred` - Predicate on the candidate assignment; only cells where
-///   `pred(candidate_of_cell[i])` is `true` contribute.
-/// * `candidate_of_cell` - Candidate assignment per cell.
 ///
 /// ### Returns
 ///
 /// A `Vec<f64>` of length `n_genes` with the summed UMI counts.
-fn sum_per_gene(
-    raw_umis: &CompressedSparseData2<u32, f32>,
-    pred: impl Fn(i32) -> bool,
-    candidate_of_cell: &[i32],
-) -> Vec<f64> {
-    let n_genes = raw_umis.shape.1;
-    let mut sums = vec![0.0_f64; n_genes];
-    for cell in 0..raw_umis.shape.0 {
-        if !pred(candidate_of_cell[cell]) {
-            continue;
-        }
-        let start = raw_umis.indptr[cell] as usize;
-        let end = raw_umis.indptr[cell + 1] as usize;
-        for idx in start..end {
-            let g = raw_umis.indices[idx] as usize;
-            sums[g] += raw_umis.data[idx] as f64;
-        }
+fn sum_per_gene(raw_umis: &CompressedSparseData2<u32, f32>) -> Vec<f64> {
+    let mut sums = vec![0.0_f64; raw_umis.shape.1];
+    for (&g, &v) in raw_umis.indices.iter().zip(&raw_umis.data) {
+        sums[g as usize] += v as f64;
     }
     sums
 }
@@ -63,7 +47,10 @@ fn sum_per_gene(
 ///
 /// * `raw_umis` - `(n_cells, n_genes)` raw UMI matrix in CSR. Used for
 ///   the convincing-gene test.
-/// * `umis_per_cell` - Pre-summed library size per cell.
+/// * `umis_per_cell` - Row sums of `raw_umis`; the candidate total that
+///   scales the expected counts of the convincing-gene test.
+/// * `mass_per_cell` - Mass for the robust-UMIs rule (upstream's `cell_umis`;
+///   the row sums unless overridden).
 /// * `candidate_of_cell` - Per-cell candidate metacell assignment from
 ///   `compute_candidate_metacells`.
 /// * `deviant_of_cell` - Per-cell deviant flag from `find_deviant_cells`.
@@ -82,6 +69,7 @@ fn sum_per_gene(
 pub fn dissolve_metacells(
     raw_umis: &CompressedSparseData2<u32, f32>,
     umis_per_cell: &[f32],
+    mass_per_cell: &[f32],
     candidate_of_cell: &[i32],
     deviant_of_cell: &[bool],
     target_metacell_size: usize,
@@ -92,14 +80,16 @@ pub fn dissolve_metacells(
     let n_cells = raw_umis.shape.0;
     let n_genes = raw_umis.shape.1;
     assert_eq!(umis_per_cell.len(), n_cells);
+    assert_eq!(mass_per_cell.len(), n_cells);
     assert_eq!(candidate_of_cell.len(), n_cells);
     assert_eq!(deviant_of_cell.len(), n_cells);
 
-    let min_robust_size =
-        ((target_metacell_size as f32) * params.min_robust_size_factor).floor() as usize;
-    let min_robust_umis = (target_metacell_umis * params.min_robust_size_factor as f64).floor();
+    let factor = params.min_robust_size_factor as f64;
+    let min_robust_size = (target_metacell_size as f64 * factor).floor() as usize;
+    let min_robust_umis = (target_metacell_umis * factor).floor();
 
-    let total_per_gene = sum_per_gene(raw_umis, |c| c >= 0, candidate_of_cell);
+    // upstream's population fractions cover every cell, deviants included
+    let total_per_gene = sum_per_gene(raw_umis);
     let total_population_umis: f64 = total_per_gene.iter().sum();
     let fraction_per_gene: Vec<f64> = if total_population_umis > 0.0 {
         total_per_gene
@@ -129,7 +119,7 @@ pub fn dissolve_metacells(
                 }
 
                 let size = cell_indices.len();
-                let umis: f64 = cell_indices.iter().map(|&i| umis_per_cell[i] as f64).sum();
+                let umis: f64 = cell_indices.iter().map(|&i| mass_per_cell[i] as f64).sum();
 
                 // Rule 1: hard floor.
                 if size < min_metacell_size {
@@ -150,7 +140,8 @@ pub fn dissolve_metacells(
                 // UMIs in this candidate to expected UMIs from the population
                 // fraction scaled by the candidate's total. Keep iff any gene
                 // has |log2((actual+1)/(expected+1))| >= min_fold.
-                let candidate_total: f64 = umis;
+                let candidate_total: f64 =
+                    cell_indices.iter().map(|&i| umis_per_cell[i] as f64).sum();
                 candidate_per_gene.fill(0.0);
                 for &cell in &cell_indices {
                     let start = raw_umis.indptr[cell] as usize;
@@ -235,7 +226,7 @@ mod tests {
         let cand = vec![0_i32, 0];
         let dev = vec![false, false];
         let params = DissolveParams::default();
-        let (mc, dis) = dissolve_metacells(&raw, &umis, &cand, &dev, 4, 40.0, 3, &params);
+        let (mc, dis) = dissolve_metacells(&raw, &umis, &umis, &cand, &dev, 4, 40.0, 3, &params);
         assert_eq!(mc, vec![-1, -1]);
         assert_eq!(dis, vec![true, true]);
     }
@@ -253,7 +244,7 @@ mod tests {
         let cand = vec![0_i32; 4];
         let dev = vec![false; 4];
         let params = DissolveParams::default();
-        let (mc, dis) = dissolve_metacells(&raw, &umis, &cand, &dev, 4, 40.0, 2, &params);
+        let (mc, dis) = dissolve_metacells(&raw, &umis, &umis, &cand, &dev, 4, 40.0, 2, &params);
         assert_eq!(mc, vec![0, 0, 0, 0]);
         assert!(dis.iter().all(|&v| !v));
     }
@@ -271,7 +262,7 @@ mod tests {
         let cand = vec![0_i32; 4];
         let dev = vec![false, false, false, true];
         let params = DissolveParams::default();
-        let (mc, dis) = dissolve_metacells(&raw, &umis, &cand, &dev, 4, 40.0, 2, &params);
+        let (mc, dis) = dissolve_metacells(&raw, &umis, &umis, &cand, &dev, 4, 40.0, 2, &params);
         assert_eq!(mc, vec![0, 0, 0, -1]);
         assert!(dis.iter().all(|&v| !v));
     }
@@ -296,7 +287,7 @@ mod tests {
             min_convincing_gene_fold_factor: None,
             ..Default::default()
         };
-        let (mc, _dis) = dissolve_metacells(&raw, &umis, &cand, &dev, 4, 40.0, 2, &params);
+        let (mc, _dis) = dissolve_metacells(&raw, &umis, &umis, &cand, &dev, 4, 40.0, 2, &params);
         assert_eq!(mc, vec![0, 0, -1, 1, 1]);
     }
 }
