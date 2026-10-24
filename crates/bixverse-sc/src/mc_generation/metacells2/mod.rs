@@ -1,15 +1,17 @@
-//! Port of the MetaCells2 workflow over into `biverse-rs`. The original
-//! implementations were in R/C++ for the original implementation by Baran,
-//! et al., Genome Biol. 2019; this was expanded in the MetaCells2 framework
-//! into Python and C++, please refer to Ben‑Kiki, et al., Genome Biol. 2022.
-//! Due to complexity of the algorithm, this lives in its own module.
+//! Port of MetaCells2 (Ben-Kiki, et al., Genome Biol. 2022, metacells 0.9.5),
+//! building on MetaCell (Baran, et al., Genome Biol. 2019). Two entry points:
+//! [`compute_metacells_single_pile`] runs the direct pipeline on one pile, and
+//! [`compute_dac_metacells`] divides and conquers for datasets beyond a pile.
+//! Parity against the reference lives in `parity.rs`.
 
 use crate::prelude::*;
 
 pub mod candidates;
+pub mod collect;
 pub mod deviants;
 pub mod direct;
 pub mod dissolve;
+pub mod divide_and_conquer;
 pub mod downsample;
 pub mod knn;
 pub mod params;
@@ -29,11 +31,14 @@ pub use candidates::{compute_candidate_metacells, make_incoming_view};
 pub use deviants::find_deviant_cells;
 pub use direct::{DirectMetacellsResult, compute_direct_metacells};
 pub use dissolve::dissolve_metacells;
+pub use divide_and_conquer::{
+    DacMetacellsResult, compute_dac_metacells, compute_target_pile_size, random_piles,
+};
 pub use downsample::downsample_pile;
 pub use knn::build_knn_graph;
 pub use params::{
-    DeviantsParams, DissolveParams, MC2KnnParams, MetacellsParams, PartitionParams, SelectParams,
-    SimilarityMethod, SimilarityParams,
+    DacParams, DeviantsParams, DissolveParams, MC2KnnParams, MetacellsParams, PartitionParams,
+    SelectParams, SimilarityMethod, SimilarityParams,
 };
 pub use partition::{optimise_partitions, score_partitions};
 pub use pile::Pile;
@@ -52,14 +57,13 @@ pub use similarity::compute_similarity;
 /// constructs a single [`Pile`], runs [`compute_direct_metacells`], and
 /// returns the result.
 ///
-/// For datasets larger than RAM or where the cell count is much greater
-/// than the practical optimiser/similarity ceiling (~10K cells), use the
-/// divide-and-conquer entry point instead (not yet implemented).
+/// The similarity and rank matrices are dense `n × n`, so beyond a pile's
+/// worth of cells (upstream suggests around 10K) use [`compute_dac_metacells`].
 ///
 /// ### Params
 ///
 /// * `reader` - Reader for the cell-based store.
-/// * `cells_to_include` - Indices of the cells to include.
+/// * `cell_indices` - Indices of the cells to include.
 /// * `params` - MC2 parameters.
 /// * `seed` - Master RNG seed.
 /// * `verbose` - If true, prints per-stage timing to stdout.
