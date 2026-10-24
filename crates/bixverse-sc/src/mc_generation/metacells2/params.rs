@@ -330,6 +330,64 @@ impl Default for DissolveParams {
     }
 }
 
+///////////////////////////////
+// Divide and conquer params //
+///////////////////////////////
+
+/// Divide-and-conquer parameters, upstream's `DacParameters`.
+///
+/// The per-pile runs use [`MetacellsParams`]; these only control how cells
+/// are piled and how the groups-of-metacells phase is configured.
+#[derive(Clone, Debug)]
+pub struct DacParams {
+    /// Stop after the final phase's outliers instead of regrouping the
+    /// outliers-of-outliers.
+    pub quick_and_dirty: bool,
+    /// Lower clamp on the computed target pile size.
+    pub min_target_pile_size: usize,
+    /// Upper clamp on the computed target pile size.
+    pub max_target_pile_size: usize,
+    /// Metacells wanted per pile; also the target group size of the groups
+    /// phase.
+    pub target_metacells_in_pile: usize,
+    /// Fixed target pile size. `None` derives it from the data (upstream's
+    /// `compute_target_pile_size`).
+    pub target_pile_size: Option<usize>,
+    /// `k_size_factor` of the groups phase.
+    pub piles_knn_k_size_factor: f64,
+    /// `min_split_size_factor` of the groups phase.
+    pub piles_min_split_size_factor: f64,
+    /// `min_robust_size_factor` of the groups phase.
+    pub piles_min_robust_size_factor: f32,
+    /// `max_merge_size_factor` of the groups phase.
+    pub piles_max_merge_size_factor: f64,
+    /// Similarity of the groups phase.
+    pub groups_similarity: SimilarityParams,
+    /// Piles computed concurrently. Each pile holds two dense
+    /// `pile_size × pile_size` matrices while it runs, so this trades memory
+    /// for throughput. Not tuned.
+    pub max_parallel_piles: usize,
+}
+
+/// Default implementation for [DacParams]
+impl Default for DacParams {
+    fn default() -> Self {
+        Self {
+            quick_and_dirty: false,
+            min_target_pile_size: 8000,
+            max_target_pile_size: 24000,
+            target_metacells_in_pile: 100,
+            target_pile_size: None,
+            piles_knn_k_size_factor: 3.0,
+            piles_min_split_size_factor: 1.5,
+            piles_min_robust_size_factor: 0.3,
+            piles_max_merge_size_factor: 0.15,
+            groups_similarity: SimilarityParams::default(),
+            max_parallel_piles: 1,
+        }
+    }
+}
+
 ///////////
 // Tests //
 ///////////

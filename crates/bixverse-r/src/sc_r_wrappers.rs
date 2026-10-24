@@ -2985,6 +2985,111 @@ impl FromRList for DissolveParams {
     }
 }
 
+///////////////
+// DacParams //
+///////////////
+
+impl FromRList for DacParams {
+    /// Generate DacParams from a flat R list, falling back to defaults. The
+    /// groups-phase similarity is read from `groups_similarity_method`,
+    /// `groups_log_data` and `groups_value_regularisation`.
+    fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let quick_and_dirty = params
+            .get("quick_and_dirty")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.quick_and_dirty);
+
+        let min_target_pile_size = params
+            .get("min_target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_target_pile_size);
+
+        let max_target_pile_size = params
+            .get("max_target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_target_pile_size);
+
+        let target_metacells_in_pile = params
+            .get("target_metacells_in_pile")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.target_metacells_in_pile);
+
+        let target_pile_size = params
+            .get("target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.target_pile_size);
+
+        let piles_knn_k_size_factor = params
+            .get("piles_knn_k_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_knn_k_size_factor);
+
+        let piles_min_split_size_factor = params
+            .get("piles_min_split_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_min_split_size_factor);
+
+        let piles_min_robust_size_factor = params
+            .get("piles_min_robust_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.piles_min_robust_size_factor);
+
+        let piles_max_merge_size_factor = params
+            .get("piles_max_merge_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_max_merge_size_factor);
+
+        let groups_method = match params
+            .get("groups_similarity_method")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => parse_similarity_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid similarity method: {s}")))?,
+            None => defaults.groups_similarity.method,
+        };
+        let groups_similarity = SimilarityParams {
+            method: groups_method,
+            log_data: params
+                .get("groups_log_data")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.groups_similarity.log_data),
+            value_regularisation: params
+                .get("groups_value_regularisation")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.groups_similarity.value_regularisation),
+        };
+
+        let max_parallel_piles = params
+            .get("max_parallel_piles")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_parallel_piles);
+
+        Ok(Self {
+            quick_and_dirty,
+            min_target_pile_size,
+            max_target_pile_size,
+            target_metacells_in_pile,
+            target_pile_size,
+            piles_knn_k_size_factor,
+            piles_min_split_size_factor,
+            piles_min_robust_size_factor,
+            piles_max_merge_size_factor,
+            groups_similarity,
+            max_parallel_piles,
+        })
+    }
+}
+
 /////////////////////
 // MetacellsParams //
 /////////////////////
