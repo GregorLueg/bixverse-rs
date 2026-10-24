@@ -12,15 +12,17 @@
 #![cfg(feature = "single-cell")]
 
 mod meta_cells2_dac_fixtures;
+mod meta_cells2_rare_dac_fixtures;
 
 use std::path::PathBuf;
 
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::metacells2::{
-    DacMetacellsResult, DacParams, MC2KnnParams, MetacellsParams, compute_dac_metacells,
+    DacMetacellsResult, DacParams, MC2KnnParams, MetacellsParams, RareParams, compute_dac_metacells,
 };
 use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
 use meta_cells2_dac_fixtures as fx;
+use meta_cells2_rare_dac_fixtures as rfx;
 
 ///////////////
 // Constants //
@@ -197,7 +199,7 @@ fn assert_structure(result: &DacMetacellsResult) {
 }
 
 /// Two clusters, three preliminary piles: every phase runs on a small input,
-/// and the same seed reproduces the run.
+/// and the same seed reproduces the run, rare detection on or off.
 #[test]
 fn test_dac_structure_and_reproducibility() {
     let n_clusters = 2;
@@ -210,9 +212,12 @@ fn test_dac_structure_and_reproducibility() {
 
     let a =
         compute_dac_metacells(&reader, &cells, None, &params, &dac, 3, false).expect("dac runs");
+    // no rare candidates here, so detection off must not change the run
+    dac.rare = None;
     let b =
         compute_dac_metacells(&reader, &cells, None, &params, &dac, 3, false).expect("dac runs");
     assert_structure(&a);
+    assert!(a.rare_module_of_cell.iter().all(|&m| m == -1));
     assert!(a.n_metacells >= n_clusters);
     assert_eq!(a.metacell_of_cell, b.metacell_of_cell);
     assert_eq!(a.level_of_cell, b.level_of_cell);
@@ -260,5 +265,264 @@ fn test_dac_matches_upstream_statistics() {
             m + slack >= lo && m <= hi + slack,
             "{name}: median {m} over {ours_k:?}, upstream {upstream:?}"
         );
+    }
+}
+
+////////////////////////////
+// Rare gene module cells //
+////////////////////////////
+
+/// Planted cluster of a rare-fixture cell and its rare population, `None`
+/// for the common cells.
+///
+/// ### Params
+///
+/// * `i` - Cell.
+/// * `n_common` - Common cells, `n_clusters * CELLS_PER_CLUSTER`.
+///
+/// ### Returns
+///
+/// `(cluster, population)`.
+fn rare_population(i: usize, n_common: usize) -> (usize, Option<usize>) {
+    if i < n_common {
+        return (i / rfx::CELLS_PER_CLUSTER, None);
+    }
+    let mut start = n_common;
+    let mut r = 0;
+    while i >= start + rfx::RARE_SIZES[r] {
+        start += rfx::RARE_SIZES[r];
+        r += 1;
+    }
+    (rfx::RARE_HOSTS[r], Some(r))
+}
+
+/// Write the rare generator's counts as a cell-major store: the first
+/// `n_clusters` planted clusters, then the rare populations.
+///
+/// ### Params
+///
+/// * `name` - Distinguishes the scratch file.
+/// * `n_clusters` - Planted clusters; [`rfx::N_CLUSTERS`] for the reference.
+///   Must exceed every host cluster.
+///
+/// ### Returns
+///
+/// The store guard and the cell count.
+fn build_rare_store(name: &str, n_clusters: usize) -> (TempStore, usize) {
+    let store = TempStore(std::env::temp_dir().join(format!("bixverse_mc2_rare_{name}.bin")));
+    let n_genes = rfx::N_CLUSTERS * rfx::MARKERS
+        + rfx::NOISE_GENES
+        + rfx::RARE_SIZES.len() * rfx::RARE_MARKERS;
+    let rare_start = rfx::N_CLUSTERS * rfx::MARKERS + rfx::NOISE_GENES;
+    let n_common = n_clusters * rfx::CELLS_PER_CLUSTER;
+    let n_cells = n_common + rfx::RARE_SIZES.iter().sum::<usize>();
+    let mut x = rfx::LCG_SEED;
+    let mut next = || {
+        x = (1_664_525 * x + 1_013_904_223) % (1 << 32);
+        x >> 16
+    };
+
+    let mut writer = CellGeneSparseWriter::new(store.path(), true, n_cells, n_genes, TARGET_SIZE)
+        .expect("writer opens");
+    for i in 0..n_cells {
+        let (cluster, population) = rare_population(i, n_common);
+        let mut indices = Vec::new();
+        let mut counts = Vec::new();
+        for g in 0..n_genes {
+            let hi = next();
+            let v = if (cluster * rfx::MARKERS..(cluster + 1) * rfx::MARKERS).contains(&g) {
+                hi % 41
+            } else if g >= rare_start {
+                let own = population.is_some_and(|r| {
+                    (rare_start + r * rfx::RARE_MARKERS..rare_start + (r + 1) * rfx::RARE_MARKERS)
+                        .contains(&g)
+                });
+                if own { hi % 11 } else { 0 }
+            } else {
+                u64::from(hi.is_multiple_of(4))
+            } as u32;
+            if v > 0 {
+                indices.push(g as u32);
+                counts.push(v);
+            }
+        }
+        writer
+            .write_cell_chunk(CsrCellChunk::from_data(
+                &counts,
+                &indices,
+                i,
+                TARGET_SIZE,
+                true,
+            ))
+            .expect("chunk writes");
+    }
+    writer.finalise().expect("store finalises");
+    (store, n_cells)
+}
+
+/// Cells of each rare population in metacells it is the majority of, as the
+/// rare generator's `recovered`.
+///
+/// ### Params
+///
+/// * `result` - A run.
+/// * `n_common` - Common cells.
+///
+/// ### Returns
+///
+/// Recovered cells per population.
+fn rare_recovered(result: &DacMetacellsResult, n_common: usize) -> Vec<usize> {
+    let truth: Vec<Option<usize>> = (0..result.metacell_of_cell.len())
+        .map(|i| rare_population(i, n_common).1)
+        .collect();
+    let mut members = vec![Vec::new(); result.n_metacells];
+    for (i, &m) in result.metacell_of_cell.iter().enumerate() {
+        if m >= 0 {
+            members[m as usize].push(i);
+        }
+    }
+    (0..rfx::RARE_SIZES.len())
+        .map(|r| {
+            (0..truth.len())
+                .filter(|&i| truth[i] == Some(r))
+                .filter(|&i| {
+                    let m = result.metacell_of_cell[i];
+                    m >= 0 && {
+                        let own = members[m as usize]
+                            .iter()
+                            .filter(|&&j| truth[j] == Some(r))
+                            .count();
+                        own * 2 > members[m as usize].len()
+                    }
+                })
+                .count()
+        })
+        .collect()
+}
+
+/// Every rare cell, and only those, sits in the module of its population.
+///
+/// ### Params
+///
+/// * `result` - A run.
+/// * `n_common` - Common cells.
+fn assert_rare_modules(result: &DacMetacellsResult, n_common: usize) {
+    let n_populations = rfx::RARE_SIZES.len();
+    let mut module_of_population = vec![None; n_populations];
+    for (i, &m) in result.rare_module_of_cell.iter().enumerate() {
+        match rare_population(i, n_common).1 {
+            None => assert_eq!(m, -1, "common cell {i} in rare module {m}"),
+            Some(r) => {
+                assert!(m >= 0, "rare cell {i} has no module");
+                assert_eq!(*module_of_population[r].get_or_insert(m), m);
+            }
+        }
+    }
+    let mut seen: Vec<i32> = module_of_population.iter().flatten().copied().collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), n_populations, "populations share a module");
+}
+
+/// Dense IDs, placed cells never flagged dissolved, every cell run (rare
+/// piles are level 0).
+///
+/// ### Params
+///
+/// * `result` - A run.
+fn assert_rare_structure(result: &DacMetacellsResult) {
+    let mut seen = vec![false; result.n_metacells];
+    for (i, &m) in result.metacell_of_cell.iter().enumerate() {
+        assert!(result.level_of_cell[i] >= 0, "cell {i} never ran");
+        if m >= 0 {
+            seen[m as usize] = true;
+            assert!(
+                !result.dissolved_of_cell[i],
+                "cell {i} placed yet dissolved"
+            );
+        }
+    }
+    assert!(seen.iter().all(|&s| s), "metacell ids are not dense");
+}
+
+/// The rare generator's parameters.
+///
+/// ### Params
+///
+/// * `pile_size` - Target pile size, fixed.
+/// * `max_gene_cell_fraction` - Rare candidate fraction cap.
+///
+/// ### Returns
+///
+/// The per-pile and divide-and-conquer parameters.
+fn rare_params(pile_size: usize, max_gene_cell_fraction: f64) -> (MetacellsParams, DacParams) {
+    let (params, mut dac) = params();
+    dac.min_target_pile_size = pile_size;
+    dac.max_target_pile_size = pile_size;
+    dac.rare = Some(RareParams {
+        max_gene_cell_fraction,
+        ..Default::default()
+    });
+    (params, dac)
+}
+
+/// Four clusters and both rare populations: the modules pick out exactly the
+/// rare cells, their piles keep them together, and rare genes join the
+/// selected genes.
+#[test]
+fn test_dac_rare_modules_small() {
+    let n_clusters = 4;
+    let n_common = n_clusters * rfx::CELLS_PER_CLUSTER;
+    let (store, n_cells) = build_rare_store("small", n_clusters);
+    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let cells: Vec<usize> = (0..n_cells).collect();
+    // 48 of 1664 cells is above the 0.02 the reference uses on 3264 cells
+    let (params, dac) = rare_params(400, 0.03);
+
+    let result =
+        compute_dac_metacells(&reader, &cells, None, &params, &dac, 1, false).expect("dac runs");
+    assert_rare_structure(&result);
+    assert_rare_modules(&result, n_common);
+    let recovered = rare_recovered(&result, n_common);
+    println!("rare recovered {recovered:?} of {:?}", rfx::RARE_SIZES);
+    for (r, (&got, &size)) in recovered.iter().zip(&rfx::RARE_SIZES).enumerate() {
+        assert!(got + 2 >= size, "population {r}: {got} of {size}");
+    }
+    for (g, &m) in result.rare_module_of_gene.iter().enumerate() {
+        if m >= 0 {
+            assert!(
+                result.selected_genes.contains(&g),
+                "rare gene {g} not selected"
+            );
+        }
+    }
+}
+
+/// Rare recovery on the reference dataset over upstream's seeds.
+#[test]
+// 3264 cells, three divide-and-conquer runs
+#[cfg(feature = "large-test")]
+fn test_dac_rare_recovery_matches_upstream() {
+    let n_common = rfx::N_CLUSTERS * rfx::CELLS_PER_CLUSTER;
+    let (store, n_cells) = build_rare_store("band", rfx::N_CLUSTERS);
+    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let cells: Vec<usize> = (0..n_cells).collect();
+    let (params, dac) = rare_params(rfx::PILE_SIZE, 0.02);
+
+    for (seed, upstream) in (1..).zip(rfx::UPSTREAM_RECOVERED) {
+        let result = compute_dac_metacells(&reader, &cells, None, &params, &dac, seed, false)
+            .expect("dac runs");
+        assert_rare_structure(&result);
+        assert_rare_modules(&result, n_common);
+        let recovered = rare_recovered(&result, n_common);
+        println!("seed {seed}: recovered {recovered:?}, upstream {upstream:?}");
+        for (r, (&got, &want)) in recovered.iter().zip(upstream).enumerate() {
+            // a couple of cells of slack: the rare piles' annealing is seeded
+            // differently from upstream's
+            assert!(
+                got + 2 >= want,
+                "seed {seed}, population {r}: {got} vs {want}"
+            );
+        }
     }
 }

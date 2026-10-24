@@ -4,6 +4,8 @@
 //! their own struct, composed into the top-level [`MetacellsParams`]. Defaults
 //! are upstream's (`metacells/parameters.py`).
 
+use bixverse_core::ml::clustering::hierarchical::LinkageMethod;
+
 /////////////////
 // Main params //
 /////////////////
@@ -330,6 +332,91 @@ impl Default for DissolveParams {
     }
 }
 
+/////////////////////////////
+// Rare gene module params //
+/////////////////////////////
+
+/// Gene-gene similarity used to cluster rare gene candidates, upstream's
+/// `genes_similarity_method` minus the logistics variants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RareSimilarityMethod {
+    /// Pearson correlation between genes over cells (`pearson`).
+    Pearson,
+    /// Absolute Pearson correlation (`abs_pearson`).
+    AbsPearson,
+    /// Correlation of the rows of the Pearson matrix (`repeated_pearson`).
+    /// Upstream's default.
+    #[default]
+    RepeatedPearson,
+    /// Absolute correlation of the rows of the absolute Pearson matrix
+    /// (`repeated_abs_pearson`).
+    RepeatedAbsPearson,
+}
+
+/// Rare gene module detection, upstream's `find_rare_gene_modules` plus the
+/// `rare_*` overrides `divide_and_conquer_pipeline` applies to the rare piles.
+#[derive(Clone, Debug)]
+pub struct RareParams {
+    /// Most candidate genes kept, those expressed in the fewest cells.
+    pub max_genes: usize,
+    /// Largest fraction of cells a candidate may be expressed in.
+    pub max_gene_cell_fraction: f64,
+    /// Smallest maximum UMI count over cells for a candidate, and for a
+    /// related gene over the module's cells.
+    pub min_gene_maximum: u32,
+    /// Similarity between candidate genes.
+    pub similarity: RareSimilarityMethod,
+    /// Linkage for the hierarchical clustering of candidates.
+    pub cluster_method: LinkageMethod,
+    /// Fewest genes in a module.
+    pub min_genes_of_modules: usize,
+    /// Fewest cells in a module. Upstream's pipeline uses its own default
+    /// here, not the run's `min_metacell_size`.
+    pub min_cells_of_modules: usize,
+    /// Largest mean number of module cells in a random pile, as a fraction of
+    /// the target metacell size, for the module to count as rare.
+    pub max_cells_factor_of_random_pile: f64,
+    /// Smallest mean off-diagonal similarity within a module.
+    pub min_module_correlation: f64,
+    /// A gene is related to a module if its fraction in the module's cells is
+    /// at least `2^min_related_gene_fold_factor` times its background fraction.
+    pub min_related_gene_fold_factor: f64,
+    /// A related gene is dropped if adding it raises the module's strong cells
+    /// beyond this factor of the original count.
+    pub max_related_gene_increase_factor: f64,
+    /// Smallest module UMI total for a cell to express the module.
+    pub min_cell_module_total: u32,
+    /// `deviants.max_cell_fraction` of the rare piles.
+    pub deviants_max_cell_fraction: f32,
+    /// `dissolve.min_robust_size_factor` of the rare piles.
+    pub dissolve_min_robust_size_factor: f32,
+    /// `dissolve.min_convincing_gene_fold_factor` of the rare piles.
+    pub dissolve_min_convincing_gene_fold_factor: Option<f32>,
+}
+
+/// Default implementation for [RareParams], upstream's `rare_*` defaults.
+impl Default for RareParams {
+    fn default() -> Self {
+        Self {
+            max_genes: 500,
+            max_gene_cell_fraction: 1e-3,
+            min_gene_maximum: 7,
+            similarity: RareSimilarityMethod::RepeatedPearson,
+            cluster_method: LinkageMethod::Ward,
+            min_genes_of_modules: 4,
+            min_cells_of_modules: 12,
+            max_cells_factor_of_random_pile: 0.5,
+            min_module_correlation: 0.1,
+            min_related_gene_fold_factor: 7.0,
+            max_related_gene_increase_factor: 4.0,
+            min_cell_module_total: 4,
+            deviants_max_cell_fraction: 0.25,
+            dissolve_min_robust_size_factor: 0.5,
+            dissolve_min_convincing_gene_fold_factor: Some(3.0),
+        }
+    }
+}
+
 ///////////////////////////////
 // Divide and conquer params //
 ///////////////////////////////
@@ -367,6 +454,11 @@ pub struct DacParams {
     /// `pile_size × pile_size` matrices while it runs, so this trades memory
     /// for throughput. Not tuned.
     pub max_parallel_piles: usize,
+    /// Rare gene module detection before the main run, as upstream's
+    /// `divide_and_conquer_pipeline`: cells of each module become their own
+    /// pile and the rest are divided and conquered. `None` skips it, as
+    /// upstream's `compute_divide_and_conquer_metacells`.
+    pub rare: Option<RareParams>,
 }
 
 /// Default implementation for [DacParams]
@@ -384,6 +476,7 @@ impl Default for DacParams {
             piles_max_merge_size_factor: 0.15,
             groups_similarity: SimilarityParams::default(),
             max_parallel_piles: 1,
+            rare: Some(RareParams::default()),
         }
     }
 }

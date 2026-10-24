@@ -15,9 +15,13 @@ use super::deviants::find_deviant_cells;
 use super::dissolve::dissolve_metacells;
 use super::downsample::compute_downsample_target;
 use super::knn::build_knn_graph;
-use super::params::{DeviantsParams, DissolveParams, MC2KnnParams, SelectParams, SimilarityParams};
+use super::params::{
+    DeviantsParams, DissolveParams, MC2KnnParams, RareParams, SelectParams, SimilarityParams,
+};
 use super::parity_fixtures as fx;
+use super::parity_rare_fixtures as rfx;
 use super::pile::Pile;
+use super::rare::find_rare_gene_modules;
 use super::seeds::seeds_count_for;
 use super::select::{gene_stats, relative_variance, select_features};
 use super::similarity::compute_similarity;
@@ -397,4 +401,174 @@ fn test_parity_dissolve() {
 
     let (metacells, _) = run(60, 200_000.0);
     assert_eq!(metacells, fx::DISSOLVE_METACELL_BIG_TARGET);
+}
+
+///////////////////////
+// Rare gene modules //
+///////////////////////
+
+/// One planted case of `dev/gen_metacells2_rare_fixtures.py`.
+struct RareCase {
+    /// LCG seed.
+    seed: u64,
+    /// Cells.
+    n_cells: usize,
+    /// Leading background genes.
+    n_background: usize,
+    /// `(gene start, gene end, cell start, cell end)` per block.
+    blocks: &'static [(usize, usize, usize, usize)],
+    /// `(gene, cell start, cell end)` per related gene.
+    related: &'static [(usize, usize, usize)],
+    /// Sporadic gene range; its end is the gene count.
+    sporadic: (usize, usize),
+    /// LCG bits that must be zero for a sporadic gene to be on.
+    sporadic_mask: u64,
+}
+
+/// The generator's `make_counts` for a rare case, as CSR.
+fn make_rare_counts(case: &RareCase) -> CompressedSparseData2<u32, f32> {
+    let n_genes = case.sporadic.1;
+    let mut rng = Lcg(case.seed);
+    let mut data = Vec::new();
+    let mut indices = Vec::new();
+    let mut indptr = vec![0usize];
+    for i in 0..case.n_cells {
+        for g in 0..n_genes {
+            let x = rng.next();
+            let hi = x >> 16;
+            let mid = (x >> 8) & 0xFF;
+            let block = case.blocks.iter().find(|b| (b.0..b.1).contains(&g));
+            let related = case.related.iter().find(|r| r.0 == g);
+            let v = if g < case.n_background {
+                if mid.is_multiple_of(4) { hi % 3 + 1 } else { 0 }
+            } else if let Some(&(_, _, c0, c1)) = block {
+                if (c0..c1).contains(&i) && !mid.is_multiple_of(5) {
+                    hi % 9
+                } else {
+                    0
+                }
+            } else if let Some(&(_, c0, c1)) = related {
+                if (c0..c1).contains(&i) {
+                    if mid.is_multiple_of(2) {
+                        hi % 10 + 1
+                    } else {
+                        0
+                    }
+                } else {
+                    u64::from(mid.is_multiple_of(64))
+                }
+            } else if (x >> 8) & case.sporadic_mask == 0 {
+                hi % 12
+            } else {
+                0
+            } as u32;
+            if v > 0 {
+                data.push(v);
+                indices.push(g);
+            }
+        }
+        indptr.push(data.len());
+    }
+    CompressedSparseData2 {
+        data,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: None,
+        shape: (case.n_cells, n_genes),
+    }
+}
+
+/// Run the port on a rare case and compare with the reference exactly,
+/// labels included.
+///
+/// ### Params
+///
+/// * `case` - The planted case.
+/// * `params` - Rare module parameters, as the generator's kwargs.
+/// * `target_pile_size` - As the generator's kwargs.
+/// * `gene_module` - Reference module per gene.
+/// * `rare_cells` - Reference cells in a module.
+/// * `rare_cell_module` - Their modules.
+fn assert_rare_case(
+    case: &RareCase,
+    params: &RareParams,
+    target_pile_size: usize,
+    gene_module: &[i32],
+    rare_cells: &[usize],
+    rare_cell_module: &[i32],
+) {
+    let counts = make_rare_counts(case);
+    let n_genes = counts.shape.1;
+    let got = find_rare_gene_modules(
+        |cells| Ok(counts.slice_rows(cells)?),
+        case.n_cells,
+        n_genes,
+        None,
+        48,
+        target_pile_size,
+        params,
+        false,
+    )
+    .unwrap();
+    assert_eq!(got.module_of_gene, gene_module);
+    let cells: Vec<usize> = (0..case.n_cells)
+        .filter(|&i| got.module_of_cell[i] >= 0)
+        .collect();
+    assert_eq!(cells, rare_cells);
+    let modules: Vec<i32> = cells.iter().map(|&i| got.module_of_cell[i]).collect();
+    assert_eq!(modules, rare_cell_module);
+    assert_eq!(
+        got.rare_gene_mask,
+        gene_module.iter().map(|&m| m >= 0).collect::<Vec<_>>()
+    );
+}
+
+/// Overlapping modules (strongest wins), a related gene, modules dropped for
+/// too few genes or cells, at a raised `max_gene_cell_fraction`.
+#[test]
+fn test_parity_rare_planted() {
+    let case = RareCase {
+        seed: rfx::PLANTED_SEED,
+        n_cells: rfx::PLANTED_N_CELLS,
+        n_background: rfx::PLANTED_N_BACKGROUND,
+        blocks: rfx::PLANTED_BLOCKS,
+        related: rfx::PLANTED_RELATED,
+        sporadic: rfx::PLANTED_SPORADIC,
+        sporadic_mask: rfx::PLANTED_SPORADIC_MASK,
+    };
+    let params = RareParams {
+        max_gene_cell_fraction: 0.02,
+        ..Default::default()
+    };
+    assert_rare_case(
+        &case,
+        &params,
+        400,
+        rfx::PLANTED_GENE_MODULE,
+        rfx::PLANTED_RARE_CELLS,
+        rfx::PLANTED_RARE_CELL_MODULE,
+    );
+}
+
+/// Upstream defaults throughout, 20000 cells.
+#[test]
+fn test_parity_rare_defaults() {
+    let case = RareCase {
+        seed: rfx::DEFAULT_SEED,
+        n_cells: rfx::DEFAULT_N_CELLS,
+        n_background: rfx::DEFAULT_N_BACKGROUND,
+        blocks: rfx::DEFAULT_BLOCKS,
+        related: rfx::DEFAULT_RELATED,
+        sporadic: rfx::DEFAULT_SPORADIC,
+        sporadic_mask: rfx::DEFAULT_SPORADIC_MASK,
+    };
+    assert_rare_case(
+        &case,
+        &RareParams::default(),
+        8000,
+        rfx::DEFAULT_GENE_MODULE,
+        rfx::DEFAULT_RARE_CELLS,
+        rfx::DEFAULT_RARE_CELL_MODULE,
+    );
 }

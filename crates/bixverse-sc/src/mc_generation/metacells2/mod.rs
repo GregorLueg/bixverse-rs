@@ -17,6 +17,7 @@ pub mod knn;
 pub mod params;
 pub mod partition;
 pub mod pile;
+pub mod rare;
 pub mod seeds;
 pub mod select;
 pub mod similarity;
@@ -25,6 +26,8 @@ pub mod similarity;
 mod parity;
 #[cfg(test)]
 mod parity_fixtures;
+#[cfg(test)]
+mod parity_rare_fixtures;
 
 // export the stuff
 pub use candidates::{compute_candidate_metacells, make_incoming_view};
@@ -38,10 +41,11 @@ pub use downsample::downsample_pile;
 pub use knn::build_knn_graph;
 pub use params::{
     DacParams, DeviantsParams, DissolveParams, MC2KnnParams, MetacellsParams, PartitionParams,
-    SelectParams, SimilarityMethod, SimilarityParams,
+    RareParams, RareSimilarityMethod, SelectParams, SimilarityMethod, SimilarityParams,
 };
 pub use partition::{optimise_partitions, score_partitions};
 pub use pile::Pile;
+pub use rare::{RareGeneModules, find_rare_gene_modules};
 pub use seeds::{choose_seeds, seeds_count_for};
 pub use select::select_features;
 pub use similarity::compute_similarity;
