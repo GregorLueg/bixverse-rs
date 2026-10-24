@@ -209,6 +209,14 @@ pub enum CoreErrors {
     #[error("Gaussian process: every sample weight is zero, so the fit would carry no data")]
     GpAllWeightsZero,
 
+    // -- hierarchical clustering --
+    /// A condensed distance matrix holds a NaN or infinite entry.
+    #[error("Hierarchical clustering: condensed distance {index} is not finite")]
+    LinkageNonFiniteDistance {
+        /// Position in the condensed matrix
+        index: usize,
+    },
+
     // -- statrs --
     /// Beta distribution construction failed
     #[error("Beta distribution error: {0}")]

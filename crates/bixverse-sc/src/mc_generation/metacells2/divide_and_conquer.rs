@@ -17,6 +17,11 @@
 //! A subset that fits one pile skips the groups phase: it is run directly,
 //! then its outliers once more.
 //!
+//! With [`DacParams::rare`] set (the default), rare gene modules are detected
+//! first, as upstream's `divide_and_conquer_pipeline`: the cells of each module
+//! are run as their own pile and the remaining cells, rare outliers included,
+//! form the top-level subset.
+//!
 //! Elements are cells at the top level and metacells inside the groups phase.
 //! Cells are streamed from the reader one pile at a time, so memory is bounded
 //! by the pile size times `max_parallel_piles`, not by the dataset.
@@ -30,8 +35,9 @@ use crate::prelude::*;
 
 use super::collect::collect_metacell_profiles;
 use super::direct::{DirectMetacellsResult, compute_direct_metacells};
-use super::params::{DacParams, MetacellsParams};
+use super::params::{DacParams, MetacellsParams, RareParams};
 use super::pile::Pile;
+use super::rare::{RareGeneModules, find_rare_gene_modules};
 
 ////////////
 // Consts //
@@ -56,8 +62,13 @@ pub struct DacMetacellsResult {
     pub level_of_cell: Vec<i32>,
     /// Number of metacells.
     pub n_metacells: usize,
-    /// Union of the genes selected in any pile, ascending.
+    /// Union of the genes selected in any pile and the rare module genes,
+    /// ascending.
     pub selected_genes: Vec<usize>,
+    /// Rare gene module per cell, `-1` for none or when detection is off.
+    pub rare_module_of_cell: Vec<i32>,
+    /// Rare gene module per gene, `-1` for none or when detection is off.
+    pub rare_module_of_gene: Vec<i32>,
 }
 
 /// Where the elements of one divide-and-conquer run come from.
@@ -625,7 +636,8 @@ fn run_subset<S: SingleCellReading>(
 // Main //
 //////////
 
-/// Compute metacells by divide and conquer.
+/// Compute metacells by divide and conquer, after isolating rare gene module
+/// cells unless `dac.rare` is `None`.
 ///
 /// ### Params
 ///
@@ -703,16 +715,78 @@ pub fn compute_dac_metacells<S: SingleCellReading>(
     };
     let mut state = State::new(n, n_genes);
     let mut counts = 0;
-    let all: Vec<usize> = (0..n).collect();
-    run_subset(&source, &mut state, &all, 0, &mut counts, &ctx)?;
+    let mut rare = RareGeneModules {
+        module_of_cell: vec![-1; n],
+        module_of_gene: vec![-1; n_genes],
+        rare_gene_mask: vec![false; n_genes],
+        n_modules: 0,
+    };
+    if let Some(rare_params) = &dac.rare {
+        rare = find_rare_gene_modules(
+            |elements| source.rows(elements),
+            n,
+            n_genes,
+            params.select.lateral_gene_mask.as_deref(),
+            params.target_metacell_size,
+            target_pile_size,
+            rare_params,
+            verbose,
+        )?;
+        if rare.n_modules > 0 {
+            run_rare_piles(&source, &mut state, &rare, &mut counts, rare_params, &ctx)?;
+        }
+    }
+
+    let common: Vec<usize> = (0..n).filter(|&e| state.metacell[e] < 0).collect();
+    run_subset(&source, &mut state, &common, 0, &mut counts, &ctx)?;
 
     Ok(DacMetacellsResult {
         metacell_of_cell: state.metacell,
         dissolved_of_cell: state.dissolved,
         level_of_cell: state.level,
         n_metacells: counts,
-        selected_genes: (0..n_genes).filter(|&g| state.selected[g]).collect(),
+        selected_genes: (0..n_genes)
+            .filter(|&g| state.selected[g] || rare.rare_gene_mask[g])
+            .collect(),
+        rare_module_of_cell: rare.module_of_cell,
+        rare_module_of_gene: rare.module_of_gene,
     })
+}
+
+/// Run the cells of each rare gene module as their own pile, level 0, as
+/// upstream's `divide_and_conquer_pipeline`: no complete cover and the rare
+/// overrides of the deviant and dissolve parameters. The outliers rejoin the
+/// common cells.
+///
+/// ### Params
+///
+/// * `source` - Element source.
+/// * `state` - Results; updated in place.
+/// * `rare` - Detected modules.
+/// * `counts` - Next free metacell ID; advanced in place.
+/// * `rare_params` - Rare module parameters.
+/// * `ctx` - Run parameters.
+fn run_rare_piles<S: SingleCellReading>(
+    source: &Source<S>,
+    state: &mut State,
+    rare: &RareGeneModules,
+    counts: &mut usize,
+    rare_params: &RareParams,
+    ctx: &Ctx,
+) -> Result<(), ScErrors> {
+    let mut piles = vec![Vec::new(); rare.n_modules];
+    for (e, &m) in rare.module_of_cell.iter().enumerate() {
+        if m >= 0 {
+            piles[m as usize].push(e);
+        }
+    }
+    let mut rare_ctx = ctx.clone();
+    rare_ctx.direct.deviants.max_cell_fraction = rare_params.deviants_max_cell_fraction;
+    rare_ctx.direct.dissolve.min_robust_size_factor = rare_params.dissolve_min_robust_size_factor;
+    rare_ctx.direct.dissolve.min_convincing_gene_fold_factor =
+        rare_params.dissolve_min_convincing_gene_fold_factor;
+    rare_ctx.direct.must_complete_cover = false;
+    run_piles(source, state, &piles, counts, 0, &rare_ctx)
 }
 
 ///////////
