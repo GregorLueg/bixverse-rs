@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   test:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@v1
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@fix-r-shared-lib-mismatch
     with:
       # No R on this lane: only bixverse-r links libR.
       cpu-runs: |
