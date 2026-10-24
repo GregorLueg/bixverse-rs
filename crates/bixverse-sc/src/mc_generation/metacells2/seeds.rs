@@ -281,19 +281,26 @@ fn degree_product(
 ///
 /// ### Returns
 ///
-/// Nothing; `seed_of_cells` is fully populated on return.
+/// `Ok(())` with `seed_of_cells` fully populated.
+///
+/// ### Errors
+///
+/// `Mc2UnreachableCells` if a pass assigns nothing, i.e. some graph component
+/// holds no seed. Upstream aborts on the same condition.
 fn complete_seeds(
     outgoing: &CompressedSparseData2<f32, f32>,
     incoming: &CompressedSparseData2<f32, f32>,
     seed_of_cells: &mut [i32],
     seeds_count: usize,
     rng: &mut StdRng,
-) {
+) -> Result<(), ScErrors> {
     if seeds_count == 0 {
-        // Pathological: no seeds at all. Should not happen in practice
-        // because phase 1 + phase 2 produce at least one seed for any
-        // non-empty input.
-        return;
+        let n_unreachable = seed_of_cells.iter().filter(|&&s| s < 0).count();
+        return if n_unreachable == 0 {
+            Ok(())
+        } else {
+            Err(ScErrors::Mc2UnreachableCells { n_unreachable })
+        };
     }
 
     let n = seed_of_cells.len();
@@ -327,10 +334,8 @@ fn complete_seeds(
         }
     }
 
-    // Subsequent passes: each iteration must shrink the disconnected list
-    // strictly (an upstream invariant — if it didn't shrink, the graph
-    // would have a fully-disconnected component, which the caller's KNN
-    // construction precludes).
+    // Subsequent passes must shrink the disconnected list strictly, otherwise
+    // a component holds no seed and the loop would never end.
     while !disconnected.is_empty() {
         let prev_len = disconnected.len();
         let old = std::mem::take(&mut disconnected);
@@ -347,12 +352,13 @@ fn complete_seeds(
                 disconnected.push(node);
             }
         }
-        debug_assert!(
-            disconnected.len() < prev_len,
-            "complete_seeds did not converge: {} disconnected nodes remain",
-            disconnected.len()
-        );
+        if disconnected.len() == prev_len {
+            return Err(ScErrors::Mc2UnreachableCells {
+                n_unreachable: prev_len,
+            });
+        }
     }
+    Ok(())
 }
 
 /// Attempt to assign `node` to a seed by weighted sampling over its assigned
@@ -464,14 +470,16 @@ pub fn seeds_count_for(
     let min_by_size = ceil_div(total_size as f64, max_metacell_size as f64);
     let max_by_size = ceil_div(total_size as f64, min_metacell_size.max(1) as f64);
 
+    // Python's `round` is half to even
+    let midpoint = |a: i64, b: i64| ((a + b) as f64 / 2.0).round_ties_even() as i64;
     let count = if max_by_size < min_by_umis {
-        (max_by_size + min_by_umis + 1) / 2
+        midpoint(max_by_size, min_by_umis)
     } else if max_by_umis < min_by_size {
-        (max_by_umis + min_by_size + 1) / 2
+        midpoint(max_by_umis, min_by_size)
     } else {
         let lo = min_by_size.max(min_by_umis);
         let hi = max_by_size.min(max_by_umis);
-        (lo + hi + 1) / 2
+        midpoint(lo, hi)
     };
 
     (count.max(1)) as usize
@@ -503,6 +511,14 @@ pub fn seeds_count_for(
 ///   in phase 1.
 /// * `random_seed` - RNG seed.
 ///
+/// ### Returns
+///
+/// The new seed count.
+///
+/// ### Errors
+///
+/// `Mc2UnreachableCells` if some cells cannot reach any seed.
+///
 /// ### Panics
 ///
 /// Panics if either matrix is non-square, if the matrix dimensions don't
@@ -516,7 +532,7 @@ pub fn choose_seeds(
     min_seed_size_quantile: f32,
     max_seed_size_quantile: f32,
     random_seed: u64,
-) -> usize {
+) -> Result<usize, ScErrors> {
     let n = seed_of_cells.len();
     assert_eq!(outgoing.shape, (n, n), "outgoing shape mismatch");
     assert_eq!(incoming.shape, (n, n), "incoming shape mismatch");
@@ -536,15 +552,8 @@ pub fn choose_seeds(
         let mut connectivity = compute_initial_connectivity(incoming, seed_of_cells);
         let mut candidates: Vec<usize> = (0..n).filter(|&i| seed_of_cells[i] < 0).collect();
 
-        let unseeded = candidates.len();
-        let to_create = max_seeds_count - seeds_count;
-        // Upstream: ceil(unseeded / to_create). Guard the divisor.
-        let mean_seed_size = if to_create == 0 {
-            1
-        } else {
-            ((unseeded as f64) / (to_create as f64)).ceil() as usize
-        }
-        .max(1);
+        // upstream's `ceil(size_t / size_t)` is an integer division, so floor
+        let mean_seed_size = (candidates.len() / (max_seeds_count - seeds_count)).max(1);
 
         while seeds_count < max_seeds_count && retain_connected(&mut candidates, &connectivity) {
             let seed_node = choose_seed_node(
@@ -566,15 +575,11 @@ pub fn choose_seeds(
             seeds_count += 1;
         }
 
-        // -- Phase 2: top-up by degree if still under the cap.
+        // -- Phase 2: top-up by degree if still under the cap. Upstream sorts
+        // descending and pops from the back, so the lowest degree goes first.
         if seeds_count < max_seeds_count {
             let mut leftover: Vec<usize> = (0..n).filter(|&i| seed_of_cells[i] < 0).collect();
-            // Sort descending by (deg_in + 1) * (deg_out + 1).
-            leftover.sort_unstable_by(|&a, &b| {
-                let da = degree_product(outgoing, incoming, a);
-                let db = degree_product(outgoing, incoming, b);
-                db.cmp(&da)
-            });
+            leftover.sort_by_cached_key(|&node| degree_product(outgoing, incoming, node));
             for node in leftover.into_iter() {
                 if seeds_count >= max_seeds_count {
                     break;
@@ -586,9 +591,9 @@ pub fn choose_seeds(
     }
 
     // -- Phase 3: probabilistic completion. Always runs.
-    complete_seeds(outgoing, incoming, seed_of_cells, seeds_count, &mut rng);
+    complete_seeds(outgoing, incoming, seed_of_cells, seeds_count, &mut rng)?;
 
-    seeds_count
+    Ok(seeds_count)
 }
 
 ///////////
@@ -676,7 +681,7 @@ mod tests {
         );
 
         let mut seeds = vec![-1i32; 4];
-        let count = choose_seeds(&out, &inc, &mut seeds, 2, 0.0, 1.0, 42);
+        let count = choose_seeds(&out, &inc, &mut seeds, 2, 0.0, 1.0, 42).unwrap();
 
         // Every node assigned to one of the `count` seeds.
         assert!(
@@ -699,7 +704,7 @@ mod tests {
 
         let mut seeds = vec![-1i32; 4];
         seeds[0] = 0;
-        let count = choose_seeds(&out, &inc, &mut seeds, 2, 0.0, 1.0, 7);
+        let count = choose_seeds(&out, &inc, &mut seeds, 2, 0.0, 1.0, 7).unwrap();
 
         assert_eq!(seeds[0], 0);
         assert!(seeds.iter().all(|&s| s >= 0));
@@ -720,8 +725,8 @@ mod tests {
 
         let mut a = vec![-1i32; 6];
         let mut b = vec![-1i32; 6];
-        let ca = choose_seeds(&out, &inc, &mut a, 3, 0.0, 1.0, 99);
-        let cb = choose_seeds(&out, &inc, &mut b, 3, 0.0, 1.0, 99);
+        let ca = choose_seeds(&out, &inc, &mut a, 3, 0.0, 1.0, 99).unwrap();
+        let cb = choose_seeds(&out, &inc, &mut b, 3, 0.0, 1.0, 99).unwrap();
         assert_eq!(ca, cb);
         assert_eq!(a, b);
     }

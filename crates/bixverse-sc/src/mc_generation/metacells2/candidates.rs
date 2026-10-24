@@ -1,29 +1,35 @@
 //! Candidate metacell orchestration.
 //!
-//! Faithful port of upstream MC2's `compute_candidate_metacells`. Wraps the
-//! SA partition optimiser (`partition.rs`) in an outer loop that:
+//! Port of upstream MC2's `compute_candidate_metacells`
+//! (`metacells/tools/candidates.py`). Wraps the SA partition optimiser
+//! (`partition.rs`) in an outer loop that:
 //!
 //! 1. Optimises an initial seed partition.
 //! 2. Splits oversized partitions (random multi-way) and cuts loosely-coupled
-//!    partitions (Stoer-Wagner min-cut), reseeds the affected cells, and
-//!    re-optimises. Repeats until no further splits/cuts.
-//! 3. Detects small partitions, dissolves them to outliers, reseeds the
-//!    leftover cells, and re-optimises. Repeats until either no more
-//!    small partitions exist or the score stops improving.
+//!    partitions (min-cut), reseeds the affected cells, and re-optimises.
+//!    Repeats until no further splits/cuts.
+//! 3. Detects small partitions, cancels them, reseeds their cells, and
+//!    re-optimises. Repeats until fewer than two small partitions remain or
+//!    the result stops improving, in which case the previous one is kept.
+//!
+//! ### Min cut
+//!
+//! Upstream hands igraph `float32` capacities, which igraph ignores, so its
+//! cut minimises the number of edges while the reported strength uses the
+//! weights. This port does the same: the cut is an unweighted Stoer-Wagner
+//! over the symmetrised community graph and the strength is upstream's mean
+//! weight ratio. In practice that leaves connected communities alone unless
+//! a cut with fewer edges than the minimum degree exists.
 //!
 //! ### Outputs
 //!
-//! Returns a fully populated `partition_of_cells: Vec<i32>` where every
-//! entry is `>= 0` and IDs are dense `0..n_partitions`. On exit the inner
-//! loop has converged and downstream stages (deviants, dissolve, projection)
-//! can run on the result.
+//! Every cell ends up in a candidate, with dense IDs `0..n_partitions`.
 
 use std::collections::BTreeSet;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
 
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::transpose_sparse;
@@ -36,16 +42,59 @@ use super::seeds::{choose_seeds, seeds_count_for};
 // Consts //
 ////////////
 
-/// Increase the upper-size threshold by 1% per outer phase. Mirrors upstream's
-/// `increase_phase` constant.
+/// Growth of the upper size bound per inner phase. Upstream's `increase_phase`.
 const INCREASE_PHASE: f64 = 1.01;
 
+/// Starting score of the outer loop, above any real score so the first pass
+/// always counts as an improvement. Upstream's `old_score = 1e9`.
+const INITIAL_OLD_SCORE: f64 = 1e9;
+
 ///////////
-// Enums //
+// Types //
 ///////////
 
-/// Stoer-Wagner result: `(cut_strength, partition_a, partition_b)`.
-type MinCut = (f64, Vec<usize>, Vec<usize>);
+/// Min-cut result on one community.
+#[derive(Debug)]
+pub(super) struct MinCut {
+    /// Upstream's cut strength; `None` when either side has no internal edge.
+    pub(super) strength: Option<f64>,
+    /// Global cell indices of the first side (the merged Stoer-Wagner group).
+    pub(super) first: Vec<usize>,
+    /// Global cell indices of the second side.
+    pub(super) second: Vec<usize>,
+}
+
+/// Outcome of a min-cut attempt on a single community.
+#[derive(PartialEq, Eq, Debug)]
+enum CutAction {
+    /// The community was left unchanged.
+    Unchanged,
+    /// The community was split into two communities.
+    Split,
+    /// The small side was demoted to outliers; the large side remains.
+    Cut,
+}
+
+/// Size and UMI bounds shared by the stages of one candidates run.
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    /// Lower UMI bound per metacell.
+    min_umis: f64,
+    /// Target UMIs per metacell.
+    target_umis: f64,
+    /// Upper UMI bound per metacell.
+    max_umis: f64,
+    /// Lower cell-count bound per metacell.
+    min_size: usize,
+    /// Target cell count per metacell.
+    target_size: usize,
+    /// Upper cell-count bound per metacell, before any `INCREASE_PHASE` growth.
+    max_size: usize,
+}
+
+/////////////
+// Helpers //
+/////////////
 
 /// Group cell indices by partition id, ascending within each group.
 ///
@@ -67,73 +116,50 @@ fn bucket_cells_by_partition(partition_of_cells: &[i32], n_partitions: usize) ->
     buckets
 }
 
-/// Outcome of a min-cut attempt on a single community.
-#[derive(PartialEq, Eq, Debug)]
-enum CutAction {
-    /// The community was left unchanged (cut too strong, or already atomic).
-    Unchanged,
-    /// The community was split into two new communities.
-    Split,
-    /// The small side was demoted to outliers; the large side remains.
-    Cut,
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Inner phase loop: alternate SA optimisation and cut/split passes until
-/// neither produces any changes.
+/// Inner phase loop (upstream `_reduce_communities`): alternate SA
+/// optimisation and cut/split passes until neither changes anything.
 ///
-/// On each iteration, optimises the current partition, nudges
-/// `max_metacell_size` upward by `INCREASE_PHASE`, then runs
-/// `cut_split_communities`. If no splits or cuts occurred, the partition has
-/// converged and the loop exits. Otherwise the demoted cells are reseeded and
-/// the loop repeats.
+/// The RNG is seeded once per call, so the splits of successive inner
+/// iterations draw from one stream, as upstream's `np.random.seed` at the top
+/// of the function. The upper size bound grows by `INCREASE_PHASE` per
+/// iteration and is local to the call.
 ///
 /// ### Params
 ///
 /// * `outgoing`, `incoming` - CSR graph and incoming-neighbour transpose.
 /// * `partition_of_cells` - Current assignment; modified in place.
-/// * `hot_communities` - Communities eligible for SA moves; updated in place.
-/// * `cell_umis` - Per-cell UMI counts.
-/// * `min_metacell_umis`, `max_metacell_umis` - UMI budget bounds.
-/// * `target_umis` - Ideal per-metacell UMI count.
-/// * `min_metacell_size` - Minimum acceptable cell count per metacell.
-/// * `target_size` - Ideal cell count per metacell.
-/// * `max_metacell_size` - Current upper cell-count bound; grown each
-///   iteration.
+/// * `hot_communities` - Communities eligible for SA moves.
+/// * `cell_umis` - Per-cell mass.
+/// * `bounds` - Size and UMI bounds.
 /// * `params` - Top-level MC2 parameters.
-/// * `cold_temperature` - Starting SA temperature for frozen communities.
-/// * `atomic_candidates` - Memoisation set for min-cut cell sets already tried.
+/// * `cold_temperature` - SA temperature for frozen communities.
+/// * `atomic_candidates` - Cell sets a min cut already left unchanged.
 /// * `random_seed` - Master RNG seed.
 ///
 /// ### Returns
 ///
-/// `(cold_temperature, score)` after convergence.
+/// `(cold_temperature, score)` after convergence; the temperature has been
+/// cooled once per inner iteration.
 #[allow(clippy::too_many_arguments)]
 fn reduce_communities(
     outgoing: &CompressedSparseData2<f32, f32>,
     incoming: &CompressedSparseData2<f32, f32>,
     partition_of_cells: &mut [i32],
-    hot_communities: &mut Vec<usize>,
+    mut hot_communities: Vec<usize>,
     cell_umis: &[f32],
-    min_metacell_umis: f64,
-    max_metacell_umis: f64,
-    target_umis: f64,
-    min_metacell_size: usize,
-    target_size: usize,
-    max_metacell_size: &mut f64,
+    bounds: &Bounds,
     params: &MetacellsParams,
     mut cold_temperature: f64,
     atomic_candidates: &mut BTreeSet<Vec<usize>>,
     random_seed: u64,
-) -> (f64, f64) {
+) -> Result<(f64, f64), ScErrors> {
+    let mut rng = StdRng::seed_from_u64(random_seed);
+    let mut max_size = bounds.max_size as f64;
     loop {
-        let n_partitions = max_partition_id(partition_of_cells) + 1;
+        let n_partitions = count_partitions(partition_of_cells);
         let mut hot_mask = vec![false; n_partitions];
-        for &p in hot_communities.iter() {
-            if p < hot_mask.len() {
+        for &p in &hot_communities {
+            if p < n_partitions {
                 hot_mask[p] = true;
             }
         }
@@ -143,12 +169,12 @@ fn reduce_communities(
             incoming,
             cell_umis,
             partition_of_cells,
-            min_metacell_umis,
-            target_umis,
-            max_metacell_umis,
-            min_metacell_size as f64,
-            target_size as f64,
-            *max_metacell_size,
+            bounds.min_umis,
+            bounds.target_umis,
+            bounds.max_umis,
+            bounds.min_size as f64,
+            bounds.target_size as f64,
+            max_size,
             &params.partition,
             cold_temperature,
             hot_mask,
@@ -156,36 +182,27 @@ fn reduce_communities(
         );
 
         cold_temperature *= 1.0 - params.partition.cooldown_phase;
-        *max_metacell_size *= INCREASE_PHASE;
+        max_size *= INCREASE_PHASE;
 
         let (split_count, cut_count, new_hot) = cut_split_communities(
             outgoing,
             partition_of_cells,
             cell_umis,
-            min_metacell_umis,
-            max_metacell_umis,
-            target_umis,
-            min_metacell_size,
-            target_size,
-            *max_metacell_size,
-            params.partition.max_split_min_cut_strength,
-            params.partition.min_cut_seed_cells,
-            params.must_complete_cover,
+            bounds,
+            max_size,
+            params,
             atomic_candidates,
-            random_seed,
+            &mut rng,
         );
-
-        *hot_communities = new_hot;
+        hot_communities = new_hot;
 
         if split_count + cut_count == 0 {
-            return (cold_temperature, score);
+            return Ok((cold_temperature, score));
         }
 
-        // Reseed only the cells that were demoted to -1 by splits/cuts.
-        let mut max_seeds_count = max_partition_id(partition_of_cells) + 1;
+        let mut max_seeds_count = count_partitions(partition_of_cells);
         if cut_count > 0 {
-            // A cut creates one extra seed slot for the dropped cells to
-            // glue onto something other than the originating community.
+            // a slot for the cut cells to form a community of their own
             hot_communities.push(max_seeds_count);
             max_seeds_count += 1;
         }
@@ -197,39 +214,30 @@ fn reduce_communities(
             params.partition.min_seed_size_quantile,
             params.partition.max_seed_size_quantile,
             random_seed,
-        );
+        )?;
     }
 }
 
-/// Run one round of random splits (Phase A) and min-cut splitting (Phase B).
+/// Run one round of random splits (phase A) and min-cut splitting (phase B),
+/// as upstream's `_cut_split_communities`.
 ///
 /// Phase A splits each community whose size or UMI total is above the current
-/// maximum into random k-way parts, demoting all but one seed cell per part to
-/// `-1`. If any Phase A splits occurred, Phase B is skipped.
+/// maximum into random parts, keeping one random cell per part and demoting
+/// the rest to `-1`. If any split happened, phase B is skipped.
 ///
-/// Phase B runs Stoer-Wagner min-cut on each community. A low-strength cut is
-/// accepted as a split if the smaller partition meets `min_cut_seed_cells`;
-/// otherwise the small side is demoted to outliers (cut), unless
-/// `must_complete_cover` prevents it.
+/// Phase B min-cuts each community not already known to be atomic.
 ///
 /// ### Params
 ///
 /// * `outgoing` - CSR outgoing-neighbour graph.
 /// * `partition_of_cells` - Current assignment; modified in place.
-/// * `cell_umis` - Per-cell UMI counts.
-/// * `min_metacell_umis`, `max_metacell_umis` - UMI budget bounds.
-/// * `target_umis` - Ideal UMI count per metacell.
-/// * `min_metacell_size` - Minimum acceptable cell count per metacell.
-/// * `target_size` - Ideal cell count per metacell.
-/// * `max_metacell_size` - Current upper cell-count bound.
-/// * `max_split_min_cut_strength` - Cut-strength threshold; cuts above this are
-///   rejected.
-/// * `min_cut_seed_cells` - Minimum cells for the small side to be a split
-///   rather than a cut.
-/// * `must_complete_cover` - If `true`, never demote cells to outliers.
+/// * `cell_umis` - Per-cell mass.
+/// * `bounds` - Size and UMI bounds.
+/// * `max_size` - Current, grown upper size bound.
+/// * `params` - Top-level MC2 parameters.
 /// * `atomic_candidates` - Memoisation set; cell sets already tried are
 ///   skipped.
-/// * `random_seed` - RNG seed.
+/// * `rng` - The reduce call's RNG stream.
 ///
 /// ### Returns
 ///
@@ -239,24 +247,17 @@ fn cut_split_communities(
     outgoing: &CompressedSparseData2<f32, f32>,
     partition_of_cells: &mut [i32],
     cell_umis: &[f32],
-    min_metacell_umis: f64,
-    max_metacell_umis: f64,
-    target_umis: f64,
-    min_metacell_size: usize,
-    target_size: usize,
-    max_metacell_size: f64,
-    max_split_min_cut_strength: f64,
-    min_cut_seed_cells: usize,
-    must_complete_cover: bool,
+    bounds: &Bounds,
+    max_size: f64,
+    params: &MetacellsParams,
     atomic_candidates: &mut BTreeSet<Vec<usize>>,
-    random_seed: u64,
+    rng: &mut StdRng,
 ) -> (usize, usize, Vec<usize>) {
-    let n_partitions = max_partition_id(partition_of_cells) + 1;
+    let n_partitions = count_partitions(partition_of_cells);
     let mut split_count = 0usize;
     let mut cut_count = 0usize;
     let mut next_new = n_partitions;
     let mut hot_communities: Vec<usize> = Vec::new();
-    let mut rng = StdRng::seed_from_u64(random_seed.wrapping_add(0x5EED5_5EED5_5EED5));
 
     // Buckets are taken once: both phases only rewrite cells of the community
     // being visited, to ids >= n_partitions or -1, so later buckets stay valid.
@@ -264,47 +265,40 @@ fn cut_split_communities(
 
     // Phase A: random splits.
     for (community_index, cells) in buckets.iter().enumerate() {
-        if cells.is_empty() {
-            continue;
-        }
         let community_size = cells.len();
         let community_umis: f64 = cells.iter().map(|&i| cell_umis[i] as f64).sum();
 
         let too_large_by_umis =
-            community_umis > max_metacell_umis && community_size >= 3 * min_metacell_size;
+            community_umis > bounds.max_umis && community_size >= 3 * bounds.min_size;
         let too_large_by_size =
-            community_size as f64 > max_metacell_size && community_umis >= 3.0 * min_metacell_umis;
-
+            community_size as f64 > max_size && community_umis >= 3.0 * bounds.min_umis;
         if !(too_large_by_umis || too_large_by_size) {
             continue;
         }
 
-        let split_parts_count = ((community_umis / target_umis).round() as usize)
-            .min((community_size as f64 / target_size as f64).round() as usize)
-            .max(2);
+        // Python's round is half to even
+        let by_umis = (community_umis / bounds.target_umis).round_ties_even() as usize;
+        let by_size =
+            (community_size as f64 / bounds.target_size as f64).round_ties_even() as usize;
+        let split_parts_count = by_umis.min(by_size).max(2);
 
-        // Repeat assignment until every part is non-empty (statistically
-        // almost always one shot, but cheap to verify).
-        let mut assignment;
-        loop {
-            assignment = (0..cells.len())
+        let assignment = loop {
+            let assignment: Vec<usize> = (0..community_size)
                 .map(|_| rng.random_range(0..split_parts_count))
-                .collect::<Vec<usize>>();
+                .collect();
             if (0..split_parts_count).all(|s| assignment.contains(&s)) {
-                break;
+                break assignment;
             }
-        }
+        };
 
-        // Demote everyone, then re-seed one cell per part.
         for &c in cells {
             partition_of_cells[c] = -1;
         }
         for split_index in 0..split_parts_count {
             let in_part: Vec<usize> = cells
                 .iter()
-                .copied()
-                .zip(assignment.iter().copied())
-                .filter_map(|(c, s)| if s == split_index { Some(c) } else { None })
+                .zip(&assignment)
+                .filter_map(|(&c, &s)| (s == split_index).then_some(c))
                 .collect();
             let seed_cell = in_part[rng.random_range(0..in_part.len())];
             let target_id = if split_index == 0 {
@@ -327,7 +321,7 @@ fn cut_split_communities(
     // Phase B: min-cut. Buckets are ascending, so a bucket is its own memo key.
     // The cuts are pure functions of the graph and are solved in parallel; the
     // partition ids they hand out are then applied in community order.
-    let cuts: Vec<Option<Option<MinCut>>> = buckets
+    let cuts: Vec<Option<MinCut>> = buckets
         .par_iter()
         .map_init(
             || vec![-1_i32; outgoing.shape.0],
@@ -335,7 +329,7 @@ fn cut_split_communities(
                 if cells.len() < 2 || atomic_candidates.contains(cells) {
                     return None;
                 }
-                Some(stoer_wagner(outgoing, cells, local_of_global))
+                Some(min_cut(outgoing, cells, local_of_global))
             },
         )
         .collect();
@@ -345,17 +339,14 @@ fn cut_split_communities(
             continue;
         };
 
-        let action = min_cut_community(
+        match min_cut_community(
             partition_of_cells,
-            cells,
             cut,
-            max_split_min_cut_strength,
-            min_cut_seed_cells,
-            must_complete_cover,
+            params.partition.max_split_min_cut_strength,
+            params.partition.min_cut_seed_cells,
+            params.must_complete_cover,
             next_new as i32,
-        );
-
-        match action {
+        ) {
             CutAction::Unchanged => {
                 atomic_candidates.insert(cells.to_vec());
             }
@@ -375,257 +366,251 @@ fn cut_split_communities(
     (split_count, cut_count, hot_communities)
 }
 
-/// Run Stoer-Wagner min-cut on the induced subgraph of `cells` and apply
-/// the result to `partition_of_cells`.
+/// Apply a min cut to one community, as upstream's `_min_cut_community`.
 ///
-/// If the cut strength exceeds `max_split_min_cut_strength`, the community is
-/// left unchanged. Otherwise the smaller partition is either promoted to a new
-/// community (if `>= min_cut_seed_cells` cells) or demoted to outliers.
+/// A cut with no strength (one side without internal edges) or with strength
+/// above `max_split_min_cut_strength` leaves the community alone. Otherwise,
+/// if the smaller side has at least `min_cut_seed_cells` cells, the second
+/// side becomes a new community (split). Failing that the small side is
+/// demoted to outliers (cut), unless `must_complete_cover` is set and the cut
+/// is not a disconnection.
 ///
 /// ### Params
 ///
 /// * `partition_of_cells` - Current assignment; modified in place.
-/// * `cells` - Global cell indices belonging to this community.
-/// * `cut` - The [stoer_wagner] result for `cells`.
-/// * `max_split_min_cut_strength` - Strength threshold above which the cut is
-///   rejected.
-/// * `min_cut_seed_cells` - Minimum cells in the small partition to accept a
-///   split.
-/// * `must_complete_cover` - If `true`, never demote cells to outliers.
-/// * `new_community_index` - Partition ID to assign to the larger half on a
-///   split.
+/// * `cut` - The [`min_cut`] result for the community.
+/// * `max_split_min_cut_strength` - Strength above which the cut is rejected.
+/// * `min_cut_seed_cells` - Smallest small side that is split off rather than
+///   cut.
+/// * `must_complete_cover` - If `true`, only disconnected cells are demoted.
+/// * `new_community_index` - Partition ID for the second side on a split.
 ///
 /// ### Returns
 ///
-/// A `CutAction` describing the outcome.
-#[allow(clippy::too_many_arguments)]
+/// A [`CutAction`] describing the outcome.
 fn min_cut_community(
     partition_of_cells: &mut [i32],
-    cells: &[usize],
-    cut: Option<MinCut>,
+    cut: MinCut,
     max_split_min_cut_strength: f64,
     min_cut_seed_cells: usize,
     must_complete_cover: bool,
     new_community_index: i32,
 ) -> CutAction {
-    if cells.len() < 2 {
-        return CutAction::Unchanged;
-    }
-
-    let Some((cut_strength, partition_a, partition_b)) = cut else {
+    let Some(strength) = cut.strength else {
         return CutAction::Unchanged;
     };
-
-    if cut_strength > max_split_min_cut_strength {
+    if strength > max_split_min_cut_strength {
         return CutAction::Unchanged;
     }
 
-    let (small, large) = if partition_a.len() <= partition_b.len() {
-        (partition_a, partition_b)
+    // upstream takes the first side only when it is strictly smaller
+    let small = if cut.first.len() < cut.second.len() {
+        &cut.first
     } else {
-        (partition_b, partition_a)
+        &cut.second
     };
 
     if small.len() >= min_cut_seed_cells {
-        for &c in &large {
+        for &c in &cut.second {
             partition_of_cells[c] = new_community_index;
         }
         return CutAction::Split;
     }
 
-    if must_complete_cover && cut_strength > 0.0 {
+    if must_complete_cover && strength > 0.0 {
         return CutAction::Unchanged;
     }
 
-    // demote the small side to outliers.
-    for &c in &small {
+    for &c in small {
         partition_of_cells[c] = -1;
     }
     CutAction::Cut
 }
 
-/// Global min-cut via Stoer-Wagner on the induced subgraph of `cells`.
+/// Upstream's min cut of the community graph `W + W^T` restricted to `cells`.
 ///
-/// Builds a symmetric local weight matrix, runs maximum-adjacency ordering
-/// `n - 1` times, and tracks the minimum cut-of-the-phase. Cut strength is
-/// normalised by total within-community edge weight so it is comparable across
-/// communities of different sizes.
+/// The cut itself is an unweighted Stoer-Wagner (every edge counts 1, see the
+/// module docs). The strength is computed on the real weights:
+/// `(cut / (|A| |B|)) / sqrt(mean_A * mean_B)` where `mean_X` is the internal
+/// weight of side `X` over its pair count; `0` when the cut carries no weight
+/// and `None` when either side has no internal weight.
 ///
 /// ### Params
 ///
 /// * `outgoing` - CSR outgoing-neighbour graph.
-/// * `cells` - Global cell indices forming the subgraph.
+/// * `cells` - Global cell indices forming the subgraph, at least two.
 /// * `local_of_global` - Scratch of length `outgoing.shape.0`, all `-1` on
 ///   entry and restored to all `-1` before return.
 ///
 /// ### Returns
 ///
-/// `Some((cut_strength, partition_a, partition_b))` where `partition_a` and
-/// `partition_b` are global cell indices on either side of the minimum cut.
-/// Returns `None` if `cells.len() < 2`.
-fn stoer_wagner(
+/// The [`MinCut`].
+pub(super) fn min_cut(
     outgoing: &CompressedSparseData2<f32, f32>,
     cells: &[usize],
     local_of_global: &mut [i32],
-) -> Option<MinCut> {
+) -> MinCut {
     let n = cells.len();
-    if n < 2 {
-        return None;
-    }
+    debug_assert!(n >= 2);
 
-    // map global cell index → local index in [0, n).
     for (local, &global) in cells.iter().enumerate() {
         local_of_global[global] = local as i32;
     }
 
-    // Build symmetric weight matrix on the local index space.
-    // weight[i][j] = sum of outgoing weights in either direction.
-    let mut weight = vec![vec![0.0f64; n]; n];
-    let mut total_weight = 0.0f64;
+    // symmetric local weights, flat row-major n x n
+    let mut weight = vec![0.0f64; n * n];
     for (local_i, &global_i) in cells.iter().enumerate() {
         let start = outgoing.indptr[global_i] as usize;
         let end = outgoing.indptr[global_i + 1] as usize;
         for idx in start..end {
-            let global_j = outgoing.indices[idx] as usize;
-            let local_j = local_of_global[global_j];
-            if local_j < 0 {
+            let local_j = local_of_global[outgoing.indices[idx] as usize];
+            if local_j < 0 || local_j as usize == local_i {
                 continue;
             }
             let local_j = local_j as usize;
-            if local_j == local_i {
-                continue;
-            }
             let w = outgoing.data[idx] as f64;
-            weight[local_i][local_j] += w;
-            weight[local_j][local_i] += w;
-            total_weight += w;
+            weight[local_i * n + local_j] += w;
+            weight[local_j * n + local_i] += w;
         }
     }
-
     for &global in cells {
         local_of_global[global] = -1;
     }
 
-    if total_weight <= 0.0 {
-        // disconnected: arbitrary singleton split.
-        let mut a = Vec::with_capacity(1);
-        let mut b = Vec::with_capacity(n - 1);
-        a.push(cells[0]);
-        b.extend_from_slice(&cells[1..]);
-        return Some((0.0, a, b));
+    let edges: Vec<f64> = weight
+        .iter()
+        .map(|&w| if w > 0.0 { 1.0 } else { 0.0 })
+        .collect();
+    let first_local = stoer_wagner(edges, n);
+
+    let mut is_first = vec![false; n];
+    for &l in &first_local {
+        is_first[l] = true;
     }
-
-    // groups[v] = the original local indices currently merged into v.
-    let mut groups: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    let mut alive = vec![true; n];
-    let mut best_cut = f64::INFINITY;
-    let mut best_partition: Vec<usize> = Vec::new();
-
-    for _ in 0..(n - 1) {
-        // maximum-adjacency ordering on alive vertices.
-        let alive_set: Vec<usize> = (0..n).filter(|&i| alive[i]).collect();
-        let m = alive_set.len();
-        if m < 2 {
-            break;
-        }
-        let mut in_a = vec![false; n];
-        let mut weights_to_a = vec![0.0f64; n];
-
-        // start from the first alive vertex.
-        let mut order: Vec<usize> = Vec::with_capacity(m);
-        let start = alive_set[0];
-        in_a[start] = true;
-        order.push(start);
-        for &v in &alive_set {
-            if v != start {
-                weights_to_a[v] = weight[start][v];
+    let (mut cut_w, mut first_w, mut second_w) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        for j in 0..i {
+            let w = weight[i * n + j];
+            match (is_first[i], is_first[j]) {
+                (true, true) => first_w += w,
+                (false, false) => second_w += w,
+                _ => cut_w += w,
             }
         }
+    }
 
-        for _ in 1..m {
-            // pick the alive, not-in-A vertex with the maximum weight to A.
+    let first_size = first_local.len() as f64;
+    let second_size = (n - first_local.len()) as f64;
+    let strength = if cut_w == 0.0 {
+        Some(0.0)
+    } else if first_w > 0.0 && second_w > 0.0 {
+        let cut_mean = cut_w / (first_size * second_size);
+        let first_mean = first_w / (first_size * (first_size - 1.0) / 2.0);
+        let second_mean = second_w / (second_size * (second_size - 1.0) / 2.0);
+        Some(cut_mean / (first_mean * second_mean).sqrt())
+    } else {
+        None
+    };
+
+    let mut first = Vec::with_capacity(first_local.len());
+    let mut second = Vec::with_capacity(n - first_local.len());
+    for (local, &global) in cells.iter().enumerate() {
+        if is_first[local] {
+            first.push(global);
+        } else {
+            second.push(global);
+        }
+    }
+
+    MinCut {
+        strength,
+        first,
+        second,
+    }
+}
+
+/// Stoer-Wagner global minimum cut.
+///
+/// Runs `n - 1` maximum-adjacency phases, merging the last two vertices of
+/// each, and keeps the lightest cut-of-the-phase. `O(n^3)`; communities are
+/// metacell sized, so this stays small.
+///
+/// ### Params
+///
+/// * `weight` - Symmetric flat row-major `n × n` capacities; consumed as
+///   merge scratch.
+/// * `n` - Vertex count, at least two.
+///
+/// ### Returns
+///
+/// The local vertex indices on one side of the minimum cut.
+fn stoer_wagner(mut weight: Vec<f64>, n: usize) -> Vec<usize> {
+    let mut groups: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    let mut alive: Vec<usize> = (0..n).collect();
+    let mut best_cut = f64::INFINITY;
+    let mut best_group: Vec<usize> = Vec::new();
+
+    let mut in_a = vec![false; n];
+    let mut weights_to_a = vec![0.0f64; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+
+    while alive.len() > 1 {
+        for &v in &alive {
+            in_a[v] = false;
+            weights_to_a[v] = 0.0;
+        }
+        order.clear();
+
+        for _ in 0..alive.len() {
+            // the alive vertex outside A most tightly connected to A
             let mut best = usize::MAX;
             let mut best_w = f64::NEG_INFINITY;
-            for &v in &alive_set {
+            for &v in &alive {
                 if !in_a[v] && weights_to_a[v] > best_w {
                     best = v;
                     best_w = weights_to_a[v];
                 }
             }
-            if best == usize::MAX {
-                break;
-            }
             in_a[best] = true;
             order.push(best);
-            for &v in &alive_set {
+            for &v in &alive {
                 if !in_a[v] {
-                    weights_to_a[v] += weight[best][v];
+                    weights_to_a[v] += weight[best * n + v];
                 }
             }
         }
 
-        if order.len() < 2 {
-            break;
-        }
-
-        // last vertex added defines the cut-of-the-phase.
         let last = order[order.len() - 1];
         let prev = order[order.len() - 2];
-        // weight of cut separating `last`
-        let cut_w = weights_to_a[last];
-
-        if cut_w < best_cut {
-            best_cut = cut_w;
-            best_partition = groups[last].clone();
+        if weights_to_a[last] < best_cut {
+            best_cut = weights_to_a[last];
+            best_group = groups[last].clone();
         }
 
-        // merge `last` into `prev`.
         let last_group = std::mem::take(&mut groups[last]);
         groups[prev].extend(last_group);
-        alive[last] = false;
-        // update weight matrix: weight[prev][v] += weight[last][v].
-        for v in 0..n {
-            if v != prev && v != last && alive[v] {
-                weight[prev][v] += weight[last][v];
-                weight[v][prev] += weight[v][last];
+        alive.retain(|&v| v != last);
+        for &v in &alive {
+            if v != prev {
+                let merged = weight[prev * n + v] + weight[last * n + v];
+                weight[prev * n + v] = merged;
+                weight[v * n + prev] = merged;
             }
         }
     }
 
-    if best_partition.is_empty() {
-        return None;
-    }
-
-    let strength = best_cut / total_weight;
-    let small_set: FxHashSet<usize> = best_partition.into_iter().collect();
-    let mut a = Vec::with_capacity(small_set.len());
-    let mut b = Vec::with_capacity(n - small_set.len());
-    for (local, &global) in cells.iter().enumerate() {
-        if small_set.contains(&local) {
-            a.push(global);
-        } else {
-            b.push(global);
-        }
-    }
-    Some((strength, a, b))
+    best_group
 }
 
-/// Identify communities that are too small by cell count or UMI total.
-///
-/// A community is flagged if it is below `lowest_metacell_size`, below
-/// `min_metacell_size` with insufficient UMIs, or below `min_metacell_umis`
-/// with insufficient cells.
+/// Identify communities that are too small by cell count or UMI total, as
+/// upstream's `_find_small_communities`.
 ///
 /// ### Params
 ///
 /// * `partition_of_cells` - Current assignment vector.
-/// * `cell_umis` - Per-cell UMI counts.
-/// * `min_metacell_umis` - Minimum acceptable UMI total per metacell.
-/// * `max_metacell_umis` - Upper UMI bound; used in the size threshold check.
-/// * `min_metacell_size` - Minimum acceptable cell count per metacell.
-/// * `max_metacell_size` - Upper cell-count bound; used in the UMI threshold
-///   check.
-/// * `lowest_metacell_size`- Hard minimum; communities below this are always
+/// * `cell_umis` - Per-cell mass.
+/// * `bounds` - Size and UMI bounds (the ungrown ones).
+/// * `lowest_metacell_size` - Hard minimum; communities below this are always
 ///   flagged.
 ///
 /// ### Returns
@@ -634,13 +619,10 @@ fn stoer_wagner(
 fn find_small_communities(
     partition_of_cells: &[i32],
     cell_umis: &[f32],
-    min_metacell_umis: f64,
-    max_metacell_umis: f64,
-    min_metacell_size: usize,
-    max_metacell_size: usize,
+    bounds: &Bounds,
     lowest_metacell_size: usize,
 ) -> (Vec<usize>, usize, f64) {
-    let n_partitions = max_partition_id(partition_of_cells) + 1;
+    let n_partitions = count_partitions(partition_of_cells);
     let mut sizes = vec![0usize; n_partitions];
     let mut umis = vec![0.0f64; n_partitions];
     for (i, &p) in partition_of_cells.iter().enumerate() {
@@ -654,14 +636,10 @@ fn find_small_communities(
     let mut total_size = 0usize;
     let mut total_umis = 0.0f64;
     for p in 0..n_partitions {
-        let s = sizes[p];
-        let u = umis[p];
-        if s == 0 {
-            continue;
-        }
+        let (s, u) = (sizes[p], umis[p]);
         let is_tiny = s < lowest_metacell_size;
-        let too_few = s < min_metacell_size && 2.0 * u < max_metacell_umis;
-        let too_small_umis = u < min_metacell_umis && 2 * s < max_metacell_size;
+        let too_few = s < bounds.min_size && 2.0 * u < bounds.max_umis;
+        let too_small_umis = u < bounds.min_umis && 2 * s < bounds.max_size;
         if is_tiny || too_few || too_small_umis {
             small.push(p);
             total_size += s;
@@ -684,20 +662,22 @@ fn find_small_communities(
 ///
 /// The number of surviving communities after cancellation.
 fn cancel_communities(partition_of_cells: &mut [i32], cancelled: &[usize]) -> usize {
-    let cancelled_set: FxHashSet<usize> = cancelled.iter().copied().collect();
-    let n_partitions = max_partition_id(partition_of_cells) + 1;
+    let n_partitions = count_partitions(partition_of_cells);
+    let mut is_cancelled = vec![false; n_partitions];
+    for &c in cancelled {
+        is_cancelled[c] = true;
+    }
     let mut new_id = vec![-1i32; n_partitions];
     let mut next = 0i32;
     for p in 0..n_partitions {
-        if !cancelled_set.contains(&p) {
+        if !is_cancelled[p] {
             new_id[p] = next;
             next += 1;
         }
     }
     for v in partition_of_cells.iter_mut() {
         if *v >= 0 {
-            let nid = new_id[*v as usize];
-            *v = nid; // either remapped or -1 if cancelled
+            *v = new_id[*v as usize];
         }
     }
     next as usize
@@ -709,7 +689,7 @@ fn cancel_communities(partition_of_cells: &mut [i32], cancelled: &[usize]) -> us
 ///
 /// * `partition_of_cells` - Current assignment; modified in place.
 fn compact_partition_ids(partition_of_cells: &mut [i32]) {
-    let n_partitions = max_partition_id(partition_of_cells) + 1;
+    let n_partitions = count_partitions(partition_of_cells);
     let mut seen = vec![false; n_partitions];
     for &p in partition_of_cells.iter() {
         if p >= 0 {
@@ -731,8 +711,7 @@ fn compact_partition_ids(partition_of_cells: &mut [i32]) {
     }
 }
 
-/// Return the largest non-negative partition ID, or `0` if all entries are
-/// `-1`.
+/// Number of partition IDs in use: the largest ID plus one.
 ///
 /// ### Params
 ///
@@ -740,15 +719,9 @@ fn compact_partition_ids(partition_of_cells: &mut [i32]) {
 ///
 /// ### Returns
 ///
-/// The maximum ID as `usize`.
-fn max_partition_id(partition_of_cells: &[i32]) -> usize {
-    partition_of_cells
-        .iter()
-        .copied()
-        .filter(|&p| p >= 0)
-        .max()
-        .unwrap_or(-1)
-        .max(-1) as usize
+/// `max + 1`, or `0` when every entry is `-1`.
+fn count_partitions(partition_of_cells: &[i32]) -> usize {
+    (partition_of_cells.iter().copied().max().unwrap_or(-1) + 1).max(0) as usize
 }
 
 /// Transpose `outgoing` and re-flag the result as CSR so that row `i` lists
@@ -786,7 +759,8 @@ pub fn make_incoming_view(
 ///
 /// * `outgoing` - CSR weighted graph (cell-cell similarity KNN).
 /// * `incoming` - Same matrix transposed and re-flagged as CSR.
-/// * `cell_umis` - Per-cell UMI counts as `f32` mass.
+/// * `cell_umis` - Per-cell mass (UMIs, or cells per group when the "cells"
+///   are metacells in divide and conquer).
 /// * `params` - Top-level metacells parameters.
 /// * `random_seed` - Master RNG seed.
 ///
@@ -794,13 +768,18 @@ pub fn make_incoming_view(
 ///
 /// `partition_of_cells` of length `n`, with every entry `>= 0` and IDs in
 /// `[0, n_partitions)`.
+///
+/// ### Errors
+///
+/// * `Mc2InvalidParams` if the size or UMI bounds collapse.
+/// * `Mc2UnreachableCells` from seeding.
 pub fn compute_candidate_metacells(
     outgoing: &CompressedSparseData2<f32, f32>,
     incoming: &CompressedSparseData2<f32, f32>,
     cell_umis: &[f32],
     params: &MetacellsParams,
     random_seed: u64,
-) -> Vec<i32> {
+) -> Result<Vec<i32>, ScErrors> {
     let n = outgoing.shape.0;
     assert_eq!(cell_umis.len(), n, "cell_umis length must match graph");
     assert_eq!(incoming.shape.0, n);
@@ -808,31 +787,42 @@ pub fn compute_candidate_metacells(
     let lowest_metacell_size = params.min_metacell_size;
     let target_size = params.target_metacell_size;
     let target_umis = params.target_metacell_umis as f64;
-    let max_merge: f64 = params.partition.max_merge_size_factor;
-    let min_split: f64 = params.partition.min_split_size_factor;
+    let max_merge = params.partition.max_merge_size_factor;
+    let min_split = params.partition.min_split_size_factor;
 
-    let min_metacell_umis = (target_umis * max_merge).floor();
-    let max_metacell_umis = (target_umis * min_split).ceil() - 1.0;
-    let min_metacell_size: usize =
-        lowest_metacell_size.max((target_size as f64 * max_merge) as usize);
-    let max_metacell_size_f =
-        ((target_size as f64 * min_split).ceil() - 1.0).max((min_metacell_size + 1) as f64);
-    let mut max_metacell_size = max_metacell_size_f;
+    let min_size = lowest_metacell_size.max((target_size as f64 * max_merge).floor() as usize);
+    let bounds = Bounds {
+        min_umis: (target_umis * max_merge).floor(),
+        target_umis,
+        max_umis: (target_umis * min_split).ceil() - 1.0,
+        min_size,
+        target_size,
+        max_size: (((target_size as f64 * min_split).ceil() as usize).saturating_sub(1))
+            .max(min_size + 1),
+    };
+    let umis_ordered = 0.0 < bounds.min_umis
+        && bounds.min_umis < bounds.target_umis
+        && bounds.target_umis < bounds.max_umis;
+    let sizes_ordered =
+        0 < bounds.min_size && bounds.min_size < target_size && target_size < bounds.max_size;
+    if !(umis_ordered && sizes_ordered) {
+        return Err(ScErrors::Mc2InvalidParams {
+            reason: format!("candidate bounds must be ordered, got {bounds:?}"),
+        });
+    }
 
     let total_umis: f64 = cell_umis.iter().map(|&u| u as f64).sum();
-
-    // Phase 0: choose initial seeds.
     let initial_seeds_count = seeds_count_for(
         n,
         total_umis,
-        min_metacell_size,
-        max_metacell_size as usize,
-        min_metacell_umis,
-        max_metacell_umis,
+        bounds.min_size,
+        bounds.max_size,
+        bounds.min_umis,
+        bounds.max_umis,
     );
 
     let mut partition_of_cells = vec![-1i32; n];
-    let _seeds_count = choose_seeds(
+    let initial_seeds_count = choose_seeds(
         outgoing,
         incoming,
         &mut partition_of_cells,
@@ -840,48 +830,35 @@ pub fn compute_candidate_metacells(
         params.partition.min_seed_size_quantile,
         params.partition.max_seed_size_quantile,
         random_seed,
-    );
+    )?;
 
-    let cooldown_pass = params.partition.cooldown_pass;
-    let cooldown_phase = params.partition.cooldown_phase;
-    let mut cold_temperature = 1.0 - cooldown_pass;
-
+    let mut cold_temperature = 1.0 - params.partition.cooldown_pass;
     let mut atomic_candidates: BTreeSet<Vec<usize>> = BTreeSet::new();
     let mut hot_communities: Vec<usize> = (0..initial_seeds_count).collect();
 
-    let mut old_score = 1e9;
+    let mut old_score = INITIAL_OLD_SCORE;
     let mut old_partition: Option<Vec<i32>> = None;
     let mut old_small_nodes_count = n;
 
     loop {
-        // Reduce phase: optimise + cut/split until stable.
         let (new_cold_temperature, score) = reduce_communities(
             outgoing,
             incoming,
             &mut partition_of_cells,
-            &mut hot_communities,
+            hot_communities,
             cell_umis,
-            min_metacell_umis,
-            max_metacell_umis,
-            target_umis,
-            min_metacell_size,
-            target_size,
-            &mut max_metacell_size,
+            &bounds,
             params,
             cold_temperature,
             &mut atomic_candidates,
             random_seed,
-        );
-        cold_temperature = new_cold_temperature * (1.0 - cooldown_phase);
+        )?;
+        cold_temperature = new_cold_temperature;
 
-        // Look for small communities to dissolve.
         let (small_communities, small_nodes_count, small_nodes_umis) = find_small_communities(
             &partition_of_cells,
             cell_umis,
-            min_metacell_umis,
-            max_metacell_umis,
-            min_metacell_size,
-            max_metacell_size as usize,
+            &bounds,
             lowest_metacell_size,
         );
 
@@ -889,9 +866,7 @@ pub fn compute_candidate_metacells(
             break;
         }
 
-        // Acceptance check: did this iteration actually improve things?
         if (old_small_nodes_count, old_score) <= (small_nodes_count, score) {
-            // Revert to the previous snapshot.
             if let Some(prev) = old_partition.take() {
                 partition_of_cells = prev;
             }
@@ -901,36 +876,31 @@ pub fn compute_candidate_metacells(
         old_score = score;
         old_partition = Some(partition_of_cells.clone());
         old_small_nodes_count = small_nodes_count;
-        let _ = small_nodes_umis;
 
-        // Drop the small communities and reseed.
         let kept = cancel_communities(&mut partition_of_cells, &small_communities);
-
         let small_seeds_count = (small_communities.len() - 1).min(seeds_count_for(
             small_nodes_count,
             small_nodes_umis,
-            min_metacell_size,
-            max_metacell_size as usize,
-            min_metacell_umis,
-            max_metacell_umis,
+            bounds.min_size,
+            bounds.max_size,
+            bounds.min_umis,
+            bounds.max_umis,
         ));
 
-        let max_seeds_count = kept + small_seeds_count;
-        let new_total = choose_seeds(
+        let seeds_count = choose_seeds(
             outgoing,
             incoming,
             &mut partition_of_cells,
-            max_seeds_count,
+            kept + small_seeds_count,
             params.partition.min_seed_size_quantile,
             params.partition.max_seed_size_quantile,
             random_seed,
-        );
-        hot_communities = (kept..new_total).collect();
+        )?;
+        hot_communities = (kept..seeds_count).collect();
     }
 
-    // Compact partition IDs so output is dense 0..k.
     compact_partition_ids(&mut partition_of_cells);
-    partition_of_cells
+    Ok(partition_of_cells)
 }
 
 ///////////
@@ -973,91 +943,82 @@ mod tests {
         (outgoing, incoming)
     }
 
-    /// The minimum cut lands on the weak bridge rather than shaving off a single node.
+    /// Two dense blocks joined by a single edge: the edge-count cut is the
+    /// bridge, and the weighted strength is low.
     #[test]
-    fn stoer_wagner_separates_two_cliques() {
-        // Two K3 cliques weakly linked by 0<->3.
-        let edges = vec![
-            (0, 1, 1.0),
-            (1, 0, 1.0),
-            (1, 2, 1.0),
-            (2, 1, 1.0),
-            (0, 2, 1.0),
-            (2, 0, 1.0),
-            (3, 4, 1.0),
-            (4, 3, 1.0),
-            (4, 5, 1.0),
-            (5, 4, 1.0),
-            (3, 5, 1.0),
-            (5, 3, 1.0),
-            (0, 3, 0.01),
-            (3, 0, 0.01),
-        ];
-        let (out, _inc) = make_graph(&edges, 6);
-        let cells: Vec<usize> = (0..6).collect();
-        let (strength, a, b) =
-            stoer_wagner(&out, &cells, &mut vec![-1; out.shape.0]).expect("min cut");
-
-        assert!(
-            strength < 0.05,
-            "weak bridge should give low strength, got {}",
-            strength
-        );
-        assert_eq!(a.len() + b.len(), 6);
-        let a_set: FxHashSet<usize> = a.into_iter().collect();
-        let b_set: FxHashSet<usize> = b.into_iter().collect();
-        let cluster1: FxHashSet<usize> = [0, 1, 2].into_iter().collect();
-        let cluster2: FxHashSet<usize> = [3, 4, 5].into_iter().collect();
-        assert!(
-            (a_set == cluster1 && b_set == cluster2) || (a_set == cluster2 && b_set == cluster1),
-            "should split exactly along the cluster boundary"
-        );
+    fn test_min_cut_finds_single_bridge() {
+        let mut edges = Vec::new();
+        for block in [0..4, 4..8] {
+            for i in block.clone() {
+                for j in block.clone() {
+                    if i != j {
+                        edges.push((i, j, 1.0));
+                    }
+                }
+            }
+        }
+        edges.push((0, 4, 0.01));
+        let (out, _inc) = make_graph(&edges, 8);
+        let cells: Vec<usize> = (0..8).collect();
+        let cut = min_cut(&out, &cells, &mut [-1; 8]);
+        let mut first = cut.first.clone();
+        first.sort_unstable();
+        assert!(first == vec![0, 1, 2, 3] || first == vec![4, 5, 6, 7]);
+        assert!(cut.strength.unwrap() < 0.01);
     }
 
-    /// A graph with no bridging edge reports zero cut strength instead of failing.
+    /// A singleton side has no internal edges, so the strength is `None`.
     #[test]
-    fn stoer_wagner_disconnected_components() {
-        // Two disconnected pairs.
+    fn test_min_cut_singleton_has_no_strength() {
+        // a triangle with a pendant node: the pendant has degree 1
+        let edges = vec![(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0), (3, 0, 1.0)];
+        let (out, _inc) = make_graph(&edges, 4);
+        let cut = min_cut(&out, &[0, 1, 2, 3], &mut [-1; 4]);
+        assert_eq!(cut.first.len().min(cut.second.len()), 1);
+        assert!(cut.strength.is_none());
+    }
+
+    /// Disconnected communities have zero strength.
+    #[test]
+    fn test_min_cut_disconnected_is_zero() {
         let edges = vec![(0, 1, 1.0), (1, 0, 1.0), (2, 3, 1.0), (3, 2, 1.0)];
         let (out, _inc) = make_graph(&edges, 4);
-        let cells: Vec<usize> = (0..4).collect();
-        let (strength, _a, _b) =
-            stoer_wagner(&out, &cells, &mut vec![-1; out.shape.0]).expect("min cut");
-        assert!(strength < 1e-9, "disconnected should give zero strength");
+        let cut = min_cut(&out, &[0, 1, 2, 3], &mut [-1; 4]);
+        assert_eq!(cut.strength, Some(0.0));
     }
 
     /// Cancelled communities drop to -1 and the survivors are renumbered densely.
     #[test]
-    fn cancel_communities_renumbers_correctly() {
+    fn test_cancel_communities_renumbers() {
         let mut p = vec![0i32, 1, 2, 0, 1, 2, 3, 3];
-        let cancelled = vec![1, 3];
-        let kept = cancel_communities(&mut p, &cancelled);
+        let kept = cancel_communities(&mut p, &[1, 3]);
         assert_eq!(kept, 2);
         assert_eq!(p, vec![0, -1, 1, 0, -1, 1, -1, -1]);
     }
 
     /// Gaps in the partition IDs are closed in order while outliers stay at -1.
     #[test]
-    fn compact_partition_ids_fills_gaps() {
+    fn test_compact_partition_ids_fills_gaps() {
         let mut p = vec![0i32, 5, -1, 5, 0, 2];
         compact_partition_ids(&mut p);
         assert_eq!(p, vec![0, 2, -1, 2, 0, 1]);
     }
 
-    /// Only communities failing both the size and the UMI floor are flagged as small.
+    /// Only communities failing the size and UMI floors are flagged as small.
     #[test]
-    fn find_small_communities_flags_below_threshold() {
+    fn test_find_small_communities_flags_below_threshold() {
         let p = vec![0i32, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2];
         let umis = vec![100.0f32; 11];
-        let (small, total_size, _total_umis) = find_small_communities(
-            &p, &umis, 50.0,  // min_metacell_umis
-            500.0, // max_metacell_umis
-            3,     // min_metacell_size
-            10,    // max_metacell_size
-            2,     // lowest_metacell_size
-        );
-        // Community 1 has 2 cells, 200 UMIs; min_size is 3, 2*200=400 < 500, so flagged.
-        // Communities 0 and 2 are fine.
+        let bounds = Bounds {
+            min_umis: 50.0,
+            target_umis: 100.0,
+            max_umis: 500.0,
+            min_size: 3,
+            target_size: 5,
+            max_size: 10,
+        };
+        let (small, total_size, _) = find_small_communities(&p, &umis, &bounds, 2);
+        // community 1: 2 cells, 200 UMIs; 2 < 3 and 2 * 200 < 500
         assert_eq!(small, vec![1]);
         assert_eq!(total_size, 2);
     }

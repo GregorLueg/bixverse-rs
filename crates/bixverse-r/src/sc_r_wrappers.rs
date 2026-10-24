@@ -2698,6 +2698,23 @@ impl FromRList for SelectParams {
 // SimilarityParams //
 //////////////////////
 
+/// Parse a MetaCells2 similarity method.
+///
+/// ### Params
+///
+/// * `s` - `"abs_pearson"` or `"pearson"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The method, or `None` if unrecognised.
+fn parse_similarity_method(s: &str) -> Option<SimilarityMethod> {
+    match s.to_lowercase().as_str() {
+        "abs_pearson" => Some(SimilarityMethod::AbsPearson),
+        "pearson" => Some(SimilarityMethod::Pearson),
+        _ => None,
+    }
+}
+
 impl FromRList for SimilarityParams {
     /// Generate SimilarityParams from an R list, falling back to defaults.
     fn from_r_list(r_list: List) -> Result<Self> {
@@ -2705,19 +2722,15 @@ impl FromRList for SimilarityParams {
         let defaults = Self::default();
 
         let method = match params.get("similarity_method").and_then(|v| v.as_str()) {
-            Some(s) => match s.to_lowercase().as_str() {
-                "log_pearson" | "logpearson" => SimilarityMethod::LogPearson,
-                "pearson" => SimilarityMethod::Pearson,
-                "spearman" => SimilarityMethod::Spearman,
-                other => {
-                    return Err(Error::Other(format!(
-                        "Invalid similarity method: {}",
-                        other
-                    )));
-                }
-            },
+            Some(s) => parse_similarity_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid similarity method: {s}")))?,
             None => defaults.method,
         };
+
+        let log_data = params
+            .get("log_data")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.log_data);
 
         let value_regularisation = params
             .get("value_regularisation")
@@ -2727,6 +2740,7 @@ impl FromRList for SimilarityParams {
 
         Ok(Self {
             method,
+            log_data,
             value_regularisation,
         })
     }
@@ -2745,19 +2759,16 @@ impl FromRList for MC2KnnParams {
         let balanced_ranks_factor = params
             .get("balanced_ranks_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.balanced_ranks_factor);
 
         let incoming_degree_factor = params
             .get("incoming_degree_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.incoming_degree_factor);
 
         let outgoing_degree_factor = params
             .get("outgoing_degree_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.outgoing_degree_factor);
 
         let min_outgoing_degree = params
@@ -2769,13 +2780,11 @@ impl FromRList for MC2KnnParams {
         let k_size_factor = params
             .get("k_size_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.k_size_factor);
 
         let k_umis_quantile = params
             .get("k_umis_quantile")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.k_umis_quantile);
 
         let min_knn_k = params
@@ -2891,11 +2900,11 @@ impl FromRList for DeviantsParams {
             .map(|v| v as f32)
             .unwrap_or(defaults.min_gene_fold_factor);
 
-        let max_gene_fraction = params
-            .get("max_gene_fraction")
+        let min_noisy_gene_fold_factor = params
+            .get("min_noisy_gene_fold_factor")
             .and_then(|v| v.as_real())
             .map(|v| v as f32)
-            .unwrap_or(defaults.max_gene_fraction);
+            .unwrap_or(defaults.min_noisy_gene_fold_factor);
 
         let max_cell_fraction = params
             .get("max_cell_fraction")
@@ -2935,7 +2944,8 @@ impl FromRList for DeviantsParams {
 
         Ok(Self {
             min_gene_fold_factor,
-            max_gene_fraction,
+            min_noisy_gene_fold_factor,
+            noisy_gene_mask: defaults.noisy_gene_mask,
             max_cell_fraction,
             gap_skip_cells,
             max_gap_cells_count,
@@ -3018,12 +3028,6 @@ impl FromRList for MetacellsParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.must_complete_cover);
 
-        let random_seed = params
-            .get("random_seed")
-            .and_then(|v| v.as_real())
-            .map(|v| v as u64)
-            .unwrap_or(defaults.random_seed);
-
         Ok(Self {
             select,
             similarity,
@@ -3035,7 +3039,6 @@ impl FromRList for MetacellsParams {
             min_metacell_size,
             target_metacell_umis,
             must_complete_cover,
-            random_seed,
         })
     }
 }

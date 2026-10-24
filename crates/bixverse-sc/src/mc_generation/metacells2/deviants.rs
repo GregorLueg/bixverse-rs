@@ -1,75 +1,47 @@
-//! Deviant cell detection ("gaps" policy).
+//! Deviant cell detection, upstream's `gaps` policy
+//! (`metacells/tools/deviants.py`, `gaps.cpp`).
 //!
 //! ### Algorithm
 //!
 //! For each candidate metacell, for each gene:
 //!
-//! 1. Sort the metacell's non-deviant cells by `log2(fraction + reg)` of
-//!    that gene, where `reg` is `1 / max(library_size,
-//!    quantile(library_sizes, q))` (per-cell, but constant across genes
-//!    within the cell).
-//! 2. Walk the sorted list from both ends. Look for a gap of at least
-//!    `min_gene_fold_factor` between the cell at position `p` and the cell
-//!    at position `p + skip`. When found, mark cells `[0..=p+stop]` (low
-//!    end) or `[p+start..end]` (high end) as having a deviant gap.
-//! 3. The skip mechanic absorbs local noise: a small skip might bridge
-//!    over a single noisy cell.
+//! 1. Sort the candidate's non-deviant cells by `log2(fraction + reg)` of
+//!    that gene, where `reg = 1 / max(library_size, quantile)` and the
+//!    quantile is over the candidate's library sizes.
+//! 2. Walk the sorted list from both ends looking for a gap of at least the
+//!    gene's minimum fold between positions `p` and `p + skip`. Cells beyond a
+//!    gap record its excess as their gap score.
 //!
-//! Two loops: inner loop iterates the gap pass, marking new deviants each
-//! time, until no new deviants emerge. Outer loop bumps the threshold by
-//! `1/8` if the deviant fraction exceeds `max_cell_fraction`.
+//! The inner loop repeats the pass, marking the cells with the largest gap
+//! scores as deviants, until none are new or `max_cell_fraction` is reached;
+//! if exceeded, the outer loop raises every threshold by 1/8 and restarts.
+//!
+//! Each candidate gathers only its members' sparse rows and only the genes
+//! where some member clears `min_compare_umis`, so no dense
+//! `n_cells × n_genes` matrix is ever built.
 
 use rayon::prelude::*;
 
 use crate::prelude::*;
-use bixverse_core::core::math::vector_helpers::{quantile, quantile_sorted};
 
 use super::params::DeviantsParams;
+
+////////////
+// Consts //
+////////////
+
+/// Upstream's threshold step when too many cells are deviant.
+const THRESHOLD_STEP: f32 = 1.0 / 8.0;
+
+/// Smallest candidate (after removing deviants) the gap pass looks at.
+const MIN_GAP_CANDIDATE_CELLS: usize = 4;
+
+/// Tolerance upstream adds to the UMI comparisons.
+const UMI_TOLERANCE: f32 = 1e-6;
 
 /////////////
 // Helpers //
 /////////////
-
-/// Build dense row-major `(n_cells × n_genes)` UMI and fraction matrices.
-///
-/// Both matrices are `Vec<f32>` of length `n_cells * n_genes`, indexed by
-/// `cell * n_genes + gene`. Fraction is `umi / library_size` for non-zero
-/// library sizes, and zero otherwise.
-///
-/// ### Params
-///
-/// * `raw_umis`      - CSR matrix of raw UMI counts.
-/// * `umis_per_cell` - Pre-summed library size per cell.
-///
-/// ### Returns
-///
-/// A tuple `(umi_dense, fraction_dense)` in row-major layout.
-fn build_dense_views(
-    raw_umis: &CompressedSparseData2<u32, f32>,
-    umis_per_cell: &[f32],
-) -> (Vec<f32>, Vec<f32>) {
-    let n_cells = raw_umis.shape.0;
-    let n_genes = raw_umis.shape.1;
-    let total = n_cells * n_genes;
-    let mut umi = vec![0.0_f32; total];
-    let mut frac = vec![0.0_f32; total];
-
-    for cell in 0..n_cells {
-        let lib = umis_per_cell[cell];
-        let inv_lib = if lib > 0.0 { 1.0 / lib } else { 0.0 };
-        let row_base = cell * n_genes;
-        let start = raw_umis.indptr[cell] as usize;
-        let end = raw_umis.indptr[cell + 1] as usize;
-        for idx in start..end {
-            let g = raw_umis.indices[idx] as usize;
-            let u = raw_umis.data[idx] as f32;
-            umi[row_base + g] = u;
-            frac[row_base + g] = u * inv_lib;
-        }
-    }
-
-    (umi, frac)
-}
 
 /// Group cell indices by candidate id, ascending within each group.
 ///
@@ -95,285 +67,254 @@ pub(super) fn bucket_cells_by_candidate(
     buckets
 }
 
-/// Compute per-cell regularisation values as
-/// `1 / max(library_size, quantile_floor)`.
+/// Linear quantile of `f32` values, computed in `f64` like numpy.
 ///
-/// The quantile floor is computed separately for each candidate metacell from
-/// the distribution of library sizes of its members, so cells in low-quality
-/// candidates get a tighter floor.
+/// ### Params
+///
+/// * `values` - Values, any order.
+/// * `q` - Quantile in `[0, 1]`.
+///
+/// ### Returns
+///
+/// The quantile, `0` for an empty slice.
+fn quantile_f64(values: &[f32], q: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+    sorted.sort_unstable_by(f64::total_cmp);
+    let pos = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = pos - lo as f64;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+/// Per-cell regularisation `1 / max(library_size, max(1, quantile))`, the
+/// quantile taken over the library sizes of the cell's candidate.
 ///
 /// ### Params
 ///
 /// * `umis_per_cell` - Per-cell library sizes.
-/// * `candidate_of_cell` - Candidate assignment per cell; `< 0` entries are
-///   skipped.
-/// * `n_candidates` - Total number of candidates.
-/// * `regularisation_quantile`   - Quantile of the candidate's library sizes
-///   used as the floor.
+/// * `cells_of_candidate` - Cell indices per candidate.
+/// * `regularisation_quantile` - Quantile of the candidate's library sizes.
 ///
 /// ### Returns
 ///
-/// A `Vec<f32>` of length `n_cells` with the regularisation value per cell.
-/// Cells without a valid candidate retain `0.0` and are skipped downstream.
+/// The regularisation per cell; `0` for cells without a candidate.
 fn compute_regularisation_per_cell(
     umis_per_cell: &[f32],
-    candidate_of_cell: &[i32],
-    n_candidates: usize,
+    cells_of_candidate: &[Vec<usize>],
     regularisation_quantile: f32,
 ) -> Vec<f32> {
-    let n_cells = umis_per_cell.len();
-    let mut reg = vec![0.0_f32; n_cells];
-
-    let buckets = bucket_cells_by_candidate(candidate_of_cell, n_candidates);
-
-    // per-candidate quantile of library sizes.
-    let per_candidate: Vec<Vec<f32>> = buckets
-        .par_iter()
-        .map(|cells| {
-            if cells.is_empty() {
-                return Vec::new();
-            }
-            let mut sizes: Vec<f32> = cells.iter().map(|&i| umis_per_cell[i]).collect();
-            sizes.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let q = quantile_sorted(&sizes, regularisation_quantile);
-            let floor = q.max(1.0);
-            cells
-                .iter()
-                .map(|&i| 1.0 / umis_per_cell[i].max(floor))
-                .collect()
-        })
-        .collect();
-
-    for (cells, values) in buckets.iter().zip(per_candidate) {
-        for (&i, v) in cells.iter().zip(values) {
-            reg[i] = v;
+    let mut reg = vec![0.0_f32; umis_per_cell.len()];
+    for cells in cells_of_candidate {
+        let sizes: Vec<f32> = cells.iter().map(|&i| umis_per_cell[i]).collect();
+        let floor = (quantile_f64(&sizes, regularisation_quantile as f64) as f32).max(1.0);
+        for &i in cells {
+            reg[i] = 1.0 / umis_per_cell[i].max(floor);
         }
     }
-
     reg
 }
 
-/// Compute `log2(fraction + reg)` for every `(cell, gene)` pair.
-///
-/// Values where `fraction + reg <= 0` are set to `NEG_INFINITY`. Output is
-/// row-major with the same layout as the input fraction matrix.
-///
-/// ### Params
-///
-/// * `fraction_dense` - Row-major fraction matrix of shape `(n_cells, n_genes)`.
-/// * `reg_per_cell` - Per-cell regularisation values.
-/// * `n_cells` - Number of cells.
-/// * `n_genes` - Number of genes.
-///
-/// ### Returns
-///
-/// A `Vec<f32>` of length `n_cells * n_genes` in row-major layout.
-fn compute_log_fractions(
-    fraction_dense: &[f32],
-    reg_per_cell: &[f32],
-    n_cells: usize,
-    n_genes: usize,
-) -> Vec<f32> {
-    let mut out = vec![0.0_f32; n_cells * n_genes];
-    out.par_chunks_mut(n_genes)
-        .zip(fraction_dense.par_chunks(n_genes))
-        .zip(reg_per_cell.par_iter())
-        .for_each(|((out_row, frac_row), &reg)| {
-            for (o, &f) in out_row.iter_mut().zip(frac_row.iter()) {
-                let v = f + reg;
-                *o = if v > 0.0 { v.log2() } else { f32::NEG_INFINITY };
-            }
-        });
-    out
+/// One candidate's members restricted to the genes worth testing, gene-major.
+struct CandidateSlab {
+    /// Number of member cells (columns of each gene row).
+    n_members: usize,
+    /// Genes in the slab, ascending.
+    genes: Vec<usize>,
+    /// UMIs, `genes.len() × n_members`, gene-major.
+    umis: Vec<f32>,
+    /// `log2(umis / library + reg)`, same layout.
+    log_fractions: Vec<f32>,
 }
 
-/// Compute the per-cell maximum gap score across all genes and candidates.
+/// Gather a candidate's members into a [`CandidateSlab`].
 ///
-/// For each candidate and each gene, sorts the candidate's non-deviant cells
-/// by their log-fraction, scans from both ends for gaps exceeding
-/// `min_gap_per_gene`, and records the gap magnitude in `max_gap_per_cell`
-/// for each cell in the deviant range. Runs candidates in parallel; writes
-/// are safe because each cell belongs to exactly one candidate.
+/// Keeps a gene when some member satisfies upstream's
+/// `umis * 2 + 1e-6 > min_compare_umis`; other genes cannot produce a gap.
+/// Genes without any positive count in the candidate are always left out,
+/// which only differs from upstream for `min_compare_umis <= 1e-6`. Cells
+/// absent from a gene's sparse row have zero UMIs and log fraction
+/// `log2(reg)`.
 ///
 /// ### Params
 ///
-/// * `umi_dense` - Row-major UMI matrix `(n_cells × n_genes)`.
-/// * `log_fraction_dense` - Row-major log-fraction matrix
-///   `(n_cells × n_genes)`.
-/// * `cells_of_candidate` - Cell indices of each candidate, ascending.
-/// * `deviant_per_cell` - Cells already marked deviant; excluded from the
-///   sorted list.
-/// * `active_per_cell` - Cells active in the current inner-loop iteration.
-/// * `min_gap_per_gene` - Per-gene minimum gap threshold.
-/// * `n_cells` - Number of cells.
-/// * `n_genes` - Number of genes.
-/// * `gap_skip_cells` - Number of positions to skip when measuring a gap; in
-///   `[1, 3]`.
-/// * `max_gap_cells_count` - Absolute maximum number of deviant cells per
-///   candidate.
-/// * `max_gap_cells_fraction`- Fractional maximum number of deviant cells per
-///   candidate.
-/// * `min_compare_umis` - Minimum combined UMI count for a gene to be tested.
-/// * `max_gap_per_cell` - Output buffer of length `n_cells`; updated in place.
+/// * `raw_umis` - Cell-major raw counts.
+/// * `members` - Member cells in order.
+/// * `umis_per_cell` - Library sizes.
+/// * `reg_per_cell` - Regularisation per cell.
+/// * `min_compare_umis` - Upstream's `min_compare_umis`.
 ///
 /// ### Returns
 ///
-/// Nothing; `max_gap_per_cell` is populated in place.
-#[allow(clippy::too_many_arguments)]
-fn compute_cell_gaps(
-    umi_dense: &[f32],
-    log_fraction_dense: &[f32],
-    cells_of_candidate: &[Vec<usize>],
-    deviant_per_cell: &[bool],
-    active_per_cell: &[bool],
-    min_gap_per_gene: &[f32],
-    n_cells: usize,
-    n_genes: usize,
-    gap_skip_cells: usize,
-    max_gap_cells_count: usize,
-    max_gap_cells_fraction: f32,
+/// The slab.
+fn gather_candidate(
+    raw_umis: &CompressedSparseData2<u32, f32>,
+    members: &[usize],
+    umis_per_cell: &[f32],
+    reg_per_cell: &[f32],
     min_compare_umis: f32,
-    max_gap_per_cell: &mut [f32],
-) {
-    // deal with rayon limitations here with some raw pointer magic
-    let max_gap_addr = max_gap_per_cell.as_mut_ptr() as usize;
+) -> CandidateSlab {
+    let n_members = members.len();
 
-    cells_of_candidate.par_iter().for_each(|members| {
-        // non-deviant cells in this candidate, plus check if any active cells
-        // exist (carry-forward from outer loop convergence).
-        let active_candidate = members.iter().any(|&cell| active_per_cell[cell]);
-        let cells: Vec<usize> = members
-            .iter()
-            .copied()
-            .filter(|&cell| !deviant_per_cell[cell])
-            .collect();
-        let candidate_cells_count = cells.len();
-        if !active_candidate || candidate_cells_count < 4 {
-            return;
-        }
-
-        let max_deviant_of_candidate = (candidate_cells_count - gap_skip_cells).min(
-            max_gap_cells_count
-                .max((max_gap_cells_fraction * candidate_cells_count as f32 + 0.5) as usize),
-        );
-
-        // SAFETY: candidates partition the cells; writes through max_gap are to
-        // disjoint subsets across rayon tasks.
-        let max_gap = unsafe { std::slice::from_raw_parts_mut(max_gap_addr as *mut f32, n_cells) };
-
-        // Per-gene buffers, reused across genes in this candidate: the
-        // candidate's values gathered contiguously (the dense matrices are
-        // cell-major, so a gene column is strided), and the sorted positions
-        // into `cells`.
-        let mut umi_gene = vec![0.0_f32; candidate_cells_count];
-        let mut lf_gene = vec![0.0_f32; candidate_cells_count];
-        let mut sorted: Vec<usize> = (0..candidate_cells_count).collect();
-
-        for gene in 0..n_genes {
-            let min_gap = min_gap_per_gene[gene];
-
-            // Skip if no cell in this candidate has enough UMIs to be
-            // considered "reliably expressed" for this gene.
-            for (slot, &c) in umi_gene.iter_mut().zip(cells.iter()) {
-                *slot = umi_dense[c * n_genes + gene];
+    let mut entries: Vec<(u32, u32, u32)> = Vec::new();
+    for (pos, &cell) in members.iter().enumerate() {
+        let start = raw_umis.indptr[cell] as usize;
+        let end = raw_umis.indptr[cell + 1] as usize;
+        for idx in start..end {
+            if raw_umis.data[idx] > 0 {
+                entries.push((raw_umis.indices[idx], pos as u32, raw_umis.data[idx]));
             }
-            if !umi_gene.iter().any(|&u| u * 2.0 + 1e-6 > min_compare_umis) {
+        }
+    }
+    entries.sort_unstable_by_key(|&(g, pos, _)| (g, pos));
+
+    let base_lf: Vec<f32> = members.iter().map(|&c| reg_per_cell[c].log2()).collect();
+
+    let mut genes = Vec::new();
+    let mut umis = Vec::new();
+    let mut log_fractions = Vec::new();
+    for group in entries.chunk_by(|a, b| a.0 == b.0) {
+        let significant = group
+            .iter()
+            .any(|&(_, _, u)| (u as f32) * 2.0 + UMI_TOLERANCE > min_compare_umis);
+        if !significant {
+            continue;
+        }
+        genes.push(group[0].0 as usize);
+        let row_start = umis.len();
+        umis.resize(row_start + n_members, 0.0);
+        log_fractions.extend_from_slice(&base_lf);
+        for &(_, pos, u) in group {
+            let cell = members[pos as usize];
+            let lib = umis_per_cell[cell];
+            // upstream divides; a zero library keeps the zero fraction
+            let fraction = if lib > 0.0 { u as f32 / lib } else { 0.0 };
+            umis[row_start + pos as usize] = u as f32;
+            log_fractions[row_start + pos as usize] = (fraction + reg_per_cell[cell]).log2();
+        }
+    }
+
+    CandidateSlab {
+        n_members,
+        genes,
+        umis,
+        log_fractions,
+    }
+}
+
+/// Record the per-cell maximum gap excess within one candidate, as upstream's
+/// `compute_cell_gaps` for one candidate.
+///
+/// ### Params
+///
+/// * `slab` - The candidate's gathered data.
+/// * `members` - Member cells, aligned with the slab columns.
+/// * `deviant_per_cell` - Cells already deviant; left out of the sort.
+/// * `min_gap_per_gene` - Minimum fold per gene.
+/// * `gap_skip_cells` - Internal skip, in `1..=3`.
+/// * `params` - Deviant parameters.
+/// * `max_gap` - Maximum gap per member position; updated in place.
+fn candidate_gaps(
+    slab: &CandidateSlab,
+    deviant_per_cell: &[bool],
+    members: &[usize],
+    min_gap_per_gene: &[f32],
+    gap_skip_cells: usize,
+    params: &DeviantsParams,
+    max_gap: &mut [f32],
+) {
+    let cells: Vec<usize> = (0..slab.n_members)
+        .filter(|&pos| !deviant_per_cell[members[pos]])
+        .collect();
+    let n = cells.len();
+    if n < MIN_GAP_CANDIDATE_CELLS {
+        return;
+    }
+
+    let max_deviant = (n - gap_skip_cells).min(
+        params
+            .max_gap_cells_count
+            .max((params.max_gap_cells_fraction * n as f32 + 0.5) as usize),
+    );
+    let max_cell_position = ((n - 1) / 2).min(max_deviant);
+    let min_compare = params.min_compare_umis;
+
+    let mut umi_gene = vec![0.0_f32; n];
+    let mut lf_gene = vec![0.0_f32; n];
+    let mut sorted: Vec<usize> = Vec::with_capacity(n);
+
+    for (row, &gene) in slab.genes.iter().enumerate() {
+        let offset = row * slab.n_members;
+        for (slot, &pos) in cells.iter().enumerate() {
+            umi_gene[slot] = slab.umis[offset + pos];
+            lf_gene[slot] = slab.log_fractions[offset + pos];
+        }
+        if !umi_gene
+            .iter()
+            .any(|&u| u * 2.0 + UMI_TOLERANCE > min_compare)
+        {
+            continue;
+        }
+        let min_gap = min_gap_per_gene[gene];
+
+        sorted.clear();
+        sorted.extend(0..n);
+        sorted.sort_unstable_by(|&a, &b| lf_gene[a].total_cmp(&lf_gene[b]));
+
+        // low end: upward gaps
+        for cell_pos in 0..max_cell_position {
+            let first = sorted[cell_pos];
+            let second = sorted[cell_pos + gap_skip_cells];
+            if umi_gene[first] + umi_gene[second] + UMI_TOLERANCE < min_compare {
                 continue;
             }
-            for (slot, &c) in lf_gene.iter_mut().zip(cells.iter()) {
-                *slot = log_fraction_dense[c * n_genes + gene];
+            let full_gap = lf_gene[second] - lf_gene[first] - min_gap;
+            if full_gap < 0.0 {
+                continue;
             }
-
-            // Reset and sort by log_fraction[gene].
-            for (pos, slot) in sorted.iter_mut().enumerate() {
-                *slot = pos;
-            }
-            sorted.sort_unstable_by(|&a, &b| {
-                lf_gene[a]
-                    .partial_cmp(&lf_gene[b])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let max_cell_position = ((candidate_cells_count - 1) / 2).min(max_deviant_of_candidate);
-
-            // -- Low end: scan from bottom for upward gaps.
-            for cell_pos in 0..max_cell_position {
-                let first = sorted[cell_pos];
-                let second = sorted[cell_pos + gap_skip_cells];
-
-                let first_u = umi_gene[first];
-                let second_u = umi_gene[second];
-                if first_u + second_u + 1e-6 < min_compare_umis {
-                    continue;
-                }
-
-                let first_lf = lf_gene[first];
-                let second_lf = lf_gene[second];
-                let full_gap = second_lf - first_lf - min_gap;
-                if full_gap < 0.0 {
-                    continue;
-                }
-
-                // Look-ahead: when skip > 1, check the half-gap; if it's
-                // smaller than the full gap, extend the deviant range by 1.
-                let mut stop_cell_position = cell_pos + 1;
-                if gap_skip_cells > 1 {
-                    let middle = sorted[cell_pos + 1];
-                    let middle_lf = lf_gene[middle];
-                    let start_gap = 2.0 * (middle_lf - first_lf) - min_gap;
-                    if start_gap < full_gap {
-                        stop_cell_position += 1;
-                    }
-                }
-
-                for gap_cell_position in 0..=stop_cell_position {
-                    let gap_cell = cells[sorted[gap_cell_position]];
-                    let cur = max_gap[gap_cell];
-                    if full_gap > cur {
-                        max_gap[gap_cell] = full_gap;
-                    }
+            let mut stop = cell_pos + 1;
+            if gap_skip_cells > 1 {
+                let middle = sorted[cell_pos + 1];
+                let start_gap = 2.0 * (lf_gene[middle] - lf_gene[first]) - min_gap;
+                if start_gap < full_gap {
+                    stop += 1;
                 }
             }
-
-            // -- High end: scan from top for downward gaps. Mirror of above.
-            for cell_offset in 0..max_cell_position {
-                let cell_pos = candidate_cells_count - 1 - cell_offset - gap_skip_cells;
-                let first = sorted[cell_pos];
-                let second = sorted[cell_pos + gap_skip_cells];
-
-                let first_u = umi_gene[first];
-                let second_u = umi_gene[second];
-                if first_u + second_u < min_compare_umis {
-                    continue;
-                }
-
-                let first_lf = lf_gene[first];
-                let second_lf = lf_gene[second];
-                let full_gap = second_lf - first_lf - min_gap;
-                if full_gap <= 0.0 {
-                    continue;
-                }
-
-                let mut start_cell_position = cell_pos + 1;
-                if gap_skip_cells > 1 {
-                    let middle = sorted[cell_pos + 1];
-                    let middle_lf = lf_gene[middle];
-                    let start_gap = 2.0 * (middle_lf - first_lf) - min_gap;
-                    if start_gap < full_gap {
-                        start_cell_position += 1;
-                    }
-                }
-
-                for gap_cell_position in start_cell_position..candidate_cells_count {
-                    let gap_cell = cells[sorted[gap_cell_position]];
-                    let cur = max_gap[gap_cell];
-                    if full_gap > cur {
-                        max_gap[gap_cell] = full_gap;
-                    }
-                }
+            for &slot in &sorted[..=stop] {
+                let g = &mut max_gap[cells[slot]];
+                *g = g.max(full_gap);
             }
         }
-    });
+
+        // high end: downward gaps; upstream drops the tolerance here
+        for cell_offset in 0..max_cell_position {
+            let cell_pos = n - 1 - cell_offset - gap_skip_cells;
+            let first = sorted[cell_pos];
+            let second = sorted[cell_pos + gap_skip_cells];
+            if umi_gene[first] + umi_gene[second] < min_compare {
+                continue;
+            }
+            let full_gap = lf_gene[second] - lf_gene[first] - min_gap;
+            if full_gap <= 0.0 {
+                continue;
+            }
+            let mut start = cell_pos + 1;
+            if gap_skip_cells > 1 {
+                let middle = sorted[cell_pos + 1];
+                let start_gap = 2.0 * (lf_gene[middle] - lf_gene[first]) - min_gap;
+                if start_gap < full_gap {
+                    start += 1;
+                }
+            }
+            for &slot in &sorted[start..] {
+                let g = &mut max_gap[cells[slot]];
+                *g = g.max(full_gap);
+            }
+        }
+    }
 }
 
 //////////
@@ -385,134 +326,160 @@ fn compute_cell_gaps(
 /// ### Params
 ///
 /// * `raw_umis` - `(n_cells, n_genes)` raw UMI counts in CSR.
-/// * `umis_per_cell` - Pre-summed library size per cell. Used for the
-///   per-cell regularisation quantile.
-/// * `candidate_of_cell` - Cell-level candidate metacell assignment;
-///   `-1` for already-outlier cells (these are skipped).
+/// * `umis_per_cell` - Row sums of `raw_umis`.
+/// * `candidate_of_cell` - Candidate metacell per cell; `-1` cells are
+///   skipped and never flagged.
 /// * `params` - Deviant detection parameters.
 ///
 /// ### Returns
 ///
-/// A boolean mask where `true` means "deviant; should not be in any
-/// metacell". Cells with `candidate_of_cell == -1` always return `false`
-/// from this function (they're already outliers; the caller maintains the
-/// outlier flag separately).
+/// A boolean mask where `true` means deviant.
+///
+/// ### Errors
+///
+/// * `Mc2InvalidParams` if `max_cell_fraction` is outside `(0, 1)` or
+///   `gap_skip_cells > 2`.
+/// * `Mc2LengthMismatch` if the noisy gene mask does not cover every gene.
 pub fn find_deviant_cells(
     raw_umis: &CompressedSparseData2<u32, f32>,
     umis_per_cell: &[f32],
     candidate_of_cell: &[i32],
     params: &DeviantsParams,
-) -> Vec<bool> {
+) -> Result<Vec<bool>, ScErrors> {
     let n_cells = raw_umis.shape.0;
     let n_genes = raw_umis.shape.1;
     assert_eq!(umis_per_cell.len(), n_cells);
     assert_eq!(candidate_of_cell.len(), n_cells);
 
+    if !(params.max_cell_fraction > 0.0 && params.max_cell_fraction < 1.0) {
+        return Err(ScErrors::Mc2InvalidParams {
+            reason: format!(
+                "deviants max_cell_fraction must be in (0, 1), got {}",
+                params.max_cell_fraction
+            ),
+        });
+    }
+    if params.gap_skip_cells > 2 {
+        return Err(ScErrors::Mc2InvalidParams {
+            reason: format!(
+                "deviants gap_skip_cells must be in 0..=2, got {}",
+                params.gap_skip_cells
+            ),
+        });
+    }
+    if let Some(mask) = params.noisy_gene_mask.as_deref()
+        && mask.len() != n_genes
+    {
+        return Err(ScErrors::Mc2LengthMismatch {
+            what: "noisy_gene_mask",
+            expected: n_genes,
+            got: mask.len(),
+        });
+    }
+
     if n_cells <= params.max_gap_cells_count {
-        return vec![false; n_cells];
+        return Ok(vec![false; n_cells]);
     }
-
-    let n_candidates = (candidate_of_cell.iter().copied().max().unwrap_or(-1) + 1) as usize;
+    let n_candidates = (candidate_of_cell.iter().copied().max().unwrap_or(-1) + 1).max(0) as usize;
     if n_candidates == 0 {
-        return vec![false; n_cells];
+        return Ok(vec![false; n_cells]);
     }
 
-    // build dense (n_cells × n_genes) raw UMI and fraction matrices.
-    let (umi_dense, fraction_dense) = build_dense_views(raw_umis, umis_per_cell);
+    let gap_skip_cells = params.gap_skip_cells + 1;
+    let max_cell_fraction = params.max_cell_fraction as f64;
 
-    // per-cell regularisation: max(library_size, quantile of candidate's
-    // library sizes) -> stored as 1/value so it adds directly to the fraction
-    // before the log
-    let regularisation_per_cell = compute_regularisation_per_cell(
-        umis_per_cell,
-        candidate_of_cell,
-        n_candidates,
-        params.cells_regularisation_quantile,
-    );
-
-    // log2(fraction + reg) per (cell, gene). reg is per-cell, broadcast.
-    let log_fraction_dense =
-        compute_log_fractions(&fraction_dense, &regularisation_per_cell, n_cells, n_genes);
-
-    // per-gene minimum gap.
-    let min_gap_per_gene = vec![params.min_gene_fold_factor; n_genes];
-
-    let max_cell_fraction = params.max_cell_fraction.clamp(1e-6, 1.0);
-    let mut min_gene_fold_factor = params.min_gene_fold_factor;
-    let mut min_gap_per_gene = min_gap_per_gene;
-
-    // gap_skip_cells in the C++ is 1, 2, or 3 (Python adds 1 to the
-    // user-facing 0/1/2 value). We use the post-Python value directly.
-    let gap_skip_cells = params.gap_skip_cells.clamp(1, 3);
+    let mut min_gap_per_gene = vec![params.min_gene_fold_factor; n_genes];
+    if let Some(mask) = params.noisy_gene_mask.as_deref() {
+        for (g, &noisy) in min_gap_per_gene.iter_mut().zip(mask) {
+            if noisy {
+                *g += params.min_noisy_gene_fold_factor;
+            }
+        }
+    }
 
     let cells_of_candidate = bucket_cells_by_candidate(candidate_of_cell, n_candidates);
+    let reg_per_cell = compute_regularisation_per_cell(
+        umis_per_cell,
+        &cells_of_candidate,
+        params.cells_regularisation_quantile,
+    );
+    let slabs: Vec<CandidateSlab> = cells_of_candidate
+        .par_iter()
+        .map(|members| {
+            gather_candidate(
+                raw_umis,
+                members,
+                umis_per_cell,
+                &reg_per_cell,
+                params.min_compare_umis,
+            )
+        })
+        .collect();
 
-    let mut deviant_per_cell = vec![false; n_cells];
-
-    // outer loop: bump threshold if deviant fraction is too high.
     loop {
-        let mut new_deviant_per_cell = vec![true; n_cells];
-        deviant_per_cell.iter_mut().for_each(|d| *d = false);
+        let mut deviant_per_cell = vec![false; n_cells];
+        let mut active_per_cell = vec![true; n_cells];
         let mut deviants_fraction = 0.0_f64;
 
-        // inner loop: keep finding new deviants until no more emerge.
-        while deviants_fraction <= max_cell_fraction as f64 {
+        while deviants_fraction <= max_cell_fraction {
+            // per candidate gaps, written back into the per-cell vector
+            let per_candidate: Vec<Vec<f32>> = slabs
+                .par_iter()
+                .zip(cells_of_candidate.par_iter())
+                .map(|(slab, members)| {
+                    let mut gaps = vec![0.0_f32; members.len()];
+                    if members.iter().any(|&c| active_per_cell[c]) {
+                        candidate_gaps(
+                            slab,
+                            &deviant_per_cell,
+                            members,
+                            &min_gap_per_gene,
+                            gap_skip_cells,
+                            params,
+                            &mut gaps,
+                        );
+                    }
+                    gaps
+                })
+                .collect();
             let mut max_gap_per_cell = vec![0.0_f32; n_cells];
+            for (gaps, members) in per_candidate.iter().zip(&cells_of_candidate) {
+                for (&g, &c) in gaps.iter().zip(members) {
+                    max_gap_per_cell[c] = g;
+                }
+            }
 
-            compute_cell_gaps(
-                &umi_dense,
-                &log_fraction_dense,
-                &cells_of_candidate,
-                &deviant_per_cell,
-                &new_deviant_per_cell,
-                &min_gap_per_gene,
-                n_cells,
-                n_genes,
-                gap_skip_cells,
-                params.max_gap_cells_count,
-                params.max_gap_cells_fraction,
-                params.min_compare_umis,
-                &mut max_gap_per_cell,
-            );
-
-            // how many cells have a non-zero gap?
             let large_gap_count = max_gap_per_cell.iter().filter(|&&v| v > 0.0).count();
-            let remaining_fraction = 1.0 - (max_cell_fraction as f64 - deviants_fraction).max(0.0);
-
+            let remaining_fraction = 1.0 - (max_cell_fraction - deviants_fraction).max(0.0);
             let gap_threshold = if (large_gap_count as f64) / (n_cells as f64) <= remaining_fraction
             {
                 0.0_f32
             } else {
-                quantile(&max_gap_per_cell, remaining_fraction as f32)
+                quantile_f64(&max_gap_per_cell, remaining_fraction) as f32
             };
 
-            // new deviants: above threshold, not already deviant.
-            new_deviant_per_cell = max_gap_per_cell
+            active_per_cell = max_gap_per_cell
                 .iter()
-                .zip(deviant_per_cell.iter())
+                .zip(&deviant_per_cell)
                 .map(|(&g, &d)| g > gap_threshold && !d)
                 .collect();
-
-            let new_count = new_deviant_per_cell.iter().filter(|&&v| v).count();
+            let new_count = active_per_cell.iter().filter(|&&v| v).count();
             if new_count == 0 {
                 break;
             }
             deviants_fraction += new_count as f64 / n_cells as f64;
-            for (d, &nd) in deviant_per_cell.iter_mut().zip(new_deviant_per_cell.iter()) {
+            for (d, &nd) in deviant_per_cell.iter_mut().zip(&active_per_cell) {
                 *d |= nd;
             }
         }
 
-        if deviants_fraction <= max_cell_fraction as f64 {
-            return deviant_per_cell;
+        if deviants_fraction <= max_cell_fraction {
+            return Ok(deviant_per_cell);
         }
 
-        // too many deviants: bump threshold and retry.
         for g in min_gap_per_gene.iter_mut() {
-            *g += 1.0 / 8.0;
+            *g += THRESHOLD_STEP;
         }
-        min_gene_fold_factor += 1.0 / 8.0;
-        let _ = min_gene_fold_factor; // recorded for diagnostics
     }
 }
 
@@ -523,7 +490,6 @@ pub fn find_deviant_cells(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bixverse_core::core::math::sparse::CompressedSparseFormat;
 
     fn make_csr(rows: Vec<Vec<(usize, u32)>>, n_genes: usize) -> CompressedSparseData2<u32, f32> {
         let mut data = Vec::new();
@@ -546,56 +512,38 @@ mod tests {
         }
     }
 
-    /// Quantile endpoints and the median land on the expected order statistics.
-    #[test]
-    fn quantile_known_values() {
-        let v = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
-        assert!((quantile(&v, 0.0) - 1.0).abs() < 1e-6);
-        assert!((quantile(&v, 1.0) - 5.0).abs() < 1e-6);
-        assert!((quantile(&v, 0.5) - 3.0).abs() < 1e-6);
-    }
-
     /// Candidates too small to compare against are left free of deviants.
     #[test]
-    fn no_deviants_when_metacell_too_small() {
-        // 3 cells, 2 genes; max_gap_cells_count = 1. n_cells = 3 is more
-        // than max_gap_cells_count = 1 so it goes through, but the
-        // candidate_cells_count check < 4 will reject.
+    fn test_deviants_none_when_candidate_too_small() {
         let raw = make_csr(
             vec![
                 vec![(0, 100), (1, 1)],
                 vec![(0, 99), (1, 2)],
                 vec![(0, 101), (1, 1)],
+                vec![(0, 100), (1, 1)],
             ],
             2,
         );
-        let umis = vec![101.0_f32, 101.0, 102.0];
-        let cand = vec![0_i32, 0, 0];
-        let params = DeviantsParams::default();
-        let dev = find_deviant_cells(&raw, &umis, &cand, &params);
-        assert_eq!(dev, vec![false, false, false]);
+        let umis = vec![101.0_f32, 101.0, 102.0, 101.0];
+        let params = DeviantsParams {
+            max_gap_cells_count: 1,
+            ..Default::default()
+        };
+        // two candidates of two cells, each below the four-cell floor
+        let dev = find_deviant_cells(&raw, &umis, &[0, 0, 1, 1], &params).unwrap();
+        assert_eq!(dev, vec![false; 4]);
     }
 
-    /// A single cell with a large fold change on one gene is flagged as deviant.
+    /// A single cell with a large fold change on one gene is flagged.
     #[test]
-    fn detects_clear_outlier_in_metacell() {
-        // 8 cells in one candidate. Cells 0..7 except cell 4 express gene
-        // 0 strongly; cell 4 doesn't. Gene 1 is uniform across all cells.
-        //
-        // We expect cell 4 to be detected as a deviant. Note that the C++
-        // gap kernel propagates a gap across `gap_skip_cells + 1` adjacent
-        // sorted positions, so with `gap_skip_cells = 1` the gap detected
-        // at position 0 marks both position 0 and position 1 with the same
-        // gap value. The test therefore checks that the obvious outlier is
-        // flagged and that the bulk of well-behaved cells is not all
-        // flagged — not that exactly one cell is flagged.
+    fn test_deviants_detects_clear_outlier() {
         let raw = make_csr(
             vec![
                 vec![(0, 100), (1, 50)],
                 vec![(0, 102), (1, 50)],
                 vec![(0, 98), (1, 50)],
                 vec![(0, 101), (1, 50)],
-                vec![(0, 1), (1, 50)], // outlier on gene 0
+                vec![(0, 1), (1, 50)],
                 vec![(0, 99), (1, 50)],
                 vec![(0, 103), (1, 50)],
                 vec![(0, 97), (1, 50)],
@@ -603,32 +551,42 @@ mod tests {
             2,
         );
         let umis: Vec<f32> = vec![150.0, 152.0, 148.0, 151.0, 51.0, 149.0, 153.0, 147.0];
-        let cand = vec![0_i32; 8];
         let params = DeviantsParams {
-            min_gene_fold_factor: 1.0, // log2 fold of 2x
+            min_gene_fold_factor: 1.0,
             min_compare_umis: 5.0,
-            gap_skip_cells: 1,
+            gap_skip_cells: 0,
             max_cell_fraction: 0.5,
             max_gap_cells_count: 2,
             max_gap_cells_fraction: 0.4,
             cells_regularisation_quantile: 0.1,
             ..Default::default()
         };
-        let dev = find_deviant_cells(&raw, &umis, &cand, &params);
-
-        // The outlier on cell 4 must be detected.
-        assert!(dev[4], "expected cell 4 to be flagged: {:?}", dev);
-
-        // At least 5 of the 7 well-behaved cells must not be flagged
-        // (one or two adjacent cells in the sorted order may be caught up
-        // in the gap propagation, but the bulk should be clean).
-        let well_behaved = [0_usize, 1, 2, 3, 5, 6, 7];
-        let n_clean = well_behaved.iter().filter(|&&i| !dev[i]).count();
+        let dev = find_deviant_cells(&raw, &umis, &[0; 8], &params).unwrap();
+        assert!(dev[4], "expected cell 4 to be flagged: {dev:?}");
+        let clean = [0_usize, 1, 2, 3, 5, 6, 7]
+            .iter()
+            .filter(|&&i| !dev[i])
+            .count();
         assert!(
-            n_clean >= 5,
-            "expected >= 5 clean well-behaved cells, got {}: {:?}",
-            n_clean,
-            dev
+            clean >= 5,
+            "expected >= 5 clean cells, got {clean}: {dev:?}"
         );
+    }
+
+    /// Out-of-range parameters are rejected rather than clamped.
+    #[test]
+    fn test_deviants_rejects_bad_params() {
+        let raw = make_csr(vec![vec![(0, 1)]; 5], 1);
+        let umis = vec![1.0; 5];
+        let bad_skip = DeviantsParams {
+            gap_skip_cells: 3,
+            ..Default::default()
+        };
+        assert!(find_deviant_cells(&raw, &umis, &[0; 5], &bad_skip).is_err());
+        let bad_fraction = DeviantsParams {
+            max_cell_fraction: 1.0,
+            ..Default::default()
+        };
+        assert!(find_deviant_cells(&raw, &umis, &[0; 5], &bad_fraction).is_err());
     }
 }

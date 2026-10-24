@@ -84,7 +84,7 @@ fn downsample_row(input: &[u32], output: &mut [u32], samples: u32, seed: u64) {
     }
 }
 
-/// Linearly interpolated quantile (matching numpy's default method).
+/// Linearly interpolated quantile (numpy's default method), in `f64`.
 ///
 /// ### Params
 ///
@@ -94,23 +94,23 @@ fn downsample_row(input: &[u32], output: &mut [u32], samples: u32, seed: u64) {
 /// ### Returns
 ///
 /// The interpolated quantile value, or `0.0` if `values` is empty.
-fn quantile(values: &[f32], q: f32) -> f32 {
+fn quantile(values: &[f32], q: f32) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
-    let mut sorted: Vec<f32> = values.to_vec();
-    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pos = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f32;
+    let mut sorted: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+    sorted.sort_unstable_by(f64::total_cmp);
+    let pos = (q as f64).clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = (lo + 1).min(sorted.len() - 1);
-    let frac = pos - lo as f32;
+    let frac = pos - lo as f64;
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
 /// Compute the per-pile UMI target for downsampling.
 ///
-/// The target is `min(max(min_samples, q(min_q)), q(max_q))`, rounded to the
-/// nearest `u32`.
+/// The target is `min(max(min_samples, q(min_q)), q(max_q))`, rounded half to
+/// even like Python's `round`.
 ///
 /// ### Params
 ///
@@ -122,7 +122,7 @@ fn quantile(values: &[f32], q: f32) -> f32 {
 /// ### Returns
 ///
 /// The clamped, rounded UMI target.
-fn compute_downsample_target(
+pub(super) fn compute_downsample_target(
     umis_per_cell: &[f32],
     min_samples: u32,
     min_cell_quantile: f32,
@@ -130,8 +130,8 @@ fn compute_downsample_target(
 ) -> u32 {
     let lo = quantile(umis_per_cell, min_cell_quantile);
     let hi = quantile(umis_per_cell, max_cell_quantile);
-    let target = lo.max(min_samples as f32).min(hi);
-    target.round().max(0.0) as u32
+    let target = lo.max(min_samples as f64).min(hi);
+    target.round_ties_even().max(0.0) as u32
 }
 
 /// Smallest power of two greater than or equal to `n`.
@@ -472,17 +472,7 @@ mod tests {
             data_2: None,
             shape: (2, 3),
         };
-        let umis = vec![60.0f32, 150.0];
-
-        let make_pile = || Pile {
-            cell_indices: vec![0, 1],
-            raw: raw.clone(),
-            umis_per_cell: umis.clone(),
-            n_genes: 3,
-            downsampled: None,
-            selected_gene_indices: None,
-            selected_dense: None,
-        };
+        let make_pile = || Pile::from_raw(raw.clone(), vec![0, 1], None).unwrap();
 
         let mut pa = make_pile();
         let mut pb = make_pile();
