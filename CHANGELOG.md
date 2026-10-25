@@ -19,8 +19,9 @@
   from the cell store.
 - Hierarchical clustering matching SciPy's `linkage` (ward, complete, average,
   weighted) in `ml::clustering::hierarchical`.
-- decoupler ULM and MLM activity scores in `enrichment::lm_activity`, dense and
-  on the cell store (`calculate_lm_activity()`). Matches decoupler 2.2.1.
+- decoupler ULM and MLM activity scores in `enrichment::lm_activity`, dense,
+  on the cell store (`calculate_lm_activity()`) and on metacells
+  (`calculate_lm_activity_metacells()`). Matches decoupler 2.2.1.
 - `bixverse-r`: `FromRList` for the MetaCells2, divide-and-conquer, rare-module
   and `LmActivityParams` params, and `r_list_to_feature_set_weights()`.
 
