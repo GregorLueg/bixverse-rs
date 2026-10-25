@@ -12,6 +12,7 @@ use crate::r_rust_interface::{
 };
 use crate::{FromRList, FromRMap, ToRList};
 use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
+use bixverse_rs::ml::clustering::hierarchical::parse_linkage_method;
 use bixverse_rs::ml::clustering::k_means::{KMeansParamsWrappers, KMeansType, parse_k_means};
 use bixverse_rs::ml::gp::LandmarkGpParams;
 use bixverse_rs::single_cell::mc_generation::{
@@ -2698,6 +2699,23 @@ impl FromRList for SelectParams {
 // SimilarityParams //
 //////////////////////
 
+/// Parse a MetaCells2 similarity method.
+///
+/// ### Params
+///
+/// * `s` - `"abs_pearson"` or `"pearson"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The method, or `None` if unrecognised.
+fn parse_similarity_method(s: &str) -> Option<SimilarityMethod> {
+    match s.to_lowercase().as_str() {
+        "abs_pearson" => Some(SimilarityMethod::AbsPearson),
+        "pearson" => Some(SimilarityMethod::Pearson),
+        _ => None,
+    }
+}
+
 impl FromRList for SimilarityParams {
     /// Generate SimilarityParams from an R list, falling back to defaults.
     fn from_r_list(r_list: List) -> Result<Self> {
@@ -2705,19 +2723,15 @@ impl FromRList for SimilarityParams {
         let defaults = Self::default();
 
         let method = match params.get("similarity_method").and_then(|v| v.as_str()) {
-            Some(s) => match s.to_lowercase().as_str() {
-                "log_pearson" | "logpearson" => SimilarityMethod::LogPearson,
-                "pearson" => SimilarityMethod::Pearson,
-                "spearman" => SimilarityMethod::Spearman,
-                other => {
-                    return Err(Error::Other(format!(
-                        "Invalid similarity method: {}",
-                        other
-                    )));
-                }
-            },
+            Some(s) => parse_similarity_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid similarity method: {s}")))?,
             None => defaults.method,
         };
+
+        let log_data = params
+            .get("log_data")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.log_data);
 
         let value_regularisation = params
             .get("value_regularisation")
@@ -2727,6 +2741,7 @@ impl FromRList for SimilarityParams {
 
         Ok(Self {
             method,
+            log_data,
             value_regularisation,
         })
     }
@@ -2745,19 +2760,16 @@ impl FromRList for MC2KnnParams {
         let balanced_ranks_factor = params
             .get("balanced_ranks_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.balanced_ranks_factor);
 
         let incoming_degree_factor = params
             .get("incoming_degree_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.incoming_degree_factor);
 
         let outgoing_degree_factor = params
             .get("outgoing_degree_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.outgoing_degree_factor);
 
         let min_outgoing_degree = params
@@ -2769,13 +2781,11 @@ impl FromRList for MC2KnnParams {
         let k_size_factor = params
             .get("k_size_factor")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.k_size_factor);
 
         let k_umis_quantile = params
             .get("k_umis_quantile")
             .and_then(|v| v.as_real())
-            .map(|v| v as f32)
             .unwrap_or(defaults.k_umis_quantile);
 
         let min_knn_k = params
@@ -2891,11 +2901,11 @@ impl FromRList for DeviantsParams {
             .map(|v| v as f32)
             .unwrap_or(defaults.min_gene_fold_factor);
 
-        let max_gene_fraction = params
-            .get("max_gene_fraction")
+        let min_noisy_gene_fold_factor = params
+            .get("min_noisy_gene_fold_factor")
             .and_then(|v| v.as_real())
             .map(|v| v as f32)
-            .unwrap_or(defaults.max_gene_fraction);
+            .unwrap_or(defaults.min_noisy_gene_fold_factor);
 
         let max_cell_fraction = params
             .get("max_cell_fraction")
@@ -2935,7 +2945,8 @@ impl FromRList for DeviantsParams {
 
         Ok(Self {
             min_gene_fold_factor,
-            max_gene_fraction,
+            min_noisy_gene_fold_factor,
+            noisy_gene_mask: defaults.noisy_gene_mask,
             max_cell_fraction,
             gap_skip_cells,
             max_gap_cells_count,
@@ -2971,6 +2982,232 @@ impl FromRList for DissolveParams {
         Ok(Self {
             min_robust_size_factor,
             min_convincing_gene_fold_factor,
+        })
+    }
+}
+
+///////////////
+// DacParams //
+///////////////
+
+impl FromRList for DacParams {
+    /// Generate DacParams from a flat R list, falling back to defaults. The
+    /// groups-phase similarity is read from `groups_similarity_method`,
+    /// `groups_log_data` and `groups_value_regularisation`. Rare gene module
+    /// detection is on unless `rare_gene_modules` is `FALSE`, its parameters
+    /// read from the `rare_*` keys of the same list.
+    fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list.clone())?;
+        let defaults = Self::default();
+
+        let quick_and_dirty = params
+            .get("quick_and_dirty")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.quick_and_dirty);
+
+        let min_target_pile_size = params
+            .get("min_target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_target_pile_size);
+
+        let max_target_pile_size = params
+            .get("max_target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_target_pile_size);
+
+        let target_metacells_in_pile = params
+            .get("target_metacells_in_pile")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.target_metacells_in_pile);
+
+        let target_pile_size = params
+            .get("target_pile_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.target_pile_size);
+
+        let piles_knn_k_size_factor = params
+            .get("piles_knn_k_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_knn_k_size_factor);
+
+        let piles_min_split_size_factor = params
+            .get("piles_min_split_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_min_split_size_factor);
+
+        let piles_min_robust_size_factor = params
+            .get("piles_min_robust_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.piles_min_robust_size_factor);
+
+        let piles_max_merge_size_factor = params
+            .get("piles_max_merge_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.piles_max_merge_size_factor);
+
+        let groups_method = match params
+            .get("groups_similarity_method")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => parse_similarity_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid similarity method: {s}")))?,
+            None => defaults.groups_similarity.method,
+        };
+        let groups_similarity = SimilarityParams {
+            method: groups_method,
+            log_data: params
+                .get("groups_log_data")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.groups_similarity.log_data),
+            value_regularisation: params
+                .get("groups_value_regularisation")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.groups_similarity.value_regularisation),
+        };
+
+        let max_parallel_piles = params
+            .get("max_parallel_piles")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_parallel_piles);
+
+        let detect_rare = params
+            .get("rare_gene_modules")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.rare.is_some());
+        let rare = if detect_rare {
+            Some(RareParams::from_r_list(r_list)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            quick_and_dirty,
+            min_target_pile_size,
+            max_target_pile_size,
+            target_metacells_in_pile,
+            target_pile_size,
+            piles_knn_k_size_factor,
+            piles_min_split_size_factor,
+            piles_min_robust_size_factor,
+            piles_max_merge_size_factor,
+            groups_similarity,
+            max_parallel_piles,
+            rare,
+        })
+    }
+}
+
+////////////////
+// RareParams //
+////////////////
+
+/// Parse a MetaCells2 rare gene similarity method.
+///
+/// ### Params
+///
+/// * `s` - `"pearson"`, `"abs_pearson"`, `"repeated_pearson"` or
+///   `"repeated_abs_pearson"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The method, or `None` if unrecognised.
+fn parse_rare_similarity_method(s: &str) -> Option<RareSimilarityMethod> {
+    match s.to_lowercase().as_str() {
+        "pearson" => Some(RareSimilarityMethod::Pearson),
+        "abs_pearson" => Some(RareSimilarityMethod::AbsPearson),
+        "repeated_pearson" => Some(RareSimilarityMethod::RepeatedPearson),
+        "repeated_abs_pearson" => Some(RareSimilarityMethod::RepeatedAbsPearson),
+        _ => None,
+    }
+}
+
+impl FromRList for RareParams {
+    /// Generate RareParams from a flat R list, falling back to defaults. Keys
+    /// carry upstream's `rare_` prefix, so they can share the DacParams list.
+    fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let int = |key: &str, default: usize| {
+            params
+                .get(key)
+                .and_then(|v| v.as_integer())
+                .map(|v| v as usize)
+                .unwrap_or(default)
+        };
+        let real =
+            |key: &str, default: f64| params.get(key).and_then(|v| v.as_real()).unwrap_or(default);
+
+        let similarity = match params
+            .get("rare_genes_similarity_method")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => parse_rare_similarity_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid rare similarity method: {s}")))?,
+            None => defaults.similarity,
+        };
+        let cluster_method = match params
+            .get("rare_genes_cluster_method")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => parse_linkage_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid rare cluster method: {s}")))?,
+            None => defaults.cluster_method,
+        };
+        let dissolve_min_convincing_gene_fold_factor = params
+            .get("rare_dissolve_min_convincing_gene_fold_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.dissolve_min_convincing_gene_fold_factor);
+
+        Ok(Self {
+            max_genes: int("rare_max_genes", defaults.max_genes),
+            max_gene_cell_fraction: real(
+                "rare_max_gene_cell_fraction",
+                defaults.max_gene_cell_fraction,
+            ),
+            min_gene_maximum: int("rare_min_gene_maximum", defaults.min_gene_maximum as usize)
+                as u32,
+            similarity,
+            cluster_method,
+            min_genes_of_modules: int("rare_min_genes_of_modules", defaults.min_genes_of_modules),
+            min_cells_of_modules: int("rare_min_cells_of_modules", defaults.min_cells_of_modules),
+            max_cells_factor_of_random_pile: real(
+                "rare_max_cells_factor_of_random_pile",
+                defaults.max_cells_factor_of_random_pile,
+            ),
+            min_module_correlation: real(
+                "rare_min_module_correlation",
+                defaults.min_module_correlation,
+            ),
+            min_related_gene_fold_factor: real(
+                "rare_min_related_gene_fold_factor",
+                defaults.min_related_gene_fold_factor,
+            ),
+            max_related_gene_increase_factor: real(
+                "rare_max_related_gene_increase_factor",
+                defaults.max_related_gene_increase_factor,
+            ),
+            min_cell_module_total: int(
+                "rare_min_cell_module_total",
+                defaults.min_cell_module_total as usize,
+            ) as u32,
+            deviants_max_cell_fraction: real(
+                "rare_deviants_max_cell_fraction",
+                defaults.deviants_max_cell_fraction as f64,
+            ) as f32,
+            dissolve_min_robust_size_factor: real(
+                "rare_dissolve_min_robust_size_factor",
+                defaults.dissolve_min_robust_size_factor as f64,
+            ) as f32,
+            dissolve_min_convincing_gene_fold_factor,
         })
     }
 }
@@ -3018,12 +3255,6 @@ impl FromRList for MetacellsParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.must_complete_cover);
 
-        let random_seed = params
-            .get("random_seed")
-            .and_then(|v| v.as_real())
-            .map(|v| v as u64)
-            .unwrap_or(defaults.random_seed);
-
         Ok(Self {
             select,
             similarity,
@@ -3035,7 +3266,6 @@ impl FromRList for MetacellsParams {
             min_metacell_size,
             target_metacell_umis,
             must_complete_cover,
-            random_seed,
         })
     }
 }

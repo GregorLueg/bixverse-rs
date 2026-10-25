@@ -216,6 +216,44 @@ pub enum ScErrors {
     #[error("select_features must be called before compute_similarity!")]
     SelectFeaturesBeforeSimilariy,
 
+    /// Feature selection kept too few genes to correlate cells on.
+    #[error("MetaCells2: selected {selected} feature genes, need at least {required}")]
+    Mc2TooFewGenes {
+        /// Genes that passed the filters
+        selected: usize,
+        /// Genes required
+        required: usize,
+    },
+
+    /// A per-gene or per-cell vector does not match the pile.
+    #[error("MetaCells2: {what} has length {got}, expected {expected}")]
+    Mc2LengthMismatch {
+        /// Which input is off
+        what: &'static str,
+        /// Expected length
+        expected: usize,
+        /// Supplied length
+        got: usize,
+    },
+
+    /// The pile holds no cells.
+    #[error("MetaCells2: the pile is empty")]
+    Mc2EmptyPile,
+
+    /// Parameters that cannot produce a valid run.
+    #[error("MetaCells2: invalid parameters: {reason}")]
+    Mc2InvalidParams {
+        /// What is wrong
+        reason: String,
+    },
+
+    /// Seed completion found nodes that no seed can reach.
+    #[error("MetaCells2: {n_unreachable} cells are not connected to any seed")]
+    Mc2UnreachableCells {
+        /// Cells left without a seed
+        n_unreachable: usize,
+    },
+
     // -- Seacells --
     /// The SEACells kernel matrix has not been yet constructed.
     #[error("SEACells: You must construct the kernel matrix first.")]

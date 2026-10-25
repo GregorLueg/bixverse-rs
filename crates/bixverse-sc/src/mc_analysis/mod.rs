@@ -7,6 +7,7 @@ pub mod aucell;
 pub mod bonsai_mc;
 pub mod dialogue_mc;
 pub mod hotspot_mc;
+pub mod lm_activity_mc;
 pub mod metacell_density;
 pub mod metrics;
 pub mod nebula_mc;

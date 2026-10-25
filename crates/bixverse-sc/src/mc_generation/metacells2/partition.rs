@@ -14,17 +14,18 @@
 //! * `in_weight[p,i]` = sum of incoming weights to `i` from nodes in `p`.
 //! * `score[p,i] = log2(EPSILON + out_weight * in_weight) / 2`.
 //!
-//! The total objective is:
+//! The reported objective is:
 //!
 //! ```text
 //! total = N*log2(N) - incoming_scale
 //!       + sum_p [ score_of_partition[p] - size[p]*log2(size[p])
-//!                + size[p] * min(mass_factor[p], size_factor[p]) ]
+//!                + size[p] * mass_factor[p] ]
 //!       + orphans_count * default_score        (only if with_orphans)
 //! ```
 //!
 //! `mass_factor` is a piecewise log2 budget penalty (zero at `target`,
-//! mildly negative inside `[low, high]`, sharply negative outside).
+//! mildly negative inside `[low, high]`, sharply negative outside). Move diffs
+//! use `min(mass_factor, size_factor)` instead, as upstream.
 //!
 //! Per-move acceptance picks the best candidate partition for the moving
 //! node by combining a "hot" diff (just the local score change for the
@@ -543,10 +544,11 @@ impl<'a> OptimizePartitions<'a> {
             let m = self.mass_of_partitions[p];
             let sz = self.size_of_partitions[p];
             if sz > 0 {
+                // upstream's reported score uses the mass factor alone; the
+                // size factor only enters the move diffs
                 total += s - (sz as f64) * (sz as f64).log2();
-                let mf = mass_factor(m, self.low_mass, self.target_mass, self.high_mass);
-                let sf = mass_factor(sz as f64, self.low_size, self.target_size, self.high_size);
-                total += (sz as f64) * mf.min(sf);
+                total +=
+                    (sz as f64) * mass_factor(m, self.low_mass, self.target_mass, self.high_mass);
             }
             orphans -= sz;
         }
@@ -1032,8 +1034,8 @@ impl<'a> OptimizePartitions<'a> {
                 .fold(f64::INFINITY, f64::min);
             let sum: f64 = list.iter().map(|&p| total_diffs[p] - min_total).sum();
             if sum <= 0.0 {
-                // all ties at min: pick uniformly.
-                return Some(list[rng.random_range(0..list.len())]);
+                // all tied: upstream's walk returns the first entry
+                return Some(list[0]);
             }
             let mut roll: f64 = rng.random::<f64>() * sum;
             for &p in list {

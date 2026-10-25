@@ -1,8 +1,10 @@
-//! This module contains all of the parameter structures needed for MetaCells2.
 //! Parameter structs for the MetaCells2 pipeline.
 //!
 //! The hierarchy mirrors the algorithm stages: each stage's parameters live in
-//! their own struct, composed into the top-level [`MetacellsParams`].
+//! their own struct, composed into the top-level [`MetacellsParams`]. Defaults
+//! are upstream's (`metacells/parameters.py`).
+
+use bixverse_core::ml::clustering::hierarchical::LinkageMethod;
 
 /////////////////
 // Main params //
@@ -11,7 +13,8 @@
 /// Top-level parameters for the MC2 algorithm.
 ///
 /// Composed of one struct per pipeline stage plus a few cross-cutting knobs
-/// (target metacell size/UMI count, must-complete-cover mode, seed).
+/// (target metacell size/UMI count, must-complete-cover mode). The RNG seed is
+/// passed to the entry points separately.
 #[derive(Clone, Debug)]
 pub struct MetacellsParams {
     /// The [SelectParams] for feature selections.
@@ -26,7 +29,7 @@ pub struct MetacellsParams {
     pub partition: PartitionParams,
     /// The [DeviantsParams] that mark genes/cells as deviant
     pub deviants: DeviantsParams,
-    /// The [DissolveParams] that TODO
+    /// The [DissolveParams] that dissolve small, unconvincing candidates.
     pub dissolve: DissolveParams,
     /// Target cell count per metacell.
     pub target_metacell_size: usize,
@@ -40,8 +43,6 @@ pub struct MetacellsParams {
     /// phase, where piles are random and "outliers" would just be rare types
     /// stuck in the wrong pile.
     pub must_complete_cover: bool,
-    /// Master seed. Per-row, per-cell, per-pile seeds are derived from this.
-    pub random_seed: u64,
 }
 
 /// Default for [MetacellsParams]
@@ -58,7 +59,6 @@ impl Default for MetacellsParams {
             min_metacell_size: 12,
             target_metacell_umis: 160_000,
             must_complete_cover: false,
-            random_seed: 0,
         }
     }
 }
@@ -127,16 +127,11 @@ impl Default for SelectParams {
 /// Cell-cell similarity computation method.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SimilarityMethod {
-    /// ln1p transform, then Pearson correlation. MC2 default. (They use log2
-    /// under the hood).
+    /// Absolute Pearson correlation. Upstream's default (`abs_pearson`).
     #[default]
-    LogPearson,
-    /// Plain Pearson correlation on raw values. Will behave badly without a log
-    /// transform — exposed mainly for parity testing.
+    AbsPearson,
+    /// Signed Pearson correlation (`pearson`).
     Pearson,
-    /// Spearman rank correlation. Non-parametric; pays a per-row sort but
-    /// avoids the log/Pearson assumption mismatch.
-    Spearman,
 }
 
 /// Cell-cell similarity computation parameters.
@@ -144,8 +139,10 @@ pub enum SimilarityMethod {
 pub struct SimilarityParams {
     /// Enum defining the chosen similarity method, see [SimilarityMethod].
     pub method: SimilarityMethod,
-    /// Constant added to every value before the (optional) log transform.
-    /// Mainly relevant if you ever want to use plain Pearson without log.
+    /// If true, correlate `log2(x + value_regularisation)` rather than
+    /// `x + value_regularisation`.
+    pub log_data: bool,
+    /// Constant added to every value before the optional log transform.
     pub value_regularisation: f32,
 }
 
@@ -153,8 +150,9 @@ pub struct SimilarityParams {
 impl Default for SimilarityParams {
     fn default() -> Self {
         Self {
-            method: SimilarityMethod::LogPearson,
-            value_regularisation: (1.0 / 7.0),
+            method: SimilarityMethod::AbsPearson,
+            log_data: true,
+            value_regularisation: 1.0 / 7.0,
         }
     }
 }
@@ -166,23 +164,21 @@ impl Default for SimilarityParams {
 /// Balanced KNN graph construction parameters.
 #[derive(Clone, Debug)]
 pub struct MC2KnnParams {
-    /// Multiplier on `k` for the per-row top-K of outgoing ranks before
-    /// symmetrisation by geometric mean. Edges with balanced rank above
-    /// `k * balanced_ranks_factor` are pruned.
-    pub balanced_ranks_factor: f32,
+    /// Edges with balanced rank above `k * balanced_ranks_factor` are dropped.
+    pub balanced_ranks_factor: f64,
     /// Multiplier on `k` for the per-cell incoming-edge cap.
-    pub incoming_degree_factor: f32,
+    pub incoming_degree_factor: f64,
     /// Multiplier on `k` for the per-cell outgoing-edge cap.
-    pub outgoing_degree_factor: f32,
-    /// Floor on per-cell outgoing edges; the heaviest outgoing edge per cell
-    /// is preserved even if pruning would drop it.
+    pub outgoing_degree_factor: f64,
+    /// Minimum outgoing degree of every cell after pruning. If any cell falls
+    /// below it, `k` is raised by 10% and the graph rebuilt, as upstream.
     pub min_outgoing_degree: usize,
     /// Multiplier in the `k` heuristic:
     /// `target_metacell_umis / median_umis * k_size_factor`.
-    pub k_size_factor: f32,
+    pub k_size_factor: f64,
     /// Quantile of cell library sizes used in the `k` heuristic via
     /// `target_metacell_umis / quantile_umis`.
-    pub k_umis_quantile: f32,
+    pub k_umis_quantile: f64,
     /// Optional floor on `k`. `None` defers entirely to the heuristic.
     pub min_knn_k: Option<usize>,
     /// If you wish to override the kNN parameter
@@ -193,7 +189,7 @@ pub struct MC2KnnParams {
 impl Default for MC2KnnParams {
     fn default() -> Self {
         Self {
-            balanced_ranks_factor: (10_f32).sqrt(),
+            balanced_ranks_factor: 10_f64.sqrt(),
             incoming_degree_factor: 3.0,
             outgoing_degree_factor: 1.0,
             min_outgoing_degree: 2,
@@ -257,21 +253,22 @@ impl Default for PartitionParams {
 // Deviant params //
 ////////////////////
 
-/// Adaptive deviant (outlier) detection parameters.
+/// Adaptive deviant (outlier) detection parameters, upstream's `gaps` policy.
 #[derive(Clone, Debug)]
 pub struct DeviantsParams {
-    /// Minimum log2 fold-factor gap (between consecutive cells, sorted by
-    /// log-fraction) within a candidate metacell for a gene to mark cells as
-    /// deviant. Auto-tuned upward if too many genes show gaps.
+    /// Minimum log2 fold-factor gap (between cells sorted by log-fraction)
+    /// within a candidate metacell for a gene to mark cells as deviant. Raised
+    /// by 1/8 while more than `max_cell_fraction` of the cells are deviant.
     pub min_gene_fold_factor: f32,
-    /// Cap on the fraction of genes allowed to show any gap. The fold-factor
-    /// threshold is raised until this is met.
-    pub max_gene_fraction: f32,
-    /// Cap on the fraction of cells marked as deviants. The per-gene cap is
-    /// raised until this is met.
+    /// Added to `min_gene_fold_factor` for genes in `noisy_gene_mask`.
+    pub min_noisy_gene_fold_factor: f32,
+    /// Optional per-gene mask of noisy genes, which need a larger gap.
+    pub noisy_gene_mask: Option<Vec<bool>>,
+    /// Cap on the fraction of cells marked as deviants, in `(0, 1)`.
     pub max_cell_fraction: f32,
-    /// Number of cells skipped when computing the "gap" — i.e. the gap is
-    /// `log_fraction[i + skip] - log_fraction[i]` to absorb local noise.
+    /// Cells skipped over when measuring a gap, in `0..=2` as upstream's
+    /// user-facing value: the gap is between sorted positions `i` and
+    /// `i + gap_skip_cells + 1`.
     pub gap_skip_cells: usize,
     /// Maximum number of cells beyond a gap that are marked as deviants for
     /// a single gene.
@@ -294,8 +291,9 @@ pub struct DeviantsParams {
 impl Default for DeviantsParams {
     fn default() -> Self {
         Self {
-            min_gene_fold_factor: 3.0, // log2(8)
-            max_gene_fraction: 0.03,
+            min_gene_fold_factor: 3.0,
+            min_noisy_gene_fold_factor: 2.0,
+            noisy_gene_mask: None,
             max_cell_fraction: 0.25,
             gap_skip_cells: 1,
             max_gap_cells_count: 3,
@@ -334,6 +332,155 @@ impl Default for DissolveParams {
     }
 }
 
+/////////////////////////////
+// Rare gene module params //
+/////////////////////////////
+
+/// Gene-gene similarity used to cluster rare gene candidates, upstream's
+/// `genes_similarity_method` minus the logistics variants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RareSimilarityMethod {
+    /// Pearson correlation between genes over cells (`pearson`).
+    Pearson,
+    /// Absolute Pearson correlation (`abs_pearson`).
+    AbsPearson,
+    /// Correlation of the rows of the Pearson matrix (`repeated_pearson`).
+    /// Upstream's default.
+    #[default]
+    RepeatedPearson,
+    /// Absolute correlation of the rows of the absolute Pearson matrix
+    /// (`repeated_abs_pearson`).
+    RepeatedAbsPearson,
+}
+
+/// Rare gene module detection, upstream's `find_rare_gene_modules` plus the
+/// `rare_*` overrides `divide_and_conquer_pipeline` applies to the rare piles.
+#[derive(Clone, Debug)]
+pub struct RareParams {
+    /// Most candidate genes kept, those expressed in the fewest cells.
+    pub max_genes: usize,
+    /// Largest fraction of cells a candidate may be expressed in.
+    pub max_gene_cell_fraction: f64,
+    /// Smallest maximum UMI count over cells for a candidate, and for a
+    /// related gene over the module's cells.
+    pub min_gene_maximum: u32,
+    /// Similarity between candidate genes.
+    pub similarity: RareSimilarityMethod,
+    /// Linkage for the hierarchical clustering of candidates.
+    pub cluster_method: LinkageMethod,
+    /// Fewest genes in a module.
+    pub min_genes_of_modules: usize,
+    /// Fewest cells in a module. Upstream's pipeline uses its own default
+    /// here, not the run's `min_metacell_size`.
+    pub min_cells_of_modules: usize,
+    /// Largest mean number of module cells in a random pile, as a fraction of
+    /// the target metacell size, for the module to count as rare.
+    pub max_cells_factor_of_random_pile: f64,
+    /// Smallest mean off-diagonal similarity within a module.
+    pub min_module_correlation: f64,
+    /// A gene is related to a module if its fraction in the module's cells is
+    /// at least `2^min_related_gene_fold_factor` times its background fraction.
+    pub min_related_gene_fold_factor: f64,
+    /// A related gene is dropped if adding it raises the module's strong cells
+    /// beyond this factor of the original count.
+    pub max_related_gene_increase_factor: f64,
+    /// Smallest module UMI total for a cell to express the module.
+    pub min_cell_module_total: u32,
+    /// `deviants.max_cell_fraction` of the rare piles.
+    pub deviants_max_cell_fraction: f32,
+    /// `dissolve.min_robust_size_factor` of the rare piles.
+    pub dissolve_min_robust_size_factor: f32,
+    /// `dissolve.min_convincing_gene_fold_factor` of the rare piles.
+    pub dissolve_min_convincing_gene_fold_factor: Option<f32>,
+}
+
+/// Default implementation for [RareParams], upstream's `rare_*` defaults.
+impl Default for RareParams {
+    fn default() -> Self {
+        Self {
+            max_genes: 500,
+            max_gene_cell_fraction: 1e-3,
+            min_gene_maximum: 7,
+            similarity: RareSimilarityMethod::RepeatedPearson,
+            cluster_method: LinkageMethod::Ward,
+            min_genes_of_modules: 4,
+            min_cells_of_modules: 12,
+            max_cells_factor_of_random_pile: 0.5,
+            min_module_correlation: 0.1,
+            min_related_gene_fold_factor: 7.0,
+            max_related_gene_increase_factor: 4.0,
+            min_cell_module_total: 4,
+            deviants_max_cell_fraction: 0.25,
+            dissolve_min_robust_size_factor: 0.5,
+            dissolve_min_convincing_gene_fold_factor: Some(3.0),
+        }
+    }
+}
+
+///////////////////////////////
+// Divide and conquer params //
+///////////////////////////////
+
+/// Divide-and-conquer parameters, upstream's `DacParameters`.
+///
+/// The per-pile runs use [`MetacellsParams`]; these only control how cells
+/// are piled and how the groups-of-metacells phase is configured.
+#[derive(Clone, Debug)]
+pub struct DacParams {
+    /// Stop after the final phase's outliers instead of regrouping the
+    /// outliers-of-outliers.
+    pub quick_and_dirty: bool,
+    /// Lower clamp on the computed target pile size.
+    pub min_target_pile_size: usize,
+    /// Upper clamp on the computed target pile size.
+    pub max_target_pile_size: usize,
+    /// Metacells wanted per pile; also the target group size of the groups
+    /// phase.
+    pub target_metacells_in_pile: usize,
+    /// Fixed target pile size. `None` derives it from the data (upstream's
+    /// `compute_target_pile_size`).
+    pub target_pile_size: Option<usize>,
+    /// `k_size_factor` of the groups phase.
+    pub piles_knn_k_size_factor: f64,
+    /// `min_split_size_factor` of the groups phase.
+    pub piles_min_split_size_factor: f64,
+    /// `min_robust_size_factor` of the groups phase.
+    pub piles_min_robust_size_factor: f32,
+    /// `max_merge_size_factor` of the groups phase.
+    pub piles_max_merge_size_factor: f64,
+    /// Similarity of the groups phase.
+    pub groups_similarity: SimilarityParams,
+    /// Piles computed concurrently. Each pile holds two dense
+    /// `pile_size × pile_size` matrices while it runs, so this trades memory
+    /// for throughput. Not tuned.
+    pub max_parallel_piles: usize,
+    /// Rare gene module detection before the main run, as upstream's
+    /// `divide_and_conquer_pipeline`: cells of each module become their own
+    /// pile and the rest are divided and conquered. `None` skips it, as
+    /// upstream's `compute_divide_and_conquer_metacells`.
+    pub rare: Option<RareParams>,
+}
+
+/// Default implementation for [DacParams]
+impl Default for DacParams {
+    fn default() -> Self {
+        Self {
+            quick_and_dirty: false,
+            min_target_pile_size: 8000,
+            max_target_pile_size: 24000,
+            target_metacells_in_pile: 100,
+            target_pile_size: None,
+            piles_knn_k_size_factor: 3.0,
+            piles_min_split_size_factor: 1.5,
+            piles_min_robust_size_factor: 0.3,
+            piles_max_merge_size_factor: 0.15,
+            groups_similarity: SimilarityParams::default(),
+            max_parallel_piles: 1,
+            rare: Some(RareParams::default()),
+        }
+    }
+}
+
 ///////////
 // Tests //
 ///////////
@@ -352,6 +499,6 @@ mod tests {
         assert_eq!(p.target_metacell_size, 48);
         assert_eq!(p.min_metacell_size, 12);
         assert_eq!(p.target_metacell_umis, 160_000);
-        assert_eq!(p.knn.balanced_ranks_factor, (10_f32).sqrt());
+        assert_eq!(p.knn.balanced_ranks_factor, 10_f64.sqrt());
     }
 }
