@@ -1,5 +1,14 @@
 # News
 
+## 0.9.3
+
+### Breaking
+
+- `mad_outlier()` takes an `r_standard` flag. With `true` the MAD is scaled by
+  `MAD_SCALE` like R's `mad()`, so `threshold` counts standard deviations
+  under normality and the margins are 1.48x wider than before. `false` keeps
+  the old raw MAD.
+
 ## 0.9.2
 
 ### Breaking

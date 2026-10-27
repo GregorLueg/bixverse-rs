@@ -1062,17 +1062,28 @@ pub fn parse_outlier_type(s: &str) -> Option<OutlierDirection> {
 
 /// MAD outlier detection
 ///
+/// With `r_standard` the MAD is scaled by [`MAD_SCALE`], so `threshold` counts
+/// standard deviations under normality, as R's `mad()` and scater's
+/// `isOutlier` do. Without it the raw MAD is used.
+///
 /// ### Params
 ///
 /// * `x` - Slice of values to check for outliers.
-/// * `threshold` - Number of MADs to accept as not being an outlier.
+/// * `threshold` - Number of (scaled or raw) MADs to accept as not being an
+///   outlier.
 /// * `direction` - Direction to check for outliers (below, above, or both).
+/// * `r_standard` - Scale the MAD by [`MAD_SCALE`] like R's `mad()`.
 ///
 /// ### Returns
 ///
 /// A tuple with a vector of booleans indicating whether each value in the input
 /// is an outlier and the value of applied margin.
-pub fn mad_outlier<T>(x: &[T], threshold: T, direction: OutlierDirection) -> (Vec<bool>, T)
+pub fn mad_outlier<T>(
+    x: &[T],
+    threshold: T,
+    direction: OutlierDirection,
+    r_standard: bool,
+) -> (Vec<bool>, T)
 where
     T: BixverseFloat,
 {
@@ -1080,7 +1091,8 @@ where
         Some(m) => m,
         None => return (vec![], T::zero()),
     };
-    let mad_val = match mad(x, None) {
+    let scale = r_standard.then(|| T::from_f64(MAD_SCALE).unwrap());
+    let mad_val = match mad(x, scale) {
         Some(m) => m,
         None => return (vec![], T::zero()),
     };
@@ -2069,19 +2081,33 @@ mod tests {
         assert!((fdr[2] - 0.04).abs() < 1e-6);
     }
 
-    /// Only points beyond the median plus `threshold` MADs count as outliers.
+    /// Only points beyond the median plus `threshold` scaled MADs count as
+    /// outliers.
     #[test]
     fn test_mad_outlier() {
         let vec: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 100.0];
-        // Median is 3.0
-        // Deviations: [2.0, 1.0, 0.0, 1.0, 97.0]
-        // MAD (median of deviations) is 1.0
-        // Threshold = 3.0, so margin = 3.0
-        // Acceptable range: 3.0 ± 3.0 = [0.0, 6.0]
-        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both);
+        // Median 3.0, raw MAD 1.0, so margin = 3.0 * MAD_SCALE
+        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both, true);
 
-        assert!((margin - 3.0).abs() < 1e-6);
-        assert_eq!(outliers, vec![false, false, false, false, true]); // 100.0 is an outlier
+        assert!((margin - 3.0 * MAD_SCALE).abs() < 1e-12);
+        assert_eq!(outliers, vec![false, false, false, false, true]);
+    }
+
+    /// Matches R's `abs(x - median(x)) > 3 * mad(x)` and, without scaling,
+    /// `3 * mad(x, constant = 1)`: 9.0 sits inside the scaled margin but
+    /// outside the raw one.
+    #[test]
+    fn test_mad_outlier_matches_r_scaled_and_raw_mad() {
+        let vec: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 9.0];
+
+        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both, true);
+        // R: 3 * mad(x) = 6.6717 with the rounded constant 1.4826
+        assert!((margin - 6.6717).abs() < 1e-4);
+        assert_eq!(outliers, vec![false; 6]);
+
+        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both, false);
+        assert!((margin - 4.5).abs() < 1e-12);
+        assert_eq!(outliers, vec![false, false, false, false, false, true]);
     }
 
     /// The alternative and outlier-direction parsers ignore case.
