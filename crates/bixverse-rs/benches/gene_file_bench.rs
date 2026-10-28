@@ -13,12 +13,16 @@
 //! * `encode` (chunk build plus `encode_gene`) and `write`
 //!   (`write_compressed_gene_chunks`), summed over write batches.
 //!
-//! `e2e` runs the shipped `write_gene_file` with its own verbose split and
-//! checks its output is byte identical to the mirror's.
+//! The mirror keeps the norm-carrying path, so it doubles as the reference:
+//! `e2e` runs the shipped `write_gene_file` (which skips the norm when every
+//! cell recomputes it) with its own verbose split and checks its output is
+//! byte identical to the mirror's.
 //!
 //! `hvg` sweeps the gene file in blocks of [`HVG_GENE_BLOCK`] genes, as
 //! `sweep_gene_block` does, and times `read_gene_parallel`, `gene_stats` on the
-//! chunks it returned, and a raw-only `read_genes_sparse` of the same block.
+//! chunks it returned, the same pair through `read_gene_parallel_raw` (what
+//! the VST sweep now reads, checked bit for bit against the first), and a
+//! raw-only `read_genes_sparse` of the same block.
 //!
 //! `describe` scans the cell store for what drives the speed of both: nnz per
 //! cell and per gene, raw count maxima, how many genes need `u32` raw counts
@@ -876,8 +880,20 @@ fn bench_hvg(gene_path: &str) {
     let (n_batches, n_slots) = (index.n_batches(), index.n_slots());
     let raw_layer = DataLayerReturn::Raw;
     let mut out = vec![GeneStats::default(); HVG_GENE_BLOCK * n_batches];
+    let mut out_raw = out.clone();
+    let sweep = |genes: &[CscGeneChunk], out: &mut [GeneStats]| {
+        genes
+            .par_iter()
+            .zip(out.par_chunks_mut(n_batches))
+            .for_each_init(
+                || HistogramScratch::new(n_slots),
+                |scratch, (gene, stats)| gene_stats(gene, &index, scratch, stats),
+            )
+    };
 
     let (mut t_read, mut t_stats, mut t_raw) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let (mut t_read_raw, mut t_stats_raw) = (Duration::ZERO, Duration::ZERO);
+    let mut identical = true;
     let mut n_blocks = 0usize;
     for g0 in (0..n_genes).step_by(HVG_GENE_BLOCK) {
         let g1 = (g0 + HVG_GENE_BLOCK).min(n_genes);
@@ -886,18 +902,21 @@ fn bench_hvg(gene_path: &str) {
         let (genes, t) = timed(|| reader.read_gene_parallel(&block).expect("read"));
         t_read += t;
 
-        let (_, t) = timed(|| {
-            genes
-                .par_iter()
-                .zip(out.par_chunks_mut(n_batches))
-                .for_each_init(
-                    || HistogramScratch::new(n_slots),
-                    |scratch, (gene, stats)| gene_stats(gene, &index, scratch, stats),
-                )
-        });
+        let (_, t) = timed(|| sweep(&genes, &mut out));
         t_stats += t;
-        black_box(&out);
         drop(genes);
+
+        let (genes, t) = timed(|| reader.read_gene_parallel_raw(&block).expect("read"));
+        t_read_raw += t;
+        let (_, t) = timed(|| sweep(&genes, &mut out_raw));
+        t_stats_raw += t;
+        drop(genes);
+        identical &= out.iter().zip(&out_raw).all(|(a, b)| {
+            a.mean.to_bits() == b.mean.to_bits()
+                && a.var.to_bits() == b.var.to_bits()
+                && a.max_count == b.max_count
+                && a.min_count == b.min_count
+        });
 
         let (csc, t) = timed(|| {
             reader
@@ -914,7 +933,13 @@ fn bench_hvg(gene_path: &str) {
     let per = |t: Duration| format!("{:.1} ms per block", s(t) * 1e3 / n_blocks as f64);
     row("read_gene_parallel", s(t_read), &per(t_read));
     row("gene_stats", s(t_stats), &per(t_stats));
+    row("read_gene_parallel_raw", s(t_read_raw), &per(t_read_raw));
+    row("gene_stats (raw chunks)", s(t_stats_raw), &per(t_stats_raw));
     row("raw read_genes_sparse", s(t_raw), &per(t_raw));
+    eprintln!(
+        "  stats from raw chunks vs full chunks: {}",
+        if identical { "identical" } else { "DIFFERENT" }
+    );
 }
 
 //////////
