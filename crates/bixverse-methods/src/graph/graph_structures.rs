@@ -26,9 +26,9 @@ const KNN_SYM_TILE: usize = 64;
 /// Magic bytes of a serialised [`SparseGraph`].
 const GRAPH_MAGIC: &[u8; 8] = b"BXSPGRPH";
 
-///////////////
+////////////////
 // Union-find //
-///////////////
+////////////////
 
 /// Disjoint-set forest with path halving and union by size.
 pub struct UnionFind {
