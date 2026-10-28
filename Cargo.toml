@@ -63,8 +63,11 @@ faer-traits = "0.24.0"
 faer-entity = "0.20.1"
 half = "2.7.1"
 hdf5 = { package = "hdf5-metno", version = "0.15.0", features = ["zlib"] }
+hdf5-sys = { package = "hdf5-metno-sys", version = "0.12.4" }
 indexmap = "2.13.0"
 libc = "0.2.178"
+# Already in the tree through `hdf5/zlib`; inflates h5 chunks off the HDF5 lock.
+libz-sys = { version = "1.1.29", default-features = false }
 lz4_flex = "0.12.0"
 memmap2 = "0.9.9"
 ndarray = "0.17.2"

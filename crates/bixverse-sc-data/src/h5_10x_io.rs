@@ -17,6 +17,7 @@ use thousands::Separable;
 
 use crate::data_io::CellOnFileQuality;
 use crate::data_io::*;
+use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::check_tenx_filters;
 use crate::h5ad_io::write_h5_cell_major_cells;
 use crate::prelude::*;
@@ -520,17 +521,12 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
     let first_pass_time = Instant::now();
     let completed_chunks = Arc::new(AtomicUsize::new(0));
 
+    let indices_rd = H5ChunkedReader::new(file.dataset(version.get_indices())?);
+
     let gene_counts: Vec<Vec<usize>> = chunks
         .par_iter()
         .map(|&chunk_start_cell| {
             let mut local_counts = vec![0usize; n_genes];
-
-            let Ok(file) = File::open(file_path) else {
-                return local_counts;
-            };
-            let Ok(indices_ds) = file.dataset(version.get_indices()) else {
-                return local_counts;
-            };
 
             let chunk_end_cell = (chunk_start_cell + CELL_CHUNK_SIZE).min(n_cells) - 1;
             let data_start = indptr[chunk_start_cell];
@@ -540,10 +536,9 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
                 return local_counts;
             }
 
-            let Ok(chunk_indices) = indices_ds.read_slice_1d(data_start..data_end) else {
+            let Ok(chunk_indices) = indices_rd.read::<i64>(data_start..data_end) else {
                 return local_counts;
             };
-            let chunk_indices: Vec<i64> = chunk_indices.to_vec();
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;
@@ -604,22 +599,14 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
     let second_pass_time = Instant::now();
     let completed_chunks = Arc::new(AtomicUsize::new(0));
 
+    let data_rd = H5ChunkedReader::new(file.dataset(version.get_data())?);
+
     let cell_stats: Vec<(Vec<usize>, Vec<f32>)> = chunks
         .par_iter()
         .map(|&chunk_start_cell| {
             let chunk_end_cell = (chunk_start_cell + CELL_CHUNK_SIZE).min(n_cells) - 1;
             let mut local_unique = vec![0usize; chunk_end_cell - chunk_start_cell + 1];
             let mut local_lib_size = vec![0.0f32; chunk_end_cell - chunk_start_cell + 1];
-
-            let Ok(file) = File::open(file_path) else {
-                return (local_unique, local_lib_size);
-            };
-            let (Ok(data_ds), Ok(indices_ds)) = (
-                file.dataset(version.get_data()),
-                file.dataset(version.get_indices()),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
 
             let data_start = indptr[chunk_start_cell];
             let data_end = indptr[chunk_end_cell + 1];
@@ -629,14 +616,11 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
             }
 
             let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_ds.read_slice_1d(data_start..data_end),
-                indices_ds.read_slice_1d(data_start..data_end),
+                data_rd.read::<f32>(data_start..data_end),
+                indices_rd.read::<usize>(data_start..data_end),
             ) else {
                 return (local_unique, local_lib_size);
             };
-
-            let chunk_data: Vec<f32> = chunk_data.to_vec();
-            let chunk_indices: Vec<usize> = chunk_indices.to_vec();
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;

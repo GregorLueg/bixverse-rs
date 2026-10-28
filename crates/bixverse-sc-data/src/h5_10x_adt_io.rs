@@ -6,6 +6,7 @@ use hdf5::File;
 use std::path::Path;
 
 use crate::h5_10x_io::*;
+use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::check_tenx_filters;
 use crate::prelude::*;
 
@@ -96,8 +97,8 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
     let mut counts = vec![0.0f64; n_cells * n_features];
 
     let indptr: Vec<usize> = file.dataset(version.get_indptr())?.read_1d()?.to_vec();
-    let data_ds = file.dataset(version.get_data())?;
-    let indices_ds = file.dataset(version.get_indices())?;
+    let data_rd = H5ChunkedReader::new(file.dataset(version.get_data())?);
+    let indices_rd = H5ChunkedReader::new(file.dataset(version.get_indices())?);
 
     const CELL_CHUNK: usize = 10000;
     for chunk_start in (0..n_cells).step_by(CELL_CHUNK) {
@@ -108,8 +109,8 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(data_start..data_end)?.to_vec();
-        let chunk_indices: Vec<usize> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_data: Vec<f32> = data_rd.read(data_start..data_end)?;
+        let chunk_indices: Vec<usize> = indices_rd.read(data_start..data_end)?;
 
         for cell in chunk_start..=chunk_end {
             let s = indptr[cell] - data_start;

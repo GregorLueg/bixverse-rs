@@ -244,6 +244,11 @@ pub enum ScDataErrors {
         filter_name: String,
     },
 
+    /// A chunk read directly from an HDF5 file did not decode to the size its
+    /// dataset says it should, or a read asked for elements past the end.
+    #[error("HDF5 chunk decode error: {0}")]
+    H5ChunkDecode(String),
+
     /// A named `obs` column was requested but does not exist in the h5ad.
     ///
     /// Primarily raised by `write_h5_normalised_counts` when the caller

@@ -11,6 +11,7 @@ use thousands::Separable;
 use super::data_io::*;
 use super::h5_filters::check_h5ad_filters;
 use super::h5ad_io::*;
+use crate::h5_chunked::H5ChunkedReader;
 use crate::prelude::*;
 
 //////////////////
@@ -64,7 +65,7 @@ fn scan_gene_nnz_csr(
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
     let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -79,7 +80,7 @@ fn scan_gene_nnz_csr(
             continue;
         }
 
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_rd.read(data_start..data_end)?;
 
         for cell_idx in chunk_start..chunk_end {
             let start = indptr[cell_idx] - data_start;
@@ -212,8 +213,8 @@ fn scan_cell_stats_csr(
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
     let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let data_ds = file.dataset(task.raw_slot.get_data())?;
-    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
 
     let mut cell_stats = Vec::with_capacity(task.no_cells);
 
@@ -229,8 +230,8 @@ fn scan_cell_stats_csr(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(data_start..data_end)?.to_vec();
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_data: Vec<f32> = data_rd.read(data_start..data_end)?;
+        let chunk_indices: Vec<u32> = indices_rd.read(data_start..data_end)?;
 
         for cell_idx in chunk_start..chunk_end {
             let start = indptr[cell_idx] - data_start;
@@ -275,8 +276,8 @@ fn scan_cell_stats_csc(
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
     let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let data_ds = file.dataset(task.raw_slot.get_data())?;
-    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
 
     let mut cell_unique = vec![0usize; task.no_cells];
     let mut cell_lib_size = vec![0.0f32; task.no_cells];
@@ -297,8 +298,8 @@ fn scan_cell_stats_csc(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_data: Vec<f32> = data_rd.read(start_pos..end_pos)?;
+        let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
 
         for &local_gene in gene_chunk {
             let gene_start = indptr[local_gene] - start_pos;
@@ -487,8 +488,8 @@ fn write_h5_csc_cells(
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let data_ds = file.dataset(task.raw_slot.get_data())?;
-    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
     let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
 
     let cell_map = dense_index_map(cells_to_keep);
@@ -520,8 +521,8 @@ fn write_h5_csc_cells(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_data: Vec<f32> = data_rd.read(start_pos..end_pos)?;
+        let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
 
         for &(local_gene, final_gene) in gene_chunk {
             let gene_start = indptr[local_gene] - start_pos;

@@ -22,6 +22,7 @@ use thousands::Separable;
 
 use crate::data_io::*;
 use crate::h5_10x_io::{TenxVersion, validate_feature_types_tenx};
+use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::check_tenx_filters;
 use crate::h5ad_io::write_h5_cell_major_cells;
 use crate::prelude::*;
@@ -150,7 +151,7 @@ fn scan_gene_nnz(
 ) -> Result<Vec<usize>, ScDataErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<usize> = file.dataset(task.version.get_indptr())?.read_1d()?.to_vec();
-    let indices_ds = file.dataset(task.version.get_indices())?;
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.version.get_indices())?);
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -162,7 +163,7 @@ fn scan_gene_nnz(
             continue;
         }
 
-        let chunk_indices: Vec<usize> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_indices: Vec<usize> = indices_rd.read(data_start..data_end)?;
 
         for cell_idx in chunk_start..chunk_end {
             let start = indptr[cell_idx] - data_start;
@@ -200,8 +201,8 @@ fn scan_cell_stats(
 ) -> Result<Vec<(usize, f32)>, ScDataErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<usize> = file.dataset(task.version.get_indptr())?.read_1d()?.to_vec();
-    let data_ds = file.dataset(task.version.get_data())?;
-    let indices_ds = file.dataset(task.version.get_indices())?;
+    let data_rd = H5ChunkedReader::new(file.dataset(task.version.get_data())?);
+    let indices_rd = H5ChunkedReader::new(file.dataset(task.version.get_indices())?);
 
     let mut cell_stats = Vec::with_capacity(task.no_cells);
 
@@ -214,8 +215,8 @@ fn scan_cell_stats(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(data_start..data_end)?.to_vec();
-        let chunk_indices: Vec<usize> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+        let chunk_data: Vec<f32> = data_rd.read(data_start..data_end)?;
+        let chunk_indices: Vec<usize> = indices_rd.read(data_start..data_end)?;
 
         for cell_idx in chunk_start..chunk_end {
             let start = indptr[cell_idx] - data_start;

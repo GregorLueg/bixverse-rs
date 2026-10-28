@@ -27,6 +27,8 @@ pub mod h5_10x_io;
 #[cfg(feature = "h5")]
 pub mod h5_10x_multifile_io;
 #[cfg(feature = "h5")]
+pub mod h5_chunked;
+#[cfg(feature = "h5")]
 pub mod h5_filters;
 #[cfg(feature = "h5")]
 pub mod h5ad_io;
