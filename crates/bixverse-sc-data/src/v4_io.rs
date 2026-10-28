@@ -392,6 +392,16 @@ impl V4Header {
             codec: ChunkCodec::from_u8(chunk[26])?,
         })
     }
+
+    /// Whether the chunk stores its normalised layer verbatim, i.e. the layer
+    /// did not recompute bit for bit from the raw counts.
+    ///
+    /// ### Returns
+    ///
+    /// `true` if [`FLAG_NORM_STORED`] is set.
+    pub(crate) fn norm_stored(&self) -> bool {
+        self.flags & FLAG_NORM_STORED != 0
+    }
 }
 
 ////////////

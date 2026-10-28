@@ -20,12 +20,25 @@
 //! `sweep_gene_block` does, and times `read_gene_parallel`, `gene_stats` on the
 //! chunks it returned, and a raw-only `read_genes_sparse` of the same block.
 //!
+//! `describe` scans the cell store for what drives the speed of both: nnz per
+//! cell and per gene, raw count maxima, how many genes need `u32` raw counts
+//! and how many chunks store their norm layer verbatim.
+//!
+//! With `GENE_FILE_BENCH_H5AD` set (needs the `h5` feature) the cell store is
+//! built from that h5ad through `stream_h5_counts`, the path behind R's
+//! `load_h5ad`, with the pilot QC ([`H5AD_QC`]), instead of being generated.
+//! It is cached on the file name. The default stages are then
+//! `describe,e2e,hvg`; on a large file set `GENE_FILE_BENCH_MAX_NNZ`, since a
+//! single phase holds 10 bytes per nnz.
+//!
 //! One run per measurement. The stores were just written or just read, so the
 //! numbers are warm page-cache unless the cache is purged in between.
 //!
 //! Run with:
 //! ```text
 //! cargo bench -p bixverse-rs --features single-cell --bench gene_file_bench
+//! GENE_FILE_BENCH_H5AD=/path/to.h5ad \
+//!   cargo bench -p bixverse-rs --features hdf5-static --bench gene_file_bench
 //! ```
 //!
 //! Environment:
@@ -33,9 +46,14 @@
 //! * `GENE_FILE_BENCH_CELLS` / `GENE_FILE_BENCH_GENES` - shape
 //! * `GENE_FILE_BENCH_LIBRARY` - median UMIs per cell, sets nnz per cell
 //! * `GENE_FILE_BENCH_MAX_NNZ` - phase budget, unset for a single phase
-//! * `GENE_FILE_BENCH_ONLY` - comma-separated subset of `convert,e2e,hvg`
+//! * `GENE_FILE_BENCH_ONLY` - comma-separated subset of
+//!   `describe,convert,e2e,hvg`
+//! * `GENE_FILE_BENCH_H5AD` - build the cell store from this h5ad
+//! * `GENE_FILE_BENCH_H5AD_SLOT` - raw count slot: `X` (default), `raw.X` or
+//!   `layers.counts`
 //! * `GENE_FILE_BENCH_DIR` - where the stores go, default the temp directory
-//! * `GENE_FILE_BENCH_REGEN=1` - rebuild the cached cell store
+//! * `GENE_FILE_BENCH_REGEN=1` - rebuild the cached cell store, synthetic or
+//!   h5ad
 //! * `RAYON_NUM_THREADS` - thread count
 
 #![cfg(feature = "single-cell")]
@@ -108,6 +126,14 @@ const COMPARE_MAX_BYTES: u64 = 4 << 30;
 
 /// Seed for the generator.
 const SEED: u64 = 0x6E4E_F11E;
+
+/// QC of the pilot run: `(min_unique_genes, min_lib_size, min_cells,
+/// target_size)`.
+#[cfg(feature = "h5")]
+const H5AD_QC: (usize, usize, usize, f32) = (100, 250, 5, 1e4);
+
+/// Largest raw count the `u16` raw layer holds.
+const U16_LIMIT: u32 = u16::MAX as u32;
 
 /////////////////
 // Store setup //
@@ -239,6 +265,189 @@ fn ensure_cell_store(path: &Path, n_cells: usize, n_genes: usize, library: f64) 
     }
     writer.finalise().expect("finalise");
     eprintln!("cell store generated in {:.1?}", start.elapsed());
+}
+
+/// Build the cell store from an h5ad unless cached.
+///
+/// Same call as R's `load_h5ad` (streaming, its default). Format and shape
+/// come from the `shape` attribute of the count group and the length of its
+/// `indptr`, the fallback `get_h5ad_dimensions` uses on the R side.
+///
+/// ### Params
+///
+/// * `h5ad` - Input file
+/// * `cell_path` - Store path
+/// * `slot` - Raw count slot, as the R `slot` argument
+#[cfg(feature = "h5")]
+fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
+    use bixverse_rs::single_cell::sc_data::data_io::MinCellQuality;
+    use bixverse_rs::single_cell::sc_data::h5ad_io::{parse_raw_slot, stream_h5_counts};
+
+    if cell_path.exists() && std::env::var("GENE_FILE_BENCH_REGEN").is_err() {
+        return;
+    }
+    let raw_slot =
+        parse_raw_slot(slot).expect("GENE_FILE_BENCH_H5AD_SLOT: X, raw.X or layers.counts");
+    let (no_cells, no_genes, indptr_len) = {
+        let file = hdf5::File::open(h5ad).expect("open h5ad");
+        let shape: Vec<i64> = file
+            .group(raw_slot.get_dense_path())
+            .and_then(|g| g.attr("shape"))
+            .and_then(|a| a.read_raw::<i64>())
+            .expect("sparse count group with a shape attribute (dense X is not supported here)");
+        let indptr_len = file.dataset(raw_slot.get_indptr()).expect("indptr").size();
+        (shape[0] as usize, shape[1] as usize, indptr_len)
+    };
+    let format = if no_cells == no_genes {
+        panic!("square matrix, cannot tell CSR from CSC by indptr length");
+    } else if indptr_len == no_cells + 1 {
+        "csr"
+    } else if indptr_len == no_genes + 1 {
+        "csc"
+    } else {
+        panic!("indptr length {indptr_len} fits neither {no_cells} cells nor {no_genes} genes");
+    };
+    eprintln!("h5ad {no_cells} x {no_genes}, {format}, slot {slot}");
+
+    let (min_unique_genes, min_lib_size, min_cells, target_size) = H5AD_QC;
+    let qc = MinCellQuality {
+        min_unique_genes,
+        min_lib_size,
+        min_cells,
+        target_size,
+    };
+    let (res, t) = timed(|| {
+        stream_h5_counts(
+            h5ad, cell_path, format, no_cells, no_genes, qc, raw_slot, true,
+        )
+    });
+    let (kept_cells, kept_genes, _) = res.expect("stream_h5_counts");
+    eprintln!(
+        "h5ad store: {kept_cells} cells x {kept_genes} genes kept, stream_h5_counts {:.1} s \
+         (pass and write split on stdout)",
+        s(t)
+    );
+}
+
+/// Value at quantile `q` of `v`, nearest rank.
+///
+/// ### Params
+///
+/// * `v` - Values, sorted in place
+/// * `q` - Quantile in `[0, 1]`
+///
+/// ### Returns
+///
+/// The value, 0 for an empty slice.
+fn quantile(v: &mut [u64], q: f64) -> u64 {
+    if v.is_empty() {
+        return 0;
+    }
+    v.sort_unstable();
+    v[((v.len() - 1) as f64 * q).round() as usize]
+}
+
+/// Format a stored-norm chunk count, or why there is none.
+///
+/// ### Params
+///
+/// * `reader` - Store reader
+///
+/// ### Returns
+///
+/// The count as text.
+fn norm_stored(reader: &ParallelSparseReader) -> String {
+    reader
+        .count_norm_stored_chunks()
+        .map_or_else(|e| format!("n/a ({e})"), |n| n.to_string())
+}
+
+/// Print the data descriptors that drive conversion and HVG speed.
+///
+/// One raw-only pass over the cell store.
+///
+/// ### Params
+///
+/// * `cell_path` - Cell store
+fn describe_store(cell_path: &str) {
+    let reader = ParallelSparseReader::new(cell_path).expect("cell reader");
+    let header = reader.get_header();
+    let (n_cells, n_genes) = (header.total_cells, header.total_genes);
+    let raw_layer = DataLayerReturn::Raw;
+
+    // per worker: nnz per cell, nnz per gene, max raw per gene
+    let ((mut cell_nnz, mut gene_nnz, gene_max, u32_cells), t) = timed(|| {
+        thread_chunks(n_cells)
+            .into_par_iter()
+            .map(|(start, end)| {
+                let mut cell_nnz = Vec::with_capacity(end - start);
+                let mut gene_nnz = vec![0u64; n_genes];
+                let mut gene_max = vec![0u32; n_genes];
+                let mut u32_cells = 0usize;
+                for b0 in (start..end).step_by(READ_BATCH) {
+                    let b1 = (b0 + READ_BATCH).min(end);
+                    let idx: Vec<usize> = (b0..b1).collect();
+                    let csr = reader
+                        .read_cells_sparse::<u32>(&idx, &raw_layer)
+                        .expect("read");
+                    for w in csr.indptr.windows(2) {
+                        let (a, b) = (w[0] as usize, w[1] as usize);
+                        cell_nnz.push((b - a) as u64);
+                        u32_cells += csr.data[a..b].iter().any(|&v| v > U16_LIMIT) as usize;
+                        for (&g, &v) in csr.indices[a..b].iter().zip(&csr.data[a..b]) {
+                            gene_nnz[g as usize] += 1;
+                            gene_max[g as usize] = gene_max[g as usize].max(v);
+                        }
+                    }
+                }
+                (cell_nnz, gene_nnz, gene_max, u32_cells)
+            })
+            .reduce(
+                || (Vec::new(), vec![0u64; n_genes], vec![0u32; n_genes], 0),
+                |mut a, b| {
+                    a.0.extend(b.0);
+                    a.1.iter_mut().zip(&b.1).for_each(|(x, y)| *x += y);
+                    a.2.iter_mut()
+                        .zip(&b.2)
+                        .for_each(|(x, &y)| *x = (*x).max(y));
+                    a.3 += b.3;
+                    a
+                },
+            )
+    });
+
+    let nnz: u64 = cell_nnz.iter().sum();
+    let u32_genes = gene_max.iter().filter(|&&m| m > U16_LIMIT).count();
+    let ubiquitous = gene_nnz.iter().filter(|&&n| n * 2 > n_cells as u64).count();
+    let mut gene_max: Vec<u64> = gene_max.into_iter().map(u64::from).collect();
+
+    eprintln!("describe ({:.1} s scan)", s(t));
+    eprintln!("  cells x genes                {n_cells} x {n_genes}, nnz {nnz}");
+    eprintln!(
+        "  nnz per cell                 mean {:.0}, p50 {}, p99 {}, max {}",
+        nnz as f64 / n_cells.max(1) as f64,
+        quantile(&mut cell_nnz, 0.5),
+        quantile(&mut cell_nnz, 0.99),
+        quantile(&mut cell_nnz, 1.0)
+    );
+    eprintln!(
+        "  nnz per gene                 p50 {}, p99 {}, max {}; in > 50% of cells: {ubiquitous}",
+        quantile(&mut gene_nnz, 0.5),
+        quantile(&mut gene_nnz, 0.99),
+        quantile(&mut gene_nnz, 1.0)
+    );
+    eprintln!(
+        "  max raw per gene             p50 {}, p99 {}, max {}",
+        quantile(&mut gene_max, 0.5),
+        quantile(&mut gene_max, 0.99),
+        quantile(&mut gene_max, 1.0)
+    );
+    eprintln!("  genes needing u32 raw        {u32_genes} of {n_genes}");
+    eprintln!("  cells needing u32 raw        {u32_cells} of {n_cells}");
+    eprintln!(
+        "  cell chunks with stored norm {} of {n_cells}",
+        norm_stored(&reader)
+    );
 }
 
 /////////////
@@ -758,27 +967,56 @@ fn main() {
     let n_genes: usize = env("GENE_FILE_BENCH_GENES").unwrap_or(DEFAULT_GENES);
     let library: f64 = env("GENE_FILE_BENCH_LIBRARY").unwrap_or(DEFAULT_LIBRARY);
     let max_nnz: Option<usize> = env("GENE_FILE_BENCH_MAX_NNZ");
-    let only = std::env::var("GENE_FILE_BENCH_ONLY").unwrap_or_default();
+    let h5ad: Option<PathBuf> = std::env::var("GENE_FILE_BENCH_H5AD")
+        .ok()
+        .map(PathBuf::from);
+    let only = std::env::var("GENE_FILE_BENCH_ONLY").unwrap_or_else(|_| match h5ad {
+        Some(_) => "describe,e2e,hvg".to_string(),
+        None => String::new(),
+    });
     let run = |name: &str| only.is_empty() || only.split(',').any(|o| o.trim() == name);
     let dir: PathBuf = std::env::var("GENE_FILE_BENCH_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
 
-    let stem = format!("bixverse_gene_file_bench_{n_cells}x{n_genes}_{library}_{SEED:x}");
+    let stem = match &h5ad {
+        Some(p) => format!(
+            "bixverse_gene_file_bench_h5ad_{}",
+            p.file_stem().expect("h5ad file name").to_string_lossy()
+        ),
+        None => format!("bixverse_gene_file_bench_{n_cells}x{n_genes}_{library}_{SEED:x}"),
+    };
     let cell_path = dir.join(format!("{stem}_cells.bin"));
     let mirror_path = dir.join(format!("{stem}_genes_mirror.bin"));
     let gene_path = dir.join(format!("{stem}_genes.bin"));
 
     eprintln!(
-        "{n_cells} cells x {n_genes} genes, median library {library}, {} threads, max_nnz {max_nnz:?}",
-        rayon::current_num_threads()
+        "{} threads, max_nnz {max_nnz:?}, stages {}",
+        rayon::current_num_threads(),
+        if only.is_empty() { "all" } else { &only }
     );
-    ensure_cell_store(&cell_path, n_cells, n_genes, library);
+    match &h5ad {
+        #[cfg(feature = "h5")]
+        Some(p) => {
+            let slot = std::env::var("GENE_FILE_BENCH_H5AD_SLOT").unwrap_or_else(|_| "X".into());
+            ensure_h5ad_store(p, &cell_path, &slot);
+        }
+        #[cfg(not(feature = "h5"))]
+        Some(_) => panic!("GENE_FILE_BENCH_H5AD needs the h5 feature, e.g. --features hdf5-static"),
+        None => {
+            eprintln!("synthetic {n_cells} cells x {n_genes} genes, median library {library}");
+            ensure_cell_store(&cell_path, n_cells, n_genes, library);
+        }
+    }
     eprintln!(
         "cell store {:.2} GB at {}",
         std::fs::metadata(&cell_path).expect("stat").len() as f64 / 1e9,
         cell_path.display()
     );
+
+    if run("describe") {
+        describe_store(cell_path.to_str().expect("utf-8"));
+    }
 
     if run("convert") {
         bench_convert(
@@ -789,7 +1027,7 @@ fn main() {
     }
 
     if run("e2e") || (run("hvg") && !gene_path.exists()) {
-        eprintln!("e2e write_gene_file (its own split below)");
+        eprintln!("e2e write_gene_file (its own split on stdout)");
         let (res, t) = timed(|| {
             write_gene_file(
                 cell_path.to_str().expect("utf-8"),
@@ -800,15 +1038,19 @@ fn main() {
         });
         res.expect("write_gene_file");
         row("write_gene_file", s(t), "");
-        if mirror_path.exists() {
+        if run("convert") {
             eprintln!(
                 "  mirror vs shipped output: {}",
                 compare_files(&mirror_path, &gene_path)
             );
         }
+        let genes =
+            ParallelSparseReader::new(gene_path.to_str().expect("utf-8")).expect("gene reader");
         eprintln!(
-            "  gene store {:.2} GB",
-            std::fs::metadata(&gene_path).expect("stat").len() as f64 / 1e9
+            "  gene store {:.2} GB, gene chunks with stored norm {} of {}",
+            std::fs::metadata(&gene_path).expect("stat").len() as f64 / 1e9,
+            norm_stored(&genes),
+            genes.get_header().total_genes
         );
     }
 

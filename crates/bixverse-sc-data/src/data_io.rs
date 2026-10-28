@@ -2914,6 +2914,34 @@ impl ParallelSparseReader {
             .ok_or(ScDataErrors::ChunkIndexNotFound(original_index))
     }
 
+    /// Count the chunks that store their normalised layer verbatim.
+    ///
+    /// Only reads the fixed chunk headers. Such chunks skip the norm recompute
+    /// on read and are larger on disk.
+    ///
+    /// ### Returns
+    ///
+    /// The number of norm-stored chunks, or
+    /// [`ScDataErrors::FileVersionMismatch`] on a v3 file, which always stores
+    /// the layer.
+    pub fn count_norm_stored_chunks(&self) -> Result<usize, ScDataErrors> {
+        if !self.is_v4() {
+            return Err(ScDataErrors::FileVersionMismatch {
+                expected: SC_FILE_VERSION,
+                found: self.version,
+            });
+        }
+        let offsets = &self.header.chunk_offsets;
+        (0..offsets.len())
+            .into_par_iter()
+            .map(|c| {
+                // chunk layout: u64 compressed length, then the v4 header
+                let at = (self.chunks_start + offsets[c]) as usize + 8;
+                Ok(V4Header::parse(&self.mmap[at..])?.norm_stored() as usize)
+            })
+            .sum()
+    }
+
     /// Locate the compressed bytes of a single chunk in the mapping.
     ///
     /// ### Params
