@@ -32,7 +32,13 @@
 //!   any gz path pays at least once.
 //!
 //! `quality` plus `stream` is what R's `load_mtx` runs (streaming is its
-//! default), before the CSR to CSC conversion that `gene_file_bench` covers.
+//! default), on one `MtxReader`, before the CSR to CSC conversion that
+//! `gene_file_bench` covers. The `stream` stage prints an `FxHasher` hash of
+//! the store, so two builds of the loader can be checked for identical output.
+//!
+//! With `MTX_BENCH_MTX` set, only the loader stages run, on that file (plain
+//! or gzipped, if the loader reads gz), with the pilot QC ([`QC`]). Nothing
+//! is cached: the store is removed after hashing.
 //!
 //! One run per measurement. The file was just written or just read, so the
 //! numbers are warm page cache unless the cache is purged in between.
@@ -55,11 +61,15 @@
 //!   transpose, at 8 bytes per entry
 //! * `MTX_BENCH_DIR` - where the files go, default the temp directory
 //! * `MTX_BENCH_REGEN=1` - rebuild the cached files
+//! * `MTX_BENCH_MTX` - run the loader stages on this real file instead
+//! * `MTX_BENCH_CELLS_AS_ROWS` - orientation of that file, `1` (default) or
+//!   `0`
 //! * `RAYON_NUM_THREADS` - thread count
 
 #![cfg(feature = "single-cell")]
 
 use std::fs::File;
+use std::hash::Hasher;
 use std::hint::black_box;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -71,6 +81,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand_distr::{Distribution, LogNormal, Uniform};
 use rayon::prelude::*;
+use rustc_hash::FxHasher;
 
 use bixverse_rs::single_cell::sc_data::data_io::MinCellQuality;
 use bixverse_rs::single_cell::sc_data::mtx_io::MtxReader;
@@ -119,9 +130,9 @@ const LOADER_BUF_BYTES: usize = 256 * 1024;
 /// Seed for the generator.
 const SEED: u64 = 0x6D74_7842;
 
-/// QC for the loader stages: `(min_unique_genes, min_lib_size, min_cells,
-/// target_size)`. Permissive enough that nearly everything survives, so the
-/// write pass sees the full matrix.
+/// QC for the loader stages, the pilot settings: `(min_unique_genes,
+/// min_lib_size, min_cells, target_size)`. On the synthetic data nearly
+/// everything survives, so the write pass sees the full matrix.
 const QC: (usize, usize, usize, f32) = (100, 250, 5, 1e4);
 
 ///////////////
@@ -595,6 +606,121 @@ fn row(stage: &str, t: Duration, bytes: u64, lines: usize) {
     );
 }
 
+/// Shape line of an mtx file, through `gzip -dc` when it is gzipped.
+///
+/// ### Params
+///
+/// * `path` - Plain or gzipped mtx
+///
+/// ### Returns
+///
+/// The three numbers of the shape line.
+fn shape_line(path: &Path) -> [usize; 3] {
+    let mut magic = [0u8; 2];
+    File::open(path)
+        .expect("open mtx")
+        .read_exact(&mut magic)
+        .expect("read magic");
+    let mut child = None;
+    let reader: Box<dyn BufRead> = if magic == [0x1f, 0x8b] {
+        let mut c = Command::new("gzip")
+            .arg("-dc")
+            .arg(path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("gzip on PATH");
+        let out = c.stdout.take().expect("piped stdout");
+        child = Some(c);
+        Box::new(BufReader::new(out))
+    } else {
+        Box::new(BufReader::new(File::open(path).expect("open mtx")))
+    };
+    let line = reader
+        .lines()
+        .map(|l| l.expect("header line"))
+        .find(|l| !l.starts_with('%'))
+        .expect("shape line");
+    if let Some(mut c) = child {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    let v: Vec<usize> = line
+        .split_whitespace()
+        .map(|t| t.parse().expect("numeric shape line"))
+        .collect();
+    [v[0], v[1], v[2]]
+}
+
+/// Time the loader as R's `load_mtx` drives it: one `MtxReader`,
+/// `parse_mtx_quality`, then the streaming write. The `inmem` stage gets a
+/// fresh reader and the same quality.
+///
+/// ### Params
+///
+/// * `path` - Input mtx, plain or gzipped (the latter only if the loader
+///   reads gz)
+/// * `cells_as_rows` - Orientation
+/// * `qc` - Quality thresholds
+/// * `bin` - Store path, removed afterwards
+/// * `run` - Stage filter
+/// * `data_bytes` - Bytes behind the GB/s column
+/// * `entries` - Entries behind the ns/entry column
+fn run_loader(
+    path: &Path,
+    cells_as_rows: bool,
+    qc: &MinCellQuality,
+    bin: &Path,
+    run: &dyn Fn(&str) -> bool,
+    data_bytes: u64,
+    entries: usize,
+) {
+    let bin_str = bin.to_str().expect("utf-8 path");
+    if !(run("quality") || run("stream") || run("inmem")) {
+        return;
+    }
+    let mut reader = MtxReader::new(path, qc.clone(), cells_as_rows).expect("reader");
+    println!("  -- parse_mtx_quality (verbose) --");
+    let (q, t_quality) = timed(|| reader.parse_mtx_quality(true).expect("quality"));
+    row("loader quality", t_quality, data_bytes, entries);
+
+    if run("stream") {
+        println!("  -- process_mtx_and_write_bin_streaming (verbose) --");
+        let (res, t) = timed(|| {
+            reader
+                .process_mtx_and_write_bin_streaming(bin_str, &q, true)
+                .expect("streaming write")
+        });
+        row("loader stream write", t, data_bytes, entries);
+        row(
+            "loader e2e (quality + stream)",
+            t_quality + t,
+            data_bytes,
+            entries,
+        );
+        let bytes = std::fs::read(bin).expect("read store");
+        let mut h = FxHasher::default();
+        h.write(&bytes);
+        println!(
+            "  kept {} cells x {} genes, store {:.2} GB, hash {:016x}",
+            res.no_cells,
+            res.no_genes,
+            bytes.len() as f64 / 1e9,
+            h.finish()
+        );
+    }
+    if run("inmem") {
+        println!("  -- process_mtx_and_write_bin (verbose) --");
+        let (_, t) = timed(|| {
+            MtxReader::new(path, qc.clone(), cells_as_rows)
+                .expect("reader")
+                .process_mtx_and_write_bin(bin_str, &q, true)
+                .expect("in-memory write")
+        });
+        row("loader in-memory write", t, data_bytes, entries);
+    }
+    let _ = std::fs::remove_file(bin);
+}
+
 //////////
 // Main //
 //////////
@@ -631,7 +757,7 @@ fn main() {
     let needs_gen = layouts
         .split(',')
         .any(|l| regen || !path_of(l.trim()).exists());
-    if needs_gen {
+    if needs_gen && std::env::var("MTX_BENCH_MTX").is_err() {
         let (per_gene, t) = timed(|| {
             let cdf = gene_cdf(n_genes);
             (gene_nnz(n_cells, &cdf, library), cdf)
@@ -665,6 +791,24 @@ fn main() {
         min_cells,
         target_size,
     };
+
+    if let Ok(real) = std::env::var("MTX_BENCH_MTX") {
+        let path = PathBuf::from(real);
+        let cells_as_rows = std::env::var("MTX_BENCH_CELLS_AS_ROWS").map_or(true, |v| v != "0");
+        let size = std::fs::metadata(&path).expect("stat mtx").len();
+        let [rows, cols, entries] = shape_line(&path);
+        println!(
+            "\n{}: {rows} x {cols}, {entries} entries, {:.2} GB on disk, cells as rows: {cells_as_rows}",
+            path.display(),
+            size as f64 / 1e9
+        );
+        let bin = dir.join(format!(
+            "bixverse_mtx_bench_real_{}_cells.bin",
+            path.file_name().expect("file name").to_string_lossy()
+        ));
+        run_loader(&path, cells_as_rows, &qc, &bin, &run, size, entries);
+        return;
+    }
 
     for layout in layouts.split(',').map(str::trim) {
         let path = path_of(layout);
@@ -782,62 +926,7 @@ fn main() {
         drop(map);
 
         let bin = dir.join(format!("{stem}_{layout}_cells.bin"));
-        let bin_str = bin.to_str().expect("utf-8 path");
-
-        let quality = if run("quality") || run("stream") || run("inmem") {
-            println!("  -- parse_mtx_quality (verbose) --");
-            let (q, t) = timed(|| {
-                MtxReader::new(&path, qc.clone(), cells_as_rows)
-                    .expect("reader")
-                    .parse_mtx_quality(true)
-                    .expect("quality")
-            });
-            row(
-                "loader quality (2 text passes)",
-                t,
-                2 * data_bytes,
-                2 * entries,
-            );
-            Some((q, t))
-        } else {
-            None
-        };
-
-        if let Some((q, t_quality)) = &quality {
-            if run("stream") {
-                println!("  -- process_mtx_and_write_bin_streaming (verbose) --");
-                let (res, t) = timed(|| {
-                    MtxReader::new(&path, qc.clone(), cells_as_rows)
-                        .expect("reader")
-                        .process_mtx_and_write_bin_streaming(bin_str, q, true)
-                        .expect("streaming write")
-                });
-                row("loader stream write", t, data_bytes, entries);
-                row(
-                    "loader e2e (quality + stream)",
-                    *t_quality + t,
-                    3 * data_bytes,
-                    3 * entries,
-                );
-                println!(
-                    "  kept {} cells x {} genes, store {:.2} GB",
-                    res.no_cells,
-                    res.no_genes,
-                    std::fs::metadata(&bin).map_or(0, |m| m.len()) as f64 / 1e9
-                );
-            }
-            if run("inmem") {
-                println!("  -- process_mtx_and_write_bin (verbose) --");
-                let (_, t) = timed(|| {
-                    MtxReader::new(&path, qc.clone(), cells_as_rows)
-                        .expect("reader")
-                        .process_mtx_and_write_bin(bin_str, q, true)
-                        .expect("in-memory write")
-                });
-                row("loader in-memory write", t, data_bytes, entries);
-            }
-        }
-        let _ = std::fs::remove_file(&bin);
+        run_loader(&path, cells_as_rows, &qc, &bin, &run, data_bytes, entries);
 
         if run("gz") {
             let gz_path = path.with_extension("mtx.gz");
