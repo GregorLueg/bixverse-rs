@@ -1181,7 +1181,7 @@ fn sweep_gene_block<S: SingleCellReading>(
     index: &CellBatchIndex,
     out: &mut [GeneStats],
 ) -> Result<(), ScErrors> {
-    let genes = reader.read_gene_parallel(gene_indices)?;
+    let genes = reader.read_gene_parallel_raw(gene_indices)?;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
 
@@ -1338,7 +1338,7 @@ pub fn run_hvg_vst<S: SingleCellReading>(
         .collect();
 
     if !needs_exact.is_empty() {
-        let genes = reader.read_gene_parallel(&needs_exact)?;
+        let genes = reader.read_gene_parallel_raw(&needs_exact)?;
         let mut exact = vec![0f32; needs_exact.len() * n_batches];
 
         genes
