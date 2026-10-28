@@ -8,9 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Crate | Contents | Depends on |
 |---|---|---|
-| `bixverse-core` | `core`, `utils`, `ml` (sparse structures, linear algebra, stats, SIMD, k-means, GPs) | nothing in the workspace |
-| `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
-| `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `v4_io`, `h5ad_io`, `sc_traits`, ...) | core |
+| `bixverse-sparse` | the compressed sparse structures (`CompressedSparseData2`) and their byte serialisation (`serialise`) | nothing in the workspace |
+| `bixverse-core` | `core`, `utils`, `ml` (linear algebra, stats, SIMD, k-means, GPs); re-exports `bixverse-sparse` | sparse |
+| `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core, sparse |
+| `bixverse-sc-data` | the single cell data layer, flattened (`data_io`, `v4_io`, `h5ad_io`, `h5_chunked`, `mtx_io`, `obs_var_io`, `sc_traits`, ...) | sparse (core with `analysis`) |
 | `bixverse-sc` | the rest of `single_cell`, flattened (`sc_processing`, `sc_analysis`, ...) | methods (with `dge`), sc-data |
 | `bixverse-gpu` | `linalg`, `methods_gpu` | methods |
 | `bixverse-sc-gpu` | the old `gpu::sc_gpu`, flattened | sc, gpu |
@@ -42,11 +43,11 @@ Features live on the crate that owns the dependency; the facade and `bixverse-r`
 
 - `bixverse-core`: `accelerate` (Apple Accelerate GEMM via `ann-search-rs/accelerate`)
 - `bixverse-methods`: `dge` (pulls in `edge-rs`; `methods::dge_bulk`)
-- `bixverse-sc-data`: `h5` (the h5ad and 10x h5 readers; pulls in `hdf5`, `ndarray`), `hdf5-static`, `hdf5-filters`
+- `bixverse-sc-data`: `h5` (the h5ad and 10x h5 readers; pulls in `hdf5`, `hdf5-sys`, `ndarray`), `hdf5-static`, `hdf5-filters`, `parquet` (implies `h5`; `obs_var_io` writes the h5ad obs / var and 10x barcodes / features to Parquet; pulls in `parquet` without arrow). `flate2` on the pure Rust `zlib-rs` backend is always on: gzipped MTX and the parallel h5 chunk inflate
 - `bixverse-sc`: `multi-modal`, `bonsai` (pulls in `bonsai-rs` with `sanity`; Sanity is only ever named through `bonsai_rs::sanity_sc_rs`)
 - `bixverse-sc-gpu`: `bonsai` (the GPU Sanity to Bonsai path)
 - `bixverse-mlx`: none. Apple Silicon only. `ann-search-rs/mlx` owns `links = "mlxc"` and exports `DEP_MLXC_AVAILABLE`; this crate's `build.rs` turns that into `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. Without `libmlxc` the crate compiles to nothing but that constant. The FFI bindings stay local because `ann_search_rs::mlx::ffi` is private
-- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge`; no HDF5), `h5` (implies `single-cell`, turns on `bixverse-sc-data/h5`), `hdf5-static` and `hdf5-filters` (imply `h5`), `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`. A consumer that never reads h5ad or 10x h5 (bixverse.gpu) leaves `h5` off and has no HDF5 in its tree
+- Facade `bixverse-rs`: `accelerate` (default), `dge`, `single-cell` (implies `dge`; no HDF5), `h5` (implies `single-cell`, turns on `bixverse-sc-data/h5`), `hdf5-static`, `hdf5-filters` and `parquet` (imply `h5`), `multi-modal`, `bonsai`, `gpu` (bulk GPU only), `sc-gpu` (gpu + single-cell + `bixverse-sc-gpu`), `mlx`. A consumer that never reads h5ad or 10x h5 (bixverse.gpu) leaves `h5` off and has no HDF5 in its tree
 - `bixverse-r`: the facade's features plus nothing else. The h5 parameter impls (`H5adFileTask`, `TenxFileTask`) sit behind its `h5`
 - `large-test` and `large_scale_diagnostics` exist on every crate that has gated tests (methods, sc, gpu, sc-gpu, mlx, facade); the facade forwards them. `large-test` is for slow tests that assert; `large_scale_diagnostics` for unasserted sweeps that print tables. No CI job enables either
 
@@ -83,11 +84,16 @@ cargo test -p bixverse-sc -- test_name_substring
 
 # Format / lint. Gated tests do not compile under the CI sets, so lint with all of them.
 cargo fmt --all
-cargo clippy --workspace --exclude bixverse-r --all-targets --features bixverse-rs/sc-gpu,bixverse-rs/multi-modal,bixverse-rs/bonsai,bixverse-rs/hdf5-static,bixverse-rs/mlx,bixverse-rs/large-test,bixverse-rs/large_scale_diagnostics
+cargo clippy --workspace --exclude bixverse-r --all-targets --features bixverse-rs/sc-gpu,bixverse-rs/multi-modal,bixverse-rs/bonsai,bixverse-rs/hdf5-static,bixverse-rs/parquet,bixverse-rs/mlx,bixverse-rs/large-test,bixverse-rs/large_scale_diagnostics
 cargo clippy -p bixverse-r --features single-cell,multi-modal,bonsai,sc-gpu --all-targets
 
 # Benches: the facade's live in crates/bixverse-rs/benches, the MLX ones in crates/bixverse-mlx/benches
 cargo bench -p bixverse-rs --features gpu --bench gpu_corr_bench
+
+# Loader stage splits. Settings are env vars documented at the top of each file.
+# GENE_FILE_BENCH_H5AD=<file> builds the store from a real h5ad; MTX_BENCH_MTX=<file> runs a real (gz) mtx
+cargo bench -p bixverse-rs --features hdf5-static --bench gene_file_bench   # h5ad passes, CSR to CSC, HVG reads
+cargo bench -p bixverse-rs --features single-cell --bench mtx_bench
 ```
 
 `bixverse-r` needs `R_HOME` / R shared libraries on the linker path because `extendr-api` links against libR. No other crate does. On macOS with R installed this generally works out of the box.
@@ -98,7 +104,10 @@ Each crate is organised by domain, not by algorithmic layer. Module trees were k
 
 - `bixverse-core`: `core/` (math primitives, `faer` linear algebra, `CompressedSparseData2`, PCA/SVD, correlations, RBF kernels, synthetic data), `utils/` (SIMD via `BixverseSimd`, matrix helpers, traits, heap structures, assertion macros), `ml/` (k-means, Gaussian processes)
 - `bixverse-methods`: `enrichment/` (fgsea, GSVA, singscore, mitch, OAE, blitzGSEA, decoupler ULM / MLM in `lm_activity`), `graph/` (`SparseGraph`, community detection, PageRank), `methods/` (NMF, ICA, LDA, diffcor, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, `dge_bulk`), `ontology/`
-- `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 4, the previous `SC_FILE_VERSION_V3` still reads; see "Single cell binary format" below), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`
+- `bixverse-sc-data`: binary format (`SC_FILE_VERSION`, currently 4, the previous `SC_FILE_VERSION_V3` still reads; see "Single cell binary format" below), `ParallelSparseReader` (checks the magic string, the version and every offset against the mmap length), in-memory reader, h5ad / 10x h5 / MTX ingestion, `sc_traits`, `CELL_BATCH_SIZE`. Ingestion rules:
+  - HDF5 serialises every call, gzip inflate included, behind one global lock. `h5_chunked::H5ChunkedReader` gets around it for chunked rank-1 datasets with exactly `[deflate]` or `[shuffle, deflate]` (h5ad and CellRanger write these): it builds the chunk index once, then `pread`s and inflates chunks in parallel off the lock. Everything else falls back to `H5Dread`. Build the reader once per dataset, outside the rayon loop. The chunk index uses `H5Dchunk_iter` on HDF5 1.14+ and `H5Dget_chunk_info_by_coord` on 1.10.5 to 1.14 (Ubuntu's system libhdf5); `build.rs` turns `DEP_HDF5_VERSION_*` into the cfgs. Never use `H5Dget_chunk_info` by index: it is linear per call.
+  - MTX is parsed once (`MtxReader::parse_mtx_quality`): entries spill into cell buckets while gene counts accumulate, cell QC subtracts the dropped genes afterwards, and cell-major input skips the bucket sort. gzip is detected by magic bytes and inflated on one thread feeding rayon parsers; plain gzip cannot be split. The banner's field is honoured: `real` must be integral counts, `pattern` counts 1.
+  - obs / var reach DuckDB as Parquet (`obs_var_io`, feature `parquet`); the R side runs `read_parquet` and casts categoricals to ENUM.
 - `bixverse-sc`: processing, kNN, batch correction, annotation, analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), trajectories, multi-modal (WNN)
 - `bixverse-gpu`, `bixverse-sc-gpu`: GPU kernels via `cubecl` / `cubek`. K-means comes from `ann-search-rs`
 - `bixverse-mlx`: experimental MLX backend via `mlx-c`, f32 only
@@ -111,6 +120,7 @@ Where an sc algorithm has a GPU or MLX twin, the seam is generic over the backen
 
 - `CellGeneSparseWriter::new` writes v4, `new_v3` and `write_gene_file_v3` the legacy layout (tests of v3 internals, conversion input). Parallel payload builders encode through `writer.format()` (`ChunkFormat::encode_cell` / `encode_gene`); `to_compressed_bytes` still emits v3 payloads, so never hand it to a v4 writer.
 - The reader dispatches on the file version, so v3 stores keep opening. `peek_file_version` reads the version from the 64 byte header, `upgrade_store_to_v4` swaps a v3 store for its conversion (temporary files first, optional `.v3.bak`), `convert_*_to_v4` write it elsewhere. The gene file needs the cell file for its library table, so convert them together.
+- Paths that only need raw counts never decode the norm: HVG VST reads through `read_gene_parallel_raw`, and the CSR to CSC conversion scatters raw counts plus cell index (`GENE_FILE_BYTES_PER_NNZ` = 8) and derives the gene file's norm from the library table. A cell file with any verbatim norm chunk (`count_norm_stored_chunks`) takes the old norm-carrying path. Both paths write byte-identical gene files; keep it that way.
 - The norm recompute goes through `norm_value`, the single definition of the layer. Changing it breaks bit identity with every file written before, as before. It uses the platform `ln_1p`; cross-platform identity of the recompute is untested.
 - Reads prefetch their byte range into the page cache (unix only, sampled residency probe first, so warm stores pay almost nothing). Cold-read benchmarks must verify coldness with `mincore`; sizing chunks by reading their mapped bytes warms the cache.
 - The archive (`archive_io`) only reads cells through the reader API and restores through the regular writers, so it is format independent and restores to v4.
