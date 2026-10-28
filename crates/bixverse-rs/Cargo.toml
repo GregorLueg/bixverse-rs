@@ -87,6 +87,7 @@ edge-rs.workspace = true
 faer.workspace = true
 half.workspace = true
 indexmap.workspace = true
+memmap2.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
@@ -127,6 +128,11 @@ required-features = ["single-cell"]
 
 [[bench]]
 name = "gene_file_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "mtx_bench"
 harness = false
 required-features = ["single-cell"]
 
