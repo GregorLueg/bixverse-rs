@@ -71,14 +71,16 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "approx",
  "bincode",
  "bixverse-sparse",
  "document-features",
+ "flate2",
  "half",
  "hdf5-metno",
+ "hdf5-metno-sys",
  "indexmap",
  "libc",
  "lz4_flex",
@@ -97,10 +99,12 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
+ "bincode",
  "num-traits",
  "rayon",
+ "serde",
  "thiserror",
 ]
 
@@ -197,6 +201,15 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "flate2"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+dependencies = [
+ "zlib-rs",
+]
 
 [[package]]
 name = "getrandom"
@@ -975,6 +988,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zstd"

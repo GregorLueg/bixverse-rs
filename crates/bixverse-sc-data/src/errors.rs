@@ -213,6 +213,18 @@ pub enum ScDataErrors {
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
+    /// Two columns of an obs / var table end up with the same name after
+    /// snake_case. DuckDB rejects the table, so the export stops before
+    /// writing anything.
+    #[error("Duplicate column name after snake_case: '{0}'")]
+    DuplicateColumnName(String),
+
+    /// Wraps any error from the `parquet` crate while writing an obs / var
+    /// table.
+    #[cfg(feature = "parquet")]
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
+
     /// A dataset is compressed with a filter this build cannot decode.
     ///
     /// Raised before the first read, because HDF5 itself reports the missing
@@ -231,6 +243,11 @@ pub enum ScDataErrors {
         /// Human readable name for that identifier.
         filter_name: String,
     },
+
+    /// A chunk read directly from an HDF5 file did not decode to the size its
+    /// dataset says it should, or a read asked for elements past the end.
+    #[error("HDF5 chunk decode error: {0}")]
+    H5ChunkDecode(String),
 
     /// A named `obs` column was requested but does not exist in the h5ad.
     ///
@@ -271,6 +288,21 @@ pub enum ScDataErrors {
     MtxParseError {
         /// Which field failed: "cell count", "gene count", or "entry count".
         field: &'static str,
+    },
+
+    /// The MTX banner names something the loader does not read: an object
+    /// other than `matrix`, the dense `array` format, a `complex` field or a
+    /// symmetry other than `general`.
+    #[error("Unsupported MTX file: {0}")]
+    MtxUnsupported(String),
+
+    /// An MTX value is not a raw count: negative, non-integral, not a number
+    /// or beyond `u32`. The store holds raw counts, so a `real` file of
+    /// normalised values cannot be loaded.
+    #[error("MTX value '{value}' is not a non-negative integral count")]
+    MtxNotACount {
+        /// The offending value as written in the file.
+        value: String,
     },
 
     // -- Format parsing --

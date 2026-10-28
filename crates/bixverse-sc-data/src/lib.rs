@@ -27,6 +27,8 @@ pub mod h5_10x_io;
 #[cfg(feature = "h5")]
 pub mod h5_10x_multifile_io;
 #[cfg(feature = "h5")]
+pub mod h5_chunked;
+#[cfg(feature = "h5")]
 pub mod h5_filters;
 #[cfg(feature = "h5")]
 pub mod h5ad_io;
@@ -35,6 +37,8 @@ pub mod h5ad_multifile_io;
 pub mod in_memory_io;
 pub mod mtx_io;
 pub mod mtx_multifile_io;
+#[cfg(feature = "parquet")]
+pub mod obs_var_io;
 #[cfg(feature = "analysis")]
 pub mod plotting;
 pub mod prelude;

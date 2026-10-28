@@ -3,15 +3,14 @@
 //! multi-loader design.
 
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
 use crate::data_io::*;
+use crate::mtx_io::{MtxSource, parse_block};
 use crate::prelude::*;
 
 ////////////////
@@ -22,7 +21,7 @@ use crate::prelude::*;
 pub struct MtxFileTask {
     /// Experimental identifier
     pub exp_id: String,
-    /// Path to the (decompressed) .mtx file
+    /// Path to the .mtx file, plain or gzipped
     pub mtx_path: String,
     /// file-local gene idx -> universe gene idx; None if gene not in
     /// the (intersected) universe
@@ -59,188 +58,53 @@ pub struct MultiMtxResult {
 // Helpers //
 /////////////
 
-/// Skip comment lines and read the dimension header from an mtx file.
+/// Open one task's mtx file and read its shape in cell and gene terms.
 ///
 /// ### Params
 ///
-/// * `reader` - Mutable reference to the buffered reader
+/// * `task` - The file task descriptor
 ///
 /// ### Returns
 ///
-/// The dimension header line (first non-comment line)
-fn read_mtx_header(reader: &mut BufReader<File>) -> std::io::Result<String> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        reader.read_line(&mut line)?;
-        if !line.starts_with('%') {
-            break;
-        }
-    }
-    Ok(line)
-}
-
-/// Find byte boundaries for parallel chunk scanning of an mtx file.
-///
-/// Skips the comment block, then splits the data region into `num_chunks`
-/// roughly equal ranges aligned to newline boundaries.
-///
-/// ### Params
-///
-/// * `path` - Path to the mtx file
-/// * `num_chunks` - Desired number of chunks
-///
-/// ### Returns
-///
-/// Vector of `(start, end)` byte offsets, one per chunk
-fn find_chunk_boundaries(path: &Path, num_chunks: usize) -> std::io::Result<Vec<(u64, u64)>> {
-    let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-    let mut reader = BufReader::with_capacity(256 * 1024, file);
-
-    let mut line = String::new();
-    loop {
-        line.clear();
-        reader.read_line(&mut line)?;
-        if !line.starts_with('%') {
-            break;
-        }
-    }
-    let data_start = reader.stream_position()?;
-    let data_size = file_size - data_start;
-    let chunk_size = data_size / num_chunks as u64;
-
-    let mut boundaries = vec![(data_start, data_start)];
-
-    for i in 1..num_chunks {
-        let target_pos = data_start + chunk_size * i as u64;
-        if target_pos >= file_size {
-            break;
-        }
-        reader.seek(std::io::SeekFrom::Start(target_pos))?;
-        let mut byte = [0u8; 1];
-        while reader.read(&mut byte)? > 0 {
-            if byte[0] == b'\n' {
-                break;
-            }
-        }
-        let boundary = reader.stream_position()?;
-        boundaries.push((boundary, boundary));
-    }
-    boundaries.push((file_size, file_size));
-
-    for i in 0..boundaries.len() - 1 {
-        boundaries[i].1 = boundaries[i + 1].0;
-    }
-    boundaries.pop();
-    Ok(boundaries)
-}
-
-/// Read a line into a byte buffer with trailing newline and CR stripped.
-///
-/// ### Params
-///
-/// * `reader` - Mutable reference to the buffered reader
-/// * `buf` - Buffer to read into; cleared before each read
-///
-/// ### Returns
-///
-/// `Ok(true)` if a line was read, `Ok(false)` at EOF
-#[inline]
-fn read_trimmed_line(reader: &mut BufReader<File>, buf: &mut Vec<u8>) -> std::io::Result<bool> {
-    buf.clear();
-    let n = reader.read_until(b'\n', buf)?;
-    if n == 0 {
-        return Ok(false);
-    }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-    }
-    if buf.last() == Some(&b'\r') {
-        buf.pop();
-    }
-    Ok(true)
-}
-
-/// Accumulate per-universe-gene NNZ counts for a single byte chunk of an mtx
-/// file.
-///
-/// ### Params
-///
-/// * `path` - Path to the mtx file
-/// * `start` - Start byte offset of the chunk
-/// * `end` - End byte offset of the chunk
-/// * `universe_size` - Total number of genes in the universe
-/// * `gene_local_to_universe` - Mapping from file-local gene index to universe
-///   index
-/// * `cells_as_rows` - Whether cells occupy rows (true) or columns (false)
-///
-/// ### Returns
-///
-/// Per-universe-gene NNZ counts as `Vec<u32>`
-fn scan_gene_nnz_chunk(
-    path: &Path,
-    start: u64,
-    end: u64,
-    universe_size: usize,
-    gene_local_to_universe: &[Option<usize>],
-    cells_as_rows: bool,
-) -> Vec<u32> {
-    let mut local = vec![0u32; universe_size];
-
-    let Ok(file) = File::open(path) else {
-        return local;
+/// `(source, no_cells, no_genes)`.
+fn open_task(task: &MtxFileTask) -> Result<(MtxSource, usize, usize), ScDataErrors> {
+    let src = MtxSource::open(Path::new(&task.mtx_path), task.cells_as_rows)?;
+    let [rows, cols, _] = src.shape;
+    let (no_cells, no_genes) = if task.cells_as_rows {
+        (rows, cols)
+    } else {
+        (cols, rows)
     };
-    let mut reader = BufReader::with_capacity(256 * 1024, file);
-    if reader.seek(std::io::SeekFrom::Start(start)).is_err() {
-        return local;
-    }
+    Ok((src, no_cells, no_genes))
+}
 
-    let mut buf = Vec::with_capacity(64);
-    let mut read = 0u64;
-    while read < (end - start) {
-        let len = match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        read += len as u64;
-
-        let blen = buf.len();
-        let trim = if blen > 0 && buf[blen - 1] == b'\n' {
-            if blen > 1 && buf[blen - 2] == b'\r' {
-                blen - 2
-            } else {
-                blen - 1
-            }
-        } else {
-            blen
-        };
-
-        if trim < 3 {
-            buf.clear();
-            continue;
-        }
-
-        if let Some((row, col, _)) = parse_mtx_coord(&buf[..trim]) {
-            let local_gene = if cells_as_rows {
-                (col - 1) as usize
-            } else {
-                (row - 1) as usize
-            };
-            if let Some(&Some(u_idx)) = gene_local_to_universe.get(local_gene) {
-                local[u_idx] += 1;
-            }
-        }
-        buf.clear();
-    }
-    local
+/// Split a 1-based mtx coordinate into 0-based `(cell, gene)`.
+///
+/// ### Params
+///
+/// * `row` - 1-based row as stored
+/// * `col` - 1-based column as stored
+/// * `cells_as_rows` - Whether rows are cells
+///
+/// ### Returns
+///
+/// `None` for a 0 coordinate, which the format does not allow.
+#[inline]
+fn cell_gene(row: u32, col: u32, cells_as_rows: bool) -> Option<(usize, usize)> {
+    let (cell, gene) = if cells_as_rows {
+        (row, col)
+    } else {
+        (col, row)
+    };
+    Some((
+        (cell as usize).checked_sub(1)?,
+        (gene as usize).checked_sub(1)?,
+    ))
 }
 
 /// Count, per universe gene, the number of cells expressing it in one mtx file.
 ///
-/// The file is split into byte ranges on line boundaries and scanned in
-/// parallel, then the per-chunk tallies are summed.
+/// The blocks of the file are parsed in parallel, one tally per worker.
 ///
 /// ### Params
 ///
@@ -251,122 +115,36 @@ fn scan_gene_nnz_chunk(
 ///
 /// Per-gene non-zero counts, indexed by universe gene index.
 fn scan_gene_nnz(task: &MtxFileTask, universe_size: usize) -> Result<Vec<usize>, ScDataErrors> {
-    let path = PathBuf::from(&task.mtx_path);
-    let file_size = std::fs::metadata(&path)?.len();
-    let num_chunks = ((file_size / (64 * 1024 * 1024)) as usize).max(1);
-    let boundaries = find_chunk_boundaries(&path, num_chunks)?;
-
-    let per_chunk: Vec<Vec<u32>> = boundaries
-        .par_iter()
-        .map(|&(s, e)| {
-            scan_gene_nnz_chunk(
-                &path,
-                s,
-                e,
-                universe_size,
-                &task.gene_local_to_universe,
-                task.cells_as_rows,
-            )
-        })
-        .collect();
+    let (src, _, _) = open_task(task)?;
+    let field = src.field;
+    let per_worker = src.par_fold_blocks(
+        || vec![0u32; universe_size],
+        |acc, _, bytes| {
+            parse_block(bytes, field, |row, col, _| {
+                if let Some((_, gene)) = cell_gene(row, col, task.cells_as_rows)
+                    && let Some(&Some(u)) = task.gene_local_to_universe.get(gene)
+                {
+                    acc[u] += 1;
+                }
+            })
+        },
+    )?;
 
     let mut total = vec![0usize; universe_size];
-    for c in per_chunk {
-        for (i, &v) in c.iter().enumerate() {
-            total[i] += v as usize;
-        }
+    for acc in per_worker {
+        total
+            .iter_mut()
+            .zip(acc)
+            .for_each(|(t, n)| *t += n as usize);
     }
     Ok(total)
-}
-
-/// Parse a single coordinate-format mtx line from raw bytes.
-///
-/// Counts are kept at full `u32` width; the on-disk chunk format narrows to
-/// u16 only when every value fits.
-///
-/// ### Params
-///
-/// * `line` - Raw bytes of a single trimmed mtx line
-///
-/// ### Returns
-///
-/// `Some((row, col, value))` on success, `None` if the line is malformed
-#[inline]
-fn parse_mtx_coord(line: &[u8]) -> Option<(u32, u32, u32)> {
-    let mut i = 0;
-    let len = line.len();
-
-    let mut row = 0u32;
-    let start = i;
-    while i < len && line[i].is_ascii_digit() {
-        row = row * 10 + (line[i] - b'0') as u32;
-        i += 1;
-    }
-    if i == start {
-        return None;
-    }
-    while i < len && (line[i] == b' ' || line[i] == b'\t') {
-        i += 1;
-    }
-    if i >= len {
-        return None;
-    }
-
-    let mut col = 0u32;
-    while i < len && line[i].is_ascii_digit() {
-        col = col * 10 + (line[i] - b'0') as u32;
-        i += 1;
-    }
-    while i < len && (line[i] == b' ' || line[i] == b'\t') {
-        i += 1;
-    }
-    if i >= len {
-        return None;
-    }
-
-    let mut val = 0u32;
-    while i < len && line[i].is_ascii_digit() {
-        val = val * 10 + (line[i] - b'0') as u32;
-        i += 1;
-    }
-    Some((row, col, val))
-}
-
-/// Read the cell and gene counts from an mtx file header.
-///
-/// ### Params
-///
-/// * `path` - Path to the mtx file
-/// * `cells_as_rows` - Whether cells occupy rows (true) or columns (false)
-///
-/// ### Returns
-///
-/// `(no_cells, no_genes)` parsed from the dimension header
-fn read_mtx_dims(path: &Path, cells_as_rows: bool) -> std::io::Result<(usize, usize)> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
-    let header = read_mtx_header(&mut reader)?;
-    let parts: Vec<&str> = header.split_whitespace().collect();
-    if parts.len() != 3 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Invalid mtx header",
-        ));
-    }
-    let a: usize = parts[0]
-        .parse()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid count"))?;
-    let b: usize = parts[1]
-        .parse()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid count"))?;
-    Ok(if cells_as_rows { (a, b) } else { (b, a) })
 }
 
 /// Scan a single mtx file for per-cell NNZ and library size over the final gene
 /// set.
 ///
-/// Splits the file into chunks and scans them in parallel, ignoring genes not
-/// present in `gene_local_to_final`.
+/// The blocks of the file are parsed in parallel, ignoring genes not present
+/// in `gene_local_to_final`.
 ///
 /// ### Params
 ///
@@ -380,83 +158,38 @@ fn read_mtx_dims(path: &Path, cells_as_rows: bool) -> std::io::Result<(usize, us
 fn scan_cell_stats(
     task: &MtxFileTask,
     gene_local_to_final: &[Option<usize>],
-) -> Result<Vec<(usize, f32)>, ScDataErrors> {
-    let path = PathBuf::from(&task.mtx_path);
-    let (no_cells, _) = read_mtx_dims(&path, task.cells_as_rows)?;
-
-    let file_size = std::fs::metadata(&path)?.len();
-    let num_chunks = ((file_size / (64 * 1024 * 1024)) as usize).max(1);
-    let boundaries = find_chunk_boundaries(&path, num_chunks)?;
-
-    let per_chunk: Vec<(Vec<u32>, Vec<f32>)> = boundaries
-        .par_iter()
-        .map(|&(s, e)| {
-            let mut unique = vec![0u32; no_cells];
-            let mut lib = vec![0.0f32; no_cells];
-            let Ok(file) = File::open(&path) else {
-                return (unique, lib);
-            };
-            let mut reader = BufReader::with_capacity(256 * 1024, file);
-            if reader.seek(std::io::SeekFrom::Start(s)).is_err() {
-                return (unique, lib);
-            }
-            let mut buf = Vec::with_capacity(64);
-            let mut read = 0u64;
-            while read < (e - s) {
-                let len = match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                read += len as u64;
-                let blen = buf.len();
-                let trim = if blen > 0 && buf[blen - 1] == b'\n' {
-                    if blen > 1 && buf[blen - 2] == b'\r' {
-                        blen - 2
-                    } else {
-                        blen - 1
-                    }
-                } else {
-                    blen
-                };
-                if trim < 3 {
-                    buf.clear();
-                    continue;
+) -> Result<Vec<(usize, u64)>, ScDataErrors> {
+    let (src, no_cells, _) = open_task(task)?;
+    let field = src.field;
+    let per_worker = src.par_fold_blocks(
+        || vec![(0u32, 0u64); no_cells],
+        |acc, _, bytes| {
+            parse_block(bytes, field, |row, col, value| {
+                if let Some((cell, gene)) = cell_gene(row, col, task.cells_as_rows)
+                    && cell < no_cells
+                    && let Some(&Some(_)) = gene_local_to_final.get(gene)
+                {
+                    acc[cell].0 += 1;
+                    acc[cell].1 += value as u64;
                 }
-                if let Some((row, col, value)) = parse_mtx_coord(&buf[..trim]) {
-                    let (cell_idx, gene_idx) = if task.cells_as_rows {
-                        ((row - 1) as usize, (col - 1) as usize)
-                    } else {
-                        ((col - 1) as usize, (row - 1) as usize)
-                    };
-                    if let Some(&Some(_)) = gene_local_to_final.get(gene_idx)
-                        && cell_idx < no_cells
-                    {
-                        unique[cell_idx] += 1;
-                        lib[cell_idx] += value as f32;
-                    }
-                }
-                buf.clear();
-            }
-            (unique, lib)
-        })
-        .collect();
+            })
+        },
+    )?;
 
-    let mut unique = vec![0usize; no_cells];
-    let mut lib = vec![0.0f32; no_cells];
-    for (u, l) in per_chunk {
-        for i in 0..no_cells {
-            unique[i] += u[i] as usize;
-            lib[i] += l[i];
-        }
+    let mut stats = vec![(0usize, 0u64); no_cells];
+    for acc in per_worker {
+        stats.iter_mut().zip(acc).for_each(|(t, (u, l))| {
+            t.0 += u as usize;
+            t.1 += l;
+        });
     }
-    Ok(unique.into_iter().zip(lib).collect())
+    Ok(stats)
 }
 
 /// Write the kept cells of a single mtx file into the unified sparse writer.
 ///
-/// Reads the file sequentially, filters to kept cells and final genes, sorts
-/// each cell's entries by gene index, and flushes them via `CsrCellChunk`.
+/// Reads the file block by block, filters to kept cells and final genes, and
+/// writes each cell's entries sorted by gene via [`write_cell_rows`].
 ///
 /// ### Params
 ///
@@ -490,37 +223,26 @@ fn write_mtx_file_cells(
         );
     }
 
-    let path = PathBuf::from(&task.mtx_path);
+    let (src, _, _) = open_task(task)?;
+    let field = src.field;
     let cell_map = dense_index_map(cells_to_keep);
     let gene_map = dense_gene_map_from_options(gene_local_to_final);
 
     // (gene_final_idx, raw_count) per kept cell
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
 
-    let file = File::open(&path)?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let _ = read_mtx_header(&mut reader)?;
-
-    let mut buf = Vec::with_capacity(64);
-    while read_trimmed_line(&mut reader, &mut buf)? {
-        if buf.is_empty() {
-            continue;
-        }
-        let Some((row, col, value)) = parse_mtx_coord(&buf) else {
-            continue;
-        };
-        let (old_cell, old_gene) = if task.cells_as_rows {
-            ((row - 1) as usize, (col - 1) as usize)
-        } else {
-            ((col - 1) as usize, (row - 1) as usize)
-        };
-        let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
-        let final_gene = gene_map.get(old_gene).copied().unwrap_or(INDEX_DROPPED);
-        if new_cell == INDEX_DROPPED || final_gene == INDEX_DROPPED {
-            continue;
-        }
-        cell_data[new_cell as usize].push((final_gene, value));
-    }
+    src.for_each_block_seq(|_, block| {
+        parse_block(&block, field, |row, col, value| {
+            let Some((cell, gene)) = cell_gene(row, col, task.cells_as_rows) else {
+                return;
+            };
+            let new_cell = cell_map.get(cell).copied().unwrap_or(INDEX_DROPPED);
+            let final_gene = gene_map.get(gene).copied().unwrap_or(INDEX_DROPPED);
+            if new_cell != INDEX_DROPPED && final_gene != INDEX_DROPPED {
+                cell_data[new_cell as usize].push((final_gene, value));
+            }
+        })
+    })?;
 
     let (nnz, lib_size) = write_cell_rows(&mut cell_data, cell_offset, target_size, writer)?;
 
@@ -628,7 +350,7 @@ pub fn multi_mtx_to_file<P: AsRef<Path>>(
     }
     let completed = Arc::new(AtomicUsize::new(0));
 
-    let per_file_cell_stats: Vec<Vec<(usize, f32)>> = tasks
+    let per_file_cell_stats: Vec<Vec<(usize, u64)>> = tasks
         .par_iter()
         .zip(composed.par_iter())
         .map(|(task, mapping)| {
@@ -650,7 +372,7 @@ pub fn multi_mtx_to_file<P: AsRef<Path>>(
                 .iter()
                 .enumerate()
                 .filter(|(_, (u, l))| {
-                    *u >= cell_qc.min_unique_genes && *l >= cell_qc.min_lib_size as f32
+                    *u >= cell_qc.min_unique_genes && *l as f32 >= cell_qc.min_lib_size as f32
                 })
                 .map(|(i, _)| i)
                 .collect()
@@ -709,4 +431,134 @@ pub fn multi_mtx_to_file<P: AsRef<Path>>(
         total_genes,
         per_file: per_file_results,
     })
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    /// Removes a test's scratch file even if an assert fails.
+    struct TempPath(PathBuf);
+
+    /// Drop implementation for [`TempPath`]. Errors are ignored: the file may
+    /// already be gone, and this runs during unwind.
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    impl TempPath {
+        /// Scratch file named after the calling test.
+        fn new(name: &str, ext: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("bixverse_mtx_multi_{name}.{ext}")))
+        }
+
+        /// Path as a `String`.
+        fn string(&self) -> String {
+            self.0.to_str().expect("utf-8 temp path").to_string()
+        }
+    }
+
+    /// Three cells x four genes as integer counts, cells as rows.
+    const INTEGER_CELLS_AS_ROWS: &str = "%%MatrixMarket matrix coordinate integer general\n\
+3 4 5\n1 1 5\n1 3 7\n2 2 3\n3 1 2\n3 4 9\n";
+
+    /// Two cells x four genes as integral reals, genes as rows.
+    const REAL_GENES_AS_ROWS: &str = "%%MatrixMarket matrix coordinate real general\n\
+4 2 3\n1 1 4.0\n2 1 1.1e+01\n4 2 6\n";
+
+    /// One cell x four genes as a pattern, cells as rows.
+    const PATTERN_CELLS_AS_ROWS: &str = "%%MatrixMarket matrix coordinate pattern general\n\
+1 4 2\n1 2\n1 4\n";
+
+    /// Task over an identity gene universe of four genes.
+    fn task(name: &str, path: &TempPath, cells_as_rows: bool) -> MtxFileTask {
+        MtxFileTask {
+            exp_id: name.to_string(),
+            mtx_path: path.string(),
+            gene_local_to_universe: (0..4).map(Some).collect(),
+            cells_as_rows,
+        }
+    }
+
+    /// QC that keeps everything.
+    fn keep_all() -> MinCellQuality {
+        MinCellQuality {
+            min_unique_genes: 1,
+            min_lib_size: 1,
+            min_cells: 1,
+            target_size: 1e4,
+        }
+    }
+
+    /// Integer, gzipped real and pattern files load into one store with the
+    /// values each field type implies.
+    #[test]
+    fn multi_mtx_reads_every_field_type_and_gzip() {
+        let integer = TempPath::new("integer", "mtx");
+        std::fs::write(&integer.0, INTEGER_CELLS_AS_ROWS).expect("written");
+        let real = TempPath::new("real", "mtx.gz");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(REAL_GENES_AS_ROWS.as_bytes())
+            .expect("gzipped");
+        std::fs::write(&real.0, enc.finish().expect("gzipped")).expect("written");
+        let pattern = TempPath::new("pattern", "mtx");
+        std::fs::write(&pattern.0, PATTERN_CELLS_AS_ROWS).expect("written");
+        let bin = TempPath::new("store", "bin");
+
+        let tasks = [
+            task("integer", &integer, true),
+            task("real", &real, false),
+            task("pattern", &pattern, true),
+        ];
+        let res = multi_mtx_to_file(&tasks, &bin.0, 4, &keep_all(), false).expect("loaded");
+        assert_eq!(res.total_cells, 6);
+        assert_eq!(res.per_file[1].lib_size, vec![15, 6]);
+        assert_eq!(res.per_file[2].lib_size, vec![2]);
+
+        let reader = ParallelSparseReader::new(&bin.string()).expect("reader opens");
+        let cells: Vec<(Vec<u32>, Vec<u32>)> = reader
+            .read_cells_parallel(&[3, 4, 5])
+            .expect("cells read back")
+            .into_iter()
+            .map(|c| (c.indices.clone(), c.data_raw.iter().collect()))
+            .collect();
+        assert_eq!(
+            cells,
+            vec![
+                (vec![0, 1], vec![4, 11]),
+                (vec![3], vec![6]),
+                (vec![1, 3], vec![1, 1]),
+            ]
+        );
+    }
+
+    /// A fractional value fails the load rather than truncating.
+    #[test]
+    fn multi_mtx_rejects_a_fractional_real() {
+        let real = TempPath::new("fraction", "mtx");
+        std::fs::write(
+            &real.0,
+            "%%MatrixMarket matrix coordinate real general\n1 4 1\n1 1 2.5\n",
+        )
+        .expect("written");
+        let bin = TempPath::new("fraction_store", "bin");
+        assert!(matches!(
+            multi_mtx_to_file(
+                &[task("fraction", &real, true)],
+                &bin.0,
+                4,
+                &keep_all(),
+                false
+            ),
+            Err(ScDataErrors::MtxNotACount { .. })
+        ));
+    }
 }

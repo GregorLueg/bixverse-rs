@@ -23,6 +23,7 @@ large_scale_diagnostics = []
 ann-search-rs.workspace = true
 approx.workspace = true
 bixverse-core.workspace = true
+bixverse-sparse.workspace = true
 document-features.workspace = true
 edge-rs = { workspace = true, optional = true }
 faer.workspace = true
@@ -32,5 +33,6 @@ rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
 statrs.workspace = true
 thiserror.workspace = true

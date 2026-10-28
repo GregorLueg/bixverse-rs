@@ -26,9 +26,10 @@ version and are released together.
 
 | Crate | What it holds | Builds on |
 | --- | --- | --- |
-| `bixverse-core` | `core`, `utils`, `ml`: sparse structures, linear algebra, statistics, SIMD, k-means, Gaussian processes | |
+| `bixverse-sparse` | The compressed sparse structures and their byte serialisation | |
+| `bixverse-core` | `core`, `utils`, `ml`: linear algebra, statistics, SIMD, k-means, Gaussian processes; re-exports the sparse structures | sparse |
 | `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
-| `bixverse-sc-data` | The single cell data layer: the binary store, its readers and writers, MTX, and h5ad / 10x h5 behind `h5` | core |
+| `bixverse-sc-data` | The single cell data layer: the binary store, its readers and writers, MTX (plain or gzipped), h5ad / 10x h5 behind `h5`, and obs / var to Parquet behind `parquet` | sparse |
 | `bixverse-sc` | The rest of the single cell suite | methods, sc-data |
 | `bixverse-gpu` | GPU linear algebra and bulk methods via `cubecl` | methods |
 | `bixverse-sc-gpu` | GPU single cell methods | sc, gpu |
@@ -51,7 +52,7 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `single_cell` | I/O for h5ad and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
 | `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
@@ -79,6 +80,7 @@ single crate sets that crate's flag instead (`h5` on `bixverse-sc-data`,
 | `h5` | The h5ad and 10x h5 readers and writers. Pulls in HDF5, implies `single-cell` |
 | `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5`, implies `h5` |
 | `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load, implies `h5` |
+| `parquet` | Writes the h5ad obs / var frames and the 10x barcodes and features to Parquet, ready for DuckDB's `read_parquet`. No arrow, implies `h5` |
 | `multi-modal` | `single_cell::multi_modal` (WNN, DSB), implies `single-cell` |
 | `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek`: the bulk GPU methods |
@@ -145,8 +147,8 @@ numerical surface, and no crate other than `bixverse-r` links libR.
 
 R packages that consume it:
 
-- [bixverse](https://github.com/GregorLueg/bixverse) with `single-cell`, `h5`
-  and `multi-modal`. The main package.
+- [bixverse](https://github.com/GregorLueg/bixverse) with `single-cell`, `h5`,
+  `parquet` and `multi-modal`. The main package.
 - [bixverse.gpu](https://github.com/GregorLueg/bixverse.gpu) with `sc-gpu`,
   adding wgpu-backed versions of the expensive methods. It does not need
   HDF5.

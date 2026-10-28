@@ -1,5 +1,58 @@
 # News
 
+## 0.9.4
+
+### Breaking
+
+- `GENE_FILE_BYTES_PER_NNZ` drops from 10 to 8: the CSR to CSC conversion no
+  longer carries the norm layer. A phase budget derived from it (the R side's
+  `csc_mem_gb`) now holds 25% more non-zeros per phase.
+- `MtxReader::parse_mtx_quality()` returns `Result<_, ScDataErrors>`.
+  `process_mtx_and_write_bin()` runs the streaming write, which now rejects a
+  `cells_to_keep` that is not ascending. Bucket files default to the system
+  temp directory; `MtxReader::with_temp_dir()` puts them elsewhere.
+- MTX values that are not non-negative integral counts error with
+  `MtxNotACount`, and `complex`, `array` or non-`general` files with
+  `MtxUnsupported`. Both used to load silently wrong.
+- The parallel h5ad and 10x quality passes error when a dataset fails to open,
+  instead of counting zeros for that chunk.
+
+### Feature
+
+- New `parquet` feature on `bixverse-sc-data` (forwarded by the facade and
+  `bixverse-r`): `h5ad_frame_to_parquet()` and `tenx_frame_to_parquet()` write
+  the h5ad obs / var frames and the 10x barcodes and features to Parquet for
+  DuckDB's `read_parquet`. Handles `_index`, categoricals (old and new style),
+  nullable columns, numerics, booleans and strings, with the kept-row filter
+  applied. No arrow.
+- `CompressedSparseData2` and `SparseGraph` get `to_bytes()` / `from_bytes()`
+  (bincode behind a magic and a format version); `SparseGraph` gains
+  `to_edge_pairs()` and `get_edge_number()`. Lets a caller hold the sNN graph
+  in Rust and persist it without going through an edge list.
+- MTX input can be gzipped (detected by magic bytes, multi-member included),
+  inflated in Rust with `flate2` on `zlib-rs`. `real` and `pattern` fields are
+  supported.
+- `SingleCellReading::read_gene_parallel_raw()` decodes raw counts and indices
+  only; it falls back to `read_gene_parallel()` for readers without a cheaper
+  path.
+
+### Performance
+
+Against 0.9.3 on a 4.7M cell Tahoe plate (MTX: Parse PBMC 1M):
+
+- h5ad and 10x h5 count reads: 5x.
+- CSR to CSC conversion: 2x.
+- HVG (VST): 2x.
+- MTX loading: 2x.
+
+### Fix
+
+- `real` MTX values were truncated to their integer part and `pattern` files
+  loaded as an empty matrix.
+- Fixed-length HDF5 strings longer than 63 bytes were truncated or failed.
+- The multi-MTX scans allocated a cell-sized vector per 64 MB chunk; library
+  sizes now accumulate as `u64`.
+
 ## 0.9.3
 
 ### Breaking

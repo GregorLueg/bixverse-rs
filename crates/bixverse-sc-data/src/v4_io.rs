@@ -392,6 +392,16 @@ impl V4Header {
             codec: ChunkCodec::from_u8(chunk[26])?,
         })
     }
+
+    /// Whether the chunk stores its normalised layer verbatim, i.e. the layer
+    /// did not recompute bit for bit from the raw counts.
+    ///
+    /// ### Returns
+    ///
+    /// `true` if [`FLAG_NORM_STORED`] is set.
+    pub(crate) fn norm_stored(&self) -> bool {
+        self.flags & FLAG_NORM_STORED != 0
+    }
 }
 
 ////////////
@@ -1025,6 +1035,45 @@ impl ChunkFormat {
         } else {
             Ok(chunk.to_compressed_bytes()?)
         }
+    }
+
+    /// Encode a v4 gene chunk whose norm layer is known to recompute.
+    ///
+    /// Same bytes as [`Self::encode_gene`] on a kept gene whose every entry
+    /// passes the derivability check, without carrying or re-checking the
+    /// layer. The caller guarantees that, e.g. by deriving `avg_exp` from the
+    /// same [`norm_value`] the reader recomputes with.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, ascending
+    /// * `raw` - Raw counts, same length
+    /// * `avg_exp` - Sum of the normalised layer, the header `aux`
+    /// * `original_index` - Gene index
+    ///
+    /// ### Returns
+    ///
+    /// The payload the writer's `write_compressed_gene_chunks` expects.
+    pub(crate) fn encode_gene_derivable(
+        &self,
+        indices: &[u32],
+        raw: &[u32],
+        avg_exp: F16,
+        original_index: usize,
+    ) -> Vec<u8> {
+        debug_assert!(self.is_v4() && indices.len() == raw.len());
+        encode_chunk(
+            &EncodeIn {
+                indices,
+                raw,
+                norm: &[],
+                aux: avg_exp.to_bits() as u64,
+                original_index,
+                to_keep: true,
+                norm_derivable: true,
+            },
+            self.codec,
+        )
     }
 }
 

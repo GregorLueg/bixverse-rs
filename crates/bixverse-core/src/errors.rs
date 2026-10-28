@@ -45,6 +45,14 @@ impl From<SparseErrors> for CoreErrors {
             SparseErrors::ShapeMismatch { expected, got } => {
                 CoreErrors::ShapeMismatch { expected, got }
             }
+            SparseErrors::NotSerialised(name) => CoreErrors::NotSerialised(name),
+            SparseErrors::SerialisedVersionMismatch { found, supported } => {
+                CoreErrors::SerialisedVersionMismatch { found, supported }
+            }
+            SparseErrors::SerialisedWidthMismatch { expected, found } => {
+                CoreErrors::SerialisedWidthMismatch { expected, found }
+            }
+            SparseErrors::SerialisationFailed(msg) => CoreErrors::SerialisationFailed(msg),
         }
     }
 }
@@ -366,4 +374,32 @@ pub enum CoreErrors {
         /// The provided [CompressedSparseFormat] enum.
         got: CompressedSparseFormat,
     },
+
+    // -- serialisation --
+    /// The bytes do not open with the magic of the requested structure.
+    #[error("The bytes are not a serialised {0} (magic bytes do not match).")]
+    NotSerialised(&'static str),
+
+    /// The bytes were written by a different version of the byte layout.
+    #[error("Serialised format version {found} is not supported (expected {supported}).")]
+    SerialisedVersionMismatch {
+        /// Version found in the header
+        found: u32,
+        /// Version this build reads and writes
+        supported: u32,
+    },
+
+    /// The bytes were written for different element types, e.g. an `f64`
+    /// structure read back as `f32`.
+    #[error("Serialised element widths {found:?} do not match the requested {expected:?} bytes.")]
+    SerialisedWidthMismatch {
+        /// Widths of the requested types
+        expected: [u8; 2],
+        /// Widths found in the header
+        found: [u8; 2],
+    },
+
+    /// Encoding failed, or the payload behind a valid header did not decode.
+    #[error("Serialisation failed: {0}")]
+    SerialisationFailed(String),
 }

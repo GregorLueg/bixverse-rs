@@ -27,6 +27,8 @@ hdf5-static = ["h5", "bixverse-rs/hdf5-static"]
 ## See `bixverse-rs`.
 hdf5-filters = ["h5", "bixverse-rs/hdf5-filters"]
 ## See `bixverse-rs`.
+parquet = ["h5", "bixverse-rs/parquet"]
+## See `bixverse-rs`.
 multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
 ## See `bixverse-rs`.
 bonsai = ["single-cell", "bixverse-rs/bonsai", "dep:bonsai-rs"]

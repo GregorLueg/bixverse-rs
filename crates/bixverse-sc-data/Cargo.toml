@@ -17,7 +17,7 @@ default = ["analysis"]
 ## reader that only needs the store formats.
 analysis = ["dep:bixverse-core", "dep:faer"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
-h5 = ["dep:hdf5", "dep:ndarray"]
+h5 = ["dep:hdf5", "dep:hdf5-sys", "dep:ndarray"]
 ## Compile the bundled HDF5 C library from source. Leave it off to link an
 ## external libhdf5 found via `HDF5_DIR` or pkg-config, which is what the R
 ## package does on Windows: `hdf5-metno-src` names its output with the host
@@ -35,6 +35,10 @@ hdf5-static = ["h5", "hdf5/static"]
 ## Blosc with snappy passes that check, since the codec sits in the chunk
 ## header, and fails in `H5Dread` with c-blosc naming the missing compressor.
 hdf5-filters = ["h5", "hdf5/lzf", "hdf5/blosc-lz4", "hdf5/blosc-zlib", "hdf5/blosc-zstd"]
+## Write the h5ad obs / var dataframes and the 10x barcodes and features to
+## Parquet, for DuckDB to ingest with `read_parquet`. Pulls in `parquet`
+## without arrow.
+parquet = ["h5", "dep:parquet"]
 
 [dependencies]
 approx.workspace = true
@@ -43,13 +47,17 @@ bixverse-core = { workspace = true, optional = true }
 bixverse-sparse.workspace = true
 document-features.workspace = true
 faer = { workspace = true, optional = true }
+flate2.workspace = true
 half.workspace = true
 hdf5 = { workspace = true, optional = true }
+# Direct dependency so `build.rs` sees the linked HDF5 version (`DEP_HDF5_*`).
+hdf5-sys = { workspace = true, optional = true }
 indexmap.workspace = true
 lz4_flex.workspace = true
 memmap2.workspace = true
 ndarray = { workspace = true, optional = true }
 num-traits.workspace = true
+parquet = { workspace = true, optional = true }
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
@@ -63,4 +71,4 @@ zstd.workspace = true
 libc.workspace = true
 
 [package.metadata.docs.rs]
-features = ["h5", "hdf5-static", "hdf5-filters"]
+features = ["h5", "hdf5-static", "hdf5-filters", "parquet"]

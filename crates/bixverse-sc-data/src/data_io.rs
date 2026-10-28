@@ -2263,6 +2263,22 @@ pub trait SingleCellReading: Send + Sync {
     /// The `CscGeneChunk`s in the order given by `indices`.
     fn read_gene_parallel(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, ScDataErrors>;
 
+    /// Read genes for consumers of the raw counts and indices only.
+    ///
+    /// `data_norm` may come back empty, so only use it when the consumer never
+    /// touches that layer. The default reads both layers.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Index positions of the genes to retrieve
+    ///
+    /// ### Returns
+    ///
+    /// The `CscGeneChunk`s in the order given by `indices`.
+    fn read_gene_parallel_raw(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, ScDataErrors> {
+        self.read_gene_parallel(indices)
+    }
+
     /// Read a batch of cells straight into one CSR matrix.
     ///
     /// Same output as [`Self::read_cells_parallel`] followed by
@@ -2912,6 +2928,83 @@ impl ParallelSparseReader {
             .get(&original_index)
             .copied()
             .ok_or(ScDataErrors::ChunkIndexNotFound(original_index))
+    }
+
+    /// Count the chunks that store their normalised layer verbatim.
+    ///
+    /// Only reads the fixed chunk headers. Such chunks skip the norm recompute
+    /// on read and are larger on disk.
+    ///
+    /// ### Returns
+    ///
+    /// The number of norm-stored chunks, or
+    /// [`ScDataErrors::FileVersionMismatch`] on a v3 file, which always stores
+    /// the layer.
+    pub fn count_norm_stored_chunks(&self) -> Result<usize, ScDataErrors> {
+        if !self.is_v4() {
+            return Err(ScDataErrors::FileVersionMismatch {
+                expected: SC_FILE_VERSION,
+                found: self.version,
+            });
+        }
+        let offsets = &self.header.chunk_offsets;
+        (0..offsets.len())
+            .into_par_iter()
+            .map(|c| {
+                // chunk layout: u64 compressed length, then the v4 header
+                let at = (self.chunks_start + offsets[c]) as usize + 8;
+                Ok(V4Header::parse(&self.mmap[at..])?.norm_stored() as usize)
+            })
+            .sum()
+    }
+
+    /// Decode the cells `start..end` of a v4 cell file in order, without the
+    /// norm layer, handing each to `f`.
+    ///
+    /// Sequential and allocation free after the first cell: meant for callers
+    /// that already fan out over cell ranges. Indices are always decoded, raw
+    /// counts only with `want_raw`.
+    ///
+    /// ### Params
+    ///
+    /// * `start` - First cell (inclusive)
+    /// * `end` - Last cell (exclusive)
+    /// * `want_raw` - Decode raw counts; otherwise `f` gets an empty slice
+    /// * `f` - Called as `f(cell, indices, raw)`
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, a mode or version mismatch, or the first decode error.
+    pub(crate) fn visit_cells_v4(
+        &self,
+        start: usize,
+        end: usize,
+        want_raw: bool,
+        mut f: impl FnMut(usize, &[u32], &[u32]),
+    ) -> Result<(), ScDataErrors> {
+        if !self.is_cell_based() {
+            return Err(ScDataErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
+        if !self.is_v4() {
+            return Err(ScDataErrors::FileVersionMismatch {
+                expected: SC_FILE_VERSION,
+                found: self.version,
+            });
+        }
+
+        self.prefetch(&(start..end).collect::<Vec<_>>());
+        let ctx = self.v4_ctx();
+        let mut s = V4Decoded::default();
+        for cell in start..end {
+            let (chunk, _) = self.locate_chunk(cell)?;
+            decode_v4(chunk, &ctx, want_raw, false, &mut s)?;
+            let raw = if want_raw { &s.raw[..s.idx.len()] } else { &[] };
+            f(cell, &s.idx, raw);
+        }
+        Ok(())
     }
 
     /// Locate the compressed bytes of a single chunk in the mapping.
@@ -3770,6 +3863,51 @@ impl SingleCellReading for ParallelSparseReader {
                 let decompressed = self.decompress_chunk(original_index)?;
 
                 CscGeneChunk::read_from_buffer(&decompressed)
+            })
+            .collect()
+    }
+
+    /// Read genes with raw counts and indices only.
+    ///
+    /// On v4 the norm layer is neither recomputed nor converted, `data_norm`
+    /// comes back empty and the decoded indices move into the chunk. v3 reads
+    /// both layers, as [`Self::read_gene_parallel`].
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Slice of index positions of the genes to retrieve
+    ///
+    /// ### Returns
+    ///
+    /// Returns an array of `CscGeneChunk` with an empty `data_norm` on v4.
+    fn read_gene_parallel_raw(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, ScDataErrors> {
+        if !self.is_v4() {
+            return self.read_gene_parallel(indices);
+        }
+        if !self.is_gene_based() {
+            return Err(ScDataErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        self.prefetch(indices);
+
+        let ctx = self.v4_ctx();
+        indices
+            .par_iter()
+            .map_init(V4Decoded::default, |s, &original_index| {
+                let (chunk, _) = self.locate_chunk(original_index)?;
+                let h = decode_v4(chunk, &ctx, true, false, s)?;
+                Ok(CscGeneChunk {
+                    data_raw: RawCounts::from_u32_auto(&s.raw[..h.nnz]),
+                    data_norm: Vec::new(),
+                    avg_exp: F16::from_bits(h.aux as u16),
+                    nnz: h.nnz,
+                    indices: std::mem::take(&mut s.idx),
+                    original_index: h.original_index,
+                    to_keep: h.to_keep,
+                })
             })
             .collect()
     }
