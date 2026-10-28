@@ -342,9 +342,11 @@ fn probe(ds: &Dataset) -> Option<DirectChunks> {
     };
 
     // chunk addresses are relative to the HDF5 base address, which a user
-    // block moves away from the start of the file
+    // block moves away from the start of the file. On Windows HDF5 locks a
+    // read/write file exclusively, so a second handle cannot read it.
     let file = ds.file().ok()?;
     if file.userblock() != 0
+        || (cfg!(windows) && !file.is_read_only())
         || !matches!(
             file.fapl().ok()?.driver(),
             hdf5::file::FileDriver::Sec2 | hdf5::file::FileDriver::Stdio
@@ -709,26 +711,37 @@ mod tests {
             vec![Filter::Shuffle, Filter::Deflate(6)],
         ];
         for (p, filters) in pipelines.iter().enumerate() {
-            let ds = write_ds(&file, &format!("i{p}"), &ints, Some(333), filters);
+            write_ds(&file, &format!("i{p}"), &ints, Some(333), filters);
+            write_ds(&file, &format!("f{p}"), &floats, Some(1000), filters);
+            write_ds(&file, &format!("s{p}"), &small, Some(64), filters);
+            write_ds(&file, &format!("one{p}"), &floats[..50], Some(50), filters);
+        }
+        // readers see the file read-only, as in ingestion
+        drop(file);
+        let file = hdf5::File::open(&path).unwrap();
+        let open = |name: String| {
+            let ds = file.dataset(&name).unwrap();
             assert_eq!(H5ChunkedReader::new(ds.clone()).is_direct(), CAN_INDEX);
+            ds
+        };
+
+        for p in 0..pipelines.len() {
+            let ds = open(format!("i{p}"));
             assert_matches_h5dread::<u32>(ds.clone(), len, &mut rng);
             assert_matches_h5dread::<usize>(ds.clone(), len, &mut rng);
             assert_matches_h5dread::<f32>(ds, len, &mut rng);
 
-            let ds = write_ds(&file, &format!("f{p}"), &floats, Some(1000), filters);
-            assert_eq!(H5ChunkedReader::new(ds.clone()).is_direct(), CAN_INDEX);
+            let ds = open(format!("f{p}"));
             assert_matches_h5dread::<f32>(ds.clone(), len, &mut rng);
             assert_matches_h5dread::<u32>(ds, len, &mut rng);
 
             // negatives clamp to zero, as in HDF5's hard conversion
-            let ds = write_ds(&file, &format!("s{p}"), &small, Some(64), filters);
-            assert_eq!(H5ChunkedReader::new(ds.clone()).is_direct(), CAN_INDEX);
+            let ds = open(format!("s{p}"));
             assert_matches_h5dread::<u32>(ds.clone(), len, &mut rng);
             assert_matches_h5dread::<f32>(ds, len, &mut rng);
 
             // single chunk larger than the dataset
-            let ds = write_ds(&file, &format!("one{p}"), &floats[..50], Some(50), filters);
-            assert_eq!(H5ChunkedReader::new(ds.clone()).is_direct(), CAN_INDEX);
+            let ds = open(format!("one{p}"));
             assert_matches_h5dread::<f32>(ds, 50, &mut rng);
         }
         drop(file);
