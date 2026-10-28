@@ -123,6 +123,11 @@ harness = false
 required-features = ["single-cell"]
 
 [[bench]]
+name = "gene_file_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
 name = "dge_scan_bench"
 harness = false
 required-features = ["single-cell"]
