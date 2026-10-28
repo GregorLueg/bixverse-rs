@@ -9,7 +9,9 @@ use std::clone::Clone;
 use std::collections::BinaryHeap;
 
 use crate::prelude::*;
-use bixverse_core::core::math::sparse::coo_to_csr;
+use bixverse_core::core::math::sparse::{coo_to_csr, thread_chunks, validate_square_csr};
+use bixverse_sparse::serialise::{decode_with_header, elem_width, encode_with_header};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 ////////////
 // Consts //
@@ -20,6 +22,9 @@ const KNN_ROW_BLOCK: usize = 32;
 
 /// Tile edge for the symmetrisation pass
 const KNN_SYM_TILE: usize = 64;
+
+/// Magic bytes of a serialised [`SparseGraph`].
+const GRAPH_MAGIC: &[u8; 8] = b"BXSPGRPH";
 
 ///////////////
 // Union-find //
@@ -106,11 +111,13 @@ impl UnionFind {
 ///   weights.
 /// * `num_nodes` - Number of nodes represented in the graph.
 /// * `directed` - Whether the graph is directed or not.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SparseGraph<T: Clone> {
     /// Adjacency matrix in CSR (symmetric for undirected graphs)
     adjacency: CompressedSparseData2<T>,
+    /// Number of nodes, equal to both sides of the adjacency's shape
     num_nodes: usize,
+    /// Whether the graph is directed
     directed: bool,
 }
 
@@ -225,6 +232,116 @@ where
     /// Boolean indicating if graph is directed
     pub fn is_directed(&self) -> bool {
         self.directed
+    }
+
+    /// Number of edges
+    ///
+    /// An undirected graph stores every edge twice, a self-loop included (both
+    /// entries in its own row, as [`edge_pairs_to_sparse_graph`] builds it).
+    ///
+    /// ### Returns
+    ///
+    /// The number of stored entries for a directed graph, half of them for an
+    /// undirected one.
+    pub fn get_edge_number(&self) -> usize {
+        let nnz = self.adjacency.indices.len();
+        if self.directed { nnz } else { nnz / 2 }
+    }
+
+    /// Flatten the graph into an edge-pair list
+    ///
+    /// The inverse of [`edge_pairs_to_sparse_graph`]: an undirected edge comes
+    /// out once, as `(i, j)` with `i < j`, and a self-loop once for each pair
+    /// of entries it holds. A directed graph gives every stored entry. Rows
+    /// are flattened in parallel, one chunk per worker, so the order is by
+    /// source node, then by the CSR order within the row.
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of `(edges, weights)`: `edges` holds the pairs flat,
+    /// `[u, v, u, v, ...]`, 0-based; `weights` one weight per pair.
+    pub fn to_edge_pairs(&self) -> (Vec<u32>, Vec<T>)
+    where
+        T: Send + Sync,
+    {
+        let directed = self.directed;
+        let parts: Vec<(Vec<u32>, Vec<T>)> = thread_chunks(self.num_nodes)
+            .into_par_iter()
+            .map(|(start, end)| {
+                let mut edges = Vec::new();
+                let mut weights = Vec::new();
+                for i in start..end {
+                    let (nbrs, ws) = self.get_neighbours_raw(i);
+                    // toggles on every self-loop entry, so each pair emits once
+                    let mut odd_loop = false;
+                    for (&j, &w) in nbrs.iter().zip(ws) {
+                        let j_us = j as usize;
+                        if j_us == i {
+                            odd_loop = !odd_loop;
+                        }
+                        if directed || j_us > i || (j_us == i && odd_loop) {
+                            edges.push(i as u32);
+                            edges.push(j);
+                            weights.push(w);
+                        }
+                    }
+                }
+                (edges, weights)
+            })
+            .collect();
+
+        let n_pairs = parts.iter().map(|(_, w)| w.len()).sum();
+        let mut edges = Vec::with_capacity(2 * n_pairs);
+        let mut weights = Vec::with_capacity(n_pairs);
+        for (e, w) in parts {
+            edges.extend_from_slice(&e);
+            weights.extend_from_slice(&w);
+        }
+        (edges, weights)
+    }
+}
+
+impl<T> SparseGraph<T>
+where
+    T: Clone + BixverseFloat + std::iter::Sum + Serialize + DeserializeOwned,
+{
+    /// Serialise the graph to bytes
+    ///
+    /// ### Returns
+    ///
+    /// A blob that [`Self::from_bytes`] reads back. See
+    /// [`bixverse_sparse::serialise`] for the layout.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, MethodsErrors> {
+        let w = elem_width::<T>();
+        encode_with_header(GRAPH_MAGIC, [w, w], self)
+            .map_err(|e| MethodsErrors::Core(CoreErrors::from(e)))
+    }
+
+    /// Read a graph written by [`Self::to_bytes`]
+    ///
+    /// The adjacency is checked for being a structurally sound square CSR
+    /// over `num_nodes` nodes, since the bytes may come from disk.
+    ///
+    /// ### Params
+    ///
+    /// * `bytes` - The blob
+    ///
+    /// ### Returns
+    ///
+    /// The graph, or a header, decode or validation error.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MethodsErrors> {
+        let w = elem_width::<T>();
+        let graph: Self = decode_with_header(GRAPH_MAGIC, [w, w], "SparseGraph", bytes)
+            .map_err(CoreErrors::from)?;
+        let n = validate_square_csr(&graph.adjacency).map_err(CoreErrors::from)?;
+        if n != graph.num_nodes {
+            return Err(CoreErrors::from(SparseErrors::ShapeMismatch {
+                expected: (graph.num_nodes, graph.num_nodes),
+                got: graph.adjacency.shape,
+            })
+            .into());
+        }
+        Ok(graph)
     }
 }
 
@@ -945,5 +1062,84 @@ mod tests {
         assert_eq!(graph.to, vec![1, 2, 1]);
         assert_eq!(graph.edge_types, vec!["e", "f", "e"]);
         assert_eq!(graph.weights, weights);
+    }
+
+    /// A small undirected graph with a duplicate edge and a self-loop.
+    fn small_graph() -> SparseGraph<f32> {
+        let edges = [0usize, 1, 1, 2, 2, 0, 3, 3, 1, 2];
+        let weights = [0.5f32, 1.0, 1.5, 2.0, 0.25];
+        edge_pairs_to_sparse_graph(&edges, &weights, 5)
+    }
+
+    /// Sorted `(u, v, w)` triples, so edge lists compare as sets.
+    fn edge_set(edges: &[u32], weights: &[f32]) -> Vec<(u32, u32, u32)> {
+        let mut out: Vec<_> = edges
+            .chunks_exact(2)
+            .zip(weights)
+            .map(|(e, w)| (e[0].min(e[1]), e[0].max(e[1]), w.to_bits()))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Edge pairs in, CSR, edge pairs out: the same multiset of edges.
+    #[test]
+    fn test_sparse_graph_edge_pairs_round_trip() {
+        let graph = small_graph();
+        let (edges, weights) = graph.to_edge_pairs();
+        assert_eq!(weights.len(), 5);
+        assert_eq!(graph.get_edge_number(), 5);
+        assert_eq!(
+            edge_set(&edges, &weights),
+            edge_set(&[0, 1, 1, 2, 2, 0, 3, 3, 1, 2], &[0.5, 1.0, 1.5, 2.0, 0.25])
+        );
+    }
+
+    /// Bytes round trip keeps the CSR, node count and direction.
+    #[test]
+    fn test_sparse_graph_bytes_round_trip() {
+        let graph = small_graph();
+        let back = SparseGraph::<f32>::from_bytes(&graph.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.get_node_number(), 5);
+        assert!(!back.is_directed());
+        assert_eq!(back.adjacency.indptr, graph.adjacency.indptr);
+        assert_eq!(back.adjacency.indices, graph.adjacency.indices);
+        assert_eq!(back.adjacency.data, graph.adjacency.data);
+    }
+
+    /// Foreign bytes, or a CSR blob, are not a graph.
+    #[test]
+    fn test_sparse_graph_bytes_bad_magic() {
+        let csr_bytes = small_graph().adjacency.to_bytes().unwrap();
+        assert!(matches!(
+            SparseGraph::<f32>::from_bytes(&csr_bytes),
+            Err(MethodsErrors::Core(CoreErrors::NotSerialised(_)))
+        ));
+    }
+
+    /// A blob from another layout version is refused.
+    #[test]
+    fn test_sparse_graph_bytes_version_mismatch() {
+        let mut bytes = small_graph().to_bytes().unwrap();
+        bytes[8..12].copy_from_slice(&999u32.to_le_bytes());
+        assert!(matches!(
+            SparseGraph::<f32>::from_bytes(&bytes),
+            Err(MethodsErrors::Core(CoreErrors::SerialisedVersionMismatch {
+                found: 999,
+                ..
+            }))
+        ));
+    }
+
+    /// An `f32` graph does not decode as `f64`.
+    #[test]
+    fn test_sparse_graph_bytes_width_mismatch() {
+        let bytes = small_graph().to_bytes().unwrap();
+        assert!(matches!(
+            SparseGraph::<f64>::from_bytes(&bytes),
+            Err(MethodsErrors::Core(
+                CoreErrors::SerialisedWidthMismatch { .. }
+            ))
+        ));
     }
 }

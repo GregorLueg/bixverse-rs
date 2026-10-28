@@ -3,6 +3,7 @@
 
 use num_traits::Float;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Mul};
 
 use crate::errors::SparseErrors;
@@ -40,7 +41,7 @@ pub fn thread_chunks(n: usize) -> Vec<(usize, usize)> {
 /////////////////////////
 
 /// Type to describe the CompressedSparseFormat
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum CompressedSparseFormat {
     /// CSC-formatted data
     Csc,
@@ -173,7 +174,7 @@ where
 
 /// Structure to store compressed sparse data with two potential data layers.
 /// Think for example in single cell raw counts and normalised counts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressedSparseData2<T, U = T>
 where
     T: Clone,
