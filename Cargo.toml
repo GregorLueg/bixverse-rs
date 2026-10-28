@@ -58,6 +58,8 @@ edge-rs = "0.3.1"
 either = "1.15.0"
 extendr-api = "0.9.0"
 extendr-engine = "0.9.0"
+# Pure-Rust zlib backend: no C toolchain on any target.
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg", "rand"] }
 faer-traits = "0.24.0"
 faer-entity = "0.20.1"

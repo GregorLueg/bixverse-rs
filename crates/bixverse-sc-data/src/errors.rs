@@ -290,6 +290,21 @@ pub enum ScDataErrors {
         field: &'static str,
     },
 
+    /// The MTX banner names something the loader does not read: an object
+    /// other than `matrix`, the dense `array` format, a `complex` field or a
+    /// symmetry other than `general`.
+    #[error("Unsupported MTX file: {0}")]
+    MtxUnsupported(String),
+
+    /// An MTX value is not a raw count: negative, non-integral, not a number
+    /// or beyond `u32`. The store holds raw counts, so a `real` file of
+    /// normalised values cannot be loaded.
+    #[error("MTX value '{value}' is not a non-negative integral count")]
+    MtxNotACount {
+        /// The offending value as written in the file.
+        value: String,
+    },
+
     // -- Format parsing --
     /// The `cs_type` string did not match a known sparse format.
     ///

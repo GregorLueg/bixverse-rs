@@ -47,6 +47,7 @@ bixverse-core = { workspace = true, optional = true }
 bixverse-sparse.workspace = true
 document-features.workspace = true
 faer = { workspace = true, optional = true }
+flate2.workspace = true
 half.workspace = true
 hdf5 = { workspace = true, optional = true }
 # Direct dependency so `build.rs` sees the linked HDF5 version (`DEP_HDF5_*`).

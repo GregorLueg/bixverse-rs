@@ -17,16 +17,15 @@
 //! * `split` - line splitting only: the shipped `BufRead::read_until` loop
 //!   (copies every line), a newline count over the mmap single threaded, and
 //!   the same in parallel chunks.
-//! * `parse` - a mirror of `parse_mtx_line` over the mmap, no per-line copy,
+//! * `parse` - an integer line parser over the mmap, no per-line copy,
 //!   single threaded and in parallel chunks. The parse ceiling for an
 //!   mmap-and-split design.
-//! * `quality` - `MtxReader::parse_mtx_quality` (two full text passes: gene
-//!   nnz, then cell stats). Its verbose output splits the two.
-//! * `stream` - `process_mtx_and_write_bin_streaming` (third text pass into
-//!   bucket files, then sort and write). Verbose output splits bucketing from
-//!   writing.
-//! * `inmem` - `process_mtx_and_write_bin`, the non-streaming writer. Holds
-//!   every kept entry at 8 bytes plus a `Vec` per cell, so opt-in only.
+//! * `quality` - `MtxReader::parse_mtx_quality`: the single text pass that
+//!   counts, spills the entries to bucket files and resolves the QC.
+//! * `stream` - `process_mtx_and_write_bin_streaming` on the same reader:
+//!   reads the buckets back and writes the store.
+//! * `inmem` - `process_mtx_and_write_bin` on a fresh reader, so it includes
+//!   the text pass. Opt-in only.
 //! * `gz` - with `MTX_BENCH_GZ=1`, gzips the file once (`gzip -1`, cached) and
 //!   times `gzip -dc` to `/dev/null`: the single-threaded inflate floor that
 //!   any gz path pays at least once.
@@ -439,7 +438,7 @@ fn ensure_gz(src: &Path, dst: &Path, regen: bool) {
 // Line parser //
 /////////////////
 
-/// Mirror of the private `parse_mtx_line` in `mtx_io.rs`.
+/// Integer-field line parser, the shape of the loader's fast path.
 ///
 /// ### Params
 ///
