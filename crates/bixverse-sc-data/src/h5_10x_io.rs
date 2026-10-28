@@ -3,11 +3,12 @@
 //! are filtered out here.
 
 use hdf5::{
-    Dataset, File,
+    Container, File,
     types::{FixedAscii, FixedUnicode, TypeDescriptor, VarLenAscii, VarLenUnicode},
 };
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -100,6 +101,19 @@ impl TenxVersion {
         }
     }
 
+    /// Returns the feature id path
+    ///
+    /// ### Returns
+    ///
+    /// Feature (gene) id path from the h5 file
+    #[inline]
+    pub fn get_feature_id(&self) -> &str {
+        match self {
+            TenxVersion::V2 => "genes",
+            TenxVersion::V3 => "matrix/features/id",
+        }
+    }
+
     /// Returns the feature name path
     ///
     /// ### Returns
@@ -131,8 +145,12 @@ impl TenxVersion {
 ///
 /// ### Params
 ///
-/// * `ds` - The h5ad data set
-fn read_fixed<T>(ds: &Dataset) -> hdf5::Result<Vec<String>>
+/// * `ds` - The dataset or attribute
+///
+/// ### Returns
+///
+/// The strings with NUL padding and surrounding whitespace removed.
+fn read_fixed<T>(ds: &Container) -> hdf5::Result<Vec<String>>
 where
     T: hdf5::H5Type + AsRef<str>,
 {
@@ -143,6 +161,37 @@ where
         .collect())
 }
 
+/// Dispatch a fixed-length string read to the smallest buffer type that holds
+/// `n` bytes. HDF5 truncates when the memory type is shorter than the file
+/// type, so the bucket must never be smaller than `n`; going up in powers of
+/// two caps the scratch memory at twice the on-disk size.
+macro_rules! read_fixed_sized {
+    ($ds:expr, $ty:ident, $n:expr) => {
+        match $n {
+            ..=16 => read_fixed::<$ty<16>>($ds)?,
+            17..=32 => read_fixed::<$ty<32>>($ds)?,
+            33..=64 => read_fixed::<$ty<64>>($ds)?,
+            65..=128 => read_fixed::<$ty<128>>($ds)?,
+            129..=256 => read_fixed::<$ty<256>>($ds)?,
+            257..=512 => read_fixed::<$ty<512>>($ds)?,
+            513..=1024 => read_fixed::<$ty<1024>>($ds)?,
+            1025..=4096 => read_fixed::<$ty<4096>>($ds)?,
+            4097..=MAX_FIXED_STRING_BYTES => read_fixed::<$ty<MAX_FIXED_STRING_BYTES>>($ds)?,
+            n => {
+                return Err(ScDataErrors::H5UnexpectedStringType(format!(
+                    "fixed-length string of {} bytes (limit {})",
+                    n, MAX_FIXED_STRING_BYTES
+                )));
+            }
+        }
+    };
+}
+
+/// Longest fixed-length HDF5 string [`read_string_dataset`] reads. Anything
+/// longer is not an identifier or a label, and the bucketed read would
+/// allocate this many bytes per element.
+const MAX_FIXED_STRING_BYTES: usize = 65_536;
+
 /// Read a 1-D HDF5 string dataset regardless of on-disk encoding
 ///
 /// CellRanger files written by h5py use variable-length UTF-8; older or
@@ -151,12 +200,14 @@ where
 ///
 /// ### Params
 ///
-/// * `ds` - The string dataset to read
+/// * `ds` - The string dataset (or attribute) to read
 ///
 /// ### Returns
 ///
 /// The strings as a `Vec<String>`.
-pub fn read_string_dataset(ds: &Dataset) -> Result<Vec<String>, ScDataErrors> {
+pub fn read_string_dataset(
+    ds: &impl Deref<Target = Container>,
+) -> Result<Vec<String>, ScDataErrors> {
     let strings = match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::VarLenUnicode => ds
             .read_raw::<VarLenUnicode>()?
@@ -168,16 +219,8 @@ pub fn read_string_dataset(ds: &Dataset) -> Result<Vec<String>, ScDataErrors> {
             .iter()
             .map(|s| s.as_str().to_string())
             .collect(),
-        TypeDescriptor::FixedUnicode(n) => match n {
-            ..=15 => read_fixed::<FixedUnicode<15>>(ds)?,
-            16..=31 => read_fixed::<FixedUnicode<31>>(ds)?,
-            _ => read_fixed::<FixedUnicode<63>>(ds)?,
-        },
-        TypeDescriptor::FixedAscii(n) => match n {
-            ..=15 => read_fixed::<FixedAscii<15>>(ds)?,
-            16..=31 => read_fixed::<FixedAscii<31>>(ds)?,
-            _ => read_fixed::<FixedAscii<63>>(ds)?,
-        },
+        TypeDescriptor::FixedUnicode(n) => read_fixed_sized!(ds, FixedUnicode, n),
+        TypeDescriptor::FixedAscii(n) => read_fixed_sized!(ds, FixedAscii, n),
         other => {
             return Err(ScDataErrors::H5UnexpectedStringType(format!("{:?}", other)));
         }

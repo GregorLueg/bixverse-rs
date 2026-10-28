@@ -35,6 +35,10 @@ hdf5-static = ["h5", "hdf5/static"]
 ## Blosc with snappy passes that check, since the codec sits in the chunk
 ## header, and fails in `H5Dread` with c-blosc naming the missing compressor.
 hdf5-filters = ["h5", "hdf5/lzf", "hdf5/blosc-lz4", "hdf5/blosc-zlib", "hdf5/blosc-zstd"]
+## Write the h5ad obs / var dataframes and the 10x barcodes and features to
+## Parquet, for DuckDB to ingest with `read_parquet`. Pulls in `parquet`
+## without arrow.
+parquet = ["h5", "dep:parquet"]
 
 [dependencies]
 approx.workspace = true
@@ -50,6 +54,7 @@ lz4_flex.workspace = true
 memmap2.workspace = true
 ndarray = { workspace = true, optional = true }
 num-traits.workspace = true
+parquet = { workspace = true, optional = true }
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
@@ -63,4 +68,4 @@ zstd.workspace = true
 libc.workspace = true
 
 [package.metadata.docs.rs]
-features = ["h5", "hdf5-static", "hdf5-filters"]
+features = ["h5", "hdf5-static", "hdf5-filters", "parquet"]

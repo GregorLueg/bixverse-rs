@@ -213,6 +213,18 @@ pub enum ScDataErrors {
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
+    /// Two columns of an obs / var table end up with the same name after
+    /// snake_case. DuckDB rejects the table, so the export stops before
+    /// writing anything.
+    #[error("Duplicate column name after snake_case: '{0}'")]
+    DuplicateColumnName(String),
+
+    /// Wraps any error from the `parquet` crate while writing an obs / var
+    /// table.
+    #[cfg(feature = "parquet")]
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
+
     /// A dataset is compressed with a filter this build cannot decode.
     ///
     /// Raised before the first read, because HDF5 itself reports the missing

@@ -37,6 +37,9 @@ hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
 ## Compile the LZF and Blosc filters into the HDF5 build. See
 ## `bixverse-sc-data`.
 hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
+## Parquet export of the h5ad obs / var and 10x barcodes / features. See
+## `bixverse-sc-data`.
+parquet = ["h5", "bixverse-sc-data/parquet"]
 ## Multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
 ## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
