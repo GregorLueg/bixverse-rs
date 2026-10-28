@@ -83,7 +83,6 @@ dependencies = [
  "hdf5-metno-sys",
  "indexmap",
  "libc",
- "libz-sys",
  "lz4_flex",
  "memmap2",
  "ndarray",

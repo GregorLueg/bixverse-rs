@@ -17,7 +17,7 @@ default = ["analysis"]
 ## reader that only needs the store formats.
 analysis = ["dep:bixverse-core", "dep:faer"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
-h5 = ["dep:hdf5", "dep:hdf5-sys", "dep:libz-sys", "dep:ndarray"]
+h5 = ["dep:hdf5", "dep:hdf5-sys", "dep:ndarray"]
 ## Compile the bundled HDF5 C library from source. Leave it off to link an
 ## external libhdf5 found via `HDF5_DIR` or pkg-config, which is what the R
 ## package does on Windows: `hdf5-metno-src` names its output with the host
@@ -53,7 +53,6 @@ hdf5 = { workspace = true, optional = true }
 # Direct dependency so `build.rs` sees the linked HDF5 version (`DEP_HDF5_*`).
 hdf5-sys = { workspace = true, optional = true }
 indexmap.workspace = true
-libz-sys = { workspace = true, optional = true }
 lz4_flex.workspace = true
 memmap2.workspace = true
 ndarray = { workspace = true, optional = true }

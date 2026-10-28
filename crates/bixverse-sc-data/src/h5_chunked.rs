@@ -434,18 +434,11 @@ fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> s
 ///
 /// `true` if the stream inflated to exactly `dst.len()` bytes.
 fn inflate(src: &[u8], dst: &mut [u8]) -> bool {
-    let mut dst_len = dst.len() as libz_sys::uLongf;
-    // SAFETY: both pointers come from live slices of the stated lengths, and
-    // `uncompress` writes at most `dst_len` bytes.
-    let status = unsafe {
-        libz_sys::uncompress(
-            dst.as_mut_ptr(),
-            &mut dst_len,
-            src.as_ptr(),
-            src.len() as libz_sys::uLong,
-        )
-    };
-    status == libz_sys::Z_OK && dst_len as usize == dst.len()
+    let mut stream = flate2::Decompress::new(true);
+    matches!(
+        stream.decompress(src, dst, flate2::FlushDecompress::Finish),
+        Ok(flate2::Status::StreamEnd)
+    ) && stream.total_out() as usize == dst.len()
 }
 
 /// Undo the HDF5 shuffle filter.
