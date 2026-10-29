@@ -695,17 +695,18 @@ pub fn dense_covariance_svd(
 /// Forms `Z^T Z` for the implicitly shifted and scaled matrix
 /// `Z = (A - o 1^T - 1 c^T) D^-1` without densifying `A`, then
 /// eigendecomposes it. `A^T A` comes from one pass over the rows: each row
-/// with `r` non-zeros adds its `r^2 / 2` outer products to the upper triangle,
-/// and all updates for one entry land in one row of the accumulator, which
-/// stays in L1. Centring, the CLR offsets and scaling are rank-one
-/// corrections applied afterwards in f64. Cost is `sum(r_i^2) / 2` plus an
-/// `m x m` eigendecomposition, so this pays off when `m` is a few thousand
-/// features and rows are sparse, as with HVG-restricted single cell data.
+/// with `r` non-zeros adds its `r^2 / 2` outer products to the lower triangle.
+/// Rayon tasks own disjoint column blocks of one shared accumulator, balanced
+/// by their pair counts, so there is no per-thread copy. Centring, the CLR
+/// offsets and scaling are rank-one corrections applied afterwards in f64.
+/// Cost is `sum(r_i^2) / 2` plus an `m x m` eigendecomposition, so this pays
+/// off when `m` is a few thousand features and rows are sparse, as with
+/// HVG-restricted single cell data.
 ///
 /// With fewer rows than features (small cell subsets) `Z` is densified instead
 /// and passed to [`dense_covariance_svd`], which eigendecomposes the `n x n`
-/// Gram. The dense `Z` is never larger than one per-thread `m x m`
-/// accumulator, so the switch costs no memory.
+/// Gram. The dense `Z` is never larger than the `m x m` accumulator, so the
+/// switch costs no memory.
 ///
 /// ### Params
 ///
@@ -722,7 +723,8 @@ pub fn dense_covariance_svd(
 /// ### Returns
 ///
 /// `RandomSvdResults` containing U (n x rank), S (length rank), and V
-/// (m x rank). Memory is one `m x m` f64 accumulator per Rayon thread.
+/// (m x rank). Besides the one-layer CSR, peak memory is the `m x m` f64
+/// accumulator plus faer's eigen workspace and eigenvectors.
 #[allow(clippy::too_many_arguments)]
 pub fn sparse_covariance_svd<T, F>(
     matrix: CompressedSparseData2<T>,
@@ -742,17 +744,30 @@ where
 
     let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
-        CompressedSparseFormat::Csc => matrix.transform_single_layer(use_second_layer)?,
+        CompressedSparseFormat::Csc => {
+            let csr = matrix.transform_single_layer(use_second_layer)?;
+            // only borrowed above, so it would otherwise live to the end
+            drop(matrix);
+            csr
+        }
     };
-    let values: &[T] = if use_second_layer {
-        csr.data_2
-            .as_ref()
-            .ok_or(CoreErrors::Data2NotAvailable)?
-            .as_slice()
-    } else {
-        csr.data.as_slice()
+    // keep the layer in use and drop the other; rows get sorted in place below
+    let (mut values, mut indices, indptr): (Vec<T>, Vec<u32>, Vec<u32>) = {
+        let CompressedSparseData2 {
+            data,
+            data_2,
+            indices,
+            indptr,
+            ..
+        } = csr;
+        let values = if use_second_layer {
+            data_2.ok_or(CoreErrors::Data2NotAvailable)?
+        } else {
+            data
+        };
+        (values, indices, indptr)
     };
-    let val = |idx: usize| -> f64 { Into::<F>::into(values[idx]).to_f64().unwrap() };
+    let to_f64 = |x: T| -> f64 { Into::<F>::into(x).to_f64().unwrap() };
 
     let off: Option<Vec<f64>> =
         row_offsets.map(|o| o.iter().map(|x| x.to_f64().unwrap()).collect());
@@ -765,10 +780,9 @@ where
         Some(s) => s.iter().map(|x| x.to_f64().unwrap()).collect(),
         None => vec![1.0; m],
     };
-    let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
 
-    // fewer rows than features: the dense n x m Z is no larger than one of the
-    // m x m accumulators below, and its n x n Gram replaces the m x m eigen
+    // fewer rows than features: the dense n x m Z is no larger than the m x m
+    // accumulator below, and its n x n Gram replaces the m x m eigen
     if n < m {
         let mut z = Mat::<f64>::zeros(n, m);
         z.par_row_iter_mut().enumerate().for_each(|(i, mut row)| {
@@ -776,13 +790,18 @@ where
             for j in 0..m {
                 row[j] = -oi - shift[j];
             }
-            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
-                row[csr.indices[idx] as usize] += val(idx);
+            for idx in indptr[i] as usize..indptr[i + 1] as usize {
+                row[indices[idx] as usize] += to_f64(values[idx]);
             }
             for j in 0..m {
-                row[j] = if constant[j] { 0.0 } else { row[j] / sd[j] };
+                row[j] = if sd[j] < COV_ZERO_SD {
+                    0.0
+                } else {
+                    row[j] / sd[j]
+                };
             }
         });
+        drop((values, indices, indptr));
         let res = dense_covariance_svd(z.as_ref(), rank)?;
         return Ok(RandomSvdResults {
             u: Mat::from_fn(n, rank, |i, c| F::from_f64(res.u[(i, c)]).unwrap()),
@@ -792,63 +811,128 @@ where
     }
 
     // relabel features by descending frequency: most pair updates then hit the
-    // small, cache-resident top-left block of the accumulator
+    // small, cache-resident top-left block of the accumulator. Everything up to
+    // the eigenvectors stays in relabelled space.
     let mut freq = vec![0usize; m];
-    for &j in csr.indices.iter() {
+    for &j in indices.iter() {
         freq[j as usize] += 1;
     }
     let mut order: Vec<usize> = (0..m).collect();
     order.sort_unstable_by(|&a, &b| freq[b].cmp(&freq[a]));
+    drop(freq);
     let mut relabel = vec![0usize; m];
     for (new_j, &old_j) in order.iter().enumerate() {
         relabel[old_j] = new_j;
     }
+    let shift: Vec<f64> = order.iter().map(|&j| shift[j]).collect();
+    let sd: Vec<f64> = order.iter().map(|&j| sd[j]).collect();
+    let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
 
-    // pass 1: one triangle of A^T A (in relabelled space, rows are no longer
-    // sorted, so an entry can land in either triangle), the column sums
-    // A^T 1 and w = A^T o
     let n_threads = rayon::current_num_threads().max(1);
-    let chunk = n.div_ceil(n_threads).max(1);
-    let (gram, col_sums, w) = (0..n)
-        .step_by(chunk)
-        .collect::<Vec<_>>()
+
+    // pass 1a: relabel and sort every row in place, and collect the column
+    // sums s = A^T 1, w = A^T o and the pair count each column receives
+    let n_row_blocks = (4 * n_threads).min(n).max(1);
+    let mut row_blocks = Vec::with_capacity(n_row_blocks);
+    let (mut idx_rest, mut val_rest) = (indices.as_mut_slice(), values.as_mut_slice());
+    for b in 0..n_row_blocks {
+        let (r0, r1) = (b * n / n_row_blocks, (b + 1) * n / n_row_blocks);
+        let len = (indptr[r1] - indptr[r0]) as usize;
+        let (bi, ri) = std::mem::take(&mut idx_rest).split_at_mut(len);
+        let (bv, rv) = std::mem::take(&mut val_rest).split_at_mut(len);
+        (idx_rest, val_rest) = (ri, rv);
+        row_blocks.push((r0, r1, bi, bv));
+    }
+    let (pair_counts, col_sums, w) = row_blocks
         .into_par_iter()
-        .map(|start| {
-            let mut g = vec![0f64; m * m];
+        .map(|(r0, r1, bi, bv)| {
+            let mut pc = vec![0u64; m];
             let mut cs = vec![0f64; m];
             let mut w = vec![0f64; m];
-            let mut row_vals: Vec<f64> = Vec::new();
-            let mut row_idx: Vec<usize> = Vec::new();
-            for i in start..(start + chunk).min(n) {
-                let (lo, hi) = (csr.indptr[i] as usize, csr.indptr[i + 1] as usize);
-                row_vals.clear();
-                row_vals.extend((lo..hi).map(val));
-                row_idx.clear();
-                row_idx.extend(csr.indices[lo..hi].iter().map(|&j| relabel[j as usize]));
-                for (p, (&a, &va)) in row_idx.iter().zip(row_vals.iter()).enumerate() {
+            let mut pairs: Vec<(u32, T)> = Vec::new();
+            let base = indptr[r0] as usize;
+            for i in r0..r1 {
+                let (lo, hi) = (indptr[i] as usize - base, indptr[i + 1] as usize - base);
+                pairs.clear();
+                pairs.extend(
+                    bi[lo..hi]
+                        .iter()
+                        .zip(&bv[lo..hi])
+                        .map(|(&j, &v)| (relabel[j as usize] as u32, v)),
+                );
+                pairs.sort_unstable_by_key(|&(j, _)| j);
+                let r = pairs.len();
+                let dst = bi[lo..hi].iter_mut().zip(bv[lo..hi].iter_mut());
+                for (p, (&(j, v), (dj, dv))) in pairs.iter().zip(dst).enumerate() {
+                    (*dj, *dv) = (j, v);
+                    let (a, va) = (j as usize, to_f64(v));
+                    pc[a] += (r - p) as u64;
                     cs[a] += va;
                     if let Some(o) = &off {
                         w[a] += va * o[i];
                     }
-                    let row = &mut g[a * m..(a + 1) * m];
-                    for (&b, &vb) in row_idx[p..].iter().zip(row_vals[p..].iter()) {
-                        row[b] += va * vb;
-                    }
                 }
             }
-            (g, cs, w)
+            (pc, cs, w)
         })
         .reduce(
-            || (vec![0f64; m * m], vec![0f64; m], vec![0f64; m]),
-            |(mut g1, mut cs1, mut w1), (g2, cs2, w2)| {
-                g1.par_iter_mut()
-                    .zip(g2.par_iter())
-                    .for_each(|(a, b)| *a += b);
-                cs1.iter_mut().zip(cs2.iter()).for_each(|(a, b)| *a += b);
-                w1.iter_mut().zip(w2.iter()).for_each(|(a, b)| *a += b);
-                (g1, cs1, w1)
+            || (vec![0u64; m], vec![0f64; m], vec![0f64; m]),
+            |(mut pc1, mut cs1, mut w1), (pc2, cs2, w2)| {
+                pc1.iter_mut().zip(&pc2).for_each(|(a, b)| *a += b);
+                cs1.iter_mut().zip(&cs2).for_each(|(a, b)| *a += b);
+                w1.iter_mut().zip(&w2).for_each(|(a, b)| *a += b);
+                (pc1, cs1, w1)
             },
         );
+
+    // column blocks with roughly equal pair counts; the frequency relabel puts
+    // most of the work in the first few columns
+    let total: u64 = pair_counts.iter().sum();
+    let n_col_blocks = (4 * n_threads).min(m).max(1) as u64;
+    let mut col_bounds = vec![0usize];
+    let mut cum = 0u64;
+    for (a, &pa) in pair_counts.iter().enumerate() {
+        cum += pa;
+        if (col_bounds.len() as u64) < n_col_blocks
+            && cum * n_col_blocks >= total * col_bounds.len() as u64
+        {
+            col_bounds.push(a + 1);
+        }
+    }
+    col_bounds.push(m);
+
+    // pass 1b: the lower triangle of A^T A, column-major. Rows are sorted, so
+    // the entries a column block owns are one contiguous run per row.
+    let mut gram = vec![0f64; m * m];
+    let mut col_blocks = Vec::with_capacity(col_bounds.len() - 1);
+    let mut rest = gram.as_mut_slice();
+    for win in col_bounds.windows(2) {
+        let (blk, r) = std::mem::take(&mut rest).split_at_mut((win[1] - win[0]) * m);
+        rest = r;
+        col_blocks.push((win[0], win[1], blk));
+    }
+    col_blocks.into_par_iter().for_each(|(c0, c1, blk)| {
+        let mut row_vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            let (lo, hi) = (indptr[i] as usize, indptr[i + 1] as usize);
+            let idx = &indices[lo..hi];
+            let p0 = idx.partition_point(|&a| (a as usize) < c0);
+            let p1 = idx.partition_point(|&a| (a as usize) < c1);
+            if p0 == p1 {
+                continue;
+            }
+            row_vals.clear();
+            row_vals.extend(values[lo + p0..hi].iter().map(|&v| to_f64(v)));
+            for p in p0..p1 {
+                let a = idx[p] as usize;
+                let va = row_vals[p - p0];
+                let col = &mut blk[(a - c0) * m..(a - c0 + 1) * m];
+                for (&b, &vb) in idx[p..].iter().zip(&row_vals[p - p0..]) {
+                    col[b as usize] += va * vb;
+                }
+            }
+        }
+    });
 
     let (o_sum, o_sq): (f64, f64) = off
         .as_ref()
@@ -857,42 +941,36 @@ where
 
     // Z^T Z = A^T A - w 1^T - 1 w^T - s c^T - c s^T + (o . o) 1 1^T
     //         + (1^T o)(1 c^T + c 1^T) + n c c^T, then scaled,
-    // with s = A^T 1 and w = A^T o
-    let gram_ref = &gram;
-    let cov_entry = |a: usize, b: usize| -> f64 {
-        if constant[a] || constant[b] {
-            return 0.0;
-        }
-        let (ra, rb) = (relabel[a], relabel[b]);
-        let ata = if ra == rb {
-            gram_ref[ra * m + ra]
-        } else {
-            gram_ref[ra * m + rb] + gram_ref[rb * m + ra]
-        };
-        let (sa, sb) = (col_sums[ra], col_sums[rb]);
-        let (ca, cb) = (shift[a], shift[b]);
-        let raw =
-            ata - w[ra] - w[rb] - sa * cb - ca * sb + o_sq + o_sum * (ca + cb) + n_f * ca * cb;
-        raw / (sd[a] * sd[b])
-    };
-    let mut cov = Mat::<f64>::zeros(m, m);
-    cov.par_col_iter_mut().enumerate().for_each(|(b, mut col)| {
-        for a in 0..m {
-            col[a] = cov_entry(a, b);
+    // with s = A^T 1 and w = A^T o. In place, lower triangle only.
+    gram.par_chunks_mut(m).enumerate().for_each(|(a, col)| {
+        for b in a..m {
+            col[b] = if constant[a] || constant[b] {
+                0.0
+            } else {
+                let (sa, sb) = (col_sums[a], col_sums[b]);
+                let (ca, cb) = (shift[a], shift[b]);
+                let raw = col[b] - w[a] - w[b] - sa * cb - ca * sb
+                    + o_sq
+                    + o_sum * (ca + cb)
+                    + n_f * ca * cb;
+                raw / (sd[a] * sd[b])
+            };
         }
     });
+
+    let eig = MatRef::from_column_major_slice(&gram, m, m)
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| CoreErrors::FaerEigenError)?;
     drop(gram);
+    let (eig_vals, eig_vecs) = (eig.S(), eig.U());
+    let mut top: Vec<usize> = (0..m).collect();
+    top.sort_by(|&a, &b| eig_vals[b].total_cmp(&eig_vals[a]));
+    top.truncate(rank);
 
-    let (eig_vals, eig_vecs) =
-        crate::core::math::sparse::symmetric_eigen_descending(cov.as_ref(), m)?;
-
-    let s: Vec<f64> = eig_vals[..rank]
-        .iter()
-        .map(|&l| l.max(0.0).sqrt())
-        .collect();
+    let s: Vec<f64> = top.iter().map(|&c| eig_vals[c].max(0.0).sqrt()).collect();
     // V scaled by 1 / sd, row-major (m x rank) for the score pass
     let v_scaled: Vec<f64> = (0..m)
-        .flat_map(|j| (0..rank).map(move |c| (j, c)))
+        .flat_map(|j| top.iter().map(move |&c| (j, c)))
         .map(|(j, c)| {
             if constant[j] {
                 0.0
@@ -901,6 +979,10 @@ where
             }
         })
         .collect();
+    let v = Mat::from_fn(m, rank, |j, c| {
+        F::from_f64(eig_vecs[(relabel[j], top[c])]).unwrap()
+    });
+    drop(eig);
     let shift_v: Vec<f64> = (0..rank)
         .map(|c| (0..m).map(|j| shift[j] * v_scaled[j * rank + c]).sum())
         .collect();
@@ -908,30 +990,35 @@ where
         .map(|c| (0..m).map(|j| v_scaled[j * rank + c]).sum())
         .collect();
 
-    // pass 2: U = Z V / s, row by row
-    let u_rm: Vec<f64> = (0..n)
-        .into_par_iter()
-        .flat_map_iter(|i| {
+    // pass 2: U = Z V / s, straight into the output
+    let mut u = Mat::<F>::zeros(n, rank);
+    u.par_row_chunks_mut(TRANSPOSE_ROW_BLOCK)
+        .enumerate()
+        .for_each(|(b, mut block)| {
             let mut acc = vec![0f64; rank];
-            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
-                let j = csr.indices[idx] as usize;
-                let a = val(idx);
-                let vr = &v_scaled[j * rank..(j + 1) * rank];
+            for r in 0..block.nrows() {
+                let i = b * TRANSPOSE_ROW_BLOCK + r;
+                acc.fill(0.0);
+                for idx in indptr[i] as usize..indptr[i + 1] as usize {
+                    let a = to_f64(values[idx]);
+                    let j = indices[idx] as usize;
+                    let vr = &v_scaled[j * rank..(j + 1) * rank];
+                    for c in 0..rank {
+                        acc[c] += a * vr[c];
+                    }
+                }
+                let oi = off.as_ref().map(|o| o[i]).unwrap_or(0.0);
                 for c in 0..rank {
-                    acc[c] += a * vr[c];
+                    let z = acc[c] - shift_v[c] - oi * one_v[c];
+                    let uc = if s[c] > 0.0 { z / s[c] } else { 0.0 };
+                    block[(r, c)] = F::from_f64(uc).unwrap();
                 }
             }
-            let oi = off.as_ref().map(|o| o[i]).unwrap_or(0.0);
-            for c in 0..rank {
-                let z = acc[c] - shift_v[c] - oi * one_v[c];
-                acc[c] = if s[c] > 0.0 { z / s[c] } else { 0.0 };
-            }
-            acc
-        })
-        .collect();
+        });
+
     Ok(RandomSvdResults {
-        u: mat_from_row_major(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
-        v: Mat::from_fn(m, rank, |j, c| F::from_f64(eig_vecs[(j, c)]).unwrap()),
+        u,
+        v,
         s: s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
     })
 }
