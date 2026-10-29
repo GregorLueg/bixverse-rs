@@ -165,13 +165,14 @@ Python package wraps the single cell streaming engine with PyO3 and maturin.
 It depends on `bixverse-sc-data` alone, so the wheel needs no R install. It
 opens a bixverse binary store and streams shuffled minibatches out of it, with
 the decode in Rust and the GIL released, fast enough to keep a GPU training loop
-fed. First consumer is scVI in `bixverse.nn`, on torch or MLX, trained straight
-off the store.
+fed. First consumer is scVI in `bixverse.nn`, on torch, MLX or JAX, trained
+straight off the store.
 
 ```bash
 uv pip install bixverse            # numpy only
 uv pip install "bixverse[torch]"   # scVI on torch
 uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
+uv pip install "bixverse[jax]"     # scVI on JAX, the fast one on CPU
 ```
 
 Docs live [here](https://gregorlueg.github.io/bixverse-rs/). The Python package
@@ -209,8 +210,8 @@ is versioned on its own line, see its
 ### Python interface
 
 - [x] Data loader to pull the counts out of the binary files and expose them to
-  Python-based deep learning frameworks (PyTorch, MLX).
-- [x] scVI trained straight off the binary files, on torch and MLX.
+  Python-based deep learning frameworks (PyTorch, MLX, JAX).
+- [x] scVI trained straight off the binary files, on torch, MLX and JAX.
 
 ## Updates
 

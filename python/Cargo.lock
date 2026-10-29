@@ -60,7 +60,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "bixverse-py"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bixverse-sc-data",
  "crossbeam-channel",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "approx",
  "bincode",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "bincode",
  "num-traits",

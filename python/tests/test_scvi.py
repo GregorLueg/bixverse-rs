@@ -9,7 +9,7 @@ import bixverse.nn as bvnn
 
 from .conftest import N_CELLS
 
-BACKENDS = ["torch"]
+BACKENDS = ["torch", "jax"]
 if platform.system() == "Darwin" and platform.machine() == "arm64":
     BACKENDS.append("mlx")
 
