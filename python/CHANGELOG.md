@@ -13,9 +13,10 @@ Requires `bixverse-sc-data` 0.9.5.
   the torch and MLX backends, as pure functions over parameter pytrees with an
   optax Adam and one `jax.jit` per training step. Torch weights convert with
   `_jax.torch_state_to_jax` and reproduce the loss to `rtol = 1e-5`. On 5963
-  PBMC cells x 2000 HVGs, 400 epochs on an M1 Max: JAX on CPU 108 s against
-  200 s for torch on CPU, with the same held-out ELBO. On a GPU MLX (33 s) and
-  torch on MPS (82 s) stay ahead.
+  PBMC cells x 2000 HVGs, 400 epochs on an M1 Max: JAX on CPU 106 s against
+  202 s for torch on CPU and 260 s for scvi-tools on CPU, with the same
+  held-out ELBO and integration metrics. On a GPU MLX (35 s) and torch on MPS
+  (82 s) stay ahead.
 
 ## 0.2.1
 
