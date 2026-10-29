@@ -14,96 +14,63 @@
 
 ### Breaking
 
-- `GENE_FILE_BYTES_PER_NNZ` drops from 10 to 8: the CSR to CSC conversion no
-  longer carries the norm layer. A phase budget derived from it (the R side's
-  `csc_mem_gb`) now holds 25% more non-zeros per phase.
-- `MtxReader::parse_mtx_quality()` returns `Result<_, ScDataErrors>`.
-  `process_mtx_and_write_bin()` runs the streaming write, which now rejects a
-  `cells_to_keep` that is not ascending. Bucket files default to the system
-  temp directory; `MtxReader::with_temp_dir()` puts them elsewhere.
-- MTX values that are not non-negative integral counts error with
-  `MtxNotACount`, and `complex`, `array` or non-`general` files with
-  `MtxUnsupported`. Both used to load silently wrong.
-- The parallel h5ad and 10x quality passes error when a dataset fails to open,
-  instead of counting zeros for that chunk.
+- `GENE_FILE_BYTES_PER_NNZ` is 8 (was 10); budgets derived from it hold 25%
+  more non-zeros per phase.
+- `MtxReader::parse_mtx_quality()` returns `Result`; the streaming write
+  rejects a non-ascending `cells_to_keep`; bucket files go to the system temp
+  directory (`MtxReader::with_temp_dir()` to change it).
+- Non-count MTX values error with `MtxNotACount`, `complex`, `array` and
+  non-`general` files with `MtxUnsupported`.
+- The h5ad and 10x quality passes error when a dataset fails to open.
 
 ### Feature
 
-- New `parquet` feature on `bixverse-sc-data` (forwarded by the facade and
-  `bixverse-r`): `h5ad_frame_to_parquet()` and `tenx_frame_to_parquet()` write
-  the h5ad obs / var frames and the 10x barcodes and features to Parquet for
-  DuckDB's `read_parquet`. Handles `_index`, categoricals (old and new style),
-  nullable columns, numerics, booleans and strings, with the kept-row filter
-  applied. No arrow.
-- `CompressedSparseData2` and `SparseGraph` get `to_bytes()` / `from_bytes()`
-  (bincode behind a magic and a format version); `SparseGraph` gains
-  `to_edge_pairs()` and `get_edge_number()`. Lets a caller hold the sNN graph
-  in Rust and persist it without going through an edge list.
-- MTX input can be gzipped (detected by magic bytes, multi-member included),
-  inflated in Rust with `flate2` on `zlib-rs`. `real` and `pattern` fields are
-  supported.
-- `SingleCellReading::read_gene_parallel_raw()` decodes raw counts and indices
-  only; it falls back to `read_gene_parallel()` for readers without a cheaper
-  path.
+- `parquet` feature: h5ad obs / var and 10x barcodes / features to Parquet
+  (`h5ad_frame_to_parquet()`, `tenx_frame_to_parquet()`), no arrow.
+- `to_bytes()` / `from_bytes()` on `CompressedSparseData2` and `SparseGraph`;
+  `SparseGraph::to_edge_pairs()` and `get_edge_number()`.
+- Gzipped MTX input; `real` and `pattern` fields.
+- `SingleCellReading::read_gene_parallel_raw()` for raw counts only.
 
 ### Performance
 
-Against 0.9.3 on a 4.7M cell Tahoe plate (MTX: Parse PBMC 1M):
-
-- h5ad and 10x h5 count reads: 5x.
-- CSR to CSC conversion: 2x.
-- HVG (VST): 2x.
-- MTX loading: 2x.
+- h5ad and 10x h5 reads 5x faster; CSR to CSC, HVG and MTX loading 2x.
 
 ### Fix
 
-- `real` MTX values were truncated to their integer part and `pattern` files
-  loaded as an empty matrix.
-- Fixed-length HDF5 strings longer than 63 bytes were truncated or failed.
-- The multi-MTX scans allocated a cell-sized vector per 64 MB chunk; library
-  sizes now accumulate as `u64`.
+- `real` MTX values were truncated and `pattern` files loaded empty.
+- Fixed-length HDF5 strings over 63 bytes were truncated or failed.
+- Multi-MTX scans allocated a cell-sized vector per chunk.
 
 ## 0.9.3
 
 ### Breaking
 
-- `mad_outlier()` takes an `r_standard` flag. With `true` the MAD is scaled by
-  `MAD_SCALE` like R's `mad()`, so `threshold` counts standard deviations
-  under normality and the margins are 1.48x wider than before. `false` keeps
-  the old raw MAD.
+- `mad_outlier()` takes an `r_standard` flag; `true` scales the MAD like R's
+  `mad()`, `false` keeps the raw MAD.
 
 ## 0.9.2
 
 ### Breaking
 
-- MetaCells2 parameters follow upstream metacells 0.9.5: `SimilarityMethod` is
-  `AbsPearson` (default) | `Pearson` plus a `log_data` flag, the kNN factors
-  are `f64`, `DeviantsParams` drops `max_gene_fraction` and gains the noisy-gene
-  fields, and `MetacellsParams::random_seed` is gone (the seed is an argument).
+- MetaCells2 parameters follow metacells 0.9.5 (`SimilarityMethod`,
+  `DeviantsParams`, no `MetacellsParams::random_seed`).
 - `select_features()`, `choose_seeds()`, `compute_candidate_metacells()` and
   `find_deviant_cells()` return `Result`; `dissolve_metacells()` takes a mass
-  vector; `Pile` gains `mass_per_cell` and `Pile::from_raw()`.
+  vector.
 
 ### Feature
 
-- MetaCells2 divide and conquer (`compute_dac_metacells()`, `DacParams`),
-  including rare gene modules (`RareParams`, on by default), streaming piles
-  from the cell store.
-- Hierarchical clustering matching SciPy's `linkage` (ward, complete, average,
-  weighted) in `ml::clustering::hierarchical`.
-- decoupler ULM and MLM activity scores in `enrichment::lm_activity`, dense,
-  on the cell store (`calculate_lm_activity()`) and on metacells
-  (`calculate_lm_activity_metacells()`). Matches decoupler 2.2.1.
-- `bixverse-r`: `FromRList` for the MetaCells2, divide-and-conquer, rare-module
-  and `LmActivityParams` params, and `r_list_to_feature_set_weights()`.
+- MetaCells2 divide and conquer with rare gene modules
+  (`compute_dac_metacells()`).
+- Hierarchical clustering matching SciPy's `linkage`.
+- decoupler ULM and MLM activity scores, matching decoupler 2.2.1.
+- `bixverse-r`: `FromRList` for the new params.
 
 ### Fix
 
-- The direct MetaCells2 pipeline now matches metacells 0.9.5 (parity tests on
-  every deterministic stage). Among others: min-cut strength, similarity
-  transform, kNN ranks and degree retry, deviant gap skip, top-3 statistic,
-  relative-variance window and the candidates loop. Deviants no longer build
-  dense cells x genes matrices.
+- The MetaCells2 pipeline matches metacells 0.9.5 stage by stage; deviants no
+  longer build dense matrices.
 
 ## 0.9.1
 
