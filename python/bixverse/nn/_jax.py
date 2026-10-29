@@ -386,7 +386,9 @@ def torch_state_to_jax(state: dict, n_batch: int) -> Vae:
     Returns:
         The JAX model, with the same weights and BatchNorm statistics.
     """
-    arr = {k: jnp.asarray(v.detach().cpu().numpy()) for k, v in state.items()}
+    # `jnp.array` copies: some jax versions alias a numpy buffer on CPU, which
+    # would tie the result to the torch module's in-place BatchNorm updates.
+    arr = {k: jnp.array(v.detach().cpu().numpy()) for k, v in state.items()}
 
     def linear(prefix: str) -> dict:
         """A torch `nn.Linear`, transposed to `(d_in, d_out)`."""
