@@ -13,6 +13,7 @@ uv pip install bixverse            # numpy only
 uv pip install "bixverse[sparse]"  # adds scipy, for Batch.scipy_csr
 uv pip install "bixverse[torch]"   # torch, for bixverse.nn
 uv pip install "bixverse[mlx]"     # MLX, Apple Silicon only
+uv pip install "bixverse[jax]"     # JAX, for bixverse.nn on CPU or CUDA
 ```
 
 ## Thirty seconds
