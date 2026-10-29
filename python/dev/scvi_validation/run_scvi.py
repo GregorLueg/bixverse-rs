@@ -86,9 +86,8 @@ def main() -> None:
     # One device for both torch arms. scvi-tools' "auto" quietly picks cpu
     # over mps, so it has to be named.
     p.add_argument("--device", default="mps", choices=["cpu", "mps", "cuda"])
-    # JAX names platforms, not torch devices. METAL needs the jax-metal plugin,
-    # which only runs on jax 0.5.0.
-    p.add_argument("--jax-device", default="cpu", choices=["cpu", "METAL", "gpu"])
+    # JAX names platforms, not torch devices.
+    p.add_argument("--jax-device", default="cpu", choices=["cpu", "gpu"])
     p.add_argument("--tag", default="", help="suffix for embedding file names")
     p.add_argument(
         "--arms", nargs="+", default=["scvi_torch", "scvi_mlx", "bv_torch", "bv_mlx"]
