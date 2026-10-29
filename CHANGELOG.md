@@ -9,6 +9,10 @@
   non-zeros). Results differ from 0.9.4 at round-off.
 - `compute_largest_eigenpairs_lanczos()` no longer clones its input or holds an
   f64 copy: 24 -> 8 bytes per non-zero.
+- `sparse_covariance_svd()` builds one shared `m x m` accumulator instead of
+  one per thread, drops the input CSC after the transpose and writes U
+  directly: 5.1 GB -> 1.6 GB and 11.6 s -> 6.9 s on 100k cells x 5000
+  features. Results differ from 0.9.4 at round-off.
 
 ## 0.9.4
 
