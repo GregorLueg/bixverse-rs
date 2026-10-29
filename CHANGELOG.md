@@ -1,5 +1,25 @@
 # News
 
+## 0.9.5
+
+### Performance
+
+- `sparse_svd_lanczos()` (the sparse PCA `Exact` / `Auto` solver) keeps one
+  orientation of the matrix instead of a CSR and a CSC, and reads the stored
+  values in their own type instead of holding f64 copies. Peak memory drops
+  from 32 to 16 bytes per non-zero, and to 8 during the solve. `sparse_pca`
+  hands over the CSR and drops its CSC before the loop. On a synthetic
+  1M x 2000, 100M non-zero matrix: 3.4 GB -> 1.75 GB peak RSS.
+- `compute_largest_eigenpairs_lanczos()` (SEACells, Palantir and diffusion
+  maps, MELD) no longer clones a CSR input or holds an f64 copy of its values:
+  24 -> 8 bytes per non-zero.
+
+### Note
+
+- Lanczos PCA results differ from 0.9.4 at round-off: `A^T x` sums in a
+  different order. They stay identical for a given seed, whatever the thread
+  count.
+
 ## 0.9.4
 
 ### Breaking
