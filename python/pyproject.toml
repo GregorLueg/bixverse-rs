@@ -29,6 +29,8 @@ torch = ["torch>=2.4"]
 # `bixverse.nn` on MLX. Apple Silicon only, so the marker keeps
 # `--all-extras` installable everywhere else.
 mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# `bixverse.nn` on JAX, CPU or CUDA (`jax[cuda12]` on top for the latter).
+jax = ["jax>=0.5", "optax>=0.2"]
 
 [dependency-groups]
 dev = [
