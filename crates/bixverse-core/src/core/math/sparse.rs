@@ -1221,22 +1221,18 @@ where
 {
     let n = matrix.shape.0;
 
-    // CSR gives contiguous rows for the matrix-vector product.
-    let csr = match matrix.cs_type {
-        CompressedSparseFormat::Csr => matrix.clone(),
-        CompressedSparseFormat::Csc => matrix.transform(),
+    // CSR gives contiguous rows for the matrix-vector product. A CSR input is
+    // used as is, a CSC one is transposed once with only the layer read here.
+    let transposed;
+    let csr = if matrix.cs_type.is_csr() {
+        matrix
+    } else {
+        transposed = matrix.transform_single_layer(false)?;
+        &transposed
     };
-    let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
 
     let matvec = |x: &[f64], y: &mut [f64]| {
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            let mut sum = 0.0;
-            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
-                let j = csr.indices[idx] as usize;
-                sum += data_f64[idx] * x[j];
-            }
-            *yi = sum;
-        });
+        major_gather(&csr.indptr, &csr.indices, &csr.data, x, y);
     };
 
     let ritz = lanczos_thick_restart(n, n_components, seed, params.unwrap_or_default(), matvec)?;
@@ -1781,6 +1777,100 @@ where
 // Lanczos SVD //
 /////////////////
 
+////////////////////////
+// Lanczos SVD: const //
+////////////////////////
+
+/// Major-axis slices per partial buffer in [minor_scatter].
+///
+/// Fixed rather than derived from the thread count, so the summation order and
+/// with it the result are the same on any machine. Each slice costs one
+/// minor-length buffer; with the minor axis the short one that stays small.
+/// Not tuned.
+const SPARSE_SCATTER_CHUNK: usize = 8192;
+
+/////////////////////////////
+// Lanczos: sparse kernels //
+/////////////////////////////
+
+/// Sparse product along the major axis: `y[i] = sum_k values[k] * x[indices[k]]`
+/// over the entries of major slice `i`.
+///
+/// For a CSR this is `A x`, for a CSC `A^T x`. Values are cast to `F` per
+/// element, so no widened copy of the data is ever held.
+///
+/// ### Params
+///
+/// * `indptr` - Major-axis pointers of the sparse matrix.
+/// * `indices` - Minor-axis indices of the sparse matrix.
+/// * `values` - The data layer, aligned with `indices`.
+/// * `x` - Input, minor-axis length.
+/// * `y` - Output, major-axis length. Overwritten.
+fn major_gather<V, F>(indptr: &[u32], indices: &[u32], values: &[V], x: &[F], y: &mut [F])
+where
+    V: Copy + Into<F> + Sync,
+    F: BixverseFloat,
+{
+    y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+        let mut sum = F::zero();
+        for idx in indptr[i] as usize..indptr[i + 1] as usize {
+            sum += values[idx].into() * x[indices[idx] as usize];
+        }
+        *yi = sum;
+    });
+}
+
+/// Sparse product across the major axis: `y[indices[k]] += values[k] * x[i]`
+/// over the entries of every major slice `i`.
+///
+/// For a CSR this is `A^T x`, for a CSC `A x`. Blocks of
+/// `SPARSE_SCATTER_CHUNK` major slices accumulate into their own buffer in
+/// parallel, then the buffers are summed in block order, which keeps the
+/// result independent of the thread count. Meant for a short minor axis, where
+/// the buffers are small and the scatter stays in cache.
+///
+/// ### Params
+///
+/// * `indptr` - Major-axis pointers of the sparse matrix.
+/// * `indices` - Minor-axis indices of the sparse matrix.
+/// * `values` - The data layer, aligned with `indices`.
+/// * `x` - Input, major-axis length.
+/// * `y` - Output, minor-axis length. Overwritten.
+fn minor_scatter<V, F>(indptr: &[u32], indices: &[u32], values: &[V], x: &[F], y: &mut [F])
+where
+    V: Copy + Into<F> + Sync,
+    F: BixverseFloat,
+{
+    let n_minor = y.len();
+    y.fill(F::zero());
+    if n_minor == 0 {
+        return;
+    }
+    let n_major = x.len();
+    let n_blocks = n_major.div_ceil(SPARSE_SCATTER_CHUNK);
+
+    let mut partial = vec![F::zero(); n_blocks * n_minor];
+    partial
+        .par_chunks_mut(n_minor)
+        .enumerate()
+        .for_each(|(block, acc)| {
+            let start = block * SPARSE_SCATTER_CHUNK;
+            let end = (start + SPARSE_SCATTER_CHUNK).min(n_major);
+            for (i, &xi) in x.iter().enumerate().take(end).skip(start) {
+                for idx in indptr[i] as usize..indptr[i + 1] as usize {
+                    acc[indices[idx] as usize] += values[idx].into() * xi;
+                }
+            }
+        });
+
+    // n_blocks * n_minor adds, negligible next to the nnz pass above
+    for acc in partial.chunks_exact(n_minor) {
+        for (yj, &a) in y.iter_mut().zip(acc) {
+            *yj += a;
+        }
+    }
+}
+
 ///////////////////////////////////
 // Lanczos SVD: public functions //
 ///////////////////////////////////
@@ -1789,6 +1879,13 @@ where
 ///
 /// Thick-restarted with the default [LanczosParams], so the trailing
 /// components converge on a flat spectrum too.
+///
+/// Only one orientation of the matrix is used: the one whose major axis is
+/// the longer dimension, so `A x` and `A^T x` are a gather and a scatter into
+/// a short buffer ([major_gather], [minor_scatter]). An input in the other
+/// orientation is transposed once, which holds a second copy next to the
+/// borrowed input; callers that can should hand over the long-major form and
+/// drop theirs. Values are read in their stored type and widened per element.
 ///
 /// ### Params
 ///
@@ -1822,43 +1919,33 @@ where
     let use_ata = n > m;
     let krylov_dim = if use_ata { m } else { n };
 
-    // keep both representations to make matvec operations fast
-    let (csr, csc);
-    let csr_owned;
-    let csc_owned;
+    // long-major orientation: CSR when there are at least as many rows as columns
+    let want_csr = n >= m;
+    let transposed;
+    let mat = if matrix.cs_type.is_csr() == want_csr {
+        matrix
+    } else {
+        transposed = matrix.transform_single_layer(use_second_layer)?;
+        &transposed
+    };
 
-    match matrix.cs_type {
-        CompressedSparseFormat::Csr => {
-            csr = matrix;
-            csc_owned = matrix.transform_single_layer(use_second_layer)?;
-            csc = &csc_owned;
-        }
-        CompressedSparseFormat::Csc => {
-            csc = matrix;
-            csr_owned = matrix.transform_single_layer(use_second_layer)?;
-            csr = &csr_owned;
+    let layer_2: &[U] = if use_second_layer {
+        mat.data_2.as_deref().ok_or(CoreErrors::Data2NotAvailable)?
+    } else {
+        &[]
+    };
+
+    // `A x` for `transpose == false`, `A^T x` otherwise
+    let product = |transpose: bool, x: &[F], y: &mut [F]| {
+        let gather = want_csr != transpose;
+        match (use_second_layer, gather) {
+            (true, true) => major_gather(&mat.indptr, &mat.indices, layer_2, x, y),
+            (true, false) => minor_scatter(&mat.indptr, &mat.indices, layer_2, x, y),
+            (false, true) => major_gather(&mat.indptr, &mat.indices, &mat.data, x, y),
+            (false, false) => minor_scatter(&mat.indptr, &mat.indices, &mat.data, x, y),
         }
     };
 
-    // helper to extract the right data layer and cast to F
-    let extract_data = |mat: &CompressedSparseData2<T, U>| -> Vec<F> {
-        if use_second_layer {
-            mat.data_2
-                .as_ref()
-                .expect("data_2 is None but use_second_layer is true")
-                .iter()
-                .copied()
-                .map(|v| v.into())
-                .collect()
-        } else {
-            mat.data.iter().copied().map(|v| v.into()).collect()
-        }
-    };
-
-    let data_csr_f = extract_data(csr);
-    let data_csc_f = extract_data(csc);
-
-    // matrix-vector product for A (using CSR)
     let matvec_a = |x: &[F], y: &mut [F]| {
         let x_scaled: Vec<F> = if let Some(sd) = col_stds {
             x.iter().enumerate().map(|(j, &v)| v / sd[j]).collect()
@@ -1876,20 +1963,17 @@ where
             F::zero()
         };
 
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            let mut sum = F::zero();
-            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
-                let j = csr.indices[idx] as usize;
-                sum += data_csr_f[idx] * x_scaled[j];
-            }
-            if col_means.is_some() {
-                sum -= mean_dot;
-            }
-            if let Some(off) = row_offsets {
-                sum -= off[i] * x_sum;
-            }
-            *yi = sum;
-        });
+        product(false, &x_scaled, y);
+        if col_means.is_some() || row_offsets.is_some() {
+            y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+                if col_means.is_some() {
+                    *yi -= mean_dot;
+                }
+                if let Some(off) = row_offsets {
+                    *yi -= off[i] * x_sum;
+                }
+            });
+        }
     };
 
     let matvec_at = |x: &[F], y: &mut [F]| {
@@ -1900,22 +1984,17 @@ where
             F::zero()
         };
 
+        product(true, x, y);
         y.par_iter_mut().enumerate().for_each(|(j, yj)| {
-            let mut sum = F::zero();
-            for idx in csc.indptr[j] as usize..csc.indptr[j + 1] as usize {
-                let i = csc.indices[idx] as usize;
-                sum += data_csc_f[idx] * x[i];
-            }
             if let Some(mu) = col_means {
-                sum -= mu[j] * x_sum;
+                *yj -= mu[j] * x_sum;
             }
             if row_offsets.is_some() {
-                sum -= m_dot_x;
+                *yj -= m_dot_x;
             }
             if let Some(sd) = col_stds {
-                sum /= sd[j];
+                *yj /= sd[j];
             }
-            *yj = sum;
         });
     };
 
@@ -1956,44 +2035,38 @@ where
         matvec_gram_f64,
     )?;
 
-    let mut singular_values: Vec<F> = Vec::with_capacity(n_components);
-    let mut u_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
-    let mut v_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
+    let kept: Vec<usize> = (0..ritz.values.len())
+        .filter(|&idx| ritz.values[idx] > 0.0)
+        .collect();
+    let singular_values: Vec<F> = kept
+        .iter()
+        .map(|&idx| F::from(ritz.values[idx].sqrt()).expect("f64 casts into any float type"))
+        .collect();
 
-    for (idx, &eval) in ritz.values.iter().enumerate() {
-        if eval <= 0.0 {
-            continue;
-        }
+    let mut u = Mat::<F>::zeros(n, kept.len());
+    let mut v = Mat::<F>::zeros(m, kept.len());
+    let mut other = vec![F::zero(); if use_ata { n } else { m }];
 
-        let sigma = F::from(eval.sqrt()).expect("f64 casts into any float type");
-        singular_values.push(sigma);
-
+    for (c, (&idx, &sigma)) in kept.iter().zip(&singular_values).enumerate() {
         let gram_evec: Vec<F> = ritz.vectors[idx * krylov_dim..(idx + 1) * krylov_dim]
             .iter()
-            .map(|&v| F::from(v).expect("f64 casts into any float type"))
+            .map(|&x| F::from(x).expect("f64 casts into any float type"))
             .collect();
 
-        if use_ata {
-            let mut u_vec = vec![F::zero(); n];
-            matvec_a(&gram_evec, &mut u_vec);
-            for x in &mut u_vec {
-                *x /= sigma;
-            }
-            u_vecs.push(u_vec);
-            v_vecs.push(gram_evec);
+        let (gram_side, other_side) = if use_ata {
+            matvec_a(&gram_evec, &mut other);
+            (&mut v, &mut u)
         } else {
-            let mut v_vec = vec![F::zero(); m];
-            matvec_at(&gram_evec, &mut v_vec);
-            for x in &mut v_vec {
-                *x /= sigma;
-            }
-            u_vecs.push(gram_evec);
-            v_vecs.push(v_vec);
+            matvec_at(&gram_evec, &mut other);
+            (&mut u, &mut v)
+        };
+        for (i, &x) in gram_evec.iter().enumerate() {
+            gram_side[(i, c)] = x;
+        }
+        for (i, &x) in other.iter().enumerate() {
+            other_side[(i, c)] = x / sigma;
         }
     }
-
-    let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
-    let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
 
     Ok(SvdResults {
         u,
@@ -2111,6 +2184,69 @@ mod tests {
         assert_eq!(svd.s.len(), k);
         for i in 0..k {
             assert_relative_eq!(svd.s[i], s_ref[i], max_relative = 1e-6);
+        }
+    }
+
+    /// CSR and CSC inputs, tall and wide, all match a dense SVD of the centred,
+    /// offset and scaled matrix, and a seed reproduces the run bit for bit.
+    ///
+    /// 9000 rows put more than one block through [minor_scatter]. A CSC input
+    /// on the tall shape and a CSR input on the wide one take the transpose,
+    /// the other two use the input as is.
+    #[test]
+    fn test_sparse_svd_lanczos_orientations_match_dense() {
+        let (long, short, k) = (9000usize, 20usize, 5usize);
+        let mut rng = StdRng::seed_from_u64(7);
+        let tall = Mat::<f64>::from_fn(long, short, |_, _| {
+            if rng.random::<f64>() < 0.2 {
+                rng.random::<f64>() * 4.0
+            } else {
+                0.0
+            }
+        });
+
+        for dense in [tall.clone(), tall.transpose().to_owned()] {
+            let (n, m) = dense.shape();
+            let means: Vec<f64> = (0..m)
+                .map(|j| dense.col(j).iter().sum::<f64>() / n as f64)
+                .collect();
+            let stds: Vec<f64> = (0..m).map(|j| 1.0 + j as f64 * 0.1).collect();
+            let offsets: Vec<f64> = (0..n).map(|i| (i % 7) as f64 * 0.01).collect();
+
+            let reference = Mat::<f64>::from_fn(n, m, |i, j| {
+                (dense[(i, j)] - means[j] - offsets[i]) / stds[j]
+            })
+            .thin_svd()
+            .unwrap();
+            let s_ref = reference.S().column_vector();
+
+            for format in [CompressedSparseFormat::Csr, CompressedSparseFormat::Csc] {
+                let sparse =
+                    CompressedSparseData2::<f64, f64>::from_dense_matrix(dense.as_ref(), format);
+                let run = || {
+                    sparse_svd_lanczos(
+                        &sparse,
+                        k,
+                        42,
+                        false,
+                        Some(&means[..]),
+                        Some(&stds[..]),
+                        Some(&offsets[..]),
+                    )
+                    .unwrap()
+                };
+                let svd = run();
+
+                assert_eq!(svd.s.len(), k);
+                for i in 0..k {
+                    assert_relative_eq!(svd.s[i], s_ref[i], max_relative = 1e-6);
+                }
+
+                let again = run();
+                assert_eq!(svd.s, again.s);
+                assert_eq!(svd.u, again.u);
+                assert_eq!(svd.v, again.v);
+            }
         }
     }
 

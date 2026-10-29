@@ -1312,8 +1312,19 @@ fn sparse_pca<S: SingleCellReading>(
             clr_offsets,
         )?,
         PcaSolver::Exact | PcaSolver::Auto => {
+            // the solver works on the long-major orientation; transposing
+            // here lets the CSC drop instead of sitting next to the copy
+            let long_major = if csc.shape.0 >= csc.shape.1 {
+                let csr = csc.transform_single_layer(true).map_err(CoreErrors::from)?;
+                // only borrowed above, so it would otherwise live to the end of
+                // the function
+                drop(csc);
+                csr
+            } else {
+                csc
+            };
             let res = sparse_svd_lanczos::<f32, f32, f64>(
-                &csc,
+                &long_major,
                 no_pcs,
                 seed as u64,
                 true,
