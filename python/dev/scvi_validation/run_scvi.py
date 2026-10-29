@@ -1,4 +1,4 @@
-"""Train scVI four ways on the same cells, genes and split.
+"""Train scVI five ways on the same cells, genes and split.
 
 Usage:
     uv run --group validation python -I dev/scvi_validation/run_scvi.py <out_dir>
@@ -9,6 +9,7 @@ Arms:
     scvi_mlx    scvi-tools `mlxSCVI`, its own (different) network and defaults
     bv_torch    `bixverse.nn` on torch, reading the bixverse store
     bv_mlx      `bixverse.nn` on MLX, reading the bixverse store
+    bv_jax      `bixverse.nn` on JAX, on `--jax-device`
 
 Every arm trains on the same 90% of the kept cells and embeds all of them.
 Held-out ELBO is scored on the other 10% by one implementation for every arm
@@ -85,6 +86,9 @@ def main() -> None:
     # One device for both torch arms. scvi-tools' "auto" quietly picks cpu
     # over mps, so it has to be named.
     p.add_argument("--device", default="mps", choices=["cpu", "mps", "cuda"])
+    # JAX names platforms, not torch devices. METAL needs the jax-metal plugin,
+    # which only runs on jax 0.5.0.
+    p.add_argument("--jax-device", default="cpu", choices=["cpu", "METAL", "gpu"])
     p.add_argument("--tag", default="", help="suffix for embedding file names")
     p.add_argument(
         "--arms", nargs="+", default=["scvi_torch", "scvi_mlx", "bv_torch", "bv_mlx"]
@@ -151,15 +155,15 @@ def main() -> None:
                     a_full = adata.copy()
                     scvi.model.mlxSCVI.setup_anndata(a_full, batch_key="exp_id")
                     latent = np.asarray(m.get_latent_representation(a_full))
-                case "bv_torch" | "bv_mlx":
+                case "bv_torch" | "bv_mlx" | "bv_jax":
                     fit = bvnn.train_scvi(
                         reader,
                         store_cells[train_pos],
                         store_genes,
                         batch[train_pos],
                         params=params,
-                        backend="torch" if arm == "bv_torch" else "mlx",
-                        device=args.device,
+                        backend=arm.removeprefix("bv_"),
+                        device=args.jax_device if arm == "bv_jax" else args.device,
                         seed=seed,
                     )
                     train_s = time.perf_counter() - t0
@@ -170,7 +174,13 @@ def main() -> None:
                 case _:
                     raise ValueError(f"unknown arm {arm}")
 
-            device = "gpu" if arm.endswith("mlx") else args.device
+            match arm:
+                case "bv_jax":
+                    device = args.jax_device
+                case "scvi_mlx" | "bv_mlx":
+                    device = "gpu"
+                case _:
+                    device = args.device
             arm_name = f"{arm}{args.tag}"
             pd.DataFrame(
                 latent, columns=[f"z_{i + 1}" for i in range(latent.shape[1])]
