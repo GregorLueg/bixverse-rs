@@ -5,7 +5,7 @@ The crate does the work: this is a thin layer that opens a bixverse binary
 sparse store and streams minibatches out of it fast enough to keep a GPU
 training loop fed.
 
-The first consumer is scVI, which ships in `bixverse.nn` (torch or MLX) and
+The first consumer is scVI, which ships in `bixverse.nn` (torch, MLX or JAX) and
 trains straight off the store, shuffled, without ever materialising the
 experiment in memory. Decoding never leaves Rust, and the GIL is released
 while it happens.
@@ -17,6 +17,7 @@ uv pip install bixverse            # numpy only
 uv pip install "bixverse[sparse]"  # adds scipy, for Batch.scipy_csr
 uv pip install "bixverse[torch]"   # scVI on torch
 uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
+uv pip install "bixverse[jax]"     # scVI on JAX, the fast one on CPU
 ```
 
 ## Use

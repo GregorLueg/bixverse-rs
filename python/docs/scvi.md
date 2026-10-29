@@ -3,11 +3,11 @@
 `bixverse.nn` carries a barebone scVI (Lopez et al., Nature Methods, 2018) for
 batch correction. It trains straight off a bixverse store: counts stream through
 the Rust loader, so there's no AnnData, no Lightning and no registry in the way.
-Two backends, torch (cuda, mps or cpu) and MLX on Apple Silicon, with the same
-network on both.
+Three backends with the same network on all of them: torch (cuda, mps or cpu),
+MLX on Apple Silicon and JAX (cpu or cuda).
 
 ```bash
-pip install "bixverse[torch]"   # or bixverse[mlx] on Apple Silicon
+pip install "bixverse[torch]"   # or bixverse[mlx] on Apple Silicon, bixverse[jax]
 ```
 
 ## Train and embed
@@ -64,7 +64,8 @@ Two levels of check.
 into ours, run both on one batch with z at the posterior mean, and compare. The
 encoder mean, reconstruction term and KL agree to `rtol = 1e-5`, for NB and
 ZINB. Our torch weights then go into the MLX model and agree to `1e-4` (MLX has
-no `lgamma`, so it uses a Lanczos approximation).
+no `lgamma`, so it uses a Lanczos approximation), and into the JAX model, which
+agrees to `1e-5`, BatchNorm running statistics included.
 
 **Same training, same kind of result.** On the two PBMC batches from the
 bixverse batch correction vignette (5841 cells after QC, 2000 HVGs, 90/10
@@ -88,6 +89,23 @@ network is the same on both sides, so the MPS gap sits outside the maths:
 mostly `torch.distributions` argument checks that stall the GPU queue every
 step, plus Lightning's per-step bookkeeping. Data loading costs the same on
 both sides.
+
+The JAX backend came later, so it isn't in that table. It got its own run on
+the PBMC data as `prepare_pbmc.R` builds it with bixverse 0.8.4, whose QC keeps
+more cells (6626, so 5963 train and 663 held out), all bixverse arms side by
+side, three seeds each, M1 Max:
+
+| arm | device | train, s | held-out ELBO |
+| --- | --- | --- | --- |
+| bixverse MLX | gpu | 33.4 | 768.3 |
+| bixverse torch | mps | 81.8 | 769.2 |
+| bixverse JAX | cpu | 107.6 | 768.3 |
+| bixverse torch | cpu | 200.4 | 768.8 |
+
+No GPU? Take JAX: it's almost twice as fast as torch on the same CPU, for the
+same ELBO. That was scvi-tools' original pitch for `JaxSCVI` back in 0.15, and
+it still holds for this network. torch on CPU is the mean of two seeds; the
+third overlapped another job on the machine and was dropped.
 
 VAE latents aren't identifiable, so two seeds of scvi-tools already disagree
 with each other. The fair comparison is ours against scvi-tools, read against
@@ -119,5 +137,10 @@ land on the same embedding. It integrates harder on these two batches.
 - `torch.compile` isn't used. On MPS it cut compute from 0.175 s to 0.136 s
   per epoch but costs about 5 s up front, and the inductor backend there is
   still experimental.
+- JAX on Apple's GPU goes through the `jax-metal` plugin, which only runs
+  pinned to jax 0.5.0. It trains, but took 182 s on the run above, slower
+  than JAX on CPU, so it isn't supported. Use MLX there.
+- The JAX training step compiles twice per fit, once for the full batch size
+  and once for the short final batch.
 - There's no torch `DataLoader` in the loop: the Rust feeder thread already
   decodes ahead of the training step.
