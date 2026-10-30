@@ -57,16 +57,15 @@ fn pair_score_sum(pair_scores: &[f32], ntop: usize, expressed: &[u16]) -> f32 {
     for (a, &gi) in expressed.iter().enumerate() {
         let i = gi as usize;
         let row = &pair_scores[i * ntop..(i + 1) * ntop];
-        let rest = &expressed[a + 1..];
+        let (quads, rem) = expressed[a + 1..].as_chunks::<4>();
         let mut acc = [0.0f32; 4];
-        let mut quads = rest.chunks_exact(4);
-        for q in &mut quads {
+        for q in quads {
             for (slot, &j) in acc.iter_mut().zip(q) {
                 *slot += row[j as usize];
             }
         }
         let mut tail = 0.0f32;
-        for &j in quads.remainder() {
+        for &j in rem {
             tail += row[j as usize];
         }
         total += (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail;

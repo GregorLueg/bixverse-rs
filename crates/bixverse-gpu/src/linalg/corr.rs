@@ -233,7 +233,7 @@ pub fn column_stats<F: Float>(
         means[feat as usize] = mean;
         if scale_sd {
             let std = F::sqrt(shared[0] / nm1);
-            let eps = F::new(1e-10);
+            let eps = F::new(1e-10_f32);
             let safe_std = if std < eps { F::new(1.0_f32) } else { std };
             inv_scales[feat as usize] = inv_sqrt_nm1 / safe_std;
         } else {

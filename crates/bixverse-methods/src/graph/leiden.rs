@@ -2053,8 +2053,12 @@ mod tests {
     }
 
     fn karate() -> SparseGraph<f64> {
-        let edges: Vec<(usize, usize, f64)> =
-            KARATE.chunks_exact(2).map(|e| (e[0], e[1], 1.0)).collect();
+        let edges: Vec<(usize, usize, f64)> = KARATE
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[a, b]| (a, b, 1.0))
+            .collect();
         build_undirected(34, &edges, false)
     }
 
@@ -2382,8 +2386,12 @@ mod tests {
 
     #[test]
     fn test_leiden_directed_errors() {
-        let edges: Vec<(usize, usize, f64)> =
-            KARATE.chunks_exact(2).map(|e| (e[0], e[1], 1.0)).collect();
+        let edges: Vec<(usize, usize, f64)> = KARATE
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|e| (e[0], e[1], 1.0))
+            .collect();
         let g = build_undirected(34, &edges, true);
         assert!(leiden_sparse_graph(&g, None).is_err());
     }

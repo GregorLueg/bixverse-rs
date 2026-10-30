@@ -170,7 +170,7 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
 
     let mut col = tx;
     while col < s_width {
-        let mut acc = A::new(0.0);
+        let mut acc = A::new(0.0_f32);
         let mut idx = seg_start;
         while idx < seg_end {
             let j = indices[idx as usize];
@@ -249,7 +249,7 @@ pub fn spmm_csc_transpose_partial<S: Float, A: Float>(
 
     let mut col = tx;
     while col < s_width {
-        let mut acc = A::new(0.0);
+        let mut acc = A::new(0.0_f32);
         let mut idx = lo;
         while idx < hi {
             let i = indices[idx as usize];
@@ -302,7 +302,7 @@ pub fn spmm_csc_transpose_reduce<A: Float>(
     let row = idx / s_width;
     let col = idx % s_width;
 
-    let mut acc = A::new(0.0);
+    let mut acc = A::new(0.0_f32);
     let mut c = 0u32;
     while c < n_chunks {
         acc += partials[(c * total + idx) as usize];
@@ -359,7 +359,7 @@ pub fn spmm_csr_plain<S: Float, A: Float>(
 
     let mut col = tx;
     while col < s_width {
-        let mut acc = A::new(0.0);
+        let mut acc = A::new(0.0_f32);
         let mut idx = seg_start;
         while idx < seg_end {
             let j = indices[idx as usize];
@@ -416,7 +416,7 @@ pub fn spmm_csc_transpose_plain<S: Float, A: Float>(
 
     let mut col = tx;
     while col < s_width {
-        let mut acc = A::new(0.0);
+        let mut acc = A::new(0.0_f32);
         let mut idx = seg_start;
         while idx < seg_end {
             let i = indices[idx as usize];
@@ -462,7 +462,7 @@ pub fn dense_column_sum<A: Float>(
 
     let tx = UNIT_POS_X;
 
-    let mut acc = A::new(0.0);
+    let mut acc = A::new(0.0_f32);
     let mut i = tx;
     while i < n_rows {
         acc += matrix[i as usize * s_width as usize + col as usize];
@@ -552,7 +552,7 @@ pub fn dense_column_weighted_sum<A: Float>(
 
     let tx = UNIT_POS_X;
 
-    let mut acc = A::new(0.0);
+    let mut acc = A::new(0.0_f32);
     let mut i = tx;
     while i < n_rows {
         acc += weights[i as usize] * matrix[i as usize * s_width as usize + col as usize];
@@ -639,7 +639,7 @@ pub fn dense_column_sq_norm<A: Float>(
 
     let tx = UNIT_POS_X;
 
-    let mut acc = A::new(0.0);
+    let mut acc = A::new(0.0_f32);
     let mut i = tx;
     while i < n_rows {
         let v = matrix[i as usize * s_width as usize + col as usize];

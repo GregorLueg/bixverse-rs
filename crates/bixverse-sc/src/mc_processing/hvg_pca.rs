@@ -614,14 +614,14 @@ pub fn get_hvg_mvb_from_sparse(
 /// The sum
 #[inline]
 fn sum_f64(x: &[f64]) -> f64 {
+    let (quads, tail) = x.as_chunks::<4>();
     let mut acc = [0.0f64; 4];
-    let mut quads = x.chunks_exact(4);
-    for q in &mut quads {
+    for q in quads {
         for (a, v) in acc.iter_mut().zip(q) {
             *a += v;
         }
     }
-    let tail: f64 = quads.remainder().iter().sum();
+    let tail: f64 = tail.iter().sum();
     (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
 }
 
@@ -637,19 +637,15 @@ fn sum_f64(x: &[f64]) -> f64 {
 /// `sum (x - mean)^2`
 #[inline]
 fn sum_sq_dev_f64(x: &[f64], mean: f64) -> f64 {
+    let (quads, tail) = x.as_chunks::<4>();
     let mut acc = [0.0f64; 4];
-    let mut quads = x.chunks_exact(4);
-    for q in &mut quads {
+    for q in quads {
         for (a, v) in acc.iter_mut().zip(q) {
             let d = v - mean;
             *a += d * d;
         }
     }
-    let tail: f64 = quads
-        .remainder()
-        .iter()
-        .map(|v| (v - mean) * (v - mean))
-        .sum();
+    let tail: f64 = tail.iter().map(|v| (v - mean) * (v - mean)).sum();
     (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
 }
 

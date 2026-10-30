@@ -222,8 +222,7 @@ where
             let test_val_f64 = test_val.to_f64().unwrap();
             let mut acc = [0.0_f64; 4];
 
-            let chunks = density_f64.chunks_exact(4);
-            let remainder = chunks.remainder();
+            let (chunks, remainder) = density_f64.as_chunks::<4>();
             for chunk in chunks {
                 for (a, &d) in acc.iter_mut().zip(chunk) {
                     *a += fast_normal_cdf(table, test_val_f64, d, bandwidth);

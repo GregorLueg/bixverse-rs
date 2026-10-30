@@ -1074,9 +1074,11 @@ mod tests {
     /// Sorted `(u, v, w)` triples, so edge lists compare as sets.
     fn edge_set(edges: &[u32], weights: &[f32]) -> Vec<(u32, u32, u32)> {
         let mut out: Vec<_> = edges
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .zip(weights)
-            .map(|(e, w)| (e[0].min(e[1]), e[0].max(e[1]), w.to_bits()))
+            .map(|(&[a, b], w)| (a.min(b), a.max(b), w.to_bits()))
             .collect();
         out.sort_unstable();
         out

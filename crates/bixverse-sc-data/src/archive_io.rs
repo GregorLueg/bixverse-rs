@@ -161,15 +161,19 @@ impl<'a> Cursor<'a> {
 /// Little-endian `u32`s from a byte slice of exact length.
 fn le_u32(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| u32::from_le_bytes(c))
 }
 
 /// Little-endian `u64`s from a byte slice of exact length.
 fn le_u64(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
     bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk by construction")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| u64::from_le_bytes(c))
 }
 
 /// Does the stored norm of a cell recompute bit for bit from its raw counts?

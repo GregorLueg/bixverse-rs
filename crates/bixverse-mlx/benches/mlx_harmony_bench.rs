@@ -96,7 +96,9 @@ fn env_usize(key: &str, fallback: usize) -> usize {
 fn read_words(path: &str) -> Vec<[u8; 4]> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2], c[3]])
         .collect()
 }

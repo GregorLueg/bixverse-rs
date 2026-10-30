@@ -271,12 +271,11 @@ fn row_dot<const SQUARED: bool>(weights: &[f32], indices: &[u32], c: &[f32]) -> 
         if SQUARED { w * w * x } else { w * x }
     };
 
-    let w_chunks = weights.chunks_exact(4);
-    let i_chunks = indices.chunks_exact(4);
-    let (w_rem, i_rem) = (w_chunks.remainder(), i_chunks.remainder());
+    let (w_chunks, w_rem) = weights.as_chunks::<4>();
+    let (i_chunks, i_rem) = indices.as_chunks::<4>();
 
     let mut acc = [0.0_f32; 4];
-    for (w, idx) in w_chunks.zip(i_chunks) {
+    for (w, idx) in w_chunks.iter().zip(i_chunks) {
         for lane in 0..4 {
             acc[lane] += term(w[lane], idx[lane]);
         }
@@ -2696,8 +2695,8 @@ mod tests {
                 }
             }
 
-            let cj_genes: Vec<usize> = clusters[cj].drain(..).collect();
-            clusters[ci].extend(cj_genes);
+            let moved = std::mem::take(&mut clusters[cj]);
+            clusters[ci].extend(moved);
             sizes[ci] = new_size;
 
             for &gene in &clusters[ci] {
