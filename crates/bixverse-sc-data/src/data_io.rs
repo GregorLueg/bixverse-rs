@@ -5282,14 +5282,10 @@ mod tests {
             DataLayerReturn::BothLayers,
         ] {
             for subset in &subsets {
-                let csc = reader
+                let want = reader
                     .read_genes_sparse::<u32>(&genes, subset.as_ref(), &layer)
-                    .expect("csc");
-                let want = match layer {
-                    DataLayerReturn::Raw => csc.transform_single_layer(false).expect("raw"),
-                    DataLayerReturn::Norm => csc.transform_single_layer(true).expect("norm"),
-                    DataLayerReturn::BothLayers => csc.transform(),
-                };
+                    .expect("csc")
+                    .transform();
                 for batch in [1, 2, CSR_GENE_BATCH] {
                     let got = genes_sparse_to_csr::<_, u32>(
                         &reader,
