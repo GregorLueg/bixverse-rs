@@ -114,9 +114,8 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0a027c4f7f7184c69ebae62918a6f7a540a51f80a07a715ba3571e3c6e1ee4"
+version = "0.12.0"
+source = "git+https://github.com/GregorLueg/ann-search-rs?branch=chore-clean-up#b78b89b682ed79b399a91e2a9930d5bbb43959ea"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
@@ -460,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-core"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -482,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "bixverse-core",
@@ -501,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-methods"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -523,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-mlx"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -542,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-r"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "bixverse-rs",
@@ -561,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -592,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -616,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "approx",
  "bincode",
@@ -647,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-gpu"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -673,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.9.5"
+version = "0.10.0"
 dependencies = [
  "approx",
  "bincode",
@@ -726,8 +725,6 @@ dependencies = [
 [[package]]
 name = "bonsai-rs"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5f50f2650a5654a65a6e94b82793264b73d568757aab7bee79163739896dae"
 dependencies = [
  "ann-search-rs",
  "cubecl",
@@ -2114,9 +2111,9 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "edge-rs"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ac5cec71fa5becf0d6321ffd85a2e78152acbb724248a317cf6901b57ce8fbd"
+checksum = "e4dcec2db665f831def2def39621d0d29d261d228f7eda4c0b40885dd76bedf3"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",

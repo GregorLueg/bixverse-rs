@@ -430,9 +430,10 @@ fn local_densities<F>(data: MatRef<F>, l: usize, verbose: usize) -> Result<Vec<F
 where
     F: BixverseFloat + AnnSearchFloat,
 {
-    let index = build_exhaustive_index(data, "cosine");
+    let index = build_exhaustive_index(data, "cosine", Verbosity::Quiet);
     // Self comes back in the results, so ask for one extra and drop it below.
-    let (indices, distances) = query_exhaustive_self(&index, l + 1, true, verbose > 1)?;
+    let (indices, distances) =
+        query_exhaustive_self(&index, l + 1, true, verbosity_from_flag(verbose > 1))?;
     let distances = distances.expect("distances requested from the exhaustive index");
 
     Ok(indices

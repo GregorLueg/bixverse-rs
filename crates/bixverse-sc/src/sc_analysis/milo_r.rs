@@ -113,12 +113,15 @@ impl KnnIndex {
                 Dist::default()
             });
 
+        let verbosity = verbosity_from_flag(verbose);
+
         match index_type {
             KnnIndexType::AnnoyIndex => Ok(KnnIndex::Annoy(AnnoyIndex::new(
                 embd,
                 knn_params.n_tree,
                 dist,
                 seed,
+                verbosity,
             )?)),
             KnnIndexType::HnswIndex => Ok(KnnIndex::Hnsw(HnswIndex::build(
                 embd,
@@ -126,7 +129,7 @@ impl KnnIndex {
                 knn_params.ef_construction,
                 &dist,
                 seed,
-                verbose,
+                verbosity,
             ))),
             KnnIndexType::NNDescentIndex => Ok(KnnIndex::NNDescent(NNDescent::new(
                 embd,
@@ -138,11 +141,11 @@ impl KnnIndex {
                 knn_params.delta,
                 knn_params.diversify_prob,
                 seed,
-                verbose,
+                verbosity,
             )?)),
-            KnnIndexType::ExhaustiveIndex => {
-                Ok(KnnIndex::Exhaustive(ExhaustiveIndex::new(embd, dist)))
-            }
+            KnnIndexType::ExhaustiveIndex => Ok(KnnIndex::Exhaustive(ExhaustiveIndex::new(
+                embd, dist, verbosity,
+            ))),
         }
     }
 

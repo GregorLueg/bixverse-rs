@@ -56,14 +56,18 @@ impl Coarsener for MlxKMeans {
         seed: usize,
         verbose: usize,
     ) -> Result<(Mat<f32>, Vec<usize>), MlxErrors> {
-        Ok(k_means_clusters_mlx(
+        let (centroids, assignments) = k_means_clusters_mlx(
             data,
             dist,
             n_centroids,
             self.params,
             seed,
-            parse_verbosity_level(verbose).detailed_verbosity(),
-        )?)
+            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+        )?;
+        Ok((
+            centroids,
+            assignments.into_iter().map(|c| c as usize).collect(),
+        ))
     }
 
     /// Exhaustive MLX kNN of the cells against the centroids.
@@ -74,8 +78,8 @@ impl Coarsener for MlxKMeans {
         m: usize,
         dist: &str,
     ) -> Result<Vec<u32>, MlxErrors> {
-        let index = build_exhaustive_index_mlx(centroids, dist)?;
-        let (idx, _) = query_exhaustive_index_mlx(data, &index, m, false, false)?;
+        let index = build_exhaustive_index_mlx(centroids, dist, Verbosity::Quiet)?;
+        let (idx, _) = query_exhaustive_index_mlx(data, &index, m, false, Verbosity::Quiet)?;
         let mut out = Vec::with_capacity(idx.len() * m);
         for row in idx {
             out.extend(row.into_iter().map(|c| c as u32));

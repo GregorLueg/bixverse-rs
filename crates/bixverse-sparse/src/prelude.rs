@@ -6,4 +6,3 @@ pub use crate::sparse::{
     thread_chunks,
 };
 pub use crate::traits::{BixverseNumeric, VecIndexCast};
-pub use crate::verbosity::{Verbosity, parse_verbosity_level};

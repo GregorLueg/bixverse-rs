@@ -247,10 +247,6 @@ impl FromRList for KnnParamsGpu {
         let beam_width = r_list_count(&params_list, "beam_width")?;
         let max_beam_iters = r_list_count(&params_list, "max_beam_iters")?;
         let n_entry_points = r_list_count(&params_list, "n_entry_points")?;
-        let extract_knn = params_list
-            .get("extract_knn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.extract_knn);
 
         Ok(Self {
             knn_method,
@@ -267,7 +263,6 @@ impl FromRList for KnnParamsGpu {
             beam_width,
             max_beam_iters,
             n_entry_points,
-            extract_knn,
         })
     }
 }

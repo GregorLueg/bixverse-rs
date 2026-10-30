@@ -1,6 +1,7 @@
 //! Contains the single cell-related kNN functions. Wrappers to generate
 //! the kNN graphs (with and without distances).
 
+use ann_search_rs::prelude::{KNN_GRAPH_EMPTY, KnnGraph, NNDescentKnnParams};
 use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::*;
@@ -36,8 +37,13 @@ pub enum KnnSearch {
     Hnsw,
     /// Annoy-based
     Annoy,
-    /// NNDescent
+    /// NNDescent, beam searched over its own index
     NNDescent,
+    /// The NNDescent kNN graph itself, built without an index and handed back
+    /// without a search. Self-kNN only: the cross-query paths fall back to
+    /// [`KnnSearch::NNDescent`]. Rows can come back shorter than `k` where the
+    /// descent never filled them.
+    NNDescentGraph,
     /// IVF
     Ivf,
     /// Exhaustive
@@ -59,6 +65,7 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
         "annoy" => Some(KnnSearch::Annoy),
         "hnsw" => Some(KnnSearch::Hnsw),
         "nndescent" => Some(KnnSearch::NNDescent),
+        "nndescent_graph" => Some(KnnSearch::NNDescentGraph),
         "exhaustive" => Some(KnnSearch::Exhaustive),
         "ivf" => Some(KnnSearch::Ivf),
         _ => None,
@@ -76,7 +83,8 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 #[derive(Clone, Debug)]
 pub struct KnnParams {
     ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`, `"ivf"`,
-    /// `"kmknn"`, `"exhaustive"` or `"nndescent"` are supported for now.
+    /// `"kmknn"`, `"exhaustive"`, `"nndescent"` or `"nndescent_graph"` are
+    /// supported for now.
     pub knn_method: String,
     /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
     pub ann_dist: String,
@@ -89,16 +97,13 @@ pub struct KnnParams {
     pub search_budget: Option<usize>,
     /// NNDescent: diversification probability after generation of the graph.
     pub diversify_prob: f32,
-    /// NNDescent: convergence criterium. If less than these percentage of
-    /// neighbours have been udpated, the algorithm counts as converged.
+    /// NNDescent and NNDescent graph: convergence criterium. If less than these
+    /// percentage of neighbours have been udpated, the algorithm counts as
+    /// converged.
     pub delta: f32,
     /// NNDescent: optional beam search budget for querying.
     pub ef_budget: Option<usize>,
-    /// NNDescent: hand back the graph the descent already built instead of
-    /// beam searching it. No search runs at all, so it is much cheaper, but it
-    /// is only valid for a self-kNN and rows can come back shorter than `k`
-    /// where the descent never filled them. Ignored by every other backend.
-    pub extract_knn: bool,
+
     /// HNSW: connections per given layer to use
     pub m: usize,
     /// HNSW: construction budget
@@ -132,7 +137,6 @@ impl KnnParams {
             diversify_prob: 0.0,
             delta: 0.001,
             ef_budget: None,
-            extract_knn: false,
             // hnsw
             m: 16,
             ef_construction: 200,
@@ -154,25 +158,6 @@ impl Default for KnnParams {
 /////////////
 // Helpers //
 /////////////
-
-/// Warn when `extract_knn` was asked for on a backend that cannot honour it.
-///
-/// Only NN-Descent leaves behind a graph that can be handed back without a
-/// search, so every other backend falls through to its query path. Staying
-/// silent would hide a parameter that did nothing.
-///
-/// ### Params
-///
-/// * `extract_knn` - Whether direct extraction was requested
-/// * `method` - The resolved kNN backend
-pub(crate) fn warn_unsupported_extract(extract_knn: bool, method: KnnSearch) {
-    if extract_knn && method != KnnSearch::NNDescent {
-        println!(
-            "[WARNING!] 'extract_knn' is only supported by NNDescent. Ignoring it for the {:?} backend.",
-            method
-        );
-    }
-}
 
 /// Helper function to create a kNN mat with self
 ///
@@ -292,6 +277,41 @@ pub fn knn_to_sparse_dist(
     )
 }
 
+/// Reshape a flat [`KnnGraph`] into one row per sample.
+///
+/// Empty slots ([`KNN_GRAPH_EMPTY`]) are dropped, so a row the descent never
+/// filled comes back shorter than `k`.
+///
+/// ### Params
+///
+/// * `graph` - The flat graph from one of the graph-only builders
+///
+/// ### Returns
+///
+/// Tuple of `(neighbour indices, distances if the graph kept them)`.
+pub fn knn_graph_to_rows(graph: KnnGraph<f32>) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
+    let k = graph.k.max(1);
+    let indices: Vec<Vec<usize>> = graph
+        .indices
+        .par_chunks(k)
+        .map(|row| {
+            row.iter()
+                .take_while(|&&id| id != KNN_GRAPH_EMPTY)
+                .map(|&id| id as usize)
+                .collect()
+        })
+        .collect();
+    let distances = graph.distances.map(|dists| {
+        dists
+            .par_chunks(k)
+            .zip(indices.par_iter())
+            .map(|(row, ids)| row[..ids.len()].to_vec())
+            .collect()
+    });
+
+    (indices, distances)
+}
+
 ////////////////////
 // Main functions //
 ////////////////////
@@ -395,16 +415,24 @@ pub fn generate_knn_hnsw(
         no_neighbours,
         verbose,
         || {
-            Ok(build_hnsw_index(
+            build_hnsw_index(
                 mat,
                 m,
                 ef_const,
                 dist_metric,
                 seed,
-                verbose,
-            ))
+                verbosity_from_flag(verbose),
+            )
         },
-        |idx| query_hnsw_self(idx, no_neighbours + 1, ef_search, false, true),
+        |idx| {
+            query_hnsw_self(
+                idx,
+                no_neighbours + 1,
+                ef_search,
+                false,
+                verbosity_from_flag(verbose),
+            )
+        },
         "HNSW",
     )?;
 
@@ -456,8 +484,24 @@ pub fn generate_knn_annoy(
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_annoy_index(mat, dist_metric, n_trees, seed),
-        |idx| query_annoy_self(idx, no_neighbours + 1, search_budget, false, verbose),
+        || {
+            build_annoy_index(
+                mat,
+                dist_metric,
+                n_trees,
+                seed,
+                verbosity_from_flag(verbose),
+            )
+        },
+        |idx| {
+            query_annoy_self(
+                idx,
+                no_neighbours + 1,
+                search_budget,
+                false,
+                verbosity_from_flag(verbose),
+            )
+        },
         "Annoy",
     )?;
 
@@ -511,8 +555,25 @@ pub fn generate_knn_ivf(
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose),
-        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose),
+        || {
+            build_ivf_index(
+                mat,
+                n_list,
+                None,
+                dist_metric,
+                seed,
+                verbosity_from_flag(verbose),
+            )
+        },
+        |idx| {
+            query_ivf_self(
+                idx,
+                no_neighbours + 1,
+                n_probe,
+                false,
+                verbosity_from_flag(verbose),
+            )
+        },
         "IVF",
     )?;
 
@@ -545,9 +606,6 @@ pub fn generate_knn_ivf(
 ///   after index generation.
 /// * `ef_budget` - Optional query search budget.
 /// * `delta` - Early stop criterium for the algorithm.
-/// * `extract_knn` - Hand back the descent graph directly rather than beam
-///   searching it. Skips the query pass entirely, at the cost of some recall
-///   and possibly short rows.
 /// * `seed` - Seed for the NN Descent algorithm
 /// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `verbose` - Controls verbosity of the algorithm
@@ -564,12 +622,11 @@ pub fn generate_knn_nndescent(
     diversify_prob: f32,
     ef_budget: Option<usize>,
     delta: f32,
-    extract_knn: bool,
     seed: usize,
     validate_index: bool,
     verbose: bool,
 ) -> Result<Vec<Vec<usize>>, ScErrors> {
-    if !extract_knn && ef_budget.is_none() && no_neighbours > 150 {
+    if ef_budget.is_none() && no_neighbours > 150 {
         println!(
             "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
             no_neighbours
@@ -590,21 +647,19 @@ pub fn generate_knn_nndescent(
                 None,
                 None,
                 seed,
-                verbose,
+                verbosity_from_flag(verbose),
             )
         },
         |idx| {
-            if extract_knn {
-                extract_nndescent_knn(idx, Some(no_neighbours + 1), true, false)
-            } else {
-                query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose)
-            }
+            query_nndescent_self(
+                idx,
+                no_neighbours + 1,
+                ef_budget,
+                false,
+                verbosity_from_flag(verbose),
+            )
         },
-        if extract_knn {
-            "NNDescent (graph extraction)"
-        } else {
-            "NNDescent"
-        },
+        "NNDescent",
     )?;
 
     if validate_index && verbose {
@@ -642,8 +697,14 @@ pub fn generate_knn_exhaustive(
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || Ok(build_exhaustive_index(mat, dist_metric)),
-        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbose),
+        || {
+            Ok(build_exhaustive_index(
+                mat,
+                dist_metric,
+                verbosity_from_flag(verbose),
+            ))
+        },
+        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbosity_from_flag(verbose)),
         "exhaustive linear search",
     )?;
 
@@ -685,12 +746,63 @@ pub fn generate_knn_kmknn(
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_kmknn_index(mat, dist_metric, n_list, None, seed, verbose),
-        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbose),
+        || {
+            build_kmknn_index(
+                mat,
+                dist_metric,
+                n_list,
+                None,
+                seed,
+                verbosity_from_flag(verbose),
+            )
+        },
+        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbosity_from_flag(verbose)),
         "KmKnn",
     )?;
 
     Ok(res)
+}
+
+/// Get the kNN graph straight from NN-Descent
+///
+/// Matrix in, graph out: no index is kept and no search runs, the graph the
+/// descent converges to is handed back as is. Seeding and descent match
+/// [`generate_knn_nndescent`], minus the beam search over the result.
+///
+/// ### Params
+///
+/// * `mat` - Matrix in which rows represent the samples and columns the
+///   respective embeddings for that sample
+/// * `dist_metric` - The distance metric to use. One of `"euclidean"` or
+///   `"cosine"`.
+/// * `no_neighbours` - Number of neighbours for the KNN graph.
+/// * `delta` - Early stop criterium for the algorithm.
+/// * `seed` - Seed for the NN Descent algorithm
+/// * `verbose` - Controls verbosity of the algorithm
+///
+/// ### Returns
+///
+/// The k-nearest neighbours, self excluded. Rows can be shorter than
+/// `no_neighbours` where the descent never filled them.
+pub fn generate_knn_nndescent_graph(
+    mat: MatRef<f32>,
+    dist_metric: &str,
+    no_neighbours: usize,
+    delta: f32,
+    seed: usize,
+    verbose: bool,
+) -> Result<Vec<Vec<usize>>, ScErrors> {
+    let params =
+        NNDescentKnnParams::new(no_neighbours, None, None, None, delta as f64, false, false);
+    let graph = build_knn_graph_nndescent(
+        mat,
+        dist_metric,
+        Some(params),
+        seed,
+        verbosity_from_flag(verbose),
+    )?;
+
+    Ok(knn_graph_to_rows(graph).0)
 }
 
 ///////////////////
@@ -728,19 +840,12 @@ pub fn generate_knn_with_dist(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
     ) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
-        // The extraction path can leave a row empty where the descent never
-        // filled it, which the query paths never do, so this cannot assume a
-        // self-edge is there to strip.
         for idx_vec in indices.iter_mut() {
-            if !idx_vec.is_empty() {
-                idx_vec.remove(0);
-            }
+            idx_vec.remove(0);
         }
         let distances = distances.map(|mut dists| {
             for dist_vec in dists.iter_mut() {
-                if !dist_vec.is_empty() {
-                    dist_vec.remove(0);
-                }
+                dist_vec.remove(0);
             }
             dists
         });
@@ -757,13 +862,19 @@ pub fn generate_knn_with_dist(
     }
 
     let knn_method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
-    warn_unsupported_extract(knn_params.extract_knn, knn_method);
+    let verbosity = verbosity_from_flag(verbose);
     let k_plus_one = knn_params.k + 1;
 
     let (indices, distances) = match knn_method {
         KnnSearch::Annoy => {
             let index = timed("Generated Annoy index", verbose, || {
-                build_annoy_index(embd, &knn_params.ann_dist, knn_params.n_tree, seed)
+                build_annoy_index(
+                    embd,
+                    &knn_params.ann_dist,
+                    knn_params.n_tree,
+                    seed,
+                    verbosity,
+                )
             })?;
             let (indices, distances) = timed("Queried Annoy index", verbose, || {
                 query_annoy_self(
@@ -771,7 +882,7 @@ pub fn generate_knn_with_dist(
                     k_plus_one,
                     knn_params.search_budget,
                     return_dist,
-                    verbose,
+                    verbosity,
                 )
             })?;
             if validate_index && verbose {
@@ -791,9 +902,9 @@ pub fn generate_knn_with_dist(
                     knn_params.ef_construction,
                     &knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity,
                 )
-            });
+            })?;
 
             if knn_params.ef_search / k_plus_one <= 2 {
                 println!(
@@ -808,7 +919,7 @@ pub fn generate_knn_with_dist(
                     k_plus_one,
                     knn_params.ef_search,
                     return_dist,
-                    verbose,
+                    verbosity,
                 )
             })?;
             if validate_index && verbose {
@@ -832,26 +943,20 @@ pub fn generate_knn_with_dist(
                     None,
                     None,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
 
-            if !knn_params.extract_knn && knn_params.ef_budget.is_none() && k_plus_one > 150 {
+            if knn_params.ef_budget.is_none() && k_plus_one > 150 {
                 println!(
                     "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
                     k_plus_one
                 )
             }
 
-            let (indices, distances) = if knn_params.extract_knn {
-                timed("Extracted NNDescent graph", verbose, || {
-                    extract_nndescent_knn(&index, Some(k_plus_one), true, true)
-                })?
-            } else {
-                timed("Queried NNDescent index", verbose, || {
-                    query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbose)
-                })?
-            };
+            let (indices, distances) = timed("Queried NNDescent index", verbose, || {
+                query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbosity)
+            })?;
             if validate_index && verbose {
                 let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
@@ -861,12 +966,29 @@ pub fn generate_knn_with_dist(
             }
             (indices, distances)
         }
+        KnnSearch::NNDescentGraph => {
+            // The self-edge is requested so these rows go through the same
+            // `remove_self` as every query path.
+            let params = NNDescentKnnParams::new(
+                knn_params.k,
+                None,
+                None,
+                None,
+                knn_params.delta as f64,
+                true,
+                true,
+            );
+            let graph = timed("Generated NNDescent graph", verbose, || {
+                build_knn_graph_nndescent(embd, &knn_params.ann_dist, Some(params), seed, verbosity)
+            })?;
+            knn_graph_to_rows(graph)
+        }
         KnnSearch::Exhaustive => {
             let index = timed("Generated Exhaustive index", verbose, || {
-                build_exhaustive_index(embd, &knn_params.ann_dist)
+                build_exhaustive_index(embd, &knn_params.ann_dist, verbosity)
             });
             timed("Queried Exhaustive index", verbose, || {
-                query_exhaustive_self(&index, k_plus_one, true, verbose)
+                query_exhaustive_self(&index, k_plus_one, true, verbosity)
             })?
         }
         KnnSearch::KmKnn => {
@@ -877,11 +999,11 @@ pub fn generate_knn_with_dist(
                     knn_params.n_list,
                     None,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
             timed("Queried KmKnn index", verbose, || {
-                query_kmknn_self(&index, k_plus_one, true, verbose)
+                query_kmknn_self(&index, k_plus_one, true, verbosity)
             })?
         }
         KnnSearch::Ivf => {
@@ -892,11 +1014,11 @@ pub fn generate_knn_with_dist(
                     None,
                     &knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
             let (indices, distances) = timed("Queried IVF index", verbose, || {
-                query_ivf_self(&index, k_plus_one, knn_params.n_probe, true, verbose)
+                query_ivf_self(&index, k_plus_one, knn_params.n_probe, true, verbosity)
             })?;
             if validate_index && verbose {
                 let recall = index.validate_index(k_plus_one, seed, None)?;
@@ -1102,12 +1224,12 @@ mod tests {
         })
     }
 
-    /// `extract_knn` reshapes the graph the descent already built rather than
-    /// beam searching it, so it trades a little recall for skipping the query
-    /// pass. It still has to agree with the beam search on most neighbours,
-    /// never return self, and never hand back more than `k`.
+    /// `"nndescent_graph"` hands back the graph the descent converged to rather
+    /// than beam searching an index, so it trades a little recall for skipping
+    /// the query pass. It still has to agree with the beam search on most
+    /// neighbours, never return self, and never hand back more than `k`.
     #[test]
-    fn test_nndescent_extract_agrees_with_the_query_path() {
+    fn test_nndescent_graph_agrees_with_the_query_path() {
         let (n, k) = (800usize, 10usize);
         let data = clustered_data(n, 16, 8);
 
@@ -1118,7 +1240,7 @@ mod tests {
             ..Default::default()
         };
         let extract = KnnParams {
-            extract_knn: true,
+            knn_method: "nndescent_graph".to_string(),
             ..base.clone()
         };
 
@@ -1126,7 +1248,7 @@ mod tests {
             .expect("the beam search path must succeed");
         let (extracted, dists) =
             generate_knn_with_dist(data.as_ref(), &extract, true, false, 42, false)
-                .expect("the extraction path must succeed");
+                .expect("the graph path must succeed");
 
         assert_eq!(extracted.len(), n);
         let dists = dists.expect("distances were requested");
@@ -1144,9 +1266,32 @@ mod tests {
         let recall = overlap as f32 / (n * k) as f32;
         assert!(
             recall > 0.9,
-            "extraction recall was {:.4} against the beam search",
+            "graph recall was {:.4} against the beam search",
             recall
         );
+    }
+
+    /// The indices-only graph path (no self-edge requested upstream) and the
+    /// with-distances path (self-edge requested, then stripped) must return the
+    /// same rows for the same seed.
+    #[test]
+    fn test_nndescent_graph_paths_agree() {
+        let (n, k) = (500usize, 8usize);
+        let data = clustered_data(n, 12, 5);
+        let params = KnnParams {
+            knn_method: "nndescent_graph".to_string(),
+            ann_dist: "euclidean".to_string(),
+            k,
+            ..Default::default()
+        };
+
+        let direct =
+            generate_knn_nndescent_graph(data.as_ref(), "euclidean", k, params.delta, 7, false)
+                .expect("the indices-only graph path must succeed");
+        let (with_dist, _) = generate_knn_with_dist(data.as_ref(), &params, true, false, 7, false)
+            .expect("the with-distances graph path must succeed");
+
+        assert_eq!(direct, with_dist);
     }
 
     /// `"euclidean"` and `"l2"` come back squared from `ann-search-rs` and get

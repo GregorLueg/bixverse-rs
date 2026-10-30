@@ -498,7 +498,7 @@ where
         params.kmeans_params,
         seed,
         device.clone(),
-        verbosity.detailed_verbosity(),
+        verbosity_from_flag(verbosity.detailed_verbosity()),
     )?;
     let mut y_host = vec![0.0f32; k * d];
     normalise_rows_into(&to_row_major(y_mat.as_ref()), d, &mut y_host);

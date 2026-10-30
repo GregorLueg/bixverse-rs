@@ -1,15 +1,16 @@
 //! GPU-accelerated approximate nearest neighbour search for single cell data,
 //! specifically with Scrublet in mind. The callers here run at high `k`, which
-//! is why exhaustive stays the default: CAGRA is at its best on low `k`, and
-//! its extraction path is capped by the build-time graph degree.
+//! is why exhaustive stays the default: CAGRA and the NN-Descent graph are at
+//! their best on low `k`.
 
-use ann_search_rs::prelude::CagraGpuSearchParams;
+use ann_search_rs::prelude::{CagraGpuSearchParams, NNDescentGpuKnnParams};
 use ann_search_rs::{
-    build_exhaustive_index_gpu, build_ivf_index_gpu, build_nndescent_index_gpu,
-    extract_nndescent_knn_gpu, query_exhaustive_index_gpu, query_exhaustive_index_gpu_self,
+    build_exhaustive_index_gpu, build_ivf_index_gpu, build_knn_graph_nndescent_gpu,
+    build_nndescent_index_gpu, query_exhaustive_index_gpu, query_exhaustive_index_gpu_self,
     query_ivf_index_gpu, query_ivf_index_gpu_self, query_nndescent_index_gpu,
     query_nndescent_index_gpu_self,
 };
+use bixverse_sc::sc_processing::knn::knn_graph_to_rows;
 use cubecl::Device;
 use faer::MatRef;
 use rayon::prelude::*;
@@ -22,9 +23,8 @@ use crate::prelude::*;
 
 /// Default CAGRA graph degree, matching `ann-search-rs`.
 ///
-/// Mirrored rather than imported because the crate does not export it. Only a
-/// floor: widening the degree for extraction must never narrow it below what
-/// the query path would have built.
+/// Mirrored rather than imported because the crate does not export it. Sizes
+/// the CAGRA beam when the caller leaves `graph_k` unset.
 const NNDESCENT_GPU_DEFAULT_DEGREE: usize = 30;
 
 ///////////
@@ -49,19 +49,25 @@ pub enum KnnSearchGpu {
     /// Inverted file index. Approximate, cost flat in `k`, and the faster of
     /// the two from roughly n = 50k upwards.
     IvfGpu,
-    /// GPU NN-Descent with a CAGRA navigational graph. Either beam searched or,
-    /// with `extract_knn`, handed back as the descent left it. Cheapest of the
-    /// three to query, but recall falls away as `k` climbs.
+    /// GPU NN-Descent with a CAGRA navigational graph, beam searched. Cheap to
+    /// query, but recall falls away as `k` climbs.
     CagraGpu,
+    /// The GPU NN-Descent kNN graph itself, built through the clustered build
+    /// without an index and handed back without a search, so datasets past the
+    /// per-binding limit work too. Self-kNN only: the cross-query paths fall
+    /// back to [`KnnSearchGpu::CagraGpu`]. Rows can come back shorter than `k`
+    /// where the descent never filled them.
+    NNDescentGraphGpu,
 }
 
 /// Parse a GPU kNN method from a string.
 ///
 /// ### Params
 ///
-/// * `s` - Method name, case-insensitive. `"exhaustive"`, `"ivf"` or
-///   `"cagra"`, each also accepted with a `_gpu` suffix. `"nndescent"` and
-///   `"nndescent_gpu"` map to CAGRA, whose graph is built by NN-descent.
+/// * `s` - Method name, case-insensitive. `"exhaustive"`, `"ivf"`, `"cagra"`
+///   or `"nndescent_graph"`, each also accepted with a `_gpu` suffix.
+///   `"nndescent"` and `"nndescent_gpu"` map to CAGRA, whose graph is built by
+///   NN-descent.
 ///
 /// ### Returns
 ///
@@ -71,6 +77,7 @@ pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
         "exhaustive" | "exhaustive_gpu" => Some(KnnSearchGpu::ExhaustiveGpu),
         "ivf" | "ivf_gpu" => Some(KnnSearchGpu::IvfGpu),
         "cagra" | "cagra_gpu" | "nndescent" | "nndescent_gpu" => Some(KnnSearchGpu::CagraGpu),
+        "nndescent_graph" | "nndescent_graph_gpu" => Some(KnnSearchGpu::NNDescentGraphGpu),
         _ => None,
     }
 }
@@ -86,7 +93,8 @@ pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
 /// `None` fall back to the heuristics documented on each field.
 #[derive(Clone, Debug)]
 pub struct KnnParamsGpu {
-    /// Which GPU method to use. One of `"exhaustive"`, `"ivf"` or `"cagra"`.
+    /// Which GPU method to use. One of `"exhaustive"`, `"ivf"`, `"cagra"` or
+    /// `"nndescent_graph"`.
     pub knn_method: String,
     /// Distance metric. One of `"euclidean"` or `"cosine"`. Manhattan is not
     /// supported by the GPU kernels.
@@ -98,20 +106,21 @@ pub struct KnnParamsGpu {
     /// IVF: number of lists to probe. Defaults to `sqrt(n_list)` upstream.
     pub n_probe: Option<usize>,
     /// CAGRA: final node degree of the graph after pruning. Defaults to 30
-    /// upstream. Widened to cover the request when `extract_knn` is set, since
-    /// extraction cannot return more neighbours than the graph holds.
+    /// upstream.
     pub graph_k: Option<usize>,
-    /// CAGRA: build node degree, the initial degree prior to pruning. Defaults
-    /// to `max(k, floor(1.5 * k))` upstream.
+    /// CAGRA and NNDescent graph: build node degree, the initial degree prior
+    /// to pruning. Defaults to `max(k, floor(1.5 * k))` upstream.
     pub k_build: Option<usize>,
-    /// CAGRA: number of trees for the forest that seeds the descent.
+    /// CAGRA and NNDescent graph: number of trees for the forest that seeds
+    /// the descent.
     pub n_tree: Option<usize>,
-    /// CAGRA: termination criterium for the NNDescent iterations.
+    /// CAGRA and NNDescent graph: termination criterium for the NNDescent
+    /// iterations.
     pub delta: f32,
-    /// CAGRA: sampling rate for the NNDescent iterations.
+    /// CAGRA and NNDescent graph: sampling rate for the NNDescent iterations.
     pub rho: Option<f32>,
-    /// CAGRA: 2-hop refinement sweeps after the descent loop. Buys graph
-    /// quality at a linear cost. Defaults to `0` upstream.
+    /// CAGRA and NNDescent graph: 2-hop refinement sweeps after the descent
+    /// loop. Buys graph quality at a linear cost. Defaults to `0` upstream.
     pub refine_knn: Option<usize>,
     /// CAGRA: beam width during querying. Auto-determined if `None`.
     pub beam_width: Option<usize>,
@@ -121,13 +130,6 @@ pub struct KnnParamsGpu {
     /// CAGRA: number of entry points during querying. Auto-determined if
     /// `None`.
     pub n_entry_points: Option<usize>,
-    /// CAGRA: hand back the graph the descent already built instead of running
-    /// a beam search over it. No search runs at all.
-    ///
-    /// `graph_k` is widened to cover the request, and `beam_width`,
-    /// `max_beam_iters` and `n_entry_points` are ignored. No effect on the
-    /// other GPU backends.
-    pub extract_knn: bool,
 }
 
 impl KnnParamsGpu {
@@ -152,7 +154,6 @@ impl KnnParamsGpu {
             beam_width: None,
             max_beam_iters: None,
             n_entry_points: None,
-            extract_knn: false,
         }
     }
 }
@@ -259,8 +260,8 @@ pub fn dispatch_knn_gpu(
     seed: usize,
     verbose: usize,
 ) -> Result<Vec<Vec<usize>>, ScGpuErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-    let detailed = verbosity.detailed_verbosity();
+    // The index builds and queries only print at detailed verbosity here.
+    let ann_verbosity = verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity());
 
     let method = parse_knn_method_gpu(&params.knn_method).unwrap_or_else(|| {
         println!(
@@ -276,8 +277,9 @@ pub fn dispatch_knn_gpu(
 
     let (raw_indices, _) = match method {
         KnnSearchGpu::ExhaustiveGpu => {
-            let index = build_exhaustive_index_gpu::<f32>(embd, &params.ann_dist, device)?;
-            query_exhaustive_index_gpu_self(&index, k_query, false, detailed)?
+            let index =
+                build_exhaustive_index_gpu::<f32>(embd, &params.ann_dist, device, ann_verbosity)?;
+            query_exhaustive_index_gpu_self(&index, k_query, false, ann_verbosity)?
         }
         KnnSearchGpu::IvfGpu => {
             let index = build_ivf_index_gpu::<f32>(
@@ -286,30 +288,16 @@ pub fn dispatch_knn_gpu(
                 None,
                 &params.ann_dist,
                 seed,
-                detailed,
+                ann_verbosity,
                 device,
             )?;
-            query_ivf_index_gpu_self(&index, k_query, params.n_probe, None, false, detailed)?
+            query_ivf_index_gpu_self(&index, k_query, params.n_probe, None, false, ann_verbosity)?
         }
         KnnSearchGpu::CagraGpu => {
-            // Extraction can only hand back what the graph holds, so the degree
-            // has to cover the request. Anything the caller pinned wins; a
-            // `None` is widened rather than left at the crate's 30.
-            let graph_k = if params.extract_knn {
-                Some(
-                    params
-                        .graph_k
-                        .unwrap_or(NNDESCENT_GPU_DEFAULT_DEGREE)
-                        .max(k_query),
-                )
-            } else {
-                params.graph_k
-            };
-
             let mut index = build_nndescent_index_gpu::<f32>(
                 embd,
                 &params.ann_dist,
-                graph_k,
+                params.graph_k,
                 params.k_build,
                 None,
                 params.n_tree,
@@ -317,18 +305,44 @@ pub fn dispatch_knn_gpu(
                 params.rho,
                 params.refine_knn,
                 seed,
-                detailed,
-                !params.extract_knn,
+                ann_verbosity,
+                true,
                 device,
             )?;
+            let query_params = cagra_query_params(params, k_query, params.graph_k);
 
-            if params.extract_knn {
-                extract_nndescent_knn_gpu(&index, Some(k_query), true, false)?
-            } else {
-                let query_params = cagra_query_params(params, k_query, graph_k);
-
-                query_nndescent_index_gpu_self(&mut index, k_query, Some(query_params), false)?
-            }
+            query_nndescent_index_gpu_self(
+                &mut index,
+                k_query,
+                Some(query_params),
+                false,
+                ann_verbosity,
+            )?
+        }
+        KnnSearchGpu::NNDescentGraphGpu => {
+            // No self-edge requested, so `drop_self_neighbours` below only
+            // truncates.
+            let graph_params = NNDescentGpuKnnParams::new(
+                k,
+                params.k_build,
+                None,
+                params.n_tree,
+                Some(params.delta),
+                params.rho,
+                params.refine_knn,
+                false,
+                false,
+            );
+            let graph = build_knn_graph_nndescent_gpu::<f32>(
+                embd,
+                &params.ann_dist,
+                Some(graph_params),
+                None,
+                seed,
+                ann_verbosity,
+                device,
+            )?;
+            knn_graph_to_rows(graph)
         }
     };
 
@@ -347,9 +361,9 @@ pub fn dispatch_knn_gpu(
 /// * `reference` - The data the index is built on (cells x features).
 /// * `query` - The query points (cells x features).
 /// * `k` - Neighbours to return per query point.
-/// * `params` - The [`KnnParamsGpu`] for this run. `k` and `extract_knn` are
-///   ignored, since extraction hands back the index's own graph rather than
-///   the results of a query.
+/// * `params` - The [`KnnParamsGpu`] for this run. `k` is ignored, and the
+///   NNDescent graph method runs as CAGRA, since a graph-only build cannot
+///   answer a cross-query.
 /// * `device` - CubeCL runtime device.
 /// * `seed` - Random seed for the index build.
 /// * `return_dist` - Return the distances as well. These come back in the
@@ -382,11 +396,13 @@ pub(crate) fn dispatch_knn_query_gpu(
         );
         KnnSearchGpu::default()
     });
+    let verbosity = verbosity_from_flag(verbose);
 
     let res = match method {
         KnnSearchGpu::ExhaustiveGpu => {
-            let index = build_exhaustive_index_gpu::<f32>(reference, &params.ann_dist, device)?;
-            query_exhaustive_index_gpu(query, &index, k, return_dist, verbose)?
+            let index =
+                build_exhaustive_index_gpu::<f32>(reference, &params.ann_dist, device, verbosity)?;
+            query_exhaustive_index_gpu(query, &index, k, return_dist, verbosity)?
         }
         KnnSearchGpu::IvfGpu => {
             let index = build_ivf_index_gpu::<f32>(
@@ -395,12 +411,20 @@ pub(crate) fn dispatch_knn_query_gpu(
                 None,
                 &params.ann_dist,
                 seed,
-                verbose,
+                verbosity,
                 device,
             )?;
-            query_ivf_index_gpu(query, &index, k, params.n_probe, None, return_dist, verbose)?
+            query_ivf_index_gpu(
+                query,
+                &index,
+                k,
+                params.n_probe,
+                None,
+                return_dist,
+                verbosity,
+            )?
         }
-        KnnSearchGpu::CagraGpu => {
+        KnnSearchGpu::CagraGpu | KnnSearchGpu::NNDescentGraphGpu => {
             // `retain_gpu` has to be set: the cross-query path needs the
             // vectors to stay device-resident after the build.
             let mut index = build_nndescent_index_gpu::<f32>(
@@ -414,7 +438,7 @@ pub(crate) fn dispatch_knn_query_gpu(
                 params.rho,
                 params.refine_knn,
                 seed,
-                verbose,
+                verbosity,
                 true,
                 device,
             )?;
@@ -427,7 +451,7 @@ pub(crate) fn dispatch_knn_query_gpu(
                 k,
                 Some(query_params),
                 return_dist,
-                verbose,
+                verbosity,
             )?
         }
     };
@@ -494,8 +518,8 @@ mod tests {
     }
 
     fn cpu_reference(data: &Mat<f32>, k: usize) -> Vec<Vec<usize>> {
-        let index = build_exhaustive_index(data.as_ref(), "euclidean");
-        let (idx, _) = query_exhaustive_self(&index, k + 1, false, false).unwrap();
+        let index = build_exhaustive_index(data.as_ref(), "euclidean", Verbosity::Quiet);
+        let (idx, _) = query_exhaustive_self(&index, k + 1, false, Verbosity::Quiet).unwrap();
         idx.into_iter()
             .enumerate()
             .map(|(i, row)| row.into_iter().filter(|&j| j != i).take(k).collect())
@@ -524,46 +548,44 @@ mod tests {
             parse_knn_method_gpu("nndescent"),
             Some(KnnSearchGpu::CagraGpu)
         );
+        assert_eq!(
+            parse_knn_method_gpu("NNDescent_Graph_GPU"),
+            Some(KnnSearchGpu::NNDescentGraphGpu)
+        );
         assert_eq!(parse_knn_method_gpu("kmknn"), None);
         assert_eq!(parse_knn_method_gpu("annoy"), None);
     }
 
-    /// CAGRA at the low `k` it is actually good at, both exits. The beam search
-    /// fills every row; the extraction path is capped by the graph degree and
-    /// may not, which is exactly why it gets a separate shape assertion.
+    /// CAGRA and the graph-only NN-Descent build at the low `k` they are
+    /// actually good at. The beam search fills every row; the graph path may
+    /// not, which is why the shape assertion only bounds the row length.
     #[test]
-    fn test_cagra_gpu_both_exits() {
+    fn test_cagra_and_nndescent_graph_gpu() {
         let Some(device) = try_device() else { return };
 
         let (n, dim, k) = (2000usize, 24usize, 15usize);
         let data = clustered_data(n, dim, 10);
         let want = cpu_reference(&data, k);
 
-        for extract in [false, true] {
+        for method in ["cagra", "nndescent_graph"] {
             let params = KnnParamsGpu {
-                knn_method: "cagra".to_string(),
+                knn_method: method.to_string(),
                 k,
-                extract_knn: extract,
                 refine_knn: Some(1),
                 ..Default::default()
             };
             let got =
                 dispatch_knn_gpu(data.as_ref(), k, &params, device.clone().into(), 42, 0).unwrap();
 
-            assert_eq!(got.len(), n, "extract = {}: wrong row count", extract);
+            assert_eq!(got.len(), n, "{}: wrong row count", method);
             for (i, row) in got.iter().enumerate() {
                 assert!(row.len() <= k, "row {} returned {} > {}", i, row.len(), k);
                 assert!(!row.contains(&i), "row {} contains itself", i);
             }
 
             let r = recall(&got, &want);
-            println!("CAGRA GPU (extract = {}): recall {:.4}", extract, r);
-            assert!(
-                r > 0.85,
-                "extract = {}: recall {:.4} below the 0.85 floor",
-                extract,
-                r
-            );
+            println!("{} GPU: recall {:.4}", method, r);
+            assert!(r > 0.85, "{}: recall {:.4} below the 0.85 floor", method, r);
         }
     }
 

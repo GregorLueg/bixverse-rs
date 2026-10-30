@@ -765,7 +765,6 @@ pub fn dispatch_knn(
     verbose: bool,
 ) -> Result<Vec<Vec<usize>>, ScErrors> {
     let method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
-    warn_unsupported_extract(knn_params.extract_knn, method);
 
     match method {
         KnnSearch::Hnsw => generate_knn_hnsw(
@@ -796,9 +795,16 @@ pub fn dispatch_knn(
             knn_params.diversify_prob,
             knn_params.ef_budget,
             knn_params.delta,
-            knn_params.extract_knn,
             seed,
             false,
+            verbose,
+        ),
+        KnnSearch::NNDescentGraph => generate_knn_nndescent_graph(
+            embd,
+            &knn_params.ann_dist,
+            k,
+            knn_params.delta,
+            seed,
             verbose,
         ),
         KnnSearch::Exhaustive => generate_knn_exhaustive(embd, &knn_params.ann_dist, k, verbose),
@@ -807,7 +813,7 @@ pub fn dispatch_knn(
             &knn_params.ann_dist,
             k,
             knn_params.n_list,
-            knn_params.n_list,
+            knn_params.n_probe,
             seed,
             false,
             verbose,

@@ -896,15 +896,22 @@ pub fn generate_knn_cross_with_dist(
     }
 
     let knn_method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
+    let verbosity = verbosity_from_flag(verbose);
     let k = knn_params.k;
 
     let (indices, distances) = match knn_method {
         KnnSearch::Annoy => {
             let index = timed("Generated Annoy index", verbose, || {
-                build_annoy_index(reference, &knn_params.ann_dist, knn_params.n_tree, seed)
+                build_annoy_index(
+                    reference,
+                    &knn_params.ann_dist,
+                    knn_params.n_tree,
+                    seed,
+                    verbosity,
+                )
             })?;
             timed("Queried Annoy index", verbose, || {
-                query_annoy_index(query, &index, k, knn_params.search_budget, true, verbose)
+                query_annoy_index(query, &index, k, knn_params.search_budget, true, verbosity)
             })?
         }
         KnnSearch::Hnsw => {
@@ -915,14 +922,16 @@ pub fn generate_knn_cross_with_dist(
                     knn_params.ef_construction,
                     &knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity,
                 )
-            });
+            })?;
             timed("Queried HNSW index", verbose, || {
-                query_hnsw_index(query, &index, k, knn_params.ef_search, true, verbose)
+                query_hnsw_index(query, &index, k, knn_params.ef_search, true, verbosity)
             })?
         }
-        KnnSearch::NNDescent => {
+        // A graph-only build cannot answer a cross-query, so the graph method
+        // queries an index too.
+        KnnSearch::NNDescent | KnnSearch::NNDescentGraph => {
             let index = timed("Generated NNDescent index", verbose, || {
                 build_nndescent_index(
                     reference,
@@ -934,19 +943,19 @@ pub fn generate_knn_cross_with_dist(
                     None,
                     None,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
             timed("Queried NNDescent index", verbose, || {
-                query_nndescent_index(query, &index, k, knn_params.ef_budget, true, verbose)
+                query_nndescent_index(query, &index, k, knn_params.ef_budget, true, verbosity)
             })?
         }
         KnnSearch::Exhaustive => {
             let index = timed("Generated Exhaustive index", verbose, || {
-                build_exhaustive_index(reference, &knn_params.ann_dist)
+                build_exhaustive_index(reference, &knn_params.ann_dist, verbosity)
             });
             timed("Queried Exhaustive index", verbose, || {
-                query_exhaustive_index(query, &index, k, true, verbose)
+                query_exhaustive_index(query, &index, k, true, verbosity)
             })?
         }
         KnnSearch::KmKnn => {
@@ -957,11 +966,11 @@ pub fn generate_knn_cross_with_dist(
                     knn_params.n_list,
                     None,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
             timed("Queried KmKnn index", verbose, || {
-                query_kmknn_index(query, &index, k, true, verbose)
+                query_kmknn_index(query, &index, k, true, verbosity)
             })?
         }
         KnnSearch::Ivf => {
@@ -972,11 +981,11 @@ pub fn generate_knn_cross_with_dist(
                     None,
                     &knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity,
                 )
             })?;
             timed("Queried IVF index", verbose, || {
-                query_ivf_index(query, &index, k, knn_params.n_probe, true, verbose)
+                query_ivf_index(query, &index, k, knn_params.n_probe, true, verbosity)
             })?
         }
     };

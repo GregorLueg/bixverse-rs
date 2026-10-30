@@ -324,7 +324,6 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
     gene_batch_size: usize,
     verbose: usize,
 ) -> Result<(), ScDataErrors> {
-    let verbosity = parse_verbosity_level(verbose);
     let start = Instant::now();
 
     let reader = ParallelSparseReader::new(in_path.as_ref().to_str().ok_or(
@@ -353,7 +352,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
 
     let n_phases = no_cells.div_ceil(cells_per_phase);
 
-    if verbosity.normal_verbosity() {
+    if verbose >= 1 {
         println!(
             "Transpose: {} genes by {} cells, {} phase(s)",
             no_genes.separate_with_underscores(),
@@ -405,7 +404,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
             })?;
         }
 
-        if verbosity.detailed_verbosity() {
+        if verbose >= 2 {
             println!(
                 "Transpose: phase {}/{} done in {:.2?}",
                 phase + 1,
@@ -417,7 +416,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
 
     writer.finalise()?;
 
-    if verbosity.normal_verbosity() {
+    if verbose >= 1 {
         println!(
             "Transpose: wrote the cell-major store in {:.2?}",
             start.elapsed()

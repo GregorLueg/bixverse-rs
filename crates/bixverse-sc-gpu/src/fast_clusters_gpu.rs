@@ -58,15 +58,19 @@ impl Coarsener for GpuKMeans {
         seed: usize,
         verbose: usize,
     ) -> Result<(Mat<f32>, Vec<usize>), ScGpuErrors> {
-        Ok(k_means_clusters_gpu::<f32>(
+        let (centroids, assignments) = k_means_clusters_gpu::<f32>(
             data,
             dist,
             n_centroids,
             self.params,
             seed,
             self.device.clone(),
-            parse_verbosity_level(verbose).detailed_verbosity(),
-        )?)
+            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+        )?;
+        Ok((
+            centroids,
+            assignments.into_iter().map(|c| c as usize).collect(),
+        ))
     }
 
     /// Exhaustive GPU kNN of the cells against the centroids.
@@ -77,8 +81,9 @@ impl Coarsener for GpuKMeans {
         m: usize,
         dist: &str,
     ) -> Result<Vec<u32>, ScGpuErrors> {
-        let index = build_exhaustive_index_gpu(centroids, dist, self.device.clone())?;
-        let (idx, _) = query_exhaustive_index_gpu(data, &index, m, false, false)?;
+        let index =
+            build_exhaustive_index_gpu(centroids, dist, self.device.clone(), Verbosity::Quiet)?;
+        let (idx, _) = query_exhaustive_index_gpu(data, &index, m, false, Verbosity::Quiet)?;
         let mut out = Vec::with_capacity(idx.len() * m);
         for row in idx {
             out.extend(row.into_iter().map(|c| c as u32));
