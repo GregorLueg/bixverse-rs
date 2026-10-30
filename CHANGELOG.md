@@ -24,11 +24,17 @@
   fastMNN, `batch_knn_search()`) run it as NN-Descent / CAGRA.
   `generate_knn_nndescent_graph()` and `knn_graph_to_rows()` are the CPU
   entry points.
+- `SingleCellReading::read_genes_sparse_csr()`: genes from a gene-major store
+  straight into CSR, without holding the CSC next to its transpose. Default
+  method, so every reader has it.
 
 ### Fixes
 
 - IVF in `dispatch_knn()` and `batch_knn_search()` passed `n_list` as
   `n_probe`, so it probed every list. It uses `n_probe` now.
+- `CompressedSparseData2::transform()` panicked on a matrix without its first
+  layer, i.e. anything read with `DataLayerReturn::Norm`. The empty layer now
+  stays empty.
 
 ### Dependencies
 
@@ -46,6 +52,23 @@
   one per thread, drops the input CSC after the transpose and writes U
   directly: 5.1 GB -> 1.6 GB and 11.6 s -> 6.9 s on 100k cells x 5000
   features. Results differ from 0.9.4 at round-off.
+- The sparse PCA (`pca_on_sc_sparse()` and the `_stats` twin) reads the HVGs
+  straight into CSR through `read_genes_sparse_csr()` when there are at least
+  as many cells as genes, so none of its solvers transposes any more. Building
+  the input on 4.7M cells x 2000 HVGs: peak 10.7 GB -> 5.5 GB at the same
+  speed (1.85 s -> 1.82 s). Column statistics may differ from 0.9.4 at
+  round-off.
+- `read_genes_sparse()` and `read_cells_sparse()` free each per-thread
+  fragment as it is copied into the output instead of holding them all to the
+  end: the read alone peaks at 6.6 GB instead of 10.5 GB on the same input.
+  This also lowers the host peak of the GPU and MLX sparse PCA.
+- The MLX sparse SVDs (`sparse_svd_lanczos_mlx()`,
+  `randomised_sparse_svd_mlx()`) consume the value layer instead of copying it:
+  whole MLX sparse PCA on the same input, Lanczos 15.2 GB -> 12.9 GB and
+  randomised 18.4 GB -> 16.0 GB.
+- All of the above are macOS figures. The streaming frees only lower the peak
+  if the allocator hands the freed blocks back; on Linux, glibc keeps blocks
+  under its mmap threshold (up to 32 MiB) on the heap.
 
 ## 0.9.4
 
