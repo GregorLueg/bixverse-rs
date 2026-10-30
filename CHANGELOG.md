@@ -44,14 +44,14 @@
 ### Performance
 
 - `sparse_svd_lanczos()` holds one f32 copy of the matrix instead of a CSR, a
-  CSC and two f64 casts: peak memory halves (3.4 GB -> 1.75 GB on 100M
-  non-zeros). Results differ from 0.9.4 at round-off.
+  CSC and two f64 casts: lower peak memory. Results differ from 0.9.4 at
+  round-off.
 - `compute_largest_eigenpairs_lanczos()` no longer clones its input or holds an
-  f64 copy: 24 -> 8 bytes per non-zero.
+  f64 copy: lower peak memory.
 - `sparse_covariance_svd()` builds one shared `m x m` accumulator instead of
   one per thread, drops the input CSC after the transpose and writes U
-  directly: 5.1 GB -> 1.6 GB and 11.6 s -> 6.9 s on 100k cells x 5000
-  features. Results differ from 0.9.4 at round-off.
+  directly: lower peak memory and faster. Results differ from 0.9.4 at
+  round-off.
 - The sparse PCA (`pca_on_sc_sparse()` and the `_stats` twin) reads the HVGs
   straight into CSR through `read_genes_sparse_csr()` when there are at least
   as many cells as genes, so none of its solvers transposes any more. Lower
