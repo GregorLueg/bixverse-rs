@@ -91,17 +91,17 @@ pub type SingleCellPcaResStats =
 /// Which solver the single cell PCA uses
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PcaSolver {
+    #[default]
+    /// Lanczos on the sparse path, the covariance solver on the dense one:
+    /// the fastest exact option on each.
+    Auto,
     /// Exact PCA via the feature x feature cross-product and a symmetric
     /// eigendecomposition. Cheap for a few thousand features, e.g. HVGs.
-    #[default]
     Covariance,
     /// Randomised SVD. Approximate, the trailing components the least so.
     Randomised,
     /// Full thin SVD on the dense path, Lanczos on the sparse one.
     Exact,
-    /// Lanczos on the sparse path, the covariance solver on the dense one:
-    /// the fastest exact option on each.
-    Auto,
 }
 
 /// Parse the PCA solver
@@ -115,10 +115,10 @@ pub enum PcaSolver {
 /// Option of the [PcaSolver]
 pub fn parse_pca_solver(s: &str) -> Option<PcaSolver> {
     match s.to_lowercase().as_str() {
+        "auto" => Some(PcaSolver::Auto),
         "covariance" => Some(PcaSolver::Covariance),
         "randomised" => Some(PcaSolver::Randomised),
         "exact" => Some(PcaSolver::Exact),
-        "auto" => Some(PcaSolver::Auto),
         _ => None,
     }
 }
