@@ -5,7 +5,7 @@ reports the crate it vendored as `bixverse.__core_version__`.
 
 ## 0.3.0
 
-Requires `bixverse-sc-data` 0.9.5.
+Requires `bixverse-sc-data` 0.10.0.
 
 **Features**
 
