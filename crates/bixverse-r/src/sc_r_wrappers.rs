@@ -349,10 +349,6 @@ impl FromRList for KnnParams {
             .unwrap_or(0.001) as f32;
 
         let ef_budget = r_list_count(&params_list, "ef_budget")?;
-        let extract_knn = params_list
-            .get("extract_knn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
         // hnsw
         let m = r_list_count(&params_list, "m")?.unwrap_or(16);
@@ -373,7 +369,6 @@ impl FromRList for KnnParams {
             n_tree,
             search_budget,
             ef_budget,
-            extract_knn,
             diversify_prob,
             delta,
             m,

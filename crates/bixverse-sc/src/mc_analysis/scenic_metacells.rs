@@ -280,7 +280,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         &Dist::SquaredEuclidean,
         Some(k_means_params.get_data()),
         seed,
-        verbosity.detailed_verbosity(),
+        verbosity_from_flag(verbosity.detailed_verbosity()),
     )?;
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
@@ -310,7 +310,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 
     let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
     for (i, &cluster_id) in assignments.iter().enumerate() {
-        clusters[cluster_id].push(i);
+        clusters[cluster_id as usize].push(i);
     }
 
     let mut rng = SmallRng::seed_from_u64(seed.wrapping_add(1) as u64);

@@ -28,7 +28,26 @@ pub use crate::{assert_nrows, assert_same_len, assert_symmetric_mat};
 /// ten thousand genes.
 const PROGRESS_STEP_PCT: usize = 10;
 
-pub use bixverse_sparse::verbosity::{Verbosity, parse_verbosity_level};
+pub use ann_search_rs::{Verbosity, parse_annsearch_verbosity as parse_verbosity_level};
+
+/// Map an on/off verbose flag onto [`Verbosity`].
+///
+/// For callers that still carry `verbose: bool` and hand it to ann-search-rs.
+///
+/// ### Params
+///
+/// * `verbose` - The flag
+///
+/// ### Returns
+///
+/// [`Verbosity::Normal`] if set, [`Verbosity::Quiet`] otherwise.
+pub fn verbosity_from_flag(verbose: bool) -> Verbosity {
+    if verbose {
+        Verbosity::Normal
+    } else {
+        Verbosity::Quiet
+    }
+}
 
 //////////////
 // Progress //

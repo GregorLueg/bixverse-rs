@@ -10,6 +10,5 @@ pub mod prelude;
 pub mod serialise;
 pub mod sparse;
 pub mod traits;
-pub mod verbosity;
 
 pub use sparse::thread_chunks;

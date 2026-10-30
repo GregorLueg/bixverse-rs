@@ -27,8 +27,8 @@ pub struct FastMnnParamsGpu {
     /// Apply cosine normalisation before computing distances.
     pub cos_norm: bool,
     /// [`KnnParamsGpu`] for the MNN and tricube searches. `k` sets the
-    /// neighbour count for both; `extract_knn` is ignored, since every search
-    /// here is a cross-query.
+    /// neighbour count for both; the NNDescent graph method runs as CAGRA,
+    /// since every search here is a cross-query.
     pub knn_params: KnnParamsGpu,
 }
 

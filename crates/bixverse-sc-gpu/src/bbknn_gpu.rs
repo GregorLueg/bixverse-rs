@@ -37,10 +37,9 @@ pub struct BbknnParamsGpu {
     /// help with population independence and improve the tidiness of
     /// clustering.
     pub trim: Option<usize>,
-    /// [`KnnParamsGpu`] for the per-batch searches. Two of its fields do not
-    /// apply here: `k` is ignored, since `neighbours_within_batch` sets the
-    /// neighbour count, and `extract_knn` is ignored, since extraction hands
-    /// back the index's own graph rather than the results of a query.
+    /// [`KnnParamsGpu`] for the per-batch searches. `k` is ignored, since
+    /// `neighbours_within_batch` sets the neighbour count, and the NNDescent
+    /// graph method runs as CAGRA, since every search here is a cross-query.
     pub knn_params: KnnParamsGpu,
 }
 

@@ -1391,7 +1391,7 @@ pub fn kmeans_centroids(
         &Dist::Cosine,
         Some(params.get_data()),
         seed,
-        verbose,
+        verbosity_from_flag(verbose),
     )?;
     let mut y = vec![0.0f32; k * d];
     normalise_rows_into(&raw, d, &mut y);

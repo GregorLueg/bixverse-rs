@@ -199,7 +199,7 @@ impl FromRList for KnnParamsGpu {
     /// Generate [KnnParamsGpu] from an R list.
     ///
     /// Reads the same flattened list `KnnParams::from_r_list` reads, but only
-    /// the five keys the GPU indices understand. Missing keys fall back to
+    /// the keys the GPU indices understand. Missing keys fall back to
     /// [`KnnParamsGpu::default()`].
     ///
     /// `k` goes through [r_list_count_allow_zero]: zero is a legitimate value
@@ -247,10 +247,6 @@ impl FromRList for KnnParamsGpu {
         let beam_width = r_list_count(&params_list, "beam_width")?;
         let max_beam_iters = r_list_count(&params_list, "max_beam_iters")?;
         let n_entry_points = r_list_count(&params_list, "n_entry_points")?;
-        let extract_knn = params_list
-            .get("extract_knn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.extract_knn);
 
         Ok(Self {
             knn_method,
@@ -267,7 +263,6 @@ impl FromRList for KnnParamsGpu {
             beam_width,
             max_beam_iters,
             n_entry_points,
-            extract_knn,
         })
     }
 }
@@ -385,9 +380,10 @@ impl FromRList for ScrubletParamsGpu {
     ///
     /// `knn_backend` is the only thing that can pick the
     /// [`ScrubletKnnBackend`] arm. Both backends share `k`, `knn_method`,
-    /// `ann_dist`, `n_list` and `n_probe`, and `"exhaustive"` / `"ivf"` are
-    /// legal `knn_method` values on either side, so the method string carries
-    /// no information about which index was meant. Absent, the GPU arm is
+    /// `ann_dist`, `n_list` and `n_probe`, and `"exhaustive"`, `"ivf"` and
+    /// `"nndescent_graph"` are legal `knn_method` values on either side, so the
+    /// method string carries no information about which index was meant.
+    /// Absent, the GPU arm is
     /// taken. Anything other than `"gpu"` or `"cpu"` is an error rather than a
     /// silent fallback: a typo should not quietly change which index runs.
     ///

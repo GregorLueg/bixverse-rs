@@ -107,6 +107,8 @@ fn get_batch_balanced_knn(
     verbose: usize,
 ) -> ScKnnResults {
     let verbosity = parse_verbosity_level(verbose);
+    // The index builds and queries only print at detailed verbosity here.
+    let ann_verbosity = verbosity_from_flag(verbosity.detailed_verbosity());
 
     let n_cells = mat.nrows();
 
@@ -171,6 +173,7 @@ fn get_batch_balanced_knn(
                     &bbknn_params.knn_params.ann_dist,
                     bbknn_params.knn_params.n_tree,
                     seed,
+                    ann_verbosity,
                 )?;
                 query_annoy_index(
                     mat,
@@ -178,7 +181,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.search_budget,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             KnnSearch::Hnsw => {
@@ -189,18 +192,20 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_construction,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbosity.detailed_verbosity(),
-                );
+                    ann_verbosity,
+                )?;
                 query_hnsw_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_search,
                     true,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
-            KnnSearch::NNDescent => {
+            // A graph-only build cannot answer a cross-query, so the graph
+            // method queries an index too.
+            KnnSearch::NNDescent | KnnSearch::NNDescentGraph => {
                 let index = build_nndescent_index(
                     sub_matrix.as_ref(),
                     &bbknn_params.knn_params.ann_dist,
@@ -211,7 +216,7 @@ fn get_batch_balanced_knn(
                     None,
                     None,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_nndescent_index(
@@ -220,19 +225,22 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_budget,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::Exhaustive => {
-                let index =
-                    build_exhaustive_index(sub_matrix.as_ref(), &bbknn_params.knn_params.ann_dist);
+                let index = build_exhaustive_index(
+                    sub_matrix.as_ref(),
+                    &bbknn_params.knn_params.ann_dist,
+                    ann_verbosity,
+                );
 
                 query_exhaustive_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::Ivf => {
@@ -242,7 +250,7 @@ fn get_batch_balanced_knn(
                     None,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_ivf_index(
@@ -251,7 +259,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.n_probe,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::KmKnn => {
@@ -261,7 +269,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.n_list,
                     None,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_kmknn_index(
@@ -269,7 +277,7 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
         };

@@ -1,6 +1,39 @@
 # News
 
-## 0.9.5
+## 0.10.0
+
+### Breaking
+
+- `ann-search-rs` 0.12. Its `Verbosity` is now the one verbosity enum: the
+  preludes re-export `ann_search_rs::Verbosity` and `parse_verbosity_level`
+  maps to `parse_annsearch_verbosity`. `bixverse_sparse::verbosity` is gone.
+  `verbosity_from_flag()` maps a `verbose: bool` onto it.
+- `extract_knn` is gone from `KnnParams` and `KnnParamsGpu`, and
+  `generate_knn_nndescent()` lost the argument. Use `knn_method =
+  "nndescent_graph"` instead (see Features). `warn_unsupported_extract()` is
+  gone with it.
+
+### Features
+
+- `"nndescent_graph"` kNN method on the CPU (`KnnSearch::NNDescentGraph`) and
+  the GPU (`KnnSearchGpu::NNDescentGraphGpu`): the NN-Descent kNN graph built
+  graph-only through `build_knn_graph_nndescent()` /
+  `build_knn_graph_nndescent_gpu()`, with no index kept and no search run.
+  The GPU one goes through the clustered build, so datasets past the
+  per-binding limit work. Self-kNN only; the cross-queries (BBKNN, Symphony,
+  fastMNN, `batch_knn_search()`) run it as NN-Descent / CAGRA.
+  `generate_knn_nndescent_graph()` and `knn_graph_to_rows()` are the CPU
+  entry points.
+
+### Fixes
+
+- IVF in `dispatch_knn()` and `batch_knn_search()` passed `n_list` as
+  `n_probe`, so it probed every list. It uses `n_probe` now.
+
+### Dependencies
+
+- `ann-search-rs` 0.12 (git branch `chore-clean-up` until released),
+  `bonsai-rs` on ann-search-rs 0.12, `edge-rs` 0.3.2.
 
 ### Performance
 

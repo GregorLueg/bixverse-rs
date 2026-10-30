@@ -178,7 +178,8 @@ pub fn batch_knn_search(
     seed: usize,
     verbose: usize,
 ) -> ScKnnResults {
-    let verbosity = parse_verbosity_level(verbose);
+    // The index builds and queries only print at detailed verbosity here.
+    let ann_verbosity = verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity());
     let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
 
     let (indices, dist) = match knn_method {
@@ -189,29 +190,23 @@ pub fn batch_knn_search(
                 params.ef_construction,
                 &params.ann_dist,
                 seed,
-                verbosity.detailed_verbosity(),
-            );
-            query_hnsw_index(
-                query,
-                &index,
-                k,
-                params.ef_search,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
+                ann_verbosity,
+            )?;
+            query_hnsw_index(query, &index, k, params.ef_search, true, ann_verbosity)?
         }
         KnnSearch::Annoy => {
-            let index = build_annoy_index(reference, &params.ann_dist, params.n_tree, seed)?;
-            query_annoy_index(
-                query,
-                &index,
-                k,
-                params.search_budget,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
+            let index = build_annoy_index(
+                reference,
+                &params.ann_dist,
+                params.n_tree,
+                seed,
+                ann_verbosity,
+            )?;
+            query_annoy_index(query, &index, k, params.search_budget, true, ann_verbosity)?
         }
-        KnnSearch::NNDescent => {
+        // A graph-only build cannot answer a cross-query, so the graph method
+        // queries an index too.
+        KnnSearch::NNDescent | KnnSearch::NNDescentGraph => {
             let index = build_nndescent_index(
                 reference,
                 &params.ann_dist,
@@ -222,20 +217,13 @@ pub fn batch_knn_search(
                 None,
                 None,
                 seed,
-                verbosity.detailed_verbosity(),
+                ann_verbosity,
             )?;
-            query_nndescent_index(
-                query,
-                &index,
-                k,
-                params.ef_budget,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
+            query_nndescent_index(query, &index, k, params.ef_budget, true, ann_verbosity)?
         }
         KnnSearch::Exhaustive => {
-            let index = build_exhaustive_index(reference, &params.ann_dist);
-            query_exhaustive_index(query, &index, k, true, verbosity.detailed_verbosity())?
+            let index = build_exhaustive_index(reference, &params.ann_dist, ann_verbosity);
+            query_exhaustive_index(query, &index, k, true, ann_verbosity)?
         }
         KnnSearch::Ivf => {
             let index = build_ivf_index(
@@ -244,16 +232,9 @@ pub fn batch_knn_search(
                 None,
                 &params.ann_dist,
                 seed,
-                verbosity.detailed_verbosity(),
+                ann_verbosity,
             )?;
-            query_ivf_index(
-                query,
-                &index,
-                k,
-                params.n_list,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
+            query_ivf_index(query, &index, k, params.n_probe, true, ann_verbosity)?
         }
         KnnSearch::KmKnn => {
             let index = build_kmknn_index(
@@ -262,9 +243,9 @@ pub fn batch_knn_search(
                 params.n_list,
                 None,
                 seed,
-                verbosity.detailed_verbosity(),
+                ann_verbosity,
             )?;
-            query_kmknn_index(query, &index, k, true, verbosity.detailed_verbosity())?
+            query_kmknn_index(query, &index, k, true, ann_verbosity)?
         }
     };
 
