@@ -3310,7 +3310,7 @@ const FUSED_PIECES_PER_THREAD: usize = 8;
 ///
 /// Larger batches amortise the per-call read overhead; the transient batch
 /// CSC grows with it and sits on top of the output at the peak.
-const CSR_GENE_BATCH: usize = 500;
+const CSR_GENE_BATCH: usize = 200;
 
 /// Row blocks per rayon thread in [`SingleCellReading::read_genes_sparse_csr`].
 ///
@@ -3319,6 +3319,20 @@ const CSR_GENE_BATCH: usize = 500;
 /// binary searches start to cost, and the blocks get small enough that the
 /// allocator keeps them in its heap instead of returning them.
 const CSR_ROW_BLOCKS_PER_THREAD: usize = 32;
+
+/// Smallest buffer a row block reserves once it is projected to matter.
+///
+/// glibc serves anything under its mmap threshold (at most 32 MiB) from the
+/// heap, where a freed block stays resident, so the assembly would free
+/// nothing. Reserving past the ceiling gives every block its own mapping,
+/// which `free` returns and `realloc` grows by `mremap`. The reserve is
+/// virtual: pages only commit as they are written.
+const CSR_BLOCK_MIN_RESERVE_BYTES: usize = 40 << 20;
+
+/// Projected row block size below which [`CSR_BLOCK_MIN_RESERVE_BYTES`] is
+/// not applied: the whole matrix is then small enough that its peak does not
+/// matter.
+const CSR_BLOCK_RESERVE_FROM_BYTES: usize = 1 << 20;
 
 /// One row block's share of every gene batch read so far.
 ///
@@ -3355,18 +3369,51 @@ impl<T: BixverseNumeric> CsrRowBlock<T> {
         }
     }
 
+    /// Reserve the block's projected final size before its first allocation,
+    /// so its buffers are mapped from the start rather than grown on the heap.
+    ///
+    /// ### Params
+    ///
+    /// * `first_batch` - Entries the first batch brings to this block
+    /// * `n_batches` - Total gene batches
+    fn reserve_projected(&mut self, first_batch: usize, n_batches: usize) {
+        let projected = first_batch * n_batches;
+        if projected * size_of::<u32>() < CSR_BLOCK_RESERVE_FROM_BYTES {
+            return;
+        }
+        // a quarter of headroom for batches denser than the first
+        let target = projected + projected / 4;
+        let elems = |size: usize| target.max(CSR_BLOCK_MIN_RESERVE_BYTES / size);
+        self.indices.reserve_exact(elems(size_of::<u32>()));
+        if let Some(d) = self.data.as_mut() {
+            d.reserve_exact(elems(size_of::<T>().max(1)));
+        }
+        if let Some(d) = self.data_2.as_mut() {
+            d.reserve_exact(elems(size_of::<f32>()));
+        }
+    }
+
     /// Transpose the rows `r0..r1` of a gene batch onto the end of the block.
     ///
     /// Relies on the rows ascending within every gene, which
     /// [`SingleCellReading::read_genes_sparse`] guarantees, so each gene's
-    /// share of the block is one binary-searched span.
+    /// share of the block is one binary-searched span. The first batch also
+    /// sizes the block's buffers, see [`Self::reserve_projected`].
     ///
     /// ### Params
     ///
     /// * `csc` - The batch, cells x batch genes
     /// * `r0` / `r1` - Row range of the block
     /// * `c0` - Output column of the first gene in the batch
-    fn append(&mut self, csc: &CompressedSparseData2<T, f32>, r0: u32, r1: u32, c0: u32) {
+    /// * `n_batches` - Total gene batches
+    fn append(
+        &mut self,
+        csc: &CompressedSparseData2<T, f32>,
+        r0: u32,
+        r1: u32,
+        c0: u32,
+        n_batches: usize,
+    ) {
         let rows = (r1 - r0) as usize;
         let spans: Vec<(usize, usize)> = csc
             .indptr
@@ -3393,6 +3440,9 @@ impl<T: BixverseNumeric> CsrRowBlock<T> {
         }
 
         let end = ptr[rows] as usize;
+        if self.ptrs.is_empty() {
+            self.reserve_projected(end, n_batches);
+        }
         self.indices.resize(end, 0);
         if let Some(d) = self.data.as_mut() {
             d.resize(end, T::default());
@@ -3488,13 +3538,21 @@ where
         .collect();
 
     let mut blocks: Vec<CsrRowBlock<T>> = (0..n_blocks).map(|_| CsrRowBlock::new(layers)).collect();
+    let n_batches = indices.len().div_ceil(batch);
     for (bi, genes) in indices.chunks(batch).enumerate() {
         let csc = reader.read_genes_sparse::<T>(genes, cells_to_keep, data_layer)?;
         let c0 = (bi * batch) as u32;
         blocks
             .par_iter_mut()
             .zip(bounds.par_iter())
-            .for_each(|(block, &(r0, r1))| block.append(&csc, r0, r1, c0));
+            .for_each(|(block, &(r0, r1))| block.append(&csc, r0, r1, c0, n_batches));
+    }
+
+    // the batch reads leave their per-thread fragments on glibc's free lists,
+    // resident; hand them back before the output starts to commit
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
     }
 
     let mut row_nnz = vec![0u32; n];
