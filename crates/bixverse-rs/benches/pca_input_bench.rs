@@ -5,6 +5,8 @@
 //!   CSC to CSR transpose. Holds both orientations at once.
 //! * `csr` - `read_genes_sparse_csr`, the batched read that never holds the
 //!   CSC next to the CSR.
+//! * `mlx_lanczos` / `mlx_randomised` (feature `mlx`) - the whole
+//!   `pca_on_sc_sparse_mlx` with that solver, for its host-side peak.
 //!
 //! Memory is the macOS physical footprint (anonymous plus compressed, no clean
 //! mmap pages), sampled every [`SAMPLE_MS`] ms by a background thread. Run one
@@ -20,7 +22,8 @@
 //! Environment:
 //!
 //! * `PCA_INPUT_BENCH_GENES` - the gene-major store
-//! * `PCA_INPUT_BENCH_VARIANT` - `transpose` or `csr`
+//! * `PCA_INPUT_BENCH_VARIANT` - `transpose`, `csr`, `mlx_lanczos` or
+//!   `mlx_randomised`
 //! * `PCA_INPUT_BENCH_HVG` - number of HVGs, default 2000. Selected once by
 //!   VST and cached next to the store
 //! * `RAYON_NUM_THREADS` - thread count
@@ -41,6 +44,10 @@ use bixverse_rs::single_cell::sc_processing::hvg::get_hvg_vst;
 
 /// Sampling interval of the footprint thread.
 const SAMPLE_MS: u64 = 10;
+
+/// Components computed by the MLX variants.
+#[cfg(feature = "mlx")]
+const MLX_PCS: usize = 30;
 
 /// Highest footprint seen since the current stage started.
 static PEAK: AtomicU64 = AtomicU64::new(0);
@@ -133,7 +140,10 @@ fn fingerprint(csr: &CompressedSparseData2<f32>) -> String {
 fn hvgs(path: &str, genes: &ParallelSparseReader, cells: &[usize], n_hvg: usize) -> Vec<usize> {
     let cache = format!("{path}.hvg{n_hvg}.txt");
     if let Ok(s) = std::fs::read_to_string(&cache) {
-        return s.lines().map(|l| l.parse().expect("cached index")).collect();
+        return s
+            .lines()
+            .map(|l| l.parse().expect("cached index"))
+            .collect();
     }
     let res = get_hvg_vst(genes, cells, 0.3, None, 0).expect("hvg");
     let mut order: Vec<usize> = (0..res.var_std.len()).collect();
@@ -189,6 +199,27 @@ fn main() {
                 .read_genes_sparse_csr::<f32>(&hvg, Some(&cell_set), &DataLayerReturn::Norm)
                 .expect("read")
         }),
+        #[cfg(feature = "mlx")]
+        "mlx_lanczos" | "mlx_randomised" => {
+            use bixverse_rs::mlx::sc::pca::pca_on_sc_sparse_mlx;
+            use bixverse_rs::single_cell::sc_processing::pca::{PcaSolver, SingleCellPcaParams};
+
+            let solver = if variant == "mlx_lanczos" {
+                PcaSolver::Exact
+            } else {
+                PcaSolver::Randomised
+            };
+            let params = SingleCellPcaParams {
+                svd_solver: solver,
+                ..SingleCellPcaParams::default()
+            };
+            let (scores, _, s) = stage("mlx_pca", || {
+                pca_on_sc_sparse_mlx(&genes, &cells, &hvg, MLX_PCS, None, &params, 42, 0)
+                    .expect("mlx pca")
+            });
+            println!("scores {:?}, s[0] {:.6e}", scores.shape(), s[0]);
+            return;
+        }
         other => panic!("unknown variant {other}"),
     };
 
