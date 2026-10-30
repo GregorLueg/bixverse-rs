@@ -1307,8 +1307,7 @@ where
 
     let (new_indptr, mut cursors, sorted) = transpose_cursors(sparse_data, chunks, new_major);
 
-    let data_pair =
-        has_data.then(|| (sparse_data.data.as_slice(), new_data.as_mut_slice()));
+    let data_pair = has_data.then_some((sparse_data.data.as_slice(), new_data.as_mut_slice()));
     let data2_pair = match (&sparse_data.data_2, &mut new_data2) {
         (Some(src), Some(dst)) => Some((src.as_slice(), dst.as_mut_slice())),
         _ => None,
