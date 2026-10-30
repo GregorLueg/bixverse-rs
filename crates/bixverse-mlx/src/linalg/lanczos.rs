@@ -117,12 +117,13 @@ pub fn sparse_svd_lanczos_mlx<T: BixverseFloat>(
     install_error_handler();
     let st = Stream::default_gpu();
 
+    // consumed, not borrowed: for `T = f32` the collect reuses the buffer, so
+    // the values are never held twice
     let values: Vec<f32> = data
         .data_2
-        .as_ref()
         .ok_or(CoreErrors::Data2NotAvailable)?
-        .iter()
-        .map(to_f32)
+        .into_iter()
+        .map(|x| to_f32(&x))
         .collect();
     let csc = CompressedSparseData2::<f32, f32>::from_parts(
         Vec::new(),
