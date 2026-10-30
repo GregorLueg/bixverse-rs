@@ -2342,6 +2342,41 @@ pub trait SingleCellReading: Send + Sync {
     where
         T: BixverseNumeric + FromPrimitive;
 
+    /// Read genes from a gene-major store straight into one CSR matrix.
+    ///
+    /// Same matrix as [`Self::read_genes_sparse`] followed by a transpose,
+    /// without ever holding the CSC next to the CSR. Genes are read in batches
+    /// of [`CSR_GENE_BATCH`]; each batch is transposed locally into
+    /// [`CSR_ROW_BLOCKS_PER_THREAD`] row blocks per thread, so the scatter
+    /// stays cache sized and no count pass is needed. The final CSR is then
+    /// assembled block by block, freeing each block as it is copied. The
+    /// output is zero-allocated and only commits as it is written, so the peak
+    /// stays near one copy plus one batch. That relies on the allocator
+    /// returning the freed blocks to the OS, which large allocations do.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene indices, in output column order
+    /// * `cells_to_keep` - Cells to keep, in output row order, or `None` for
+    ///   all cells
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// CSR of shape `(cells, indices.len())`, columns ascending within each
+    /// row, or whatever [`Self::read_genes_sparse`] raises.
+    fn read_genes_sparse_csr<T>(
+        &self,
+        indices: &[usize],
+        cells_to_keep: Option<&IndexSet<u32>>,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, ScDataErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        genes_sparse_to_csr(self, indices, cells_to_keep, data_layer, CSR_GENE_BATCH)
+    }
+
     /// Return the header of the underlying store
     ///
     /// ### Returns
@@ -3271,6 +3306,254 @@ impl ParallelSparseReader {
 /// stealing at the cost of a few more scratch buffers.
 const FUSED_PIECES_PER_THREAD: usize = 8;
 
+/// Genes per batch in [`SingleCellReading::read_genes_sparse_csr`].
+///
+/// Larger batches amortise the per-call read overhead; the transient batch
+/// CSC grows with it and sits on top of the output at the peak.
+const CSR_GENE_BATCH: usize = 500;
+
+/// Row blocks per rayon thread in [`SingleCellReading::read_genes_sparse_csr`].
+///
+/// Each block transposes its rows of a batch locally. Too few blocks and the
+/// scatter spills out of cache; too many and the per-batch row pointers and
+/// binary searches start to cost, and the blocks get small enough that the
+/// allocator keeps them in its heap instead of returning them.
+const CSR_ROW_BLOCKS_PER_THREAD: usize = 32;
+
+/// One row block's share of every gene batch read so far.
+///
+/// All batches append to one buffer per layer, so the buffers grow large
+/// enough to be mapped directly and are handed back whole on drop.
+struct CsrRowBlock<T> {
+    /// Per batch, row pointers into the buffers (absolute offsets), one more
+    /// than the block's rows.
+    ptrs: Vec<Vec<u32>>,
+    /// Raw counts, when requested.
+    data: Option<Vec<T>>,
+    /// Normalised counts, when requested.
+    data_2: Option<Vec<f32>>,
+    /// Global column of each entry.
+    indices: Vec<u32>,
+}
+
+impl<T: BixverseNumeric> CsrRowBlock<T> {
+    /// Empty block.
+    ///
+    /// ### Params
+    ///
+    /// * `layers` - `(raw, norm)`: which layers to carry
+    ///
+    /// ### Returns
+    ///
+    /// The block.
+    fn new(layers: (bool, bool)) -> Self {
+        Self {
+            ptrs: Vec::new(),
+            data: layers.0.then(Vec::new),
+            data_2: layers.1.then(Vec::new),
+            indices: Vec::new(),
+        }
+    }
+
+    /// Transpose the rows `r0..r1` of a gene batch onto the end of the block.
+    ///
+    /// Relies on the rows ascending within every gene, which
+    /// [`SingleCellReading::read_genes_sparse`] guarantees, so each gene's
+    /// share of the block is one binary-searched span.
+    ///
+    /// ### Params
+    ///
+    /// * `csc` - The batch, cells x batch genes
+    /// * `r0` / `r1` - Row range of the block
+    /// * `c0` - Output column of the first gene in the batch
+    fn append(&mut self, csc: &CompressedSparseData2<T, f32>, r0: u32, r1: u32, c0: u32) {
+        let rows = (r1 - r0) as usize;
+        let spans: Vec<(usize, usize)> = csc
+            .indptr
+            .windows(2)
+            .map(|w| {
+                let (s, e) = (w[0] as usize, w[1] as usize);
+                let col = &csc.indices[s..e];
+                (
+                    s + col.partition_point(|&i| i < r0),
+                    s + col.partition_point(|&i| i < r1),
+                )
+            })
+            .collect();
+
+        let mut ptr = vec![0u32; rows + 1];
+        ptr[0] = self.indices.len() as u32;
+        for &(lo, hi) in &spans {
+            for &i in &csc.indices[lo..hi] {
+                ptr[(i - r0) as usize + 1] += 1;
+            }
+        }
+        for j in 0..rows {
+            ptr[j + 1] += ptr[j];
+        }
+
+        let end = ptr[rows] as usize;
+        self.indices.resize(end, 0);
+        if let Some(d) = self.data.as_mut() {
+            d.resize(end, T::default());
+        }
+        if let Some(d) = self.data_2.as_mut() {
+            d.resize(end, 0.0);
+        }
+        let src_2 = csc.data_2.as_deref();
+        let mut cursor: Vec<u32> = ptr[..rows].to_vec();
+        for (g, &(lo, hi)) in spans.iter().enumerate() {
+            for k in lo..hi {
+                let c = &mut cursor[(csc.indices[k] - r0) as usize];
+                let pos = *c as usize;
+                self.indices[pos] = c0 + g as u32;
+                if let Some(d) = self.data.as_mut() {
+                    d[pos] = csc.data[k];
+                }
+                if let (Some(d), Some(s)) = (self.data_2.as_mut(), src_2) {
+                    d[pos] = s[k];
+                }
+                *c += 1;
+            }
+        }
+        self.ptrs.push(ptr);
+    }
+
+    /// Copy the block's rows into its slot of the output, batch after batch
+    /// within each row, then free the block.
+    ///
+    /// ### Params
+    ///
+    /// * `rows` - Rows in the block
+    /// * `data` - Output raw counts slot, empty when not requested
+    /// * `data_2` - Output normalised slot, empty when not requested
+    /// * `indices` - Output column index slot
+    fn copy_rows(self, rows: usize, data: &mut [T], data_2: &mut [f32], indices: &mut [u32]) {
+        let mut pos = 0;
+        for j in 0..rows {
+            for ptr in &self.ptrs {
+                let (s, e) = (ptr[j] as usize, ptr[j + 1] as usize);
+                let len = e - s;
+                indices[pos..pos + len].copy_from_slice(&self.indices[s..e]);
+                if let Some(src) = self.data.as_ref() {
+                    data[pos..pos + len].copy_from_slice(&src[s..e]);
+                }
+                if let Some(src) = self.data_2.as_ref() {
+                    data_2[pos..pos + len].copy_from_slice(&src[s..e]);
+                }
+                pos += len;
+            }
+        }
+    }
+}
+
+/// Body of [`SingleCellReading::read_genes_sparse_csr`], with the batch size
+/// exposed so tests can force several batches on a toy store.
+///
+/// ### Params
+///
+/// * `reader` - The gene-major store
+/// * `indices` - Gene indices, in output column order
+/// * `cells_to_keep` - Cells to keep, in output row order, or `None`
+/// * `data_layer` - Which layer(s) to materialise
+/// * `batch` - Genes per batch
+///
+/// ### Returns
+///
+/// The CSR, or whatever [`SingleCellReading::read_genes_sparse`] raises.
+fn genes_sparse_to_csr<S, T>(
+    reader: &S,
+    indices: &[usize],
+    cells_to_keep: Option<&IndexSet<u32>>,
+    data_layer: &DataLayerReturn,
+    batch: usize,
+) -> Result<CompressedSparseData2<T, f32>, ScDataErrors>
+where
+    S: SingleCellReading + ?Sized,
+    T: BixverseNumeric + FromPrimitive,
+{
+    let n = cells_to_keep.map_or(reader.get_header().total_cells, |s| s.len());
+    let layers = wanted_layers(data_layer);
+    let n_blocks = (rayon::current_num_threads() * CSR_ROW_BLOCKS_PER_THREAD)
+        .min(n)
+        .max(1);
+    let block_rows = n.div_ceil(n_blocks).max(1);
+    let bounds: Vec<(u32, u32)> = (0..n_blocks)
+        .map(|r| {
+            (
+                (r * block_rows).min(n) as u32,
+                ((r + 1) * block_rows).min(n) as u32,
+            )
+        })
+        .collect();
+
+    let mut blocks: Vec<CsrRowBlock<T>> = (0..n_blocks).map(|_| CsrRowBlock::new(layers)).collect();
+    for (bi, genes) in indices.chunks(batch).enumerate() {
+        let csc = reader.read_genes_sparse::<T>(genes, cells_to_keep, data_layer)?;
+        let c0 = (bi * batch) as u32;
+        blocks
+            .par_iter_mut()
+            .zip(bounds.par_iter())
+            .for_each(|(block, &(r0, r1))| block.append(&csc, r0, r1, c0));
+    }
+
+    let mut row_nnz = vec![0u32; n];
+    row_nnz
+        .par_chunks_mut(block_rows)
+        .zip(blocks.par_iter())
+        .for_each(|(out, block)| {
+            for ptr in &block.ptrs {
+                for (j, o) in out.iter_mut().enumerate() {
+                    *o += ptr[j + 1] - ptr[j];
+                }
+            }
+        });
+    let mut indptr = vec![0u32; n + 1];
+    for i in 0..n {
+        indptr[i + 1] = indptr[i] + row_nnz[i];
+    }
+    drop(row_nnz);
+
+    let nnz = indptr[n] as usize;
+    let mut data: Vec<T> = if layers.0 {
+        vec![T::default(); nnz]
+    } else {
+        Vec::new()
+    };
+    let mut data_2: Option<Vec<f32>> = layers.1.then(|| vec![0.0; nnz]);
+    let mut out_indices: Vec<u32> = vec![0; nnz];
+
+    let block_offsets: Vec<usize> = std::iter::once(0)
+        .chain(bounds.iter().map(|&(_, r1)| indptr[r1 as usize] as usize))
+        .collect();
+    let data_parts = split_at_offsets(&mut data, &block_offsets, layers.0);
+    let data_2_parts = split_at_offsets(
+        data_2.as_deref_mut().unwrap_or_default(),
+        &block_offsets,
+        layers.1,
+    );
+    let index_parts = split_at_offsets(&mut out_indices, &block_offsets, true);
+
+    blocks
+        .into_par_iter()
+        .zip(data_parts)
+        .zip(data_2_parts)
+        .zip(index_parts)
+        .zip(bounds.par_iter())
+        .for_each(|((((block, d), d2), idx), &(r0, r1))| {
+            block.copy_rows((r1 - r0) as usize, d, d2, idx);
+        });
+
+    Ok(CompressedSparseData2 {
+        data,
+        indices: out_indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csr,
+        data_2,
+        shape: (n, indices.len()),
+    })
+}
+
 /// Convert one raw count exactly into `T`.
 ///
 /// ### Params
@@ -3519,7 +3802,9 @@ where
 
     // Concatenate in parallel: each fragment copies into its own disjoint
     // slot of preallocated outputs. A serial append here costs more than the
-    // whole parallel decode.
+    // whole parallel decode. The outputs are zero-allocated, so their pages
+    // only commit as they are written, and each fragment is freed once
+    // copied: the peak stays near one copy rather than two.
     let nnz_offsets: Vec<usize> = std::iter::once(0)
         .chain(fragments.iter().scan(0, |acc, f| {
             *acc += f.indices.len();
@@ -3553,7 +3838,7 @@ where
     let indptr_parts = split_at_offsets(&mut indptr[1..], &run_offsets, true);
 
     fragments
-        .par_iter()
+        .into_par_iter()
         .zip(data_parts)
         .zip(data_2_parts)
         .zip(index_parts)
@@ -3572,6 +3857,7 @@ where
                 offset += len;
                 *out = offset as u32;
             }
+            drop(fragment);
         });
 
     Ok(CompressedSparseData2 {
@@ -4972,6 +5258,49 @@ mod tests {
                     .read_genes_sparse::<u32>(&genes, subset.as_ref(), &layer)
                     .expect("fused");
                 assert_same_sparse(&got, &want);
+            }
+        }
+    }
+
+    /// The direct CSR read equals the CSC read transposed, for every layer and
+    /// cell subset, with one batch and with several.
+    #[test]
+    fn test_read_genes_sparse_csr_matches_transposed_csc() {
+        let (_temp, reader) = csc_test_store("csc_to_csr_matches");
+        let genes = [2usize, 0, 3, 1, 0];
+
+        let subsets: Vec<Option<IndexSet<u32>>> = vec![
+            None,
+            Some([0_u32, 3, 4, 5].into_iter().collect()),
+            Some([5_u32, 1, 3].into_iter().collect()),
+            Some(IndexSet::new()),
+        ];
+
+        for layer in [
+            DataLayerReturn::Raw,
+            DataLayerReturn::Norm,
+            DataLayerReturn::BothLayers,
+        ] {
+            for subset in &subsets {
+                let csc = reader
+                    .read_genes_sparse::<u32>(&genes, subset.as_ref(), &layer)
+                    .expect("csc");
+                let want = match layer {
+                    DataLayerReturn::Raw => csc.transform_single_layer(false).expect("raw"),
+                    DataLayerReturn::Norm => csc.transform_single_layer(true).expect("norm"),
+                    DataLayerReturn::BothLayers => csc.transform(),
+                };
+                for batch in [1, 2, CSR_GENE_BATCH] {
+                    let got = genes_sparse_to_csr::<_, u32>(
+                        &reader,
+                        &genes,
+                        subset.as_ref(),
+                        &layer,
+                        batch,
+                    )
+                    .expect("csr");
+                    assert_same_sparse(&got, &want);
+                }
             }
         }
     }

@@ -638,6 +638,119 @@ pub fn sparse_csc_column_stds(
     Ok(res)
 }
 
+/// Column means and standard deviations of a CSR sparse matrix.
+///
+/// The CSR twin of [`sparse_csc_column_means`] and [`sparse_csc_column_stds`],
+/// with the same definitions, so a matrix read straight into CSR needs no
+/// transpose for its statistics. Two passes over the rows, each folding into
+/// per-thread column accumulators; only the summation order differs from the
+/// CSC versions.
+///
+/// ### Params
+///
+/// * `csr` - The CSR sparse matrix.
+/// * `use_second_layer` - Whether to use the second layer of data.
+/// * `row_offsets` - Optional per-row offsets used by the shifted CLR
+///   transformation.
+///
+/// ### Returns
+///
+/// Tuple of (column means, column standard deviations), both on the CLR scale
+/// when `row_offsets` is set.
+fn sparse_csr_column_stats(
+    csr: &CompressedSparseData2<f32>,
+    use_second_layer: bool,
+    row_offsets: Option<&[f64]>,
+) -> Result<(Vec<f64>, Vec<f64>), ScErrors> {
+    if !csr.cs_type.is_csr() {
+        return Err(CoreErrors::SparseLayoutMismatch {
+            expected: CompressedSparseFormat::Csr,
+            got: csr.cs_type,
+        }
+        .into());
+    }
+
+    let (n, m) = csr.shape;
+    let n_f = n as f64;
+    let values: &[f32] = if use_second_layer {
+        csr.data_2
+            .as_ref()
+            .ok_or(CoreErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        &csr.data
+    };
+    let row = |i: usize| {
+        let (s, e) = (csr.indptr[i] as usize, csr.indptr[i + 1] as usize);
+        (&csr.indices[s..e], &values[s..e])
+    };
+    let add = |mut a: Vec<f64>, b: Vec<f64>| {
+        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+        a
+    };
+
+    // pass 1: column sums of A, and the nnz per column
+    let sums = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0; 2 * m],
+            |mut acc, i| {
+                let (idx, val) = row(i);
+                for (&j, &x) in idx.iter().zip(val) {
+                    acc[j as usize] += x as f64;
+                    acc[m + j as usize] += 1.0;
+                }
+                acc
+            },
+        )
+        .reduce(|| vec![0.0; 2 * m], add);
+    let mu_a: Vec<f64> = sums[..m].iter().map(|&s| s / n_f).collect();
+
+    let (m_bar, var_m, m_centered) = if let Some(off) = row_offsets {
+        let m_bar = off.iter().sum::<f64>() / n_f;
+        let m_centered: Vec<f64> = off.iter().map(|&v| v - m_bar).collect();
+        let var_m = m_centered.iter().map(|&v| v * v).sum::<f64>() / (n_f - 1.0);
+        (m_bar, var_m, Some(m_centered))
+    } else {
+        (0.0, 0.0, None)
+    };
+
+    // pass 2: squared deviations of the non-zeros, and the CLR cross term
+    let dev = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0; 2 * m],
+            |mut acc, i| {
+                let (idx, val) = row(i);
+                let mc = m_centered.as_ref().map_or(0.0, |mc| mc[i]);
+                for (&j, &x) in idx.iter().zip(val) {
+                    let (j, x) = (j as usize, x as f64);
+                    let d = x - mu_a[j];
+                    acc[j] += d * d;
+                    acc[m + j] += x * mc;
+                }
+                acc
+            },
+        )
+        .reduce(|| vec![0.0; 2 * m], add);
+
+    let means = mu_a.iter().map(|&mu| mu - m_bar).collect();
+    let stds = (0..m)
+        .map(|j| {
+            let ss_zeros = (n_f - sums[m + j]) * mu_a[j] * mu_a[j];
+            let var_a = (dev[j] + ss_zeros) / (n_f - 1.0);
+            let variance = if m_centered.is_some() {
+                var_a - (2.0 / (n_f - 1.0)) * dev[m + j] + var_m
+            } else {
+                var_a
+            };
+            variance.max(0.0).sqrt().max(f64::EPSILON)
+        })
+        .collect();
+
+    Ok((means, stds))
+}
+
 ///////////////
 // Dense PCA //
 ///////////////
@@ -1259,13 +1372,19 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_reading = Instant::now();
 
-    let mut csc: CompressedSparseData2<f32> =
-        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?;
+    // every solver works on the long-major orientation, so read it directly:
+    // CSR when there are at least as many cells as genes, which never holds
+    // a CSC next to its transpose
+    let mut matrix: CompressedSparseData2<f32> = if cell_set.len() >= gene_indices.len() {
+        reader.read_genes_sparse_csr(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?
+    } else {
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?
+    };
 
     if params_pca.clr {
         let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
         clr_rescale(
-            csc.data_2.as_mut().expect("norm layer requested"),
+            matrix.data_2.as_mut().expect("norm layer requested"),
             size_factor,
         );
     }
@@ -1278,8 +1397,13 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_data_prep = Instant::now();
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, clr_offsets)?;
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, clr_offsets)?;
+    let (col_means, col_stds): (Vec<f64>, Vec<f64>) = if matrix.cs_type.is_csr() {
+        sparse_csr_column_stats(&matrix, true, clr_offsets)?
+    } else {
+        let means = sparse_csc_column_means(&matrix, true, clr_offsets)?;
+        let stds = sparse_csc_column_stds(&matrix, &means, true, clr_offsets)?;
+        (means, stds)
+    };
 
     let end_data_prep = start_data_prep.elapsed();
 
@@ -1298,10 +1422,10 @@ fn sparse_pca<S: SingleCellReading>(
 
     let svd_res = match params_pca.svd_solver {
         PcaSolver::Covariance => {
-            sparse_covariance_svd::<f32, f64>(csc, no_pcs, true, centre, scale, clr_offsets)?
+            sparse_covariance_svd::<f32, f64>(matrix, no_pcs, true, centre, scale, clr_offsets)?
         }
         PcaSolver::Randomised => randomised_sparse_svd::<f32, f64>(
-            csc,
+            matrix,
             no_pcs,
             seed as u64,
             true,
@@ -1312,19 +1436,8 @@ fn sparse_pca<S: SingleCellReading>(
             clr_offsets,
         )?,
         PcaSolver::Exact | PcaSolver::Auto => {
-            // the solver works on the long-major orientation; transposing
-            // here lets the CSC drop instead of sitting next to the copy
-            let long_major = if csc.shape.0 >= csc.shape.1 {
-                let csr = csc.transform_single_layer(true).map_err(CoreErrors::from)?;
-                // only borrowed above, so it would otherwise live to the end of
-                // the function
-                drop(csc);
-                csr
-            } else {
-                csc
-            };
             let res = sparse_svd_lanczos::<f32, f32, f64>(
-                &long_major,
+                &matrix,
                 no_pcs,
                 seed as u64,
                 true,
@@ -1581,4 +1694,43 @@ pub fn sparse_pca_accelerator_input<S: SingleCellReading>(
     }
 
     Ok((csc, col_means, col_stds))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CSR statistics equal the CSC ones on the same matrix, with and
+    /// without CLR offsets, including an all-zero column.
+    #[test]
+    fn test_sparse_csr_column_stats_match_csc() {
+        let (n, m) = (37, 6);
+        let value = |i: usize, j: usize| -> f32 {
+            if j == 4 || (i * 7 + j * 3) % 5 < 2 {
+                0.0
+            } else {
+                ((i * 13 + j * 29) % 11) as f32 * 0.37
+            }
+        };
+        let csr =
+            CompressedSparseData2::<f32>::from_entry_fn(n, m, CompressedSparseFormat::Csr, value);
+        let csc =
+            CompressedSparseData2::<f32>::from_entry_fn(n, m, CompressedSparseFormat::Csc, value);
+        let offsets: Vec<f64> = (0..n).map(|i| 0.1 + (i % 4) as f64 * 0.05).collect();
+
+        for off in [None, Some(offsets.as_slice())] {
+            let (means, stds) = sparse_csr_column_stats(&csr, false, off).expect("csr stats");
+            let want_means = sparse_csc_column_means(&csc, false, off).expect("csc means");
+            let want_stds =
+                sparse_csc_column_stds(&csc, &want_means, false, off).expect("csc stds");
+            for j in 0..m {
+                assert!((means[j] - want_means[j]).abs() <= 1e-12 * want_means[j].abs().max(1.0));
+                assert!((stds[j] - want_stds[j]).abs() <= 1e-12 * want_stds[j].abs().max(1.0));
+            }
+        }
+    }
 }
