@@ -54,21 +54,16 @@
   features. Results differ from 0.9.4 at round-off.
 - The sparse PCA (`pca_on_sc_sparse()` and the `_stats` twin) reads the HVGs
   straight into CSR through `read_genes_sparse_csr()` when there are at least
-  as many cells as genes, so none of its solvers transposes any more. Building
-  the input on 4.7M cells x 2000 HVGs: peak 10.7 GB -> 5.5 GB at the same
-  speed (1.85 s -> 1.82 s). Column statistics may differ from 0.9.4 at
-  round-off.
+  as many cells as genes, so none of its solvers transposes any more. Lower
+  peak memory on large data, on macOS and Linux. Column statistics may differ
+  from 0.9.4 at round-off.
 - `read_genes_sparse()` and `read_cells_sparse()` free each per-thread
   fragment as it is copied into the output instead of holding them all to the
-  end: the read alone peaks at 6.6 GB instead of 10.5 GB on the same input.
-  This also lowers the host peak of the GPU and MLX sparse PCA.
+  end: lower peak memory on every sparse read, including the input of the
+  GPU and MLX sparse PCA.
 - The MLX sparse SVDs (`sparse_svd_lanczos_mlx()`,
-  `randomised_sparse_svd_mlx()`) consume the value layer instead of copying it:
-  whole MLX sparse PCA on the same input, Lanczos 15.2 GB -> 12.9 GB and
-  randomised 18.4 GB -> 16.0 GB.
-- All of the above are macOS figures. The streaming frees only lower the peak
-  if the allocator hands the freed blocks back; on Linux, glibc keeps blocks
-  under its mmap threshold (up to 32 MiB) on the heap.
+  `randomised_sparse_svd_mlx()`) consume the value layer instead of copying
+  it: lower peak memory.
 
 ## 0.9.4
 
