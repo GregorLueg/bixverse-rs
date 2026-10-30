@@ -196,19 +196,19 @@ impl RawCounts {
         Ok(if width == 4 {
             RawCounts::U32(
                 buffer[..needed]
-                    .chunks_exact(4)
-                    .map(|c| {
-                        u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction"))
-                    })
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| u32::from_le_bytes(c))
                     .collect(),
             )
         } else {
             RawCounts::U16(
                 buffer[..needed]
-                    .chunks_exact(2)
-                    .map(|c| {
-                        u16::from_le_bytes(c.try_into().expect("2-byte chunk by construction"))
-                    })
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&c| u16::from_le_bytes(c))
                     .collect(),
             )
         })
@@ -484,8 +484,10 @@ impl<'a> ChunkPayload<'a> {
     /// An iterator over the stored f16 values.
     fn norm_iter(&self) -> impl Iterator<Item = F16> + '_ {
         self.data_norm
-            .chunks_exact(2)
-            .map(|c| F16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| F16::from_le_bytes(c))
     }
 
     /// Iterate the indices.
@@ -495,8 +497,10 @@ impl<'a> ChunkPayload<'a> {
     /// An iterator over the stored indices.
     fn index_iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.indices
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| u32::from_le_bytes(c))
     }
 
     /// Copy the raw layer out as owned [`RawCounts`].
@@ -651,16 +655,20 @@ impl RunSource for ChunkPayload<'_> {
         if self.raw_width == 4 {
             extend_raw_checked(
                 out,
-                self.data_raw.chunks_exact(4).map(|c| {
-                    u32::from_le_bytes(c.try_into().expect("4-byte chunk by construction"))
-                }),
+                self.data_raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| u32::from_le_bytes(c)),
             )
         } else {
             extend_raw_checked(
                 out,
-                self.data_raw.chunks_exact(2).map(|c| {
-                    u16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")) as u32
-                }),
+                self.data_raw
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&c| u16::from_le_bytes(c) as u32),
             )
         }
     }
@@ -674,8 +682,8 @@ impl RunSource for ChunkPayload<'_> {
             .chunks(2 * F16_BLOCK)
             .zip(out[start..].chunks_mut(F16_BLOCK))
         {
-            for (b, c) in block.iter_mut().zip(src.chunks_exact(2)) {
-                *b = f16::from_le_bytes(c.try_into().expect("2-byte chunk by construction"));
+            for (b, &c) in block.iter_mut().zip(src.as_chunks::<2>().0) {
+                *b = f16::from_le_bytes(c);
             }
             block[..dst.len()].convert_to_f32_slice(dst);
         }

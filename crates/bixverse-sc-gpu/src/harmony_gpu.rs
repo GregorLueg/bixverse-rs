@@ -287,7 +287,7 @@ pub fn row_l2_normalise_into<F: Float>(
         }
         let norm = F::sqrt(acc);
 
-        if norm > F::new(1e-8) {
+        if norm > F::new(1e-8_f32) {
             for e in 0..dim {
                 dst[base + e] = src[base + e] / norm;
             }

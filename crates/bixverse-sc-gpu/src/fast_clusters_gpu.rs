@@ -126,7 +126,7 @@ mod tests {
             .unwrap();
         let cpu = top_m_cpu(data.as_ref(), centroids.as_ref(), 5, "euclidean");
         let mut mismatch = 0;
-        for (g, c) in gpu.chunks_exact(5).zip(cpu.chunks_exact(5)) {
+        for (g, c) in gpu.as_chunks::<5>().0.iter().zip(cpu.as_chunks::<5>().0) {
             let (mut g, mut c) = (g.to_vec(), c.to_vec());
             g.sort_unstable();
             c.sort_unstable();

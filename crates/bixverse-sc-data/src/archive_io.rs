@@ -326,8 +326,10 @@ fn decode_block(buf: &[u8], target_size: f32) -> Result<Vec<CsrCellChunk>, ScDat
     let raw: Vec<u32> = le_u32(&cur.take_shuffled(total_nnz, 4)?).collect();
     let norm_bytes = cur.take_shuffled(n_norm, 2)?;
     let mut stored_norm = norm_bytes
-        .chunks_exact(2)
-        .map(|c| F16::from_le_bytes(c.try_into().expect("2-byte chunk by construction")));
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| F16::from_le_bytes(c));
 
     let mut cells = Vec::with_capacity(n);
     let (mut start, mut prev_orig) = (0usize, 0u64);

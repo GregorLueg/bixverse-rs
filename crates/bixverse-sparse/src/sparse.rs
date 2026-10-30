@@ -2173,15 +2173,15 @@ where
         let data = &mat.data[row_start..row_end];
         let cols = &mat.indices[row_start..row_end];
         let mut acc = [T::default(); 4];
-        let mut data_chunks = data.chunks_exact(4);
-        let mut col_chunks = cols.chunks_exact(4);
-        for (d, c) in (&mut data_chunks).zip(&mut col_chunks) {
+        let (data_chunks, data_rem) = data.as_chunks::<4>();
+        let (col_chunks, col_rem) = cols.as_chunks::<4>();
+        for (d, c) in data_chunks.iter().zip(col_chunks) {
             for l in 0..4 {
                 acc[l] += d[l] * vec[c[l] as usize];
             }
         }
         let mut sum = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-        for (&d, &c) in data_chunks.remainder().iter().zip(col_chunks.remainder()) {
+        for (&d, &c) in data_rem.iter().zip(col_rem) {
             sum += d * vec[c as usize];
         }
         result[i] = sum;

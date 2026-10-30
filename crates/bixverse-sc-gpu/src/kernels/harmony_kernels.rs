@@ -86,7 +86,7 @@ fn row_l2_normalise<F: Float>(data: &mut Tensor<F>, n_rows: u32, #[comptime] dim
         }
         let norm = F::sqrt(acc);
 
-        if norm > F::new(1e-8) {
+        if norm > F::new(1e-8_f32) {
             for e in 0..dim {
                 data[base + e] /= norm;
             }

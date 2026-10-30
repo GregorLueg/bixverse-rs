@@ -768,8 +768,10 @@ pub(crate) fn decode_v4_into(
         let stored_norm = rest.get(raw_len..raw_len + n * 2).ok_or_else(truncated)?;
         norm.extend(
             stored_norm
-                .chunks_exact(2)
-                .map(|c| F16::from_le_bytes([c[0], c[1]]).to_f32()),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| F16::from_le_bytes(c).to_f32()),
         );
     } else if ctx.is_cell {
         let lib = h.aux as f32;
