@@ -52,8 +52,8 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
-| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
+| `single_cell` | I/O for h5ad and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN (KmKnn, exhaustive, Annoy, HNSW, IVF, NN-Descent, and the NN-Descent graph built without an index), SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN (exhaustive, IVF, CAGRA, and the NN-Descent graph built without an index), Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
 dense linear algebra (GEMM through Apple Accelerate on macOS), `rayon` for CPU
@@ -110,7 +110,7 @@ Everything through the facade:
 
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.9", features = ["single-cell", "h5"] }
+bixverse-rs = { version = "0.10", features = ["single-cell", "h5"] }
 ```
 
 ```rust
@@ -121,12 +121,13 @@ Or only the layer you need, e.g. the binary store without HDF5:
 
 ```toml
 [dependencies]
-bixverse-sc-data = "0.9"
+bixverse-sc-data = "0.10"
 ```
 
 Every crate has a prelude that re-exports the ones below it: the errors, sparse
-structures, `SparseGraph`, matrix and vector helpers, the SIMD trait and the
-assertion macros. Each crate has its own error enum (`CoreErrors`,
+structures, `SparseGraph`, matrix and vector helpers, the SIMD trait, the
+assertion macros and `Verbosity` (re-exported from `ann-search-rs`, so both
+crates share one enum). Each crate has its own error enum (`CoreErrors`,
 `MethodsErrors`, `ScDataErrors`, `ScErrors`, ...), and each wraps the ones
 below it, so `?` converts upwards.
 
