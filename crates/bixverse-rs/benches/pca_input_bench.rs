@@ -9,7 +9,8 @@
 //!   `pca_on_sc_sparse_mlx` with that solver, for its host-side peak.
 //!
 //! Memory is the macOS physical footprint (anonymous plus compressed, no clean
-//! mmap pages), sampled every [`SAMPLE_MS`] ms by a background thread. Run one
+//! mmap pages) or the Linux `RssAnon`, sampled every [`SAMPLE_MS`] ms by a
+//! background thread. Run one
 //! variant per process so earlier stages do not leak into the allocator state.
 //! Both variants print a fingerprint of their CSR; they must agree.
 //!
@@ -54,9 +55,12 @@ static PEAK: AtomicU64 = AtomicU64::new(0);
 
 /// Current physical footprint of this process.
 ///
+/// On Linux this is `RssAnon`: the store's mmap pages are file-backed and
+/// would otherwise count as resident.
+///
 /// ### Returns
 ///
-/// Bytes, or `0` off macOS.
+/// Bytes, or `0` on any other platform.
 fn footprint() -> u64 {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -68,7 +72,16 @@ fn footprint() -> u64 {
         );
         info.ri_phys_footprint
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("RssAnon:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map_or(0, |kb| kb * 1024)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     0
 }
 
