@@ -181,13 +181,21 @@ class Step:
 class Pipeline:
     """A linear chain of steps, R's `ScPipeline`. Inert until applied.
 
-    Build it with `>>` from steps, or from a tuple of them.
+    Build it from a list of steps, `Pipeline([step_hvg(), step_pca(30)])`,
+    or chain steps with `>>` as shorthand: `step_hvg() >> step_pca(30)`.
 
     Attributes:
-        steps: The steps, in order.
+        steps: The steps, in order. Any sequence; stored as a tuple.
     """
 
-    steps: tuple[Step, ...] = ()
+    steps: Sequence[Step] = ()
+
+    def __post_init__(self) -> None:
+        # beartype samples one element of a sequence, so check them all
+        bad = [type(s).__name__ for s in self.steps if not isinstance(s, Step)]
+        if bad:
+            raise TypeError(f"Pipeline steps must be Step objects, got {bad}")
+        object.__setattr__(self, "steps", tuple(self.steps))
 
     def __rshift__(self, other: Step) -> Pipeline:
         return Pipeline((*self.steps, other))

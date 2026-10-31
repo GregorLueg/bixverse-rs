@@ -58,6 +58,16 @@ def test_rshift_keeps_the_step_order():
         _ = p >> "not_a_step"  # ty: ignore[unsupported-operator]
 
 
+def test_list_and_rshift_build_the_same_pipeline():
+    chained = pipeline.step_hvg(hvg_no=20) >> pipeline.step_pca(5)
+    listed = pipeline.Pipeline([pipeline.step_hvg(hvg_no=20), pipeline.step_pca(5)])
+    assert listed == chained
+    assert isinstance(listed.steps, tuple)
+    assert repr(listed) == repr(chained)
+    with pytest.raises((TypeError, BeartypeCallHintParamViolation)):
+        pipeline.Pipeline([pipeline.step_hvg(), "not_a_step"])  # ty: ignore[invalid-argument-type]
+
+
 def test_step_captures_its_arguments():
     s = pipeline.step_hvg(hvg_no=30)
     assert s.name == "hvg"
