@@ -270,6 +270,9 @@ def _legend(
         title_fontproperties={"weight": "bold", "size": 8},
         alignment="left",
     )
+    # add_artist clips to the axes, which hides a legend outside them and
+    # keeps it out of the layout's tight bbox
+    leg.set_clip_on(False)
     ax.add_artist(leg)
 
 
