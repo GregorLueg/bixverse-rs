@@ -35,6 +35,8 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - scVI: scvi.md
+  - Vignettes:
+      - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md
@@ -55,6 +57,11 @@ markdown_extensions:
 
 plugins:
   - search
+  # The `.ipynb` carry their outputs (`dev/vignettes.py execute`); the `.py`
+  # sources stay out of the site.
+  - mkdocs-jupyter:
+      execute: false
+      include: ["vignettes/*.ipynb"]
   - mkdocstrings:
       handlers:
         python:
@@ -83,3 +90,6 @@ plugins:
 # `mkdocs serve` picks up a docstring edit without a restart.
 watch:
   - bixverse
+
+exclude_docs: |
+  vignettes/*.py

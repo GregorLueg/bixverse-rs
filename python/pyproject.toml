@@ -57,6 +57,7 @@ dev = [
 # extension present: `maturin develop --release` before `mkdocs build`.
 docs = [
     "mkdocs>=1.6",
+    "mkdocs-jupyter>=0.25",
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.27",
 ]
@@ -66,6 +67,15 @@ validation = [
     # 1.5.1 needs Python 3.12; the marker keeps the lock solvable for 3.11.
     "scvi-tools==1.5.1; python_version >= '3.12'",
     "anndata>=0.10",
+]
+# Executes `docs/vignettes/*.py` into their `.ipynb` twins: `dev/vignettes.py`.
+# The vignettes import the `embed` and `plots` extras, so `dev` comes too.
+vignettes = [
+    "click>=8.1",
+    "ipykernel>=6.29",
+    "jupytext>=1.16",
+    "nbclient>=0.10",
+    "nbformat>=5.10",
 ]
 
 [tool.maturin]
@@ -100,6 +110,8 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 # Generated docstrings and checks run long; the generator owns the layout.
 "bixverse/params/_generated.py" = ["E501"]
 "gpu/bixverse_gpu/params/_generated.py" = ["E501"]
+# A bare expression at the end of a notebook cell is its displayed output.
+"docs/vignettes/*.py" = ["B018"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["bixverse", "bixverse_gpu"]

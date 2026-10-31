@@ -551,6 +551,49 @@ def load_multi_h5ad(
 
 
 @beartype
+def get_cell_ranger_params(
+    directory: Path | str, *, cells_as_rows: bool = False, has_hdr: bool = False
+) -> MtxIoParams:
+    """The mtx parameters for a Cell Ranger output directory.
+
+    Picks the first file present of `matrix.mtx` / `mat.mtx`, `barcodes.tsv` /
+    `barcodes.csv` and `features.*` / `genes.*` (Cell Ranger v3 and v2).
+
+    Args:
+        directory: The directory holding the three files.
+        cells_as_rows: Do cells represent the rows of the mtx. Cell Ranger
+            writes genes as rows.
+        has_hdr: Do the barcode and feature files have headers.
+
+    Returns:
+        The parameters for `load_mtx()`.
+
+    Raises:
+        FileNotFoundError: If one of the three files is missing.
+    """
+    directory = Path(directory).expanduser()
+
+    def pick(candidates: tuple[str, ...], label: str) -> str:
+        for c in candidates:
+            if (directory / c).exists():
+                return str(directory / c)
+        raise FileNotFoundError(
+            f"No {label} file found in '{directory}'. "
+            f"Looked for: {', '.join(candidates)}."
+        )
+
+    return MtxIoParams(
+        path_mtx=pick(("matrix.mtx", "mat.mtx"), "matrix"),
+        path_obs=pick(("barcodes.tsv", "barcodes.csv"), "barcode"),
+        path_var=pick(
+            ("features.tsv", "features.csv", "genes.tsv", "genes.csv"), "feature"
+        ),
+        cells_as_rows=cells_as_rows,
+        has_hdr=has_hdr,
+    )
+
+
+@beartype
 def load_mtx(
     directory: Path | str,
     mtx_params: MtxIoParams,

@@ -21,6 +21,7 @@ from bixverse._core.download import (
 )
 from bixverse._core.ingest import (
     archive_sc_exp,
+    get_cell_ranger_params,
     load_csr,
     load_h5ad,
     load_h5ad_norm,
@@ -89,6 +90,7 @@ __all__ = [
     "generate_dialogue_test_data",
     "generate_single_cell_test_data",
     "generate_single_cell_test_data_adt",
+    "get_cell_ranger_params",
     "get_h5ad_dimensions",
     "get_tenx_h5_metadata",
     "load_csr",
