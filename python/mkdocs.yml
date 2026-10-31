@@ -36,6 +36,7 @@ nav:
   - Quickstart: quickstart.md
   - scVI: scvi.md
   - Vignettes:
+      - Thinking the bixverse way: vignettes/thinking_single_cell.ipynb
       - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
       - Data I/O: vignettes/single_cell_io.ipynb
       - kNN searches: vignettes/knn_searches.ipynb

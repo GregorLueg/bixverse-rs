@@ -7,9 +7,10 @@ files. The ids are not saved: they always come from the DuckDB. Without a
 Python memory file `load_existing` rebuilds the map from the DuckDB, as R
 does without its own.
 
-The DuckDB is the one state both front ends write. Whichever memory file is
-loaded wins over it for the cell filter, as in R, so a filter set on the other
-side after the save is reported rather than silently ignored.
+The DuckDB is the one state both front ends write, and its `obs.to_keep` is
+the cell filter: a memory file whose saved filter differs from it is
+overruled with a warning, so a filter set on the other side after the save is
+honoured and its stale cache reported.
 """
 
 from __future__ import annotations
