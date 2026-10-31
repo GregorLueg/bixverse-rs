@@ -47,7 +47,7 @@ bixverse-rs = { path = "crates/bixverse-rs", version = "0.10.0", default-feature
 
 # External
 approx = "0.5.1"
-ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs", branch = "chore-clean-up", default-features = false }
+ann-search-rs = { version = "0.12.0", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"] }
 bonsai-rs = { path = "/Users/gregorlueg/repos/shared/bonsai-rs", features = ["sanity"] }
 cubecl = { version = "0.11.0", features = ["wgpu"] }
