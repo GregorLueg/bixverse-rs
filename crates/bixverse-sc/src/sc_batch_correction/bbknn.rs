@@ -827,38 +827,63 @@ pub fn bbknn(
     )
 }
 
-/// The kNN the R package stores after BBKNN: the first `k` stored entries of
-/// each row of the distance CSR from [`bbknn`].
+/// The `k` nearest neighbours of each cell in the distance CSR from [`bbknn`].
 ///
-/// That CSR is sorted by column index, so these are the `k` lowest-index
-/// neighbours of the batch-balanced set, not the `k` nearest. Kept as the R
-/// wrapper (`rs_bbknn_filtering`) does it so both front ends store the same
-/// kNN. Zero distances are not stored in the CSR, so a cell with duplicates
-/// can come back with a shorter row.
+/// The CSR rows are sorted by column index, so each row is reordered by
+/// distance (ties by index) before the first `k` are taken. Zero distances are
+/// not stored in the CSR, so a cell with duplicates can come back with a
+/// shorter row.
 ///
 /// ### Params
 ///
 /// * `distances` - The distance CSR from [`bbknn`]
-/// * `k` - Entries to keep per row
+/// * `k` - Neighbours to keep per row
 ///
 /// ### Returns
 ///
-/// `(indices, distances)` per cell, each row at most `k` long.
-pub fn bbknn_first_neighbours(
+/// `(indices, distances)` per cell, nearest first, each row at most `k` long.
+pub fn bbknn_nearest_neighbours(
     distances: &CompressedSparseData2<f32>,
     k: usize,
 ) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
     (0..distances.shape.0)
+        .into_par_iter()
         .map(|i| {
             let start = distances.indptr[i] as usize;
-            let end = (distances.indptr[i + 1] as usize).min(start + k);
-            (
-                distances.indices[start..end]
-                    .iter()
-                    .map(|&j| j as usize)
-                    .collect(),
-                distances.data[start..end].to_vec(),
-            )
+            let end = distances.indptr[i + 1] as usize;
+            let mut row: Vec<(usize, f32)> = distances.indices[start..end]
+                .iter()
+                .zip(&distances.data[start..end])
+                .map(|(&j, &d)| (j as usize, d))
+                .collect();
+            row.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            row.truncate(k);
+            row.into_iter().unzip()
         })
         .unzip()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bbknn_nearest_neighbours_sorts_by_distance() {
+        // Row 0 stores its neighbours by column index with descending
+        // distances; row 1 has a tie broken by index.
+        let csr: CompressedSparseData2<f32> = CompressedSparseData2::new_csr(
+            &[3.0, 2.0, 1.0, 0.5, 0.5],
+            &[1, 2, 3, 2, 0],
+            &[0, 3, 5],
+            None,
+            (2, 4),
+        );
+        let (idx, dist) = bbknn_nearest_neighbours(&csr, 2);
+        assert_eq!(idx, vec![vec![3, 2], vec![0, 2]]);
+        assert_eq!(dist, vec![vec![1.0, 2.0], vec![0.5, 0.5]]);
+    }
 }

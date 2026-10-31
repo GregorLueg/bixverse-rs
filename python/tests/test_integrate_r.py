@@ -122,10 +122,12 @@ def _same_bbknn(sc: bv.SingleCells, want: dict) -> None:
     knn, g = sc.cache.knn, sc.cache.connectivities
     assert knn is not None and g is not None
     assert knn.dist_metric == want["knn"]["metric"]
-    np.testing.assert_array_equal(knn.indices, want["knn"]["indices"])
-    np.testing.assert_allclose(
-        knn.distances, want["knn"]["dist"], rtol=RTOL_F32, atol=ATOL_F32
-    )
+    # R 0.8.4 keeps the k lowest-index entries of each batch-balanced row; the
+    # crate now keeps the k nearest. Both are drawn from the same candidates,
+    # so the Python rows are sorted and never further than R's sorted rows.
+    assert np.all(np.diff(knn.distances, axis=1) >= 0)
+    r_sorted = np.sort(np.asarray(want["knn"]["dist"], dtype=np.float64), axis=1)
+    assert np.all(knn.distances <= r_sorted + ATOL_F32)
     wg = want["graph"]
     assert g.shape == (wg["n"], wg["n"])
     np.testing.assert_array_equal(g.indptr, wg["indptr"])
@@ -364,7 +366,6 @@ def test_graph_connectivity_matches_r(ref, sc_corrected):
     ("key", "kwargs"),
     [
         ("summary", {"cell_type_column": "cell_grp", "embd_to_use": "harmony"}),
-        ("summary_bbknn", {"embd_to_use": None}),
     ],
 )
 def test_integration_metrics_match_r(ref, sc_corrected, key, kwargs):

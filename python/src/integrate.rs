@@ -10,7 +10,7 @@
 
 use bixverse_methods::graph::graph_structures::max_symmetrise_to_sparse_graph;
 use bixverse_sc::prelude::ScErrors;
-use bixverse_sc::sc_batch_correction::bbknn::{BbknnParams, bbknn, bbknn_first_neighbours};
+use bixverse_sc::sc_batch_correction::bbknn::{BbknnParams, bbknn, bbknn_nearest_neighbours};
 use bixverse_sc::sc_batch_correction::fast_mnn::{FastMnnParams, fast_mnn_on_store};
 use bixverse_sc::sc_batch_correction::harmony::{HarmonyParams, harmony as harmony_v1};
 use bixverse_sc::sc_batch_correction::harmony_v2::{HarmonyParamsV2, harmony_v2 as harmony2};
@@ -217,7 +217,7 @@ pub fn bbknn_graph<'py>(
         .detach(|| {
             let (distances, connectivities) =
                 bbknn(view, &labels, &params, seed, verbose as usize)?;
-            let (mut idx, mut dist) = bbknn_first_neighbours(&distances, k);
+            let (mut idx, mut dist) = bbknn_nearest_neighbours(&distances, k);
             pad_knn_rows(&mut idx, Some(&mut dist), k);
             Ok::<_, ScErrors>((idx, dist, max_symmetrise_to_sparse_graph(&connectivities)))
         })
