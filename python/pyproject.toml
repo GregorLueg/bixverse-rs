@@ -71,6 +71,13 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# The rules take `object` (the generated classes import this module), so
+# attribute access would not type-check; getattr is deliberate.
+"bixverse/params/_extras.py" = ["B009"]
+# Generated docstrings and checks run long; the generator owns the layout.
+"bixverse/params/_generated.py" = ["E501"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["bixverse"]
 

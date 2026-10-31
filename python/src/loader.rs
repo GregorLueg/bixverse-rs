@@ -183,7 +183,7 @@ impl PyCellLoader {
         genes: Option<PyReadonlyArray1<'_, u32>>,
     ) -> PyResult<Self> {
         if !reader.cell_based {
-            return Err(BvErr(ScDataErrors::ReaderModeMismatch {
+            return Err(BvErr::from(ScDataErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
             })
@@ -361,7 +361,7 @@ impl PyCellLoaderIter {
             Ok(Ok(batch)) => batch_to_py(py, batch).map(Some),
             Ok(Err(e)) => {
                 self.shutdown();
-                Err(BvErr(e).into())
+                Err(BvErr::from(e).into())
             }
             // Disconnected: the feeder finished the epoch and dropped its end.
             Err(_) => {

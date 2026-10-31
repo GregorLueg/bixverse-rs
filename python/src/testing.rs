@@ -56,7 +56,7 @@ pub fn write_synthetic_store<'py>(
     let mut dense = vec![0f32; n_cells * n_genes];
 
     let mut writer =
-        CellGeneSparseWriter::new(path, true, n_cells, n_genes, TARGET_SIZE).map_err(BvErr)?;
+        CellGeneSparseWriter::new(path, true, n_cells, n_genes, TARGET_SIZE).map_err(BvErr::from)?;
 
     for cell in 0..n_cells {
         let mut counts: Vec<u32> = Vec::new();
@@ -78,10 +78,10 @@ pub fn write_synthetic_store<'py>(
         }
 
         let chunk = CsrCellChunk::from_data(&counts, &cols, cell, TARGET_SIZE, true);
-        writer.write_cell_chunk(chunk).map_err(BvErr)?;
+        writer.write_cell_chunk(chunk).map_err(BvErr::from)?;
     }
 
-    writer.finalise().map_err(BvErr)?;
+    writer.finalise().map_err(BvErr::from)?;
 
     Ok(dense
         .into_pyarray(py)

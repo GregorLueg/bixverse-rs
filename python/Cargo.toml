@@ -17,14 +17,23 @@ name = "_bixverse"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Only the single cell data layer: no extendr, so no libR on the link line.
+# The single cell crates, no extendr, so no libR on the link line. Python
+# extras cannot switch Rust features, so the wheel carries every sc feature.
+bixverse-sc = { path = "../crates/bixverse-sc", features = ["multi-modal", "bonsai"] }
 # `hdf5-static` compiles the bundled HDF5 C library instead of linking a
-# system one, so the wheel loads without an HDF5 install.
-bixverse-sc-data = { path = "../crates/bixverse-sc-data", default-features = false, features = ["hdf5-static"] }
+# system one, so the wheel loads without an HDF5 install. `parquet` hands the
+# h5ad / 10x obs and var to DuckDB.
+bixverse-sc-data = { path = "../crates/bixverse-sc-data", features = ["hdf5-static", "parquet"] }
 crossbeam-channel = "0.5"
 numpy = "0.29"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+pythonize = "0.29"
 rand = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+
+# Accelerate GEMM on macOS, as the R package builds it.
+[target.'cfg(target_os = "macos")'.dependencies]
+bixverse-core = { path = "../crates/bixverse-core", features = ["accelerate"] }
 
 [profile.release]
 lto = "thin"
