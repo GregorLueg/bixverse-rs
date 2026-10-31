@@ -45,11 +45,10 @@ from bixverse.params import (
 def _knn_dict(
     p: BtMetacellsParams | SeacellsParams | SupercellParams,
 ) -> dict[str, object]:
-    """The dict Rust reads, `extract_knn` on `"nndescent"` mapped to the
-    crate's `"nndescent_graph"` method as `find_neighbours` does."""
+    """The dict Rust reads, `extract_knn` dropped as `find_neighbours` does:
+    `"nndescent"` is graph-only in the crate."""
     d = to_rust(p)
-    if d.pop("extract_knn") and d["knn_method"] == "nndescent":
-        d["knn_method"] = "nndescent_graph"
+    d.pop("extract_knn", None)
     return d
 
 

@@ -996,9 +996,9 @@ pub fn generate_knn_cross_with_dist(
                 query_hnsw_index(query, &index, k, knn_params.ef_search, true, verbosity)
             })?
         }
-        // A graph-only build cannot answer a cross-query, so the graph method
-        // queries an index too.
-        KnnSearch::NNDescent | KnnSearch::NNDescentGraph => {
+        // A graph-only build cannot answer a cross-query, so NNDescent
+        // builds and searches the index here.
+        KnnSearch::NNDescent => {
             let index = timed("Generated NNDescent index", verbose, || {
                 build_nndescent_index(
                     reference,

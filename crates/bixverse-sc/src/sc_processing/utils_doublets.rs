@@ -798,18 +798,7 @@ pub fn dispatch_knn(
             false,
             verbose,
         ),
-        KnnSearch::NNDescent => generate_knn_nndescent(
-            embd,
-            &knn_params.ann_dist,
-            k,
-            knn_params.diversify_prob,
-            knn_params.ef_budget,
-            knn_params.delta,
-            seed,
-            false,
-            verbose,
-        ),
-        KnnSearch::NNDescentGraph => generate_knn_nndescent_graph(
+        KnnSearch::NNDescent => generate_knn_nndescent_graph(
             embd,
             &knn_params.ann_dist,
             k,

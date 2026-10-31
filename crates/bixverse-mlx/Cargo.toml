@@ -33,6 +33,7 @@ bixverse-sc-data = { workspace = true, features = ["analysis"] }
 faer.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -40,6 +41,7 @@ thiserror.workspace = true
 bixverse-gpu.workspace = true
 bixverse-sc-gpu.workspace = true
 cubecl.workspace = true
+rustc-hash.workspace = true
 
 ###########
 # Benches #

@@ -381,11 +381,11 @@ impl FromRList for ScrubletParamsGpu {
     /// `knn_backend` is the only thing that can pick the
     /// [`ScrubletKnnBackend`] arm. Both backends share `k`, `knn_method`,
     /// `ann_dist`, `n_list` and `n_probe`, and `"exhaustive"`, `"ivf"` and
-    /// `"nndescent_graph"` are legal `knn_method` values on either side, so the
+    /// `"nndescent"` are legal `knn_method` values on either side, so the
     /// method string carries no information about which index was meant.
-    /// Absent, the GPU arm is
-    /// taken. Anything other than `"gpu"` or `"cpu"` is an error rather than a
-    /// silent fallback: a typo should not quietly change which index runs.
+    /// Absent, the GPU arm is taken. Anything other than `"gpu"` or `"cpu"`
+    /// is an error rather than a silent fallback: a typo should not quietly
+    /// change which index runs.
     ///
     /// `n_bins_hist` is read first and `n_bins_histogram` second, so a list
     /// built by `bixverse::params_scrublet()` lands on the right value too.

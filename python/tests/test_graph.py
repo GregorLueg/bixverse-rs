@@ -73,8 +73,8 @@ def test_generate_knn_truncates_dims(sc):
     assert knn.indices[:, 0].tolist() == d.argmin(axis=1).tolist()
 
 
-def test_extract_knn_runs_the_descent_graph(sc):
-    p = KnnParams(knn_method="nndescent", extract_knn=True, k=10)
+def test_nndescent_runs_the_descent_graph(sc):
+    p = KnnParams(knn_method="nndescent", k=10)
     knn = graph.generate_knn(sc, neighbours_params=p)
     exact = graph.generate_knn(sc, neighbours_params=KnnParams(k=10))
     assert knn is not None

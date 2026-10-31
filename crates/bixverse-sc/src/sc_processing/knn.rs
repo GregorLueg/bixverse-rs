@@ -5,7 +5,7 @@ use ann_search_rs::prelude::{KNN_GRAPH_EMPTY, KnnGraph, NNDescentKnnParams};
 use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::*;
-use faer::{MatRef, RowRef};
+use faer::{Mat, MatRef, RowRef};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Deserializer, de::Error as _};
@@ -41,13 +41,11 @@ pub enum KnnSearch {
     Hnsw,
     /// Annoy-based
     Annoy,
-    /// NNDescent, beam searched over its own index
+    /// NNDescent. A self-kNN is the descent graph itself, built without an
+    /// index and handed back without a search, short rows topped up exactly
+    /// (see [`top_up_short_rows`]). A cross-query builds the NNDescent index
+    /// and beam searches it.
     NNDescent,
-    /// The NNDescent kNN graph itself, built without an index and handed back
-    /// without a search. Self-kNN only: the cross-query paths fall back to
-    /// [`KnnSearch::NNDescent`]. Rows can come back shorter than `k` where the
-    /// descent never filled them.
-    NNDescentGraph,
     /// IVF
     Ivf,
     /// Exhaustive
@@ -62,14 +60,14 @@ pub enum KnnSearch {
 ///
 /// ### Returns
 ///
-/// Option of the HvgMethod (some not yet implemented)
+/// The matching [`KnnSearch`], or `None` if the string is unrecognised.
+/// `"cagra"` is GPU / MLX only and returns `None` here.
 pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
     match s.to_lowercase().as_str() {
         "kmknn" => Some(KnnSearch::KmKnn),
         "annoy" => Some(KnnSearch::Annoy),
         "hnsw" => Some(KnnSearch::Hnsw),
         "nndescent" => Some(KnnSearch::NNDescent),
-        "nndescent_graph" => Some(KnnSearch::NNDescentGraph),
         "exhaustive" => Some(KnnSearch::Exhaustive),
         "ivf" => Some(KnnSearch::Ivf),
         _ => None,
@@ -91,7 +89,7 @@ pub fn de_knn_method<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error
         Some(_) => Ok(s),
         None => Err(D::Error::custom(format!(
             "knn_method must be one of 'kmknn', 'annoy', 'hnsw', 'nndescent', \
-             'nndescent_graph', 'exhaustive' or 'ivf', got '{s}'"
+             'exhaustive' or 'ivf' ('cagra' is GPU / MLX only), got '{s}'"
         ))),
     }
 }
@@ -130,8 +128,7 @@ pub fn de_ann_dist<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[serde(default)]
 pub struct KnnParams {
     ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`, `"ivf"`,
-    /// `"kmknn"`, `"exhaustive"`, `"nndescent"` or `"nndescent_graph"` are
-    /// supported for now.
+    /// `"kmknn"`, `"exhaustive"` or `"nndescent"` are supported for now.
     #[serde(deserialize_with = "de_knn_method")]
     pub knn_method: String,
     /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
@@ -147,7 +144,7 @@ pub struct KnnParams {
     pub search_budget: Option<usize>,
     /// NNDescent: diversification probability after generation of the graph.
     pub diversify_prob: f32,
-    /// NNDescent and NNDescent graph: convergence criterium. If less than these
+    /// NNDescent: convergence criterium. If less than these
     /// percentage of neighbours have been udpated, the algorithm counts as
     /// converged.
     pub delta: f32,
@@ -832,8 +829,9 @@ pub fn generate_knn_kmknn(
 ///
 /// ### Returns
 ///
-/// The k-nearest neighbours, self excluded. Rows can be shorter than
-/// `no_neighbours` where the descent never filled them.
+/// The k-nearest neighbours, self excluded. Rows the descent left short are
+/// topped up with [`top_up_short_rows`], so every row holds `no_neighbours`
+/// (fewer only when there are not that many other cells).
 pub fn generate_knn_nndescent_graph(
     mat: MatRef<f32>,
     dist_metric: &str,
@@ -852,7 +850,10 @@ pub fn generate_knn_nndescent_graph(
         verbosity_from_flag(verbose),
     )?;
 
-    Ok(knn_graph_to_rows(graph).0)
+    let mut indices = knn_graph_to_rows(graph).0;
+    top_up_short_rows(mat, &mut indices, None, no_neighbours, dist_metric, verbose)?;
+
+    Ok(indices)
 }
 
 ///////////////////
@@ -982,41 +983,6 @@ pub fn generate_knn_with_dist(
             (indices, distances)
         }
         KnnSearch::NNDescent => {
-            let index = timed("Generated NNDescent index", verbose, || {
-                build_nndescent_index(
-                    embd,
-                    &knn_params.ann_dist,
-                    knn_params.delta,
-                    knn_params.diversify_prob,
-                    None,
-                    None,
-                    None,
-                    None,
-                    seed,
-                    verbosity,
-                )
-            })?;
-
-            if knn_params.ef_budget.is_none() && k_plus_one > 150 {
-                println!(
-                    "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
-                    k_plus_one
-                )
-            }
-
-            let (indices, distances) = timed("Queried NNDescent index", verbose, || {
-                query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbosity)
-            })?;
-            if validate_index && verbose {
-                let recall = index.validate_index(k_plus_one, seed, None)?;
-                println!(
-                    "Recall of approximate nearest neighbours search in random subset: {:.2}",
-                    recall
-                );
-            }
-            (indices, distances)
-        }
-        KnnSearch::NNDescentGraph => {
             // The self-edge is requested so these rows go through the same
             // `remove_self` as every query path.
             let params = NNDescentKnnParams::new(
@@ -1081,7 +1047,17 @@ pub fn generate_knn_with_dist(
         }
     };
 
-    let (indices, mut distances) = remove_self(indices, distances);
+    let (mut indices, mut distances) = remove_self(indices, distances);
+    if knn_method == KnnSearch::NNDescent {
+        top_up_short_rows(
+            embd,
+            &mut indices,
+            distances.as_deref_mut(),
+            knn_params.k,
+            &knn_params.ann_dist,
+            verbose,
+        )?;
+    }
     if let Some(dists) = distances.as_mut() {
         to_true_distances(dists, &knn_params.ann_dist);
     }
@@ -1131,11 +1107,79 @@ pub fn knn_or_generate(
     }
 }
 
+/// Fill the rows a graph-only NN-descent build left short of `k`
+///
+/// The descent can leave a row short where it never filled it. Only those
+/// rows are re-queried, exactly, against the whole embedding, so the cost
+/// scales with the number of short rows rather than with `n`. A filled row is
+/// replaced wholesale by its exact neighbours.
+///
+/// ### Params
+///
+/// * `embd` - The embedding the graph was built on, cells x features
+/// * `indices` - Neighbour rows, self excluded, replaced in place where short
+/// * `distances` - Optional distances alongside, in the index metric (squared
+///   for Euclidean, so before [`to_true_distances`])
+/// * `k` - Target row length
+/// * `ann_dist` - Distance metric name, as handed to the graph build
+/// * `verbose` - Print how many rows were filled
+///
+/// ### Returns
+///
+/// The number of rows that were filled.
+pub fn top_up_short_rows(
+    embd: MatRef<f32>,
+    indices: &mut [Vec<usize>],
+    mut distances: Option<&mut [Vec<f32>]>,
+    k: usize,
+    ann_dist: &str,
+    verbose: bool,
+) -> Result<usize, ScErrors> {
+    let short: Vec<usize> = indices
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.len() < k)
+        .map(|(i, _)| i)
+        .collect();
+    if short.is_empty() {
+        return Ok(0);
+    }
+
+    let quiet = verbosity_from_flag(false);
+    let query = Mat::<f32>::from_fn(short.len(), embd.ncols(), |r, c| embd[(short[r], c)]);
+    let index = build_exhaustive_index(embd, ann_dist, quiet);
+    let (rows, dists) = query_exhaustive_index(query.as_ref(), &index, k + 1, true, quiet)?;
+    let dists = dists.expect("return_dist is set");
+
+    for ((&i, row), dist) in short.iter().zip(rows).zip(dists) {
+        let (row, dist): (Vec<usize>, Vec<f32>) = row
+            .into_iter()
+            .zip(dist)
+            .filter(|&(j, _)| j != i)
+            .take(k)
+            .unzip();
+        indices[i] = row;
+        if let Some(d) = distances.as_mut() {
+            d[i] = dist;
+        }
+    }
+
+    if verbose {
+        println!(
+            "Filled {} kNN rows the NN-descent graph left short of k = {} with an exact search.",
+            short.len(),
+            k
+        );
+    }
+
+    Ok(short.len())
+}
+
 /// Pad the rows a search left short of `k` neighbours
 ///
 /// A short row repeats its last neighbour (and distance); an empty row
-/// points at itself at distance 0. Only `"nndescent_graph"` leaves rows
-/// short; every index search fills them.
+/// points at itself at distance 0. The searches here only leave rows short
+/// when there are fewer than `k` other cells.
 ///
 /// ### Params
 ///
@@ -1443,51 +1487,93 @@ mod tests {
         })
     }
 
-    /// `"nndescent_graph"` hands back the graph the descent converged to rather
-    /// than beam searching an index, so it trades a little recall for skipping
-    /// the query pass. It still has to agree with the beam search on most
-    /// neighbours, never return self, and never hand back more than `k`.
+    /// `"nndescent"` hands back the graph the descent converged to rather than
+    /// beam searching an index. It still has to agree with the exact search on
+    /// most neighbours, never return self, and fill every row to `k`.
     #[test]
-    fn test_nndescent_graph_agrees_with_the_query_path() {
+    fn test_nndescent_graph_agrees_with_exhaustive() {
         let (n, k) = (800usize, 10usize);
         let data = clustered_data(n, 16, 8);
 
-        let base = KnnParams {
+        let graph = KnnParams {
             knn_method: "nndescent".to_string(),
             ann_dist: "euclidean".to_string(),
             k,
             ..Default::default()
         };
-        let extract = KnnParams {
-            knn_method: "nndescent_graph".to_string(),
-            ..base.clone()
+        let exact = KnnParams {
+            knn_method: "exhaustive".to_string(),
+            ..graph.clone()
         };
 
-        let (queried, _) = generate_knn_with_dist(data.as_ref(), &base, false, false, 42, false)
-            .expect("the beam search path must succeed");
-        let (extracted, dists) =
-            generate_knn_with_dist(data.as_ref(), &extract, true, false, 42, false)
-                .expect("the graph path must succeed");
+        let (truth, _) = generate_knn_with_dist(data.as_ref(), &exact, false, false, 42, false)
+            .expect("the exhaustive path must succeed");
+        let (got, dists) = generate_knn_with_dist(data.as_ref(), &graph, true, false, 42, false)
+            .expect("the graph path must succeed");
 
-        assert_eq!(extracted.len(), n);
+        assert_eq!(got.len(), n);
         let dists = dists.expect("distances were requested");
 
         let mut overlap = 0usize;
-        for (i, (got, want)) in extracted.iter().zip(queried.iter()).enumerate() {
-            assert!(got.len() <= k, "row {} returned {} > {}", i, got.len(), k);
-            assert!(!got.contains(&i), "row {} contains itself", i);
-            assert_eq!(got.len(), dists[i].len(), "row {} shape mismatch", i);
+        for (i, (row, want)) in got.iter().zip(truth.iter()).enumerate() {
+            assert_eq!(row.len(), k, "row {} holds {} != {}", i, row.len(), k);
+            assert!(!row.contains(&i), "row {} contains itself", i);
+            assert_eq!(row.len(), dists[i].len(), "row {} shape mismatch", i);
 
-            let truth: FxHashSet<usize> = want.iter().copied().collect();
-            overlap += got.iter().filter(|x| truth.contains(x)).count();
+            let want: FxHashSet<usize> = want.iter().copied().collect();
+            overlap += row.iter().filter(|x| want.contains(x)).count();
         }
 
         let recall = overlap as f32 / (n * k) as f32;
         assert!(
             recall > 0.9,
-            "graph recall was {:.4} against the beam search",
+            "graph recall was {:.4} against exhaustive",
             recall
         );
+    }
+
+    /// Short rows, empty ones included, come back as the exact neighbours with
+    /// their distances; full rows are left untouched.
+    #[test]
+    fn test_top_up_short_rows_fills_exactly() {
+        let (n, k) = (300usize, 6usize);
+        let data = clustered_data(n, 8, 4);
+        // raw metric distances, as the graph path hands them to the top-up
+        let index = build_exhaustive_index(data.as_ref(), "euclidean", verbosity_from_flag(false));
+        let (raw_idx, raw_dist) =
+            query_exhaustive_self(&index, k + 1, true, verbosity_from_flag(false))
+                .expect("exhaustive self-query must succeed");
+        let raw_dist = raw_dist.expect("distances were requested");
+        let truth: Vec<Vec<usize>> = raw_idx.iter().map(|r| r[1..].to_vec()).collect();
+        let truth_dist: Vec<Vec<f32>> = raw_dist.iter().map(|r| r[1..].to_vec()).collect();
+
+        let mut indices = truth.clone();
+        let mut dists = truth_dist.clone();
+        indices[3].truncate(2);
+        dists[3].truncate(2);
+        indices[7].clear();
+        dists[7].clear();
+        // a full row with a wrong neighbour must not be touched
+        indices[9][0] = 0;
+
+        let filled = top_up_short_rows(
+            data.as_ref(),
+            &mut indices,
+            Some(&mut dists),
+            k,
+            "euclidean",
+            false,
+        )
+        .expect("the top-up must succeed");
+
+        assert_eq!(filled, 2);
+        for i in [3, 7] {
+            assert_eq!(indices[i], truth[i], "row {} indices", i);
+            for (got, want) in dists[i].iter().zip(&truth_dist[i]) {
+                assert_relative_eq!(got, want, epsilon = 1e-5);
+            }
+        }
+        assert_eq!(indices[9][0], 0);
     }
 
     /// The indices-only graph path (no self-edge requested upstream) and the
@@ -1498,7 +1584,7 @@ mod tests {
         let (n, k) = (500usize, 8usize);
         let data = clustered_data(n, 12, 5);
         let params = KnnParams {
-            knn_method: "nndescent_graph".to_string(),
+            knn_method: "nndescent".to_string(),
             ann_dist: "euclidean".to_string(),
             k,
             ..Default::default()

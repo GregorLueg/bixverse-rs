@@ -6,6 +6,7 @@ pub mod cellsweep;
 pub mod doublet_detection;
 pub mod hvg;
 pub mod knn;
+pub mod knn_device;
 pub mod magic;
 pub mod metrics;
 pub mod pca;

@@ -53,11 +53,10 @@ logger = logging.getLogger(__name__)
 
 @beartype
 def _knn_params(params: KnnGpuDefaults) -> dict[str, object]:
-    """The dict Rust reads the GPU kNN from: `extract_knn` on `"nndescent"`
-    is the crate's `"nndescent_graph"` method, as on the CPU side."""
+    """The dict Rust reads the GPU kNN from, `extract_knn` dropped as on the
+    CPU side: `"nndescent"` is graph-only in the crate."""
     d = to_rust(params)
-    if d.pop("extract_knn") and d["knn_method"] == "nndescent":
-        d["knn_method"] = "nndescent_graph"
+    d.pop("extract_knn", None)
     return d
 
 
@@ -92,8 +91,8 @@ def generate_knn(
     `generate_gpu_knn_sc`.
 
     Methods: `"exhaustive"` (exact, the default), `"ivf"` and `"nndescent"`
-    (a CAGRA graph, beam searched, or with `extract_knn=True` handed back as
-    the descent left it). Euclidean distances are true L2.
+    (the descent graph, handed back without a search). Euclidean distances
+    are true L2.
 
     Args:
         sc: The experiment.
