@@ -822,8 +822,9 @@ fn write_i32(group: &Group, name: &str, xs: &[u32]) -> Result<(), ScDataErrors> 
     let data = xs
         .iter()
         .map(|&x| {
-            i32::try_from(x)
-                .map_err(|_| ScDataErrors::InvalidArgument(format!("{name} value {x} exceeds int32")))
+            i32::try_from(x).map_err(|_| {
+                ScDataErrors::InvalidArgument(format!("{name} value {x} exceeds int32"))
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     group.new_dataset_builder().with_data(&data).create(name)?;
@@ -922,13 +923,8 @@ mod tests {
     #[test]
     fn test_write_tenx_h5_round_trips_layout() {
         // 2 cells x 3 features
-        let counts = CompressedSparseData2::<u32>::new_csr(
-            &[1, 4, 2],
-            &[0, 2, 1],
-            &[0, 2, 3],
-            None,
-            (2, 3),
-        );
+        let counts =
+            CompressedSparseData2::<u32>::new_csr(&[1, 4, 2], &[0, 2, 1], &[0, 2, 3], None, (2, 3));
         let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let (ids, names) = (s(&["g1", "g2", "g3"]), s(&["A", "B", "C"]));
         let features = TenxFeatures {
