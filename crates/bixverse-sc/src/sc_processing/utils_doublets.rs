@@ -532,6 +532,16 @@ pub fn pca_observed<S: SingleCellReading>(
 ) -> Result<DoubletPcaRes, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
+    let max_pcs = gene_indices.len().min(cell_indices.len());
+    if no_pcs == 0 || no_pcs > max_pcs {
+        return Err(CoreErrors::InvalidArgument(format!(
+            "no_pcs ({no_pcs}) must be in 1..={max_pcs} (min of {} genes and {} cells)",
+            gene_indices.len(),
+            cell_indices.len()
+        ))
+        .into());
+    }
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_indices.len();
