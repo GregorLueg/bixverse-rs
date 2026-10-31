@@ -264,3 +264,23 @@ def synthetic_dialogue_data(params: dict[str, object], seed: int) -> dict[str, A
 def synthetic_cellsweep_data(
     params: dict[str, object], seed: int
 ) -> dict[str, Any]: ...
+
+# QC
+
+def mad_outlier(
+    x: np.ndarray, threshold: float, direction: str, r_standard: bool
+) -> tuple[np.ndarray, float]: ...
+def top_genes_perc(
+    f_path_cell: str,
+    top_n_vals: list[int],
+    cell_indices: np.ndarray,
+    streaming: bool,
+    verbose: bool = False,
+) -> list[np.ndarray]: ...
+def gene_set_perc(
+    f_path_cell: str,
+    gene_sets: list[np.ndarray],
+    cell_indices: np.ndarray,
+    streaming: bool,
+    verbose: bool = False,
+) -> list[np.ndarray]: ...

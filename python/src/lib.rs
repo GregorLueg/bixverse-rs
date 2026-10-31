@@ -12,6 +12,7 @@ mod error;
 mod h5ad_write;
 mod io;
 mod loader;
+mod qc;
 mod reader;
 mod synthetic;
 mod testing;
@@ -72,6 +73,9 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(synthetic::synthetic_adt_data, m)?,
         wrap_pyfunction!(synthetic::synthetic_dialogue_data, m)?,
         wrap_pyfunction!(synthetic::synthetic_cellsweep_data, m)?,
+        wrap_pyfunction!(qc::mad_outlier, m)?,
+        wrap_pyfunction!(qc::top_genes_perc, m)?,
+        wrap_pyfunction!(qc::gene_set_perc, m)?,
     ] {
         m.add_function(f)?;
     }
