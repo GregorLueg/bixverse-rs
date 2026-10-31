@@ -17,6 +17,17 @@ Requires `bixverse-sc-data` 0.10.0.
   202 s for torch on CPU and 260 s for scvi-tools on CPU, with the same
   held-out ELBO and integration metrics. On a GPU MLX (35 s) and torch on MPS
   (82 s) stay ahead.
+- Vignettes: the 22 single cell vignettes of the R package as Python
+  notebooks, from the PBMC3k walkthrough and the design notes to batch
+  correction, meta cells, trajectories, DE and DA. Each is a jupytext
+  `docs/vignettes/<name>.py` (the source) with its executed `.ipynb` next to
+  it, rendered on the docs site. `dev/vignettes.py execute` re-runs them,
+  `dev/vignettes.py check` flags a notebook that no longer matches its source.
+- `bixverse.io.get_cell_ranger_params()` builds the mtx parameters for a Cell
+  Ranger output directory, as R's `get_cell_ranger_params()`.
+- `download_kang_pbmc()` and `download_thymus_ageing()` return h5ad files
+  Python can load (R's are qs2 `SingleCellExperiment`s), and
+  `download_pbmc_1k_5p()` fetches from the bixverse-data release first.
 
 ## 0.2.1
 

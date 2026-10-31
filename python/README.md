@@ -100,6 +100,20 @@ machine precision. `"both"` returns the two together over one sparsity pattern.
 - The store is memory-mapped and the reader hints random access, which is right
   for a shuffled loader and wrong for a sequential full scan.
 
+## Vignettes
+
+The single cell vignettes of the R package, ported to Python notebooks, live
+in `docs/vignettes/` and on the [docs site](https://gregorlueg.github.io/bixverse-rs/).
+Start with "Thinking the bixverse way" and the PBMC3k walkthrough. Each
+vignette is a jupytext `.py` with its executed `.ipynb` next to it; the data
+sets download themselves on first use. To re-run them:
+
+```bash
+uv sync --group dev --group vignettes
+uv run python dev/vignettes.py execute                   # all of them
+uv run python dev/vignettes.py execute pbmc_single_cell  # or by name
+```
+
 ## Development
 
 ```bash
