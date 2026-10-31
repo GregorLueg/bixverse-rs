@@ -287,8 +287,8 @@ def test_downloads_hit_the_cache(tmp_path, monkeypatch):
         bv.io.download_dialogue_uc: "dialogue_uc.h5ad",
         bv.io.download_marrow_cd34: "marrow_sample_scseq_counts.h5ad",
         bv.io.download_pbmc_totalseq_data: "10k_Human_PBMC_TotalSeqB.h5",
-        bv.io.download_kang_pbmc: "kang18_8vs8.qs2",
-        bv.io.download_thymus_ageing: "thymus_ageing_droplet.qs2",
+        bv.io.download_kang_pbmc: "kang18_8vs8.h5ad",
+        bv.io.download_thymus_ageing: "thymus_ageing_droplet.h5ad",
     }
     for fn, rel in cached.items():
         target = tmp_path / rel

@@ -5,8 +5,8 @@ the Zenodo copy second. Each helper caches into `cache_dir` and returns the
 path straight away when the extracted result is already there, so only the
 first call touches the network.
 
-`download_kang_pbmc` and `download_thymus_ageing` fetch qs2 serialised
-`SingleCellExperiment` objects, which only R can read.
+`download_kang_pbmc` and `download_thymus_ageing` fetch h5ad conversions of
+the qs2 `SingleCellExperiment`s R uses; they live in the GitHub release only.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def _fetch_tar(
 
 @beartype
 def _fetch_gz(
-    file: str, zenodo_record: str, cache_dir: Path | str | None, quiet: bool
+    file: str, zenodo_record: str | None, cache_dir: Path | str | None, quiet: bool
 ) -> Path:
     """Download and gunzip a file unless the result is cached."""
     root = _cache(cache_dir)
@@ -246,10 +246,11 @@ def download_pbmc_batches(
 def download_pbmc_1k_5p(
     cache_dir: Path | str | None = None, *, quiet: bool = False
 ) -> Path:
-    """The unfiltered 10x PBMC 1k 5' matrix, straight from the 10x CDN.
+    """The unfiltered 10x PBMC 1k 5' matrix.
 
     Every barcode is in there, empty droplets included, which is what
-    CellSweep needs. The file also carries Antibody Capture features.
+    CellSweep needs. The file also carries Antibody Capture features. The
+    GitHub release copy comes first; the 10x CDN refuses Python's downloader.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
@@ -260,7 +261,7 @@ def download_pbmc_1k_5p(
     """
     file = "sc5p_v2_hs_PBMC_1k_raw_feature_bc_matrix.h5"
     url = f"https://cf.10xgenomics.com/samples/cell-vdj/4.0.0/sc5p_v2_hs_PBMC_1k/{file}"
-    return _fetch_file(file, [url], cache_dir, quiet)
+    return _fetch_file(file, [*data_urls(file), url], cache_dir, quiet)
 
 
 @beartype
@@ -342,17 +343,17 @@ def download_kang_pbmc(
 ) -> Path:
     """The Kang et al. IFN-beta stimulated PBMCs (Nat Biotechnol, 2018).
 
-    A qs2 serialised `SingleCellExperiment`, readable from R only.
+    The raw counts with the cell and gene annotations of R's qs2
+    `SingleCellExperiment`, as h5ad.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
         quiet: Suppress progress logging.
 
     Returns:
-        The qs2 file.
+        The h5ad file.
     """
-    file = "kang18_8vs8.qs2"
-    return _fetch_file(file, data_urls(file), cache_dir, quiet)
+    return _fetch_gz("kang18_8vs8.h5ad.gz", None, cache_dir, quiet)
 
 
 @beartype
@@ -361,14 +362,14 @@ def download_thymus_ageing(
 ) -> Path:
     """The Baran-Gale et al. ageing thymus data (Development, 2020).
 
-    A qs2 serialised `SingleCellExperiment`, readable from R only.
+    The raw counts with the cell and gene annotations of R's qs2
+    `SingleCellExperiment`, as h5ad.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
         quiet: Suppress progress logging.
 
     Returns:
-        The qs2 file.
+        The h5ad file.
     """
-    file = "thymus_ageing_droplet.qs2"
-    return _fetch_file(file, data_urls(file), cache_dir, quiet)
+    return _fetch_gz("thymus_ageing_droplet.h5ad.gz", None, cache_dir, quiet)
