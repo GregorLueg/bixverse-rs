@@ -602,3 +602,57 @@ def meld(
     seed: int = 42,
     verbose: bool = False,
 ) -> dict[str, Any]: ...
+def sc_type(
+    f_path_gene: str,
+    cell_indices: np.ndarray,
+    markers: list[dict[str, Any]],
+    sensitivity: bool,
+    weight_floor: float | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def sc_type_cluster_assignment(
+    cell_types: list[str], scores: np.ndarray, cluster_labels: np.ndarray
+) -> dict[str, Any]: ...
+def sc_type_assign_cells(
+    cell_types: list[str],
+    scores: np.ndarray,
+    params: dict[str, object],
+    graph: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    cluster_labels: np.ndarray | None = None,
+) -> dict[str, Any]: ...
+def build_symphony_ref(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    hvg_indices: np.ndarray,
+    batch_labels: list[np.ndarray],
+    pca_params: dict[str, object],
+    no_pcs: int,
+    harmony_params: dict[str, object],
+    harmony_version: str,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def symphony_map_query(
+    f_path_query: str,
+    cell_indices: np.ndarray,
+    gene_means: np.ndarray,
+    gene_sds: np.ndarray,
+    loadings: np.ndarray,
+    centroids: np.ndarray,
+    nr: np.ndarray,
+    c_cache: np.ndarray,
+    gene_map: np.ndarray,
+    batch_labels: list[np.ndarray],
+    params: dict[str, object],
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def transfer_labels_symphony(
+    reference_z_corr: np.ndarray,
+    query_z_corr: np.ndarray,
+    reference_labels: np.ndarray,
+    n_labels: int,
+    knn_params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]: ...

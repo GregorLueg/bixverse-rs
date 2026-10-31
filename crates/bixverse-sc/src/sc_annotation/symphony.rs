@@ -12,6 +12,7 @@ use faer::{Accum, Mat, MatMut, MatRef, Par};
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -22,7 +23,9 @@ use crate::sc_batch_correction::harmony::{
 };
 use crate::sc_batch_correction::harmony_core::to_row_major;
 use crate::sc_batch_correction::harmony_v2::{HarmonyParamsV2, harmony_v2_with_state};
-use crate::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_sparse_stats};
+use crate::sc_processing::pca::{
+    SingleCellPcaParams, clr_offsets_on_store, pca_on_sc_sparse_stats,
+};
 use bixverse_core::utils::gemm::gemm;
 
 ////////////
@@ -51,6 +54,11 @@ pub enum HarmonyBackend {
 }
 
 /// Symphony query-mapping parameters.
+///
+/// Deserialises from the keys of the R `params_symphony_map()` list; missing
+/// keys take the defaults.
+#[derive(Deserialize)]
+#[serde(default)]
 pub struct SymphonyMapParams {
     /// Soft-clustering fuzziness for query -> reference centroid assignment.
     /// Smaller means closer to hard clustering. Symphony R default is 0.1.
@@ -637,6 +645,59 @@ pub fn build_symphony_reference<S: SingleCellReading>(
         nr,
         c,
     })
+}
+
+/// Build a Symphony reference from an on-disk experiment.
+///
+/// Loads the CLR offsets from the cell-major store when `pca_params.clr`
+/// asks for the `PFlogPF` transformation, then runs
+/// [build_symphony_reference] on the gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file.
+/// * `f_path_cell` - Path to the `counts_cells.bin` file, read only for the
+///   CLR offsets.
+/// * `cell_indices` - Cell indices to include in the reference.
+/// * `hvg_indices` - HVG gene indices, already selected upstream.
+/// * `batch_labels` - One label slice per batch variable, see
+///   [build_symphony_reference].
+/// * `pca_params` - PCA parameters.
+/// * `no_pcs` - Number of principal components.
+/// * `harmony_backend` - Which Harmony variant and its parameters.
+/// * `seed` - Seed.
+/// * `verbose` - Verbosity (0 silent, 1 normal, 2 detailed).
+///
+/// ### Returns
+///
+/// The [SymphonyReference].
+#[allow(clippy::too_many_arguments)]
+pub fn build_symphony_reference_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    hvg_indices: &[usize],
+    batch_labels: &[Vec<usize>],
+    pca_params: &SingleCellPcaParams,
+    no_pcs: usize,
+    harmony_backend: HarmonyBackend,
+    seed: usize,
+    verbose: usize,
+) -> Result<SymphonyReference, ScErrors> {
+    let offsets = clr_offsets_on_store(f_path_cell, cell_indices, pca_params.clr, verbose)?;
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    build_symphony_reference(
+        &reader,
+        cell_indices,
+        hvg_indices,
+        batch_labels,
+        pca_params,
+        no_pcs,
+        harmony_backend,
+        offsets.as_deref(),
+        seed,
+        verbose,
+    )
 }
 
 ///////////////////

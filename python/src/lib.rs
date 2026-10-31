@@ -7,6 +7,7 @@
 
 use pyo3::prelude::*;
 
+mod annotate;
 mod batch;
 mod de;
 mod doublets;
@@ -122,6 +123,12 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(de::milor_nhoods, m)?,
         wrap_pyfunction!(de::spatial_fdr, m)?,
         wrap_pyfunction!(de::meld, m)?,
+        wrap_pyfunction!(annotate::sc_type, m)?,
+        wrap_pyfunction!(annotate::sc_type_cluster_assignment, m)?,
+        wrap_pyfunction!(annotate::sc_type_assign_cells, m)?,
+        wrap_pyfunction!(annotate::build_symphony_ref, m)?,
+        wrap_pyfunction!(annotate::symphony_map_query, m)?,
+        wrap_pyfunction!(annotate::transfer_labels_symphony, m)?,
     ] {
         m.add_function(f)?;
     }

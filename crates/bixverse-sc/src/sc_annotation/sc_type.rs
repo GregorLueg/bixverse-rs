@@ -10,6 +10,7 @@
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -57,12 +58,18 @@ const MIN_SD: f64 = 1e-8;
 ////////////////
 
 /// Struture to hold the information on the cell type markers
+///
+/// Deserialises from one entry of R's `prepare_cell_markers()` list; missing
+/// index vectors are empty, a missing `cell_type` is an error.
+#[derive(Deserialize)]
 pub struct CellTypeMarkers {
     /// The represented cell type
     pub cell_type: String,
     /// The positive marker indices
+    #[serde(default)]
     pub positive_indices: Vec<usize>,
     /// The negative marker indices
+    #[serde(default)]
     pub negative_indices: Vec<usize>,
 }
 
@@ -120,8 +127,30 @@ pub fn parse_score_calibration(s: &str) -> Option<ScoreCalibration> {
     }
 }
 
+/// Deserialise a [ScoreCalibration] through [parse_score_calibration]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"none"` or `"column_z"`
+///
+/// ### Returns
+///
+/// The calibration, or an error naming the unrecognised value.
+pub fn de_score_calibration<'de, D: Deserializer<'de>>(d: D) -> Result<ScoreCalibration, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_score_calibration(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "calibration must be 'none' or 'column_z', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for the per-cell ScType assignment path
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sctype_cells()` list; missing
+/// keys take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct ScTypeCellParams {
     /// Self-retention during smoothing. Each iteration computes
     /// `alpha * original + (1 - alpha) * neighbour_average`.
@@ -131,6 +160,7 @@ pub struct ScTypeCellParams {
     /// Convergence tolerance for the smoothing iteration
     pub tolerance: f32,
     /// How to rescale the scores before the argmax
+    #[serde(deserialize_with = "de_score_calibration")]
     pub calibration: ScoreCalibration,
     /// Minimum score for a cell to get a call instead of `Unknown`
     pub score_floor: f32,

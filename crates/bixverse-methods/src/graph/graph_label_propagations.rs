@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 
+use crate::graph::graph_structures::SparseGraph;
 use crate::prelude::BixverseFloat;
 use bixverse_core::assert_same_len;
 
@@ -256,6 +257,41 @@ where
         }
 
         Self::build_csr(adj_vec)
+    }
+
+    /// Build the KnnLabPropGraph from an undirected [SparseGraph]
+    ///
+    /// Flattens the graph with [SparseGraph::to_edge_pairs] (each edge once)
+    /// and symmetrises it again, averaging reciprocal weights. Going through
+    /// the edge pairs rather than the CSR rows keeps the neighbour order, and
+    /// with it every downstream float sum, identical to the edge-list route.
+    ///
+    /// ### Params
+    ///
+    /// * `graph` - The neighbour graph
+    ///
+    /// ### Returns
+    ///
+    /// Self with row-normalised weights.
+    pub fn from_sparse_graph(graph: &SparseGraph<T>) -> Self
+    where
+        T: std::iter::Sum,
+    {
+        let (edges, weights) = graph.to_edge_pairs();
+        let from: Vec<usize> = edges.iter().step_by(2).map(|&x| x as usize).collect();
+        let to: Vec<usize> = edges
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|&x| x as usize)
+            .collect();
+        Self::from_weighted_node_pairs(
+            &from,
+            &to,
+            &weights,
+            graph.get_node_number(),
+            Some(SymmetryWeightStrategy::Average),
+        )
     }
 
     /// Label spreading algorithm
