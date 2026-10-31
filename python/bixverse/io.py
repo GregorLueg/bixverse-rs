@@ -1,9 +1,116 @@
-"""Opening and saving single cell experiment directories.
+"""Loading, saving and writing single cell experiment directories.
 
 A directory written by the bixverse R package opens here and the other way
-round. See `bixverse._core.io` for what is saved where.
+round. The loaders ingest h5ad, mtx, 10x h5 or in-memory counts into a new
+directory and return it opened; see `bixverse._core.ingest` for what lands
+where.
 """
 
+from bixverse._core.download import (
+    download_cd34_data,
+    download_demuxlet_pbmc,
+    download_dialogue_uc,
+    download_kang_pbmc,
+    download_marrow_cd34,
+    download_pbmc3k,
+    download_pbmc8k,
+    download_pbmc_1k_5p,
+    download_pbmc_batches,
+    download_pbmc_totalseq_data,
+    download_thymus_ageing,
+)
+from bixverse._core.ingest import (
+    archive_sc_exp,
+    load_csr,
+    load_h5ad,
+    load_h5ad_norm,
+    load_mtx,
+    load_multi_h5ad,
+    load_multi_mtx,
+    load_multi_tenx_h5,
+    load_tenx_h5,
+    merge_sc_experiments,
+    stream_h5ad,
+    upgrade_sc_store,
+)
 from bixverse._core.io import load_existing, save
+from bixverse._core.scan import (
+    H5adDims,
+    Prescan,
+    TenxH5Meta,
+    detect_raw_count_slot,
+    get_h5ad_dimensions,
+    get_tenx_h5_metadata,
+    prescan_h5ad_files,
+    prescan_mtx_dirs,
+    prescan_tenx_h5_files,
+    read_h5ad_metadata,
+    read_tenx_h5_metadata,
+)
+from bixverse._core.synthetic import (
+    SyntheticAdtData,
+    SyntheticCellsweepData,
+    SyntheticData,
+    SyntheticDialogueData,
+    generate_cellsweep_test_data,
+    generate_dialogue_test_data,
+    generate_single_cell_test_data,
+    generate_single_cell_test_data_adt,
+)
+from bixverse._core.writers import (
+    save_h5ad,
+    write_cellranger_output,
+    write_h5ad_sc,
+    write_tenx_h5_sc,
+)
 
-__all__ = ["load_existing", "save"]
+__all__ = [
+    "H5adDims",
+    "Prescan",
+    "SyntheticAdtData",
+    "SyntheticCellsweepData",
+    "SyntheticData",
+    "SyntheticDialogueData",
+    "TenxH5Meta",
+    "archive_sc_exp",
+    "detect_raw_count_slot",
+    "download_cd34_data",
+    "download_demuxlet_pbmc",
+    "download_dialogue_uc",
+    "download_kang_pbmc",
+    "download_marrow_cd34",
+    "download_pbmc3k",
+    "download_pbmc8k",
+    "download_pbmc_1k_5p",
+    "download_pbmc_batches",
+    "download_pbmc_totalseq_data",
+    "download_thymus_ageing",
+    "generate_cellsweep_test_data",
+    "generate_dialogue_test_data",
+    "generate_single_cell_test_data",
+    "generate_single_cell_test_data_adt",
+    "get_h5ad_dimensions",
+    "get_tenx_h5_metadata",
+    "load_csr",
+    "load_existing",
+    "load_h5ad",
+    "load_h5ad_norm",
+    "load_mtx",
+    "load_multi_h5ad",
+    "load_multi_mtx",
+    "load_multi_tenx_h5",
+    "load_tenx_h5",
+    "merge_sc_experiments",
+    "prescan_h5ad_files",
+    "prescan_mtx_dirs",
+    "prescan_tenx_h5_files",
+    "read_h5ad_metadata",
+    "read_tenx_h5_metadata",
+    "save",
+    "save_h5ad",
+    "stream_h5ad",
+    "upgrade_sc_store",
+    "write_cellranger_output",
+    "write_h5ad_sc",
+    "write_tenx_h5_sc",
+]

@@ -286,7 +286,10 @@ impl CellQuality {
 }
 
 /// Structure that stores minimum QC thresholds/info for single cell
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_min_quality()` list; every
+/// key is required.
+#[derive(Clone, Debug, Deserialize)]
 pub struct MinCellQuality {
     /// Minimum number of unique genes per cell (or spot for Visium type
     /// technology).

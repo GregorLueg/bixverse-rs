@@ -4,6 +4,7 @@
 use hdf5::File;
 use ndarray::{Array2, s};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
@@ -19,12 +20,18 @@ use crate::prelude::*;
 //////////////////
 
 /// Per-file task descriptor for multi-h5ad loading
+///
+/// Deserialises from the keys of one R `prescan_h5ad_files()` file task.
+/// `cs_type` and `raw_slot` go through [parse_h5ad_format] and
+/// [parse_raw_slot]; a missing or null `raw_slot` is `X`.
+#[derive(Deserialize)]
 pub struct H5adFileTask {
     /// Experimental identifier
     pub exp_id: String,
     /// Path to the h5ad file
     pub h5_path: String,
     /// Type of storage in this specific h5ad file
+    #[serde(deserialize_with = "de_h5ad_format")]
     pub cs_type: H5ADFormat,
     /// Number of cells/spots in this h5ad file
     pub no_cells: usize,
@@ -33,6 +40,7 @@ pub struct H5adFileTask {
     /// file-local gene idx -> universe gene idx; None if gene not in universe
     pub gene_local_to_universe: Vec<Option<usize>>,
     /// Raw count storage
+    #[serde(default, deserialize_with = "de_raw_slot")]
     pub raw_slot: RawDataSlot,
 }
 

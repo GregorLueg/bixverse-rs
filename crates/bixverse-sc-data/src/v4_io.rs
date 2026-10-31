@@ -99,6 +99,24 @@ pub enum ChunkCodec {
     Zstd,
 }
 
+/// Parse a codec name
+///
+/// ### Params
+///
+/// * `s` - One of `"lz4"`, `"zstd"` or `"none"`
+///
+/// ### Returns
+///
+/// The [ChunkCodec], or `None` for anything else.
+pub fn parse_chunk_codec(s: &str) -> Option<ChunkCodec> {
+    match s {
+        "lz4" => Some(ChunkCodec::Lz4),
+        "zstd" => Some(ChunkCodec::Zstd),
+        "none" => Some(ChunkCodec::None),
+        _ => None,
+    }
+}
+
 impl ChunkCodec {
     /// The byte stored in the chunk header.
     ///

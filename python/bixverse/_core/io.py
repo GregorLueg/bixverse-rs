@@ -15,6 +15,7 @@ side after the save is reported rather than silently ignored.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -22,8 +23,9 @@ from pathlib import Path
 import numpy as np
 from beartype import beartype
 
+from bixverse import _bixverse
 from bixverse._core import db
-from bixverse._core.single_cells import GENES_BIN, SingleCells
+from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
 
 ###########
@@ -33,6 +35,9 @@ from bixverse._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap
 MEMORY_NPZ: str = "memory_py.npz"
 MEMORY_JSON: str = "memory_py.json"
 MEMORY_FORMAT: int = 1
+ARCHIVE_NAME: str = "counts.bxa"
+
+logger = logging.getLogger(__name__)
 
 _PLAIN_SLOTS: tuple[str, ...] = ("pca_factors", "pca_loadings", "pca_singular_vals")
 
@@ -155,6 +160,9 @@ def load_existing(directory: Path | str) -> SingleCells:
         cache come from there; otherwise the map is rebuilt from the DuckDB
         and the cache is empty.
 
+    Restores the stores from `counts.bxa` when only the archive is there,
+    and warns about a store in the v3 format, as R does.
+
     Raises:
         FileNotFoundError: If a store, the DuckDB, or one half of the memory
             file pair is missing.
@@ -162,9 +170,19 @@ def load_existing(directory: Path | str) -> SingleCells:
             fit the store.
     """
     directory = Path(directory).expanduser()
-    genes = directory / GENES_BIN
+    cells, genes = directory / CELLS_BIN, directory / GENES_BIN
+    archive = directory / ARCHIVE_NAME
+    if not cells.exists() and not genes.exists() and archive.is_file():
+        logger.info("Found only %s. Restoring the binaries from it.", ARCHIVE_NAME)
+        _bixverse.restore_cells_archive(archive, cells, genes, None, False)
     if not genes.is_file():
         raise FileNotFoundError(f"{genes} does not exist")
+    if any(_bixverse.file_version(p) < 4 for p in (cells, genes)):
+        warnings.warn(
+            "This store uses the old v3 file format. It still works, but the v4 "
+            "format is smaller and faster. Convert it with upgrade_sc_store().",
+            stacklevel=2,
+        )
     sc = SingleCells(directory)
 
     npz, js = directory / MEMORY_NPZ, directory / MEMORY_JSON

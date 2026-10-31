@@ -3,6 +3,7 @@
 //! merge several experiments.
 
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
@@ -25,7 +26,9 @@ const MERGE_CELL_BATCH_SIZE: usize = 10_000;
 ////////////////
 
 /// A single input source for the merge operation
-#[derive(Debug, Clone)]
+///
+/// Deserialises from the keys of one R `merge_sc_experiments()` merge task.
+#[derive(Debug, Clone, Deserialize)]
 pub struct BinMergeTask {
     /// Identifier for this experiment, becomes a column in obs.
     pub exp_id: String,

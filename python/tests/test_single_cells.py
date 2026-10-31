@@ -22,8 +22,9 @@ def exp(tmp_path):
             str(tmp_path / "counts_cells.bin"), N_CELLS, N_GENES, 0.4, 7
         )
     )
-    # load_existing checks the gene store exists; nothing here reads it
-    (tmp_path / "counts_genes.bin").touch()
+    bv._bixverse.generate_gene_based_data(
+        tmp_path / "counts_cells.bin", tmp_path / "counts_genes.bin"
+    )
 
     obs = pl.DataFrame(
         {

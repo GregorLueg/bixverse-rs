@@ -18,6 +18,7 @@ parameters or registered frames.
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -29,6 +30,8 @@ import duckdb
 import numpy as np
 import polars as pl
 from beartype import beartype
+
+from bixverse import _bixverse
 
 ###########
 # Globals #
@@ -866,3 +869,258 @@ def parquet_parts_to_duckdb(
         f"FROM ({stacked}) ORDER BY _part, {_qi(idx_col)}",
         params,
     )
+
+
+##############
+# Plain text #
+##############
+
+
+@beartype
+def plain_text_delimiter(path: Path) -> str:
+    """Tab for a `.tsv` / `.tsv.gz`, comma otherwise, as R decides it."""
+    return "\t" if re.search(r"\.tsv(\.gz)?$", path.name, re.IGNORECASE) else ","
+
+
+@beartype
+def plain_text_to_duckdb(
+    con: duckdb.DuckDBPyConnection,
+    path: Path,
+    *,
+    has_hdr: bool,
+    keep: np.ndarray | None,
+    table: Literal["obs", "var"],
+) -> None:
+    """Load a CSV / TSV metadata file into a table, as R's `.plain_text_to_duckdb`.
+
+    The file goes into a temporary table with insertion order preserved, so
+    its `rowid` is the 0-based file row. The first column becomes the
+    identifier, the others are snake_cased when there is a header, and the
+    kept rows are numbered in file order.
+
+    Args:
+        con: Open connection.
+        path: The file.
+        has_hdr: Whether the file has a header.
+        keep: Optional 0-based file rows to keep.
+        table: `"obs"` or `"var"`.
+    """
+    idx_col, id_col = TABLE_KEYS[table]
+    raw = "bixverse_plain_text_raw"
+    con.execute("SET preserve_insertion_order = true")
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE {raw} AS SELECT * FROM read_csv(?, "
+        f"delim = {_qs(plain_text_delimiter(path))}, header = {str(has_hdr).lower()})",
+        [str(path)],
+    )
+    try:
+        desc = con.execute(f"SELECT * FROM {raw} LIMIT 0").description
+        original = [d[0] for d in desc]
+        sanitised = _bixverse.snake_case(original) if has_hdr else list(original)
+        sanitised[0] = id_col
+        mapping = ", ".join(
+            f"t.{_qi(o)} AS {_qi(s)}" for o, s in zip(original, sanitised, strict=True)
+        )
+        sql = (
+            f"CREATE OR REPLACE TABLE {_qi(table)} AS SELECT ROW_NUMBER() OVER "
+            f"(ORDER BY t.rowid) AS {_qi(idx_col)}, {mapping} FROM {raw} t "
+            "{where} ORDER BY t.rowid"
+        )
+        if keep is None:
+            con.execute(sql.format(where=""))
+        else:
+            rows = pl.DataFrame({"row_num": keep.astype(np.int64)})
+            with _registered(con, "bixverse_plain_text_keep", rows):
+                con.execute(
+                    sql.format(
+                        where="WHERE t.rowid IN "
+                        "(SELECT row_num FROM bixverse_plain_text_keep)"
+                    )
+                )
+    finally:
+        con.execute(f"DROP TABLE IF EXISTS {raw}")
+
+
+#################
+# Multi sources #
+#################
+
+
+@beartype
+def _int_like_r(frame: pl.DataFrame) -> pl.DataFrame:
+    """Narrow `Int64` columns to `Int32` where they fit, as fread reads them."""
+    casts = [
+        pl.col(name).cast(pl.Int32)
+        for name, dtype in frame.schema.items()
+        if dtype == pl.Int64
+        and bool(frame[name].drop_nulls().is_between(-(2**31) + 1, 2**31 - 1).all())
+    ]
+    return frame.with_columns(casts) if casts else frame
+
+
+@beartype
+def rbind_fill(frames: list[pl.DataFrame]) -> pl.DataFrame:
+    """Stack frames by column name, as `data.table::rbindlist(fill = TRUE)`.
+
+    Columns appear in order of first appearance and are null where a frame
+    lacks them. A column that is categorical in any frame comes out as an
+    `Enum` whose levels are, frame by frame, its levels or (for a string
+    column) its values in row order, each only when not yet seen.
+
+    Args:
+        frames: The frames, in stacking order.
+
+    Returns:
+        The stacked frame.
+    """
+    names: list[str] = []
+    for f in frames:
+        names.extend(c for c in f.columns if c not in names)
+
+    levels: dict[str, list[str]] = {}
+    for name in names:
+        dtypes = [f.schema[name] for f in frames if name in f.columns]
+        if not any(isinstance(d, (pl.Enum, pl.Categorical)) for d in dtypes):
+            continue
+        seen: dict[str, None] = {}
+        for f in frames:
+            if name not in f.columns:
+                continue
+            dtype = f.schema[name]
+            values = (
+                dtype.categories.to_list()
+                if isinstance(dtype, pl.Enum)
+                else f[name].drop_nulls().cast(pl.String).unique(maintain_order=True)
+            )
+            seen.update(dict.fromkeys(values))
+        levels[name] = list(seen)
+
+    cast = [
+        f.with_columns(pl.col(c).cast(pl.String) for c in levels if c in f.columns)
+        for f in frames
+    ]
+    out = pl.concat(cast, how="diagonal_relaxed").select(names)
+    return out.with_columns(pl.col(c).cast(pl.Enum(lv)) for c, lv in levels.items())
+
+
+@beartype
+def _populate_stacked(con: duckdb.DuckDBPyConnection, frame: pl.DataFrame) -> None:
+    """Write a stacked obs frame as `cell_idx`, `cell_id`, `exp_id`, the rest."""
+    rest = [c for c in frame.columns if c not in ("cell_idx", "cell_id", "exp_id")]
+    populate_from_frame(con, "obs", frame.select("cell_id", "exp_id", *rest))
+
+
+@beartype
+def obs_from_multi_plain_text(
+    con: duckdb.DuckDBPyConnection,
+    parts: list[tuple[Path, str, bool, np.ndarray]],
+) -> None:
+    """Build `obs` from several barcode files.
+
+    R's `populate_obs_from_multi_plain_text`: per file the kept rows, the
+    first column as `cell_id` prefixed with the `exp_id`, stacked with the
+    union of columns.
+
+    Args:
+        con: Open connection.
+        parts: Per file the path, `exp_id`, whether it has a header and the
+            0-based rows to keep.
+
+    Raises:
+        ValueError: If a barcodes file already has an `exp_id` column.
+    """
+    frames = []
+    for path, exp_id, has_hdr, keep in parts:
+        frame = pl.read_csv(
+            path, separator=plain_text_delimiter(path), has_header=has_hdr
+        )
+        names = (
+            _bixverse.snake_case(frame.columns)
+            if has_hdr
+            else [f"V{i + 1}" for i in range(frame.width)]
+        )
+        names[0] = "cell_id"
+        frame = _int_like_r(frame.rename(dict(zip(frame.columns, names, strict=True))))
+        if "exp_id" in frame.columns:
+            raise ValueError(
+                f"Input '{exp_id}' barcodes file already has an exp_id column."
+            )
+        frame = frame[keep.astype(np.int64)].with_columns(
+            (pl.lit(f"{exp_id}_") + pl.col("cell_id").cast(pl.String)).alias("cell_id"),
+            pl.lit(exp_id).alias("exp_id"),
+        )
+        frames.append(frame)
+    _populate_stacked(con, rbind_fill(frames))
+
+
+@beartype
+def obs_from_multi_duckdb(
+    con: duckdb.DuckDBPyConnection, parts: list[tuple[Path, str]]
+) -> None:
+    """Build `obs` from the kept cells of several DuckDBs.
+
+    R's `populate_obs_from_multi_duckdb`: per source the `to_keep` rows in
+    `cell_idx` order, `cell_id` prefixed with the `exp_id`, stacked with the
+    union of columns.
+
+    Args:
+        con: Open connection to the target.
+        parts: Per source its DuckDB and `exp_id`.
+
+    Raises:
+        ValueError: If a source already has an `exp_id` column.
+    """
+    frames = []
+    for path, exp_id in parts:
+        with connect(path, read_only=True) as src:
+            frame = _fetch(
+                src, "SELECT * FROM obs WHERE to_keep = TRUE ORDER BY cell_idx"
+            )
+        if "exp_id" in frame.columns:
+            raise ValueError(
+                f"Input '{exp_id}' already has an exp_id column in obs. Merging "
+                "already-merged objects is not supported."
+            )
+        frame = frame.drop([c for c in ("cell_idx", "to_keep") if c in frame.columns])
+        frames.append(
+            frame.with_columns(
+                (
+                    pl.lit(f"{exp_id}_")
+                    + pl.col("cell_id").cast(pl.String).fill_null("NA")
+                ).alias("cell_id"),
+                pl.lit(exp_id).alias("exp_id"),
+            )
+        )
+    _populate_stacked(con, rbind_fill(frames))
+
+
+@beartype
+def var_from_duckdb_reordered(
+    con: duckdb.DuckDBPyConnection, source: Path, gene_ids: list[str]
+) -> None:
+    """Build `var` from a source DuckDB, reordered to `gene_ids`.
+
+    R's `populate_vars_from_duckdb_reordered`. A gene the source does not
+    hold keeps only its id, with a warning.
+
+    Args:
+        con: Open connection to the target.
+        source: The source DuckDB.
+        gene_ids: Gene ids in the target order.
+    """
+    with connect(source, read_only=True) as src:
+        var = _fetch(src, "SELECT * FROM var ORDER BY gene_idx")
+    var = var.drop("gene_idx").unique(
+        subset="gene_id", keep="first", maintain_order=True
+    )
+    frame = pl.DataFrame({"gene_id": gene_ids}).join(
+        var, on="gene_id", how="left", maintain_order="left"
+    )
+    n_missing = len(set(gene_ids) - set(var["gene_id"].to_list()))
+    if n_missing:
+        warnings.warn(
+            f"{n_missing} gene(s) absent from the var reference source; metadata "
+            "limited to gene_id (gene_universe = 'union').",
+            stacklevel=2,
+        )
+    populate_from_frame(con, "var", frame)
