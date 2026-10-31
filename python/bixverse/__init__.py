@@ -16,7 +16,18 @@ Batches are sparse CSR by default. Pass ``sparse=False`` for a dense
 scatter over every gene whether or not it holds a count.
 """
 
-from . import _bixverse, annotate, de, doublets, graph, integrate, io, pp, qc
+from . import (
+    _bixverse,
+    annotate,
+    de,
+    doublets,
+    graph,
+    integrate,
+    io,
+    metacells,
+    pp,
+    qc,
+)
 from ._bixverse import (
     BixverseError,
     CellReader,
@@ -25,6 +36,7 @@ from ._bixverse import (
     __version__,
 )
 from ._core.db import TableNotFoundError
+from ._core.metacells import MetaCells
 from ._core.single_cells import Counts, SingleCells, get_counts
 from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
 from ._core.subset import SingleCellsSubset, merge_subset_obs
@@ -39,6 +51,7 @@ __all__ = [
     "CsrMatrix",
     "KnnGraph",
     "MagicLayer",
+    "MetaCells",
     "ScCache",
     "ScMap",
     "SingleCells",
@@ -57,6 +70,7 @@ __all__ = [
     "integrate",
     "io",
     "merge_subset_obs",
+    "metacells",
     "pp",
     "qc",
 ]

@@ -137,7 +137,7 @@ fn stream_opts(gene_batch_size: Option<usize>, seed: u64, verbose: bool) -> SctS
 ///
 /// Column name to `float64` array, `bin` and `batch` as `int32`, `gene_idx`
 /// as `uint32`.
-fn stats_dict<'py>(
+pub(crate) fn stats_dict<'py>(
     py: Python<'py>,
     stats: Vec<HvgStats>,
     batch_cols: bool,

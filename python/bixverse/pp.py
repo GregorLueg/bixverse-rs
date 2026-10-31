@@ -5,8 +5,9 @@ Functions take a `SingleCells` first and write what R writes: HVG statistics
 to var, the HVG set to `sc.map.hvg`, the PCA, residual model and MAGIC layer
 to `sc.cache`, stamped. `get_*` variants return data and leave the experiment
 alone. All but `get_hvg_data` also take a `SingleCellsSubset`, as in R;
-on a subset `find_hvg` leaves var alone. See `bixverse._core.pp` for the
-workflow.
+on a subset `find_hvg` leaves var alone. `find_hvg`, `get_hvg_data`,
+`calculate_pca` and `fit_residuals` also take `MetaCells`, as in R.
+See `bixverse._core.pp` for the workflow.
 """
 
 from bixverse._core.pp import (

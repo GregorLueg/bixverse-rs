@@ -26,7 +26,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
-from bixverse._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
+from bixverse._core.state import ScMap, cache_from_payload, cache_payload
 
 ###########
 # Globals #
@@ -38,8 +38,6 @@ MEMORY_FORMAT: int = 1
 ARCHIVE_NAME: str = "counts.bxa"
 
 logger = logging.getLogger(__name__)
-
-_PLAIN_SLOTS: tuple[str, ...] = ("pca_factors", "pca_loadings", "pca_singular_vals")
 
 
 ########
@@ -61,45 +59,9 @@ def save(sc: SingleCells) -> None:
     if sc.map.hvg is not None:
         arrays["map/hvg"] = sc.map.hvg
 
-    c = sc.cache
-    c.artefacts()  # rejects reserved embedding names before anything is written
-    for slot in _PLAIN_SLOTS:
-        value = getattr(c, slot)
-        if value is not None:
-            arrays[f"cache/{slot}"] = value
-    for i, arr in enumerate(c.embeddings.values()):
-        arrays[f"cache/embedding/{i}"] = arr
-    if c.knn is not None:
-        arrays["cache/knn/indices"] = c.knn.indices
-        arrays["cache/knn/distances"] = c.knn.distances
-    if c.connectivities is not None:
-        arrays["cache/connectivities/data"] = c.connectivities.data
-        arrays["cache/connectivities/indices"] = c.connectivities.indices
-        arrays["cache/connectivities/indptr"] = c.connectivities.indptr
-    if c.magic is not None:
-        arrays["cache/magic/data"] = c.magic.data
-        arrays["cache/magic/features"] = np.asarray(c.magic.features, dtype=str)
-    if c.residual_fit is not None:
-        warnings.warn(
-            "The residual model is not persisted yet; it will be absent on load.",
-            stacklevel=2,
-        )
-
-    present = c.artefacts()
-    meta = {
-        "format": MEMORY_FORMAT,
-        "embeddings": list(c.embeddings),
-        "knn_dist_metric": None if c.knn is None else c.knn.dist_metric,
-        "connectivities_shape": (
-            None if c.connectivities is None else list(c.connectivities.shape)
-        ),
-        # only stamps of present artefacts; a dropped payload's stamp is dead
-        "stamps": {
-            label: {"cells": s.cells, "id": s.id, "parents": list(s.parents)}
-            for label, s in present.items()
-            if s is not None and label != "residuals"
-        },
-    }
+    cache_arrays, cache_meta = cache_payload(sc.cache)
+    arrays.update(cache_arrays)
+    meta = {"format": MEMORY_FORMAT, **cache_meta}
 
     npz, js = sc.dir / MEMORY_NPZ, sc.dir / MEMORY_JSON
     tmp_npz, tmp_js = npz.with_suffix(".npz.tmp"), js.with_suffix(".json.tmp")
@@ -113,39 +75,6 @@ def save(sc: SingleCells) -> None:
 ########
 # Load #
 ########
-
-
-@beartype
-def _cache_from_disk(arrays: dict[str, np.ndarray], meta: dict) -> ScCache:
-    """Rebuild a cache from the saved arrays and metadata."""
-    cache = ScCache()
-    for slot in _PLAIN_SLOTS:
-        if f"cache/{slot}" in arrays:
-            setattr(cache, slot, arrays[f"cache/{slot}"])
-    for i, name in enumerate(meta["embeddings"]):
-        cache.embeddings[name] = arrays[f"cache/embedding/{i}"]
-    if "cache/knn/indices" in arrays:
-        cache.knn = KnnGraph(
-            arrays["cache/knn/indices"],
-            arrays["cache/knn/distances"],
-            meta["knn_dist_metric"],
-        )
-    if "cache/connectivities/data" in arrays:
-        n_rows, n_cols = meta["connectivities_shape"]
-        cache.connectivities = CsrMatrix(
-            arrays["cache/connectivities/data"],
-            arrays["cache/connectivities/indices"],
-            arrays["cache/connectivities/indptr"],
-            (n_rows, n_cols),
-        )
-    if "cache/magic/data" in arrays:
-        cache.magic = MagicLayer(
-            arrays["cache/magic/data"],
-            arrays["cache/magic/features"].astype(object),
-        )
-    for label, s in meta["stamps"].items():
-        cache.set_stamp(label, Stamp(s["cells"], s["id"], tuple(s["parents"])))
-    return cache
 
 
 @beartype
@@ -204,7 +133,7 @@ def load_existing(directory: Path | str) -> SingleCells:
         arrays["map/cells_to_keep"],
         arrays.get("map/hvg"),
     )
-    sc.cache = _cache_from_disk(arrays, meta)
+    sc.cache = cache_from_payload(arrays, meta)
 
     if not np.array_equal(np.sort(sc.map.cells_to_keep), from_db):
         warnings.warn(

@@ -17,6 +17,7 @@ mod h5ad_write;
 mod integrate;
 mod io;
 mod loader;
+mod metacells;
 mod pp;
 mod qc;
 mod reader;
@@ -129,6 +130,18 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(annotate::build_symphony_ref, m)?,
         wrap_pyfunction!(annotate::symphony_map_query, m)?,
         wrap_pyfunction!(annotate::transfer_labels_symphony, m)?,
+        wrap_pyfunction!(metacells::bootstrapped_metacells, m)?,
+        wrap_pyfunction!(metacells::seacells, m)?,
+        wrap_pyfunction!(metacells::supercells, m)?,
+        wrap_pyfunction!(metacells::metacells2, m)?,
+        wrap_pyfunction!(metacells::metacell_density, m)?,
+        wrap_pyfunction!(metacells::metacell_compactness, m)?,
+        wrap_pyfunction!(metacells::metacell_separation, m)?,
+        wrap_pyfunction!(metacells::mc_hvg, m)?,
+        wrap_pyfunction!(metacells::mc_pca, m)?,
+        wrap_pyfunction!(metacells::mc_fit_residuals, m)?,
+        wrap_pyfunction!(metacells::mc_residual_variance, m)?,
+        wrap_pyfunction!(metacells::mc_pca_residuals, m)?,
     ] {
         m.add_function(f)?;
     }

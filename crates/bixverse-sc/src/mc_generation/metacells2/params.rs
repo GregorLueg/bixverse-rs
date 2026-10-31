@@ -3,8 +3,133 @@
 //! The hierarchy mirrors the algorithm stages: each stage's parameters live in
 //! their own struct, composed into the top-level [`MetacellsParams`]. Defaults
 //! are upstream's (`metacells/parameters.py`).
+//!
+//! Every struct deserialises from the one flat R `params_sc_metacells2()` or
+//! `params_sc_metacells2_dac()` list, as the R list conversion reads them;
+//! missing keys take the defaults.
 
-use bixverse_core::ml::clustering::hierarchical::LinkageMethod;
+use bixverse_core::ml::clustering::hierarchical::{LinkageMethod, parse_linkage_method};
+use serde::{Deserialize, Deserializer, de::Error as _};
+
+/////////////
+// Parsers //
+/////////////
+
+/// Parse a MetaCells2 similarity method.
+///
+/// ### Params
+///
+/// * `s` - `"abs_pearson"` or `"pearson"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The method, or `None` if unrecognised.
+pub fn parse_similarity_method(s: &str) -> Option<SimilarityMethod> {
+    match s.to_lowercase().as_str() {
+        "abs_pearson" => Some(SimilarityMethod::AbsPearson),
+        "pearson" => Some(SimilarityMethod::Pearson),
+        _ => None,
+    }
+}
+
+/// Parse a MetaCells2 rare gene similarity method.
+///
+/// ### Params
+///
+/// * `s` - `"pearson"`, `"abs_pearson"`, `"repeated_pearson"` or
+///   `"repeated_abs_pearson"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The method, or `None` if unrecognised.
+pub fn parse_rare_similarity_method(s: &str) -> Option<RareSimilarityMethod> {
+    match s.to_lowercase().as_str() {
+        "pearson" => Some(RareSimilarityMethod::Pearson),
+        "abs_pearson" => Some(RareSimilarityMethod::AbsPearson),
+        "repeated_pearson" => Some(RareSimilarityMethod::RepeatedPearson),
+        "repeated_abs_pearson" => Some(RareSimilarityMethod::RepeatedAbsPearson),
+        _ => None,
+    }
+}
+
+/// Deserialise a [SimilarityMethod] through [parse_similarity_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The method, or an error naming the unrecognised value.
+pub fn de_similarity_method<'de, D: Deserializer<'de>>(d: D) -> Result<SimilarityMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_similarity_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "similarity method must be 'abs_pearson' or 'pearson', got '{s}'"
+        ))
+    })
+}
+
+/// Deserialise a [RareSimilarityMethod] through [parse_rare_similarity_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The method, or an error naming the unrecognised value.
+pub fn de_rare_similarity_method<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<RareSimilarityMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_rare_similarity_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "rare similarity method must be one of 'pearson', 'abs_pearson', \
+             'repeated_pearson' or 'repeated_abs_pearson', got '{s}'"
+        ))
+    })
+}
+
+/// Deserialise a [LinkageMethod] through [parse_linkage_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The linkage, or an error naming the unrecognised value.
+pub fn de_linkage_method<'de, D: Deserializer<'de>>(d: D) -> Result<LinkageMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_linkage_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "cluster method must be one of 'ward', 'complete', 'average' or \
+             'weighted', got '{s}'"
+        ))
+    })
+}
+
+/// Deserialise a `u64` that may arrive as a real, as R hands over counts past
+/// `i32` range
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a non-negative number
+///
+/// ### Returns
+///
+/// The value truncated towards zero, as the R list conversion casts it, or
+/// an error for a negative or non-finite one.
+pub fn de_u64_from_real<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(D::Error::custom(format!(
+            "expected a non-negative finite number, got {v}"
+        )));
+    }
+    Ok(v as u64)
+}
 
 /////////////////
 // Main params //
@@ -15,21 +140,28 @@ use bixverse_core::ml::clustering::hierarchical::LinkageMethod;
 /// Composed of one struct per pipeline stage plus a few cross-cutting knobs
 /// (target metacell size/UMI count, must-complete-cover mode). The RNG seed is
 /// passed to the entry points separately.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct MetacellsParams {
     /// The [SelectParams] for feature selections.
+    #[serde(flatten)]
     pub select: SelectParams,
     /// The [SimilarityParams] for the MetaCell similarity
+    #[serde(flatten)]
     pub similarity: SimilarityParams,
     /// The [MC2KnnParams] - these are MetaCell2-specific parameters that are
     /// different from [`crate::prelude::KnnParams`].
+    #[serde(flatten)]
     pub knn: MC2KnnParams,
     /// The [PartitionParams] that defines how to partition the cells into the
     /// meta cells.
+    #[serde(flatten)]
     pub partition: PartitionParams,
     /// The [DeviantsParams] that mark genes/cells as deviant
+    #[serde(flatten)]
     pub deviants: DeviantsParams,
     /// The [DissolveParams] that dissolve small, unconvincing candidates.
+    #[serde(flatten)]
     pub dissolve: DissolveParams,
     /// Target cell count per metacell.
     pub target_metacell_size: usize,
@@ -37,6 +169,7 @@ pub struct MetacellsParams {
     /// UMI counts or convincing genes.
     pub min_metacell_size: usize,
     /// Target total UMIs per metacell. Drives seed count and band penalties.
+    #[serde(deserialize_with = "de_u64_from_real")]
     pub target_metacell_umis: u64,
     /// When true, deviant detection and dissolution are bypassed and every cell
     /// ends up in some metacell. Required by the divide-and-conquer preliminary
@@ -68,7 +201,8 @@ impl Default for MetacellsParams {
 //////////////////////
 
 /// Feature gene selection and per-pile downsampling parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SelectParams {
     /// Floor for the downsampling target. Even very-low-UMI piles get at least
     /// this many samples per cell (subject to caps from `max_quantile`).
@@ -100,6 +234,7 @@ pub struct SelectParams {
     /// Optional mask of genes excluded from selection (e.g. lateral genes
     /// like cell-cycle markers). v1 leaves this unwired but the field is
     /// here so the API doesn't churn when it's added.
+    #[serde(skip)]
     pub lateral_gene_mask: Option<Vec<bool>>,
 }
 
@@ -135,9 +270,14 @@ pub enum SimilarityMethod {
 }
 
 /// Cell-cell similarity computation parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SimilarityParams {
     /// Enum defining the chosen similarity method, see [SimilarityMethod].
+    #[serde(
+        rename = "similarity_method",
+        deserialize_with = "de_similarity_method"
+    )]
     pub method: SimilarityMethod,
     /// If true, correlate `log2(x + value_regularisation)` rather than
     /// `x + value_regularisation`.
@@ -162,7 +302,8 @@ impl Default for SimilarityParams {
 /////////////////////////////
 
 /// Balanced KNN graph construction parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct MC2KnnParams {
     /// Edges with balanced rank above `k * balanced_ranks_factor` are dropped.
     pub balanced_ranks_factor: f64,
@@ -206,7 +347,8 @@ impl Default for MC2KnnParams {
 //////////////////////
 
 /// Simulated-annealing partition optimiser parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct PartitionParams {
     /// Per-pass temperature decay rate.
     pub cooldown_pass: f64,
@@ -254,7 +396,8 @@ impl Default for PartitionParams {
 ////////////////////
 
 /// Adaptive deviant (outlier) detection parameters, upstream's `gaps` policy.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct DeviantsParams {
     /// Minimum log2 fold-factor gap (between cells sorted by log-fraction)
     /// within a candidate metacell for a gene to mark cells as deviant. Raised
@@ -263,6 +406,7 @@ pub struct DeviantsParams {
     /// Added to `min_gene_fold_factor` for genes in `noisy_gene_mask`.
     pub min_noisy_gene_fold_factor: f32,
     /// Optional per-gene mask of noisy genes, which need a larger gap.
+    #[serde(skip)]
     pub noisy_gene_mask: Option<Vec<bool>>,
     /// Cap on the fraction of cells marked as deviants, in `(0, 1)`.
     pub max_cell_fraction: f32,
@@ -309,7 +453,8 @@ impl Default for DeviantsParams {
 /////////////////////
 
 /// Small/unconvincing metacell dissolution parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct DissolveParams {
     /// Multiplier on `target_metacell_size` (and `target_metacell_umis`)
     /// defining the "robust" threshold. Metacells at or above this size or UMI
@@ -355,42 +500,67 @@ pub enum RareSimilarityMethod {
 
 /// Rare gene module detection, upstream's `find_rare_gene_modules` plus the
 /// `rare_*` overrides `divide_and_conquer_pipeline` applies to the rare piles.
-#[derive(Clone, Debug)]
+///
+/// Its keys carry upstream's `rare_` prefix, so they share the [DacParams]
+/// list.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct RareParams {
     /// Most candidate genes kept, those expressed in the fewest cells.
+    #[serde(rename = "rare_max_genes")]
     pub max_genes: usize,
     /// Largest fraction of cells a candidate may be expressed in.
+    #[serde(rename = "rare_max_gene_cell_fraction")]
     pub max_gene_cell_fraction: f64,
     /// Smallest maximum UMI count over cells for a candidate, and for a
     /// related gene over the module's cells.
+    #[serde(rename = "rare_min_gene_maximum")]
     pub min_gene_maximum: u32,
     /// Similarity between candidate genes.
+    #[serde(
+        rename = "rare_genes_similarity_method",
+        deserialize_with = "de_rare_similarity_method"
+    )]
     pub similarity: RareSimilarityMethod,
     /// Linkage for the hierarchical clustering of candidates.
+    #[serde(
+        rename = "rare_genes_cluster_method",
+        deserialize_with = "de_linkage_method"
+    )]
     pub cluster_method: LinkageMethod,
     /// Fewest genes in a module.
+    #[serde(rename = "rare_min_genes_of_modules")]
     pub min_genes_of_modules: usize,
     /// Fewest cells in a module. Upstream's pipeline uses its own default
     /// here, not the run's `min_metacell_size`.
+    #[serde(rename = "rare_min_cells_of_modules")]
     pub min_cells_of_modules: usize,
     /// Largest mean number of module cells in a random pile, as a fraction of
     /// the target metacell size, for the module to count as rare.
+    #[serde(rename = "rare_max_cells_factor_of_random_pile")]
     pub max_cells_factor_of_random_pile: f64,
     /// Smallest mean off-diagonal similarity within a module.
+    #[serde(rename = "rare_min_module_correlation")]
     pub min_module_correlation: f64,
     /// A gene is related to a module if its fraction in the module's cells is
     /// at least `2^min_related_gene_fold_factor` times its background fraction.
+    #[serde(rename = "rare_min_related_gene_fold_factor")]
     pub min_related_gene_fold_factor: f64,
     /// A related gene is dropped if adding it raises the module's strong cells
     /// beyond this factor of the original count.
+    #[serde(rename = "rare_max_related_gene_increase_factor")]
     pub max_related_gene_increase_factor: f64,
     /// Smallest module UMI total for a cell to express the module.
+    #[serde(rename = "rare_min_cell_module_total")]
     pub min_cell_module_total: u32,
     /// `deviants.max_cell_fraction` of the rare piles.
+    #[serde(rename = "rare_deviants_max_cell_fraction")]
     pub deviants_max_cell_fraction: f32,
     /// `dissolve.min_robust_size_factor` of the rare piles.
+    #[serde(rename = "rare_dissolve_min_robust_size_factor")]
     pub dissolve_min_robust_size_factor: f32,
     /// `dissolve.min_convincing_gene_fold_factor` of the rare piles.
+    #[serde(rename = "rare_dissolve_min_convincing_gene_fold_factor")]
     pub dissolve_min_convincing_gene_fold_factor: Option<f32>,
 }
 
@@ -425,7 +595,11 @@ impl Default for RareParams {
 ///
 /// The per-pile runs use [`MetacellsParams`]; these only control how cells
 /// are piled and how the groups-of-metacells phase is configured.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_metacells2_dac()` list, see
+/// [`DacParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "DacParamsSpec")]
 pub struct DacParams {
     /// Stop after the final phase's outliers instead of regrouping the
     /// outliers-of-outliers.
@@ -477,6 +651,101 @@ impl Default for DacParams {
             groups_similarity: SimilarityParams::default(),
             max_parallel_piles: 1,
             rare: Some(RareParams::default()),
+        }
+    }
+}
+
+/// The keys a [`DacParams`] deserialises from, as its R list conversion reads
+/// them; missing keys take the [`DacParams`] defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct DacParamsSpec {
+    /// See [`DacParams::quick_and_dirty`].
+    pub quick_and_dirty: bool,
+    /// See [`DacParams::min_target_pile_size`].
+    pub min_target_pile_size: usize,
+    /// See [`DacParams::max_target_pile_size`].
+    pub max_target_pile_size: usize,
+    /// See [`DacParams::target_metacells_in_pile`].
+    pub target_metacells_in_pile: usize,
+    /// See [`DacParams::target_pile_size`].
+    pub target_pile_size: Option<usize>,
+    /// See [`DacParams::piles_knn_k_size_factor`].
+    pub piles_knn_k_size_factor: f64,
+    /// See [`DacParams::piles_min_split_size_factor`].
+    pub piles_min_split_size_factor: f64,
+    /// See [`DacParams::piles_min_robust_size_factor`].
+    pub piles_min_robust_size_factor: f32,
+    /// See [`DacParams::piles_max_merge_size_factor`].
+    pub piles_max_merge_size_factor: f64,
+    /// Similarity method of the groups phase.
+    #[serde(deserialize_with = "de_similarity_method")]
+    pub groups_similarity_method: SimilarityMethod,
+    /// Log transform in the groups phase similarity.
+    pub groups_log_data: bool,
+    /// Regularisation of the groups phase similarity.
+    pub groups_value_regularisation: f32,
+    /// See [`DacParams::max_parallel_piles`].
+    pub max_parallel_piles: usize,
+    /// Detect rare gene modules first.
+    pub rare_gene_modules: bool,
+    /// The `rare_*` keys, used when `rare_gene_modules` is set.
+    #[serde(flatten)]
+    pub rare: RareParams,
+}
+
+impl Default for DacParamsSpec {
+    fn default() -> Self {
+        let d = DacParams::default();
+        Self {
+            quick_and_dirty: d.quick_and_dirty,
+            min_target_pile_size: d.min_target_pile_size,
+            max_target_pile_size: d.max_target_pile_size,
+            target_metacells_in_pile: d.target_metacells_in_pile,
+            target_pile_size: d.target_pile_size,
+            piles_knn_k_size_factor: d.piles_knn_k_size_factor,
+            piles_min_split_size_factor: d.piles_min_split_size_factor,
+            piles_min_robust_size_factor: d.piles_min_robust_size_factor,
+            piles_max_merge_size_factor: d.piles_max_merge_size_factor,
+            groups_similarity_method: d.groups_similarity.method,
+            groups_log_data: d.groups_similarity.log_data,
+            groups_value_regularisation: d.groups_similarity.value_regularisation,
+            max_parallel_piles: d.max_parallel_piles,
+            rare_gene_modules: d.rare.is_some(),
+            rare: d.rare.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<DacParamsSpec> for DacParams {
+    /// Assemble the groups phase similarity and drop the rare parameters
+    /// when the detection is off.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`DacParams`].
+    fn from(s: DacParamsSpec) -> Self {
+        Self {
+            quick_and_dirty: s.quick_and_dirty,
+            min_target_pile_size: s.min_target_pile_size,
+            max_target_pile_size: s.max_target_pile_size,
+            target_metacells_in_pile: s.target_metacells_in_pile,
+            target_pile_size: s.target_pile_size,
+            piles_knn_k_size_factor: s.piles_knn_k_size_factor,
+            piles_min_split_size_factor: s.piles_min_split_size_factor,
+            piles_min_robust_size_factor: s.piles_min_robust_size_factor,
+            piles_max_merge_size_factor: s.piles_max_merge_size_factor,
+            groups_similarity: SimilarityParams {
+                method: s.groups_similarity_method,
+                log_data: s.groups_log_data,
+                value_regularisation: s.groups_value_regularisation,
+            },
+            max_parallel_piles: s.max_parallel_piles,
+            rare: s.rare_gene_modules.then_some(s.rare),
         }
     }
 }

@@ -420,6 +420,94 @@ class ScCache:
         return new
 
 
+###############
+# Persistence #
+###############
+
+_PLAIN_SLOTS: tuple[str, ...] = ("pca_factors", "pca_loadings", "pca_singular_vals")
+
+
+@beartype
+def cache_payload(cache: ScCache) -> tuple[dict[str, np.ndarray], dict]:
+    """A cache as npz arrays (keys under `cache/`) and JSON metadata.
+
+    The residual model is opaque for now and is left out, with a warning.
+
+    Raises:
+        ValueError: If an embedding uses a reserved name.
+    """
+    present = cache.artefacts()
+    arrays: dict[str, np.ndarray] = {}
+    for slot in _PLAIN_SLOTS:
+        value = getattr(cache, slot)
+        if value is not None:
+            arrays[f"cache/{slot}"] = value
+    for i, arr in enumerate(cache.embeddings.values()):
+        arrays[f"cache/embedding/{i}"] = arr
+    if cache.knn is not None:
+        arrays["cache/knn/indices"] = cache.knn.indices
+        arrays["cache/knn/distances"] = cache.knn.distances
+    if cache.connectivities is not None:
+        arrays["cache/connectivities/data"] = cache.connectivities.data
+        arrays["cache/connectivities/indices"] = cache.connectivities.indices
+        arrays["cache/connectivities/indptr"] = cache.connectivities.indptr
+    if cache.magic is not None:
+        arrays["cache/magic/data"] = cache.magic.data
+        arrays["cache/magic/features"] = np.asarray(cache.magic.features, dtype=str)
+    if cache.residual_fit is not None:
+        warnings.warn(
+            "The residual model is not persisted yet; it will be absent on load.",
+            stacklevel=3,
+        )
+    meta = {
+        "embeddings": list(cache.embeddings),
+        "knn_dist_metric": None if cache.knn is None else cache.knn.dist_metric,
+        "connectivities_shape": (
+            None if cache.connectivities is None else list(cache.connectivities.shape)
+        ),
+        # only stamps of present artefacts; a dropped payload's stamp is dead
+        "stamps": {
+            label: {"cells": s.cells, "id": s.id, "parents": list(s.parents)}
+            for label, s in present.items()
+            if s is not None and label != "residuals"
+        },
+    }
+    return arrays, meta
+
+
+@beartype
+def cache_from_payload(arrays: dict[str, np.ndarray], meta: dict) -> ScCache:
+    """Rebuild a cache from `cache_payload` output."""
+    cache = ScCache()
+    for slot in _PLAIN_SLOTS:
+        if f"cache/{slot}" in arrays:
+            setattr(cache, slot, arrays[f"cache/{slot}"])
+    for i, name in enumerate(meta["embeddings"]):
+        cache.embeddings[name] = arrays[f"cache/embedding/{i}"]
+    if "cache/knn/indices" in arrays:
+        cache.knn = KnnGraph(
+            arrays["cache/knn/indices"],
+            arrays["cache/knn/distances"],
+            meta["knn_dist_metric"],
+        )
+    if "cache/connectivities/data" in arrays:
+        n_rows, n_cols = meta["connectivities_shape"]
+        cache.connectivities = CsrMatrix(
+            arrays["cache/connectivities/data"],
+            arrays["cache/connectivities/indices"],
+            arrays["cache/connectivities/indptr"],
+            (n_rows, n_cols),
+        )
+    if "cache/magic/data" in arrays:
+        cache.magic = MagicLayer(
+            arrays["cache/magic/data"],
+            arrays["cache/magic/features"].astype(object),
+        )
+    for label, s in meta["stamps"].items():
+        cache.set_stamp(label, Stamp(s["cells"], s["id"], tuple(s["parents"])))
+    return cache
+
+
 ##############
 # Staleness #
 ##############

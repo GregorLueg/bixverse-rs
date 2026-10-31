@@ -4,6 +4,7 @@
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 
 use crate::prelude::*;
 
@@ -12,7 +13,11 @@ use crate::prelude::*;
 ////////////////////////
 
 /// Structure for the MetaCell parameters
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_bt_metacells()` list, the kNN keys
+/// included; missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct BootstrappedMetaCellParams {
     /// Maximum number of shared cells for the meta cell aggregation
     pub max_shared: usize,
@@ -22,7 +27,20 @@ pub struct BootstrappedMetaCellParams {
     pub max_iter: usize,
     /// [KnnParams] for the various approximate nearest neighbour searches in
     /// ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
+}
+
+impl Default for BootstrappedMetaCellParams {
+    /// The fallbacks of the R list conversion.
+    fn default() -> Self {
+        Self {
+            max_shared: 15,
+            target_no_metacells: 1000,
+            max_iter: 5000,
+            knn_params: KnnParams::default(),
+        }
+    }
 }
 
 /// Sorted, deduplicated copy of a neighbour list.

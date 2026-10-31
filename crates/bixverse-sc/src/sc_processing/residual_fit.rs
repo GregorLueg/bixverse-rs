@@ -7,6 +7,7 @@
 //! matching [`ResidualSource`] for the downstream steps. Small selections are
 //! read into memory first ([`CellSubset`]), as the HVG entry points do.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::prelude::*;
@@ -23,7 +24,7 @@ use crate::sc_processing::sctransform::residuals::SctResiduals;
 use crate::sc_processing::sctransform::stream::{
     SctGroupedFit, SctStreamOpts, fit_sctransform, fit_sctransform_grouped, sct_corrected_counts,
 };
-use bixverse_sc_data::in_memory_io::CellSubset;
+use bixverse_sc_data::in_memory_io::{CellSubset, InMemorySparseReader};
 
 ///////////
 // Types //
@@ -531,4 +532,187 @@ pub fn sct_corrected_counts_on_store<P: AsRef<Path>>(
     let source = SctResiduals::new(&fit.models, cells, fit.group_of_cell.clone())?;
     sct_corrected_counts(&reader, &source, cell_set, f_path_out, opts)?;
     Ok(source.genes().to_vec())
+}
+
+///////////////
+// In memory //
+///////////////
+
+/// The same counts, CSC over (cells, genes), as [`InMemorySparseReader`]
+/// wants them.
+///
+/// ### Params
+///
+/// * `counts` - Raw counts in `data`, CSR or CSC over (cells, genes)
+///
+/// ### Returns
+///
+/// The CSC layout, borrowed when it already is one.
+fn as_csc(counts: &CompressedSparseData2<u32, f32>) -> Cow<'_, CompressedSparseData2<u32, f32>> {
+    if counts.cs_type.is_csc() {
+        Cow::Borrowed(counts)
+    } else {
+        Cow::Owned(counts.transform())
+    }
+}
+
+/// Fit a residual model over an in-memory count matrix, e.g. meta cells.
+///
+/// The in-memory twin of [`fit_residuals_on_store`]: every row is a fitted
+/// cell, in row order, so the fit's `cell_indices` are `0..n_rows`. Meta cell
+/// counts are summed UMIs, so the negative binomial the models describe is
+/// still defined, just at a far greater depth than a single cell.
+///
+/// ### Params
+///
+/// * `counts` - Raw counts in `data` and a second layer in `data_2`, CSR or
+///   CSC over (cells, genes)
+/// * `groups` - Optional group id per row, densely covering `0..n_groups`;
+///   `None` fits one model
+/// * `covariates` - Cell-level covariates aligned to the rows, empty for none
+/// * `params` - The method and its parameters
+/// * `opts` - Seed and reporting; the gene batching is moot in memory
+///
+/// ### Returns
+///
+/// The [`ResidualFit`] over `0..n_rows`.
+pub fn fit_residuals_in_memory(
+    counts: &CompressedSparseData2<u32, f32>,
+    groups: Option<&[u32]>,
+    covariates: SctCovariates,
+    params: ResidualParams,
+    opts: SctStreamOpts,
+) -> Result<ResidualFit, ScErrors> {
+    let csc = as_csc(counts);
+    let n_cells = csc.shape.0;
+    let cell_set: Vec<usize> = (0..n_cells).collect();
+    let gene_reader = InMemorySparseReader::new(&csc, None)?;
+
+    let model = match params {
+        ResidualParams::Sct(sct_params) => {
+            covariates.validate(n_cells)?;
+            let library_sizes: Vec<f64> = gene_reader
+                .read_cell_library_sizes(&cell_set)?
+                .into_iter()
+                .map(|s| s as f64)
+                .collect();
+            let log10_umi: Vec<f64> = library_sizes.iter().map(|&s| s.log10()).collect();
+            let fit = fit_sct_on_reader(
+                &gene_reader,
+                &cell_set,
+                groups,
+                &library_sizes,
+                &covariates,
+                &sct_params,
+                opts,
+            )?;
+            ResidualModel::Sct {
+                fit,
+                log10_umi,
+                covariates,
+            }
+        }
+        ResidualParams::Apr(apr_params) => {
+            // the analytic Pearson fit sums each cell over its group's retained
+            // genes, which a gene-major sweep cannot answer
+            let cell_reader = InMemorySparseReader::new_cell_major(&csc, None)?;
+            let fit = fit_apr_on_readers(
+                &gene_reader,
+                &cell_reader,
+                &cell_set,
+                groups,
+                &apr_params,
+                opts,
+            )?;
+            ResidualModel::Apr { fit }
+        }
+    };
+
+    Ok(ResidualFit {
+        model,
+        cell_indices: cell_set,
+    })
+}
+
+/// Residual variance per gene and group, and the residual HVGs, over an
+/// in-memory count matrix.
+///
+/// The in-memory twin of [`residual_variance_on_store`].
+///
+/// ### Params
+///
+/// * `counts` - The matrix the model was fitted on
+/// * `fit` - A fit from [`fit_residuals_in_memory`]
+/// * `n_hvg` - Variable features per group
+/// * `opts` - Reporting
+///
+/// ### Returns
+///
+/// The [`ResidualVarianceRes`].
+pub fn residual_variance_in_memory(
+    counts: &CompressedSparseData2<u32, f32>,
+    fit: &ResidualFit,
+    n_hvg: usize,
+    opts: SctStreamOpts,
+) -> Result<ResidualVarianceRes, ScErrors> {
+    let csc = as_csc(counts);
+    let cell_set: Vec<usize> = (0..csc.shape.0).collect();
+    fit.check_cells(&cell_set)?;
+    let reader = InMemorySparseReader::new(&csc, None)?;
+    fit.with_source(|source| {
+        let variance = residual_variance(&reader, source, &cell_set, opts)?;
+        let hvg = select_residual_hvg(&variance, source.genes(), n_hvg)?;
+        Ok(ResidualVarianceRes {
+            genes: source.genes().to_vec(),
+            variance,
+            hvg,
+        })
+    })
+}
+
+/// PCA on the residuals of a model fitted on an in-memory count matrix.
+///
+/// The in-memory twin of [`pca_residuals_on_store`].
+///
+/// ### Params
+///
+/// * `counts` - The matrix the model was fitted on
+/// * `fit` - A fit from [`fit_residuals_in_memory`]
+/// * `gene_indices` - The genes, all covered by the model
+/// * `no_pcs` - Number of principal components
+/// * `params_pca` - Parameters for this PCA run; `clr` and
+///   `normalise_variance` must be off
+/// * `seed` - Seed for the randomised SVD
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The [`SingleCellPcaRes`].
+pub fn pca_residuals_in_memory(
+    counts: &CompressedSparseData2<u32, f32>,
+    fit: &ResidualFit,
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaRes {
+    let csc = as_csc(counts);
+    let cell_set: Vec<usize> = (0..csc.shape.0).collect();
+    fit.check_cells(&cell_set)?;
+    let reader = InMemorySparseReader::new(&csc, None)?;
+    let (scores, loadings, s, _) = fit.with_source(|source| {
+        pca_on_sc_residuals(
+            &reader,
+            &cell_set,
+            gene_indices,
+            no_pcs,
+            params_pca,
+            source,
+            seed,
+            false,
+            verbose,
+        )
+    })?;
+    Ok((scores, loadings, s))
 }

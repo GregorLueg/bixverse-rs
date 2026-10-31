@@ -2692,23 +2692,6 @@ impl FromRList for SelectParams {
 // SimilarityParams //
 //////////////////////
 
-/// Parse a MetaCells2 similarity method.
-///
-/// ### Params
-///
-/// * `s` - `"abs_pearson"` or `"pearson"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The method, or `None` if unrecognised.
-fn parse_similarity_method(s: &str) -> Option<SimilarityMethod> {
-    match s.to_lowercase().as_str() {
-        "abs_pearson" => Some(SimilarityMethod::AbsPearson),
-        "pearson" => Some(SimilarityMethod::Pearson),
-        _ => None,
-    }
-}
-
 impl FromRList for SimilarityParams {
     /// Generate SimilarityParams from an R list, falling back to defaults.
     fn from_r_list(r_list: List) -> Result<Self> {
@@ -3100,26 +3083,6 @@ impl FromRList for DacParams {
 ////////////////
 // RareParams //
 ////////////////
-
-/// Parse a MetaCells2 rare gene similarity method.
-///
-/// ### Params
-///
-/// * `s` - `"pearson"`, `"abs_pearson"`, `"repeated_pearson"` or
-///   `"repeated_abs_pearson"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The method, or `None` if unrecognised.
-fn parse_rare_similarity_method(s: &str) -> Option<RareSimilarityMethod> {
-    match s.to_lowercase().as_str() {
-        "pearson" => Some(RareSimilarityMethod::Pearson),
-        "abs_pearson" => Some(RareSimilarityMethod::AbsPearson),
-        "repeated_pearson" => Some(RareSimilarityMethod::RepeatedPearson),
-        "repeated_abs_pearson" => Some(RareSimilarityMethod::RepeatedAbsPearson),
-        _ => None,
-    }
-}
 
 impl FromRList for RareParams {
     /// Generate RareParams from a flat R list, falling back to defaults. Keys

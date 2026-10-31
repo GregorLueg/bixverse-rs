@@ -9,6 +9,7 @@
 //!   Ben‑Kiki, et al., Genome Biol. 2022.
 
 pub mod cell_aggregation_utils;
+pub mod generate;
 pub mod hdwgcna_meta_cells;
 pub mod metacells2;
 pub mod seacells;

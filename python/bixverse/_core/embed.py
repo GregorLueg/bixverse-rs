@@ -26,7 +26,7 @@ import numpy as np
 from beartype import beartype
 
 from bixverse._core.state import RESERVED_EMBEDDINGS
-from bixverse._core.subset import ScOrScSubset
+from bixverse._core.subset import ScOrMc
 
 ############
 # Defaults #
@@ -178,7 +178,7 @@ def forceatlas2_defaults() -> mf.ForceAtlas2:
 
 @beartype
 def _embed(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     est: mf.BaseEmbedding,
     *,
     use_knn: bool,
@@ -234,7 +234,7 @@ def _embed(
 
 @beartype
 def umap(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = True,
     embd_to_use: str = "pca",
@@ -273,7 +273,7 @@ def umap(
 
 @beartype
 def densmap(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = True,
     embd_to_use: str = "pca",
@@ -311,7 +311,7 @@ def densmap(
 
 @beartype
 def tsne(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = False,
     embd_to_use: str = "pca",
@@ -347,7 +347,7 @@ def tsne(
 
 @beartype
 def densne(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = False,
     embd_to_use: str = "pca",
@@ -385,7 +385,7 @@ def densne(
 
 @beartype
 def phate(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = True,
     embd_to_use: str = "pca",
@@ -423,7 +423,7 @@ def phate(
 
 @beartype
 def forceatlas2(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     use_knn: bool = True,
     embd_to_use: str = "pca",

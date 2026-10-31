@@ -8,6 +8,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use serde::Deserialize;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -66,7 +67,11 @@ const BANDWIDTH_RANK_DIVISOR: usize = 3;
 ////////////
 
 /// Structure to store the SEACells parameters
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_seacells()` list, see
+/// [`SEACellsParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "SEACellsParamsSpec")]
 pub struct SEACellsParams {
     // -- sea cells --
     /// Number of sea cells to detect
@@ -150,6 +155,97 @@ impl SEACellsParams {
 impl Default for SEACellsParams {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The keys a [`SEACellsParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take the [`SEACellsParams`] defaults. The
+/// eigensolver keys carry a `lanczos_` prefix.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct SEACellsParamsSpec {
+    /// See [`SEACellsParams::n_sea_cells`].
+    pub n_sea_cells: usize,
+    /// See [`SEACellsParams::max_fw_iters`].
+    pub max_fw_iters: usize,
+    /// See [`SEACellsParams::convergence_epsilon`].
+    pub convergence_epsilon: f32,
+    /// See [`SEACellsParams::max_iter`].
+    pub max_iter: usize,
+    /// See [`SEACellsParams::min_iter`].
+    pub min_iter: usize,
+    /// See [`SEACellsParams::greedy_threshold`].
+    pub greedy_threshold: usize,
+    /// See [`SEACellsParams::graph_building`].
+    pub graph_building: String,
+    /// See [`SEACellsParams::pruning`].
+    pub pruning: bool,
+    /// See [`SEACellsParams::pruning_threshold`].
+    pub pruning_threshold: f32,
+    /// See [`SEACellsParams::n_landmarks`].
+    pub n_landmarks: Option<usize>,
+    /// Lanczos basis size, `None` to derive it.
+    pub lanczos_basis_size: Option<usize>,
+    /// Lanczos restart cycles.
+    pub lanczos_max_restarts: usize,
+    /// Lanczos relative residual tolerance.
+    pub lanczos_tol: f64,
+    /// The kNN keys.
+    #[serde(flatten)]
+    pub knn_params: KnnParams,
+}
+
+impl Default for SEACellsParamsSpec {
+    fn default() -> Self {
+        let d = SEACellsParams::default();
+        Self {
+            n_sea_cells: d.n_sea_cells,
+            max_fw_iters: d.max_fw_iters,
+            convergence_epsilon: d.convergence_epsilon,
+            max_iter: d.max_iter,
+            min_iter: d.min_iter,
+            greedy_threshold: d.greedy_threshold,
+            graph_building: d.graph_building,
+            pruning: d.pruning,
+            pruning_threshold: d.pruning_threshold,
+            n_landmarks: d.n_landmarks,
+            lanczos_basis_size: d.lanczos_params.basis_size,
+            lanczos_max_restarts: d.lanczos_params.max_restarts,
+            lanczos_tol: d.lanczos_params.tol,
+            knn_params: d.knn_params,
+        }
+    }
+}
+
+impl From<SEACellsParamsSpec> for SEACellsParams {
+    /// Assemble the eigensolver parameters.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`SEACellsParams`].
+    fn from(s: SEACellsParamsSpec) -> Self {
+        Self {
+            n_sea_cells: s.n_sea_cells,
+            max_fw_iters: s.max_fw_iters,
+            convergence_epsilon: s.convergence_epsilon,
+            max_iter: s.max_iter,
+            min_iter: s.min_iter,
+            greedy_threshold: s.greedy_threshold,
+            graph_building: s.graph_building,
+            pruning: s.pruning,
+            pruning_threshold: s.pruning_threshold,
+            n_landmarks: s.n_landmarks,
+            knn_params: s.knn_params,
+            lanczos_params: LanczosParams {
+                basis_size: s.lanczos_basis_size,
+                max_restarts: s.lanczos_max_restarts,
+                tol: s.lanczos_tol,
+            },
+        }
     }
 }
 

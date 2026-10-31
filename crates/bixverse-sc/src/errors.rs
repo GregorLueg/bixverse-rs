@@ -281,6 +281,38 @@ pub enum ScErrors {
         n_cells: usize,
     },
 
+    // -- Meta cell generation --
+    /// The cell mapping disagrees with the embedding or kNN graph it describes.
+    #[error(
+        "Meta cells: 'cells_to_keep' has {n_keep} entries but the embedding / kNN graph has {n_rows} rows."
+    )]
+    MetaCellMappingMismatch {
+        /// Entries in `cells_to_keep`
+        n_keep: usize,
+        /// Rows of the embedding or kNN graph
+        n_rows: usize,
+    },
+
+    /// None of the requested cells is part of the working set.
+    #[error("Meta cells: none of the requested 'cells_to_use' are part of 'cells_to_keep'.")]
+    MetaCellNoCellsToUse,
+
+    /// A supplied kNN graph does not cover the embedding row for row.
+    #[error("Meta cells: the kNN graph has {knn_rows} rows but the embedding has {embd_rows}.")]
+    MetaCellKnnEmbeddingMismatch {
+        /// Rows of the kNN graph
+        knn_rows: usize,
+        /// Rows of the embedding
+        embd_rows: usize,
+    },
+
+    /// An input a generator needs was not given.
+    #[error("Meta cells: {what}.")]
+    MetaCellMissingInput {
+        /// What is missing, as a sentence fragment
+        what: &'static str,
+    },
+
     // -- MELD --
     /// If the user provides a label which is out-of-range of the expected
     /// number of groups

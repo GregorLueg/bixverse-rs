@@ -31,6 +31,7 @@ import polars as pl
 from beartype import beartype
 
 from bixverse._core import db
+from bixverse._core.metacells import MetaCells
 from bixverse._core.single_cells import (
     ScBase,
     Selection,
@@ -258,6 +259,7 @@ class SingleCellsSubset(ScBase):
 
 
 ScOrScSubset = SingleCells | SingleCellsSubset
+ScOrMc = SingleCells | SingleCellsSubset | MetaCells
 
 
 ##############

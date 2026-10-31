@@ -5,6 +5,8 @@ The port of R's `generate_knn_sc`, `find_neighbours_sc`, `find_clusters_sc`,
 embedding from `sc.cache`; this layer resolves the inputs, writes what R
 writes (the kNN and the neighbour graph to `sc.cache`, stamped as derived
 from the embedding and the kNN, cluster labels to obs) and returns the rest.
+`find_neighbours`, `find_clusters` and `get_connectivities` also take
+`MetaCells`, whose labels go to its obs in row order.
 
     >>> find_neighbours(sc)
     >>> find_clusters(sc, res=1.0)
@@ -28,9 +30,10 @@ import polars as pl
 from beartype import beartype
 
 from bixverse import _bixverse
+from bixverse._core.metacells import MetaCells
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
-from bixverse._core.subset import ScOrScSubset
+from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse.params import FastClusterParams, KnnParams, NeighboursParams, to_rust
 
 ###########
@@ -98,7 +101,7 @@ class FastClusters:
 
 
 @beartype
-def _embedding(sc: ScOrScSubset, name: str) -> np.ndarray | None:
+def _embedding(sc: ScOrMc, name: str) -> np.ndarray | None:
     """A cached embedding by name, `"pca"` for the PCA scores."""
     if name == "pca":
         return sc.cache.pca_factors
@@ -276,7 +279,7 @@ def calc_knn_metrics(ref_knn: KnnGraph, query_knn: KnnGraph) -> KnnMetrics:
 
 @beartype
 def find_neighbours(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     embd_to_use: str = "pca",
     no_embd_to_use: int | None = None,
@@ -334,7 +337,7 @@ def find_neighbours(
 
 
 @beartype
-def get_connectivities(sc: ScOrScSubset) -> CsrMatrix | None:
+def get_connectivities(sc: ScOrMc) -> CsrMatrix | None:
     """The neighbour graph, R's `get_connectivities` / `as_igraph`.
 
     The undirected graph as its symmetric CSR, rows sorted, every edge
@@ -359,7 +362,7 @@ def get_connectivities(sc: ScOrScSubset) -> CsrMatrix | None:
 
 @beartype
 def find_clusters(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     cluster_algorithm: ClusterAlgorithm = "leiden",
     res: float = 1.0,
@@ -423,14 +426,11 @@ def find_clusters(
         local_moving=local_moving,
         seed=seed,
     )
-    sc.add_obs(
-        pl.DataFrame(
-            {
-                "cell_idx": sc.cells_to_keep,
-                name: pl.Series(labels, dtype=pl.Int32),
-            }
-        )
-    )
+    labels = pl.Series(name, labels, dtype=pl.Int32)
+    if isinstance(sc, MetaCells):
+        sc.add_obs(labels.to_frame())
+        return
+    sc.add_obs(pl.DataFrame({"cell_idx": sc.cells_to_keep}).with_columns(labels))
 
 
 @beartype

@@ -656,3 +656,110 @@ def transfer_labels_symphony(
     seed: int = 42,
     verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+def bootstrapped_metacells(
+    f_path_cell: str,
+    knn: np.ndarray | None,
+    embd: np.ndarray | None,
+    cells_to_keep: np.ndarray,
+    cells_to_use: np.ndarray | None,
+    params: dict[str, object],
+    target_size: float,
+    seed: int,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def seacells(
+    f_path_cell: str,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_distances: np.ndarray | None,
+    cells_to_keep: np.ndarray,
+    cells_to_use: np.ndarray | None,
+    params: dict[str, object],
+    target_size: float,
+    seed: int,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def supercells(
+    f_path_cell: str,
+    knn_indices: np.ndarray | None,
+    knn_distances: np.ndarray | None,
+    embd: np.ndarray | None,
+    cells_to_keep: np.ndarray,
+    cells_to_use: np.ndarray | None,
+    params: dict[str, object],
+    target_size: float,
+    seed: int,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def metacells2(
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    mc2_params: dict[str, object],
+    dac_params: dict[str, object],
+    target_size: float,
+    seed: int,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def metacell_density(
+    knn_indices: np.ndarray,
+    knn_distances: np.ndarray,
+    n_dcs: int,
+    k_density: int,
+    knn_params: dict[str, object],
+    seed: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, list[str]]: ...
+def metacell_compactness(
+    dcs: np.ndarray, metacells: list[np.ndarray]
+) -> np.ndarray: ...
+def metacell_separation(dcs: np.ndarray, metacells: list[np.ndarray]) -> np.ndarray: ...
+def mc_hvg(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    params: dict[str, object],
+) -> dict[str, np.ndarray]: ...
+def mc_pca(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    no_pcs: int,
+    params: dict[str, object],
+    clr_offsets: np.ndarray | None,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def mc_fit_residuals(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    method: str,
+    group_of_cell: np.ndarray | None,
+    covariates: list[tuple[str, np.ndarray]],
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> ResidualFit: ...
+def mc_residual_variance(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    fit: ResidualFit,
+    n_hvg: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def mc_pca_residuals(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    fit: ResidualFit,
+    gene_indices: np.ndarray,
+    no_pcs: int,
+    params: dict[str, object],
+    seed: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...

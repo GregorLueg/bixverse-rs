@@ -2,7 +2,9 @@
 
 The port of R's `find_hvg_sc`, `get_hvg_data_sc`, `find_hvg_batch_aware_sc`,
 `calculate_pca_sc`, `fit_residuals_sc`, `sct_corrected_counts_sc` and
-`run_magic_sc`. The work runs in Rust over the binary stores; this layer
+`run_magic_sc`, plus the `MetaCells` methods of the first four. The work
+runs in Rust over the binary stores, or the in-memory meta cell counts; this
+layer
 resolves the inputs, writes what R writes (the HVG statistics to var, the
 HVG set to `sc.map.hvg`, the PCA, residual model and MAGIC layer to
 `sc.cache`) and stamps the cached artefacts as R stamps them.
@@ -35,10 +37,11 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.ingest import _prepare
+from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import MagicLayer
-from bixverse._core.subset import ScOrScSubset
+from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse.params import (
     AprParams,
     HvgParams,
@@ -247,6 +250,23 @@ def _fit_usable(sc: ScOrScSubset) -> ResidualFit:
 
 
 @beartype
+def _fit_usable_mc(mc: MetaCells) -> ResidualFit:
+    """The cached residual model of meta cells, R's `.assert_fit_usable_mc`.
+
+    Meta cells have no cell filter to drift, so this is the presence check.
+
+    Raises:
+        ValueError: If nothing was fitted.
+    """
+    fit = mc.cache.residual_fit
+    if not isinstance(fit, ResidualFit):
+        raise ValueError(
+            "No fitted residual model found on the object. Run fit_residuals() first."
+        )
+    return fit
+
+
+@beartype
 def _check_not_residual(params: HvgParams, fn: str, hint: str) -> None:
     """Refuse the residual HVG method where it does not apply.
 
@@ -316,8 +336,34 @@ def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
 
 
 @beartype
+def _find_hvg_mc(mc: MetaCells, hvg_no: int, params: HvgParams, verbose: bool) -> None:
+    """`find_hvg` on meta cells, R's `find_hvg_sc` MetaCells method.
+
+    The statistics go to the meta cell var, the selection to `mc.hvg`. The
+    residual method writes no statistics, as in R.
+    """
+    if params.method == "residual":
+        fit = _fit_usable_mc(mc)
+        _, _, hvg = _bixverse.mc_residual_variance(
+            *csr_args(mc.raw), fit.model, hvg_no, verbose
+        )
+        if verbose and fit.n_groups > 1:
+            logger.info(
+                "Selected %i variable features across %i groups.",
+                len(hvg),
+                fit.n_groups,
+            )
+        mc.hvg = hvg
+        return
+    m = mc.raw if params.method == "vst" else mc.norm
+    res = _bixverse.mc_hvg(*csr_args(m), to_rust(params))
+    mc.add_var(pl.DataFrame(res))
+    mc.hvg = _top(res[HVG_RANK_COL[params.method]], hvg_no)
+
+
+@beartype
 def find_hvg(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     hvg_no: int = 2000,
     hvg_params: HvgParams | None = None,
@@ -338,6 +384,11 @@ def find_hvg(
     `fit_residuals`, writes `residual_variance` instead, and treats `hvg_no`
     as a per-group count whose union is kept.
 
+    On `MetaCells` the statistics come from the in-memory counts (raw for
+    `"vst"`, normalised otherwise) and go to its var, the selection to
+    `mc.hvg`; the residual method writes no statistics there. `streaming` is
+    ignored.
+
     Args:
         sc: The experiment.
         hvg_no: Number of HVGs (per group for `"residual"`).
@@ -351,6 +402,9 @@ def find_hvg(
             is missing or stale.
     """
     params = hvg_params or HvgParams()
+    if isinstance(sc, MetaCells):
+        _find_hvg_mc(sc, hvg_no, params, verbose)
+        return
     if params.method == "residual":
         _find_hvg_residual(sc, hvg_no, verbose)
         return
@@ -363,7 +417,7 @@ def find_hvg(
 
 @beartype
 def get_hvg_data(
-    sc: SingleCells,
+    sc: SingleCells | MetaCells,
     *,
     cell_ids: Sequence[str] | None = None,
     hvg_no: int = 3000,
@@ -375,8 +429,9 @@ def get_hvg_data(
     `get_hvg_data_sc`.
 
     Args:
-        sc: The experiment.
-        cell_ids: The cells to compute over. `None` for the kept cells.
+        sc: The experiment, or meta cells.
+        cell_ids: The cells (meta cell ids on `MetaCells`) to compute over.
+            `None` for the kept cells, or every meta cell.
         hvg_no: Number of genes to flag.
         hvg_params: The HVG parameters; `"residual"` is refused, it needs a
             model fitted on a fixed cell set.
@@ -398,8 +453,17 @@ def get_hvg_data(
         "get_hvg_data",
         "Use fit_residuals() followed by find_hvg().",
     )
-    cells = sc.cells_to_keep if cell_ids is None else sc.cell_indices(list(cell_ids))
-    res = _hvg_stats(sc, cells, params, streaming, verbose)
+    if isinstance(sc, MetaCells):
+        rows = None if cell_ids is None else sc.cell_indices(list(cell_ids))
+        layer = "raw" if params.method == "vst" else "norm"
+        res = _bixverse.mc_hvg(
+            *csr_args(sc.counts(cells=rows, layer=layer)), to_rust(params)
+        )
+    else:
+        cells = (
+            sc.cells_to_keep if cell_ids is None else sc.cell_indices(list(cell_ids))
+        )
+        res = _hvg_stats(sc, cells, params, streaming, verbose)
     hvg = _top(res[HVG_RANK_COL[params.method]], hvg_no)
     rank = np.full(sc.n_genes, None, dtype=object)
     rank[hvg.astype(np.int64)] = np.arange(1, hvg_no + 1)
@@ -593,7 +657,7 @@ def _calculate_pca_residual(
 
 @beartype
 def _set_pca(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     scores: np.ndarray,
     loadings: np.ndarray,
     singular_vals: np.ndarray,
@@ -608,8 +672,68 @@ def _set_pca(
 
 
 @beartype
+def _calculate_pca_mc(
+    mc: MetaCells,
+    no_pcs: int,
+    params: PcaParams,
+    residuals: bool,
+    seed: int,
+    verbose: bool,
+) -> None:
+    """`calculate_pca` on meta cells, R's `calculate_pca_sc` MetaCells method.
+
+    Dense, in memory; the CLR offsets come off the full raw panel.
+    """
+    selected = mc.hvg
+    assert selected is not None
+    if residuals:
+        _check_residual_pca_params(params)
+        fit = _fit_usable_mc(mc)
+        genes = np.intersect1d(selected, fit.genes).astype(np.uint32)
+        if genes.size == 0:
+            raise ValueError(
+                "None of the requested genes are covered by the fitted residual "
+                "model. The model only covers genes detected in every group."
+            )
+        if genes.size < selected.size and verbose:
+            logger.info(
+                "Dropping %i of %i genes not covered by the residual model.",
+                selected.size - genes.size,
+                selected.size,
+            )
+        scores, loadings, sv = _bixverse.mc_pca_residuals(
+            *csr_args(mc.raw), fit.model, genes, no_pcs, to_rust(params), seed, verbose
+        )
+        _set_pca(mc, scores, loadings, sv[:no_pcs], parents=("residuals",))
+        return
+    offsets = _clr_offsets(mc) if params.clr else None
+    scores, loadings, sv = _bixverse.mc_pca(
+        *csr_args(mc.counts(genes=selected, layer="norm")),
+        no_pcs,
+        to_rust(params),
+        offsets,
+        seed,
+    )
+    _set_pca(mc, scores, loadings, sv[:no_pcs])
+
+
+@beartype
+def _clr_offsets(mc: MetaCells) -> np.ndarray:
+    """Per meta cell `mean(log1p(x / rowSum(x)))` over every gene of the raw
+    counts, R's `mc_get_clr_offsets`."""
+    m = mc.raw
+    n_rows, n_genes = m.shape
+    lengths = np.diff(m.indptr.astype(np.int64))
+    row_of = np.repeat(np.arange(n_rows), lengths)
+    data = m.data.astype(np.float64)
+    totals = np.bincount(row_of, weights=data, minlength=n_rows)
+    logs = np.log1p(data / totals[row_of])
+    return np.bincount(row_of, weights=logs, minlength=n_rows) / n_genes
+
+
+@beartype
 def calculate_pca(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     no_pcs: int,
     *,
     pca_params: PcaParams | None = None,
@@ -639,11 +763,29 @@ def calculate_pca(
             Dense only, and needs `clr` and `normalise_variance` off.
         verbose: Controls verbosity.
 
+    On `MetaCells` the PCA is dense over the in-memory normalised counts
+    (raw for the residual path) and `sparse_svd` is ignored, as in R.
+
     Raises:
         ValueError: On a residual run that cannot be honoured, or a missing
             or stale residual model.
     """
     params = pca_params or PcaParams()
+    if isinstance(sc, MetaCells):
+        if sc.hvg is None and hvg is None:
+            warnings.warn(
+                "No HVGs identified in the object nor provided. Please run "
+                "find_hvg() or provide the indices of the HVG. Returning object "
+                "as is.",
+                stacklevel=2,
+            )
+            return
+        if hvg is not None:
+            if verbose:
+                logger.info("HVGs provided. Setting the internal HVG to them.")
+            sc.hvg = sc._resolve_genes(hvg)
+        _calculate_pca_mc(sc, no_pcs, params, residuals, seed, verbose)
+        return
     if sc.map.hvg is None and hvg is None:
         warnings.warn(
             "No HVGs identified in the object nor provided. Please run find_hvg() "
@@ -737,8 +879,52 @@ def _covariates(
 
 
 @beartype
+def _fit_residuals_mc(
+    mc: MetaCells,
+    method: ResidualMethod,
+    params: SctransformParams | AprParams,
+    group_column: str | None,
+    covariate_columns: list[str],
+    seed: int,
+    verbose: bool,
+) -> None:
+    """`fit_residuals` on meta cells, R's `fit_residuals_sc` MetaCells
+    method: the in-memory raw counts, obs in row order."""
+    obs = mc.obs()
+    groups = None
+    if group_column is not None:
+        if group_column not in obs.columns:
+            raise ValueError(
+                f"Column '{group_column}' not found in the observation table."
+            )
+        groups, _ = _factor_codes(obs[group_column], group_column)
+    covariates = _covariates(obs, covariate_columns, method)
+    model = _bixverse.mc_fit_residuals(
+        *csr_args(mc.raw),
+        method,
+        groups,
+        covariates,
+        to_rust(params),
+        seed,
+        verbose,
+    )
+    if verbose:
+        logger.info(
+            "Fitted %i model(s) over %i genes.", model.n_groups, len(model.genes)
+        )
+    mc.cache.residual_fit = ResidualFit(
+        model=model,
+        method=method,
+        params=params,
+        group_column=group_column,
+        covariate_names=tuple(c for c, _ in covariates),
+    )
+    mc.stamp("residuals")
+
+
+@beartype
 def fit_residuals(
-    sc: ScOrScSubset,
+    sc: ScOrMc,
     *,
     method: ResidualMethod = "sctransform",
     group_column: str | None = None,
@@ -769,10 +955,39 @@ def fit_residuals(
         seed: Seed for the step-1 subsampling.
         verbose: Controls verbosity.
 
+    On `MetaCells` the model is fitted on the summed counts (still negative
+    binomial, at a far greater depth; `"analytic_pearson"` is the better
+    choice there) with obs in row order; `gene_batch_size` does not apply and
+    warns.
+
     Raises:
         TypeError: If `residual_params` does not match `method`.
         ValueError: On a missing group column or unusable covariates.
     """
+    if isinstance(sc, MetaCells):
+        if gene_batch_size is not None:
+            warnings.warn(
+                "`gene_batch_size` does not apply to meta cells, whose counts are "
+                "already in memory. Ignoring it.",
+                stacklevel=2,
+            )
+        expected = SctransformParams if method == "sctransform" else AprParams
+        params = residual_params or expected()
+        if not isinstance(params, expected):
+            raise TypeError(
+                f"method '{method}' takes {expected.__name__}, got "
+                f"{type(params).__name__}"
+            )
+        _fit_residuals_mc(
+            sc,
+            method,
+            params,
+            group_column,
+            list(covariate_columns or []),
+            seed,
+            verbose,
+        )
+        return
     if sc.n_cells == 0:
         warnings.warn(
             "No cells kept in the object. Run set_cells_to_keep() first. "

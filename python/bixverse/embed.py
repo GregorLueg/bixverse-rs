@@ -5,7 +5,7 @@ Functions take a `SingleCells` first, write the embedding to
 `sc.cache.embeddings` under R's name and stamp it. The numerics come from the
 `manifolds-rs` wheel, an optional extra: `pip install bixverse[embed]`. See
 `bixverse._core.embed` for the workflow. Every function also takes a
-`SingleCellsSubset`, as in R.
+`SingleCellsSubset` or `MetaCells`, as in R.
 """
 
 try:

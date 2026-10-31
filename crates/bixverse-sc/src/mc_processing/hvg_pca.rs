@@ -599,6 +599,88 @@ pub fn get_hvg_mvb_from_sparse(
     get_hvg_dispersion_from_sparse(matrix, binning, n_bins)
 }
 
+/// Per-gene mean and variance of the log2-expression of a meta cell matrix.
+///
+/// The meta cell normalised layer is `log1p` on the natural scale, as the
+/// single cell one, so the sums go through [log2_stats_from_sums] exactly
+/// like the streaming scran driver. Zero entries contribute to neither sum.
+///
+/// ### Params
+///
+/// * `matrix` - Log-normalised data in `data`, shape (cells, genes), CSR or
+///   CSC.
+///
+/// ### Returns
+///
+/// `(mean, var)` per gene on the log2 scale.
+fn log2_gene_stats(matrix: &CompressedSparseData2<f32>) -> (Vec<f64>, Vec<f64>) {
+    let (n_cells, n_genes) = matrix.shape;
+    let mut sums = vec![(0.0_f64, 0.0_f64); n_genes];
+    let mut add = |gene: usize, value: f32| {
+        let value = value as f64;
+        sums[gene].0 += value;
+        sums[gene].1 += value * value;
+    };
+    match matrix.cs_type {
+        CompressedSparseFormat::Csr => {
+            for (&gene, &value) in matrix.indices.iter().zip(&matrix.data) {
+                add(gene as usize, value);
+            }
+        }
+        CompressedSparseFormat::Csc => {
+            for (gene, window) in matrix.indptr.windows(2).enumerate() {
+                for &value in &matrix.data[window[0] as usize..window[1] as usize] {
+                    add(gene, value);
+                }
+            }
+        }
+    }
+    sums.into_iter()
+        .map(|(sum, sum_sq)| log2_stats_from_sums(sum, sum_sq, n_cells))
+        .unzip()
+}
+
+/// HVG statistics of an in-memory meta cell matrix, any method but the
+/// residual one.
+///
+/// Pass the raw counts for `vst` and the log-normalised counts otherwise.
+/// `meanvarbin` and `dispersion` compute the same statistics; they differ
+/// only in how the caller selects from them.
+///
+/// ### Params
+///
+/// * `matrix` - The counts in `data`, shape (meta cells, genes), CSR or CSC
+/// * `params` - The HVG parameters; `clip_max` applies to `vst` only
+///
+/// ### Returns
+///
+/// The statistics of `params.method`, one entry per gene.
+pub fn hvg_on_metacells(
+    matrix: &CompressedSparseData2<f32>,
+    params: &HvgParams,
+) -> Result<HvgStats, ScErrors> {
+    Ok(match params.method {
+        HvgMethod::Vst => HvgStats::Vst(get_hvg_vst_from_sparse(
+            matrix,
+            params.loess_span as f32,
+            params.clip_max,
+        )),
+        HvgMethod::MeanVarBin | HvgMethod::Dispersion => HvgStats::Dispersion(
+            get_hvg_dispersion_from_sparse(matrix, &params.binning, params.n_bins),
+        ),
+        HvgMethod::Scran => {
+            let (mean, var) = log2_gene_stats(matrix);
+            let (fitted, residual) = fit_variance_trend(&mean, &var, &params.scran_trend())?;
+            HvgStats::Scran(HvgScranRes {
+                mean,
+                var,
+                fitted,
+                residual,
+            })
+        }
+    })
+}
+
 /////////
 // PCA //
 /////////
