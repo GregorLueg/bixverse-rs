@@ -319,6 +319,8 @@ dependencies = [
 [[package]]
 name = "bonsai-rs"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db7663bbd438b78619fc428aec6213d2207738c77c4ae56f1b6d9ab933082f11"
 dependencies = [
  "ann-search-rs",
  "num-traits",

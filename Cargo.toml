@@ -49,7 +49,7 @@ bixverse-rs = { path = "crates/bixverse-rs", version = "0.10.0", default-feature
 approx = "0.5.1"
 ann-search-rs = { version = "0.12.0", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"] }
-bonsai-rs = { path = "/Users/gregorlueg/repos/shared/bonsai-rs", features = ["sanity"] }
+bonsai-rs = { version = "0.3.1", features = ["sanity"] }
 cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
 cubek = { version = "0.3.0", features = ["matmul"] }
