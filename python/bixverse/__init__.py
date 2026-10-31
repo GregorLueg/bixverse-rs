@@ -27,6 +27,8 @@ from . import (
     metacells,
     pp,
     qc,
+    traj,
+    trees,
 )
 from ._bixverse import (
     BixverseError,
@@ -73,4 +75,6 @@ __all__ = [
     "metacells",
     "pp",
     "qc",
+    "traj",
+    "trees",
 ]

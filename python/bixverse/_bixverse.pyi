@@ -763,3 +763,48 @@ def mc_pca_residuals(
     seed: int,
     verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def palantir(
+    knn_indices: np.ndarray,
+    knn_dist: np.ndarray,
+    early_cell: int,
+    terminal_states: np.ndarray | None,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def paga(
+    knn_indices: np.ndarray,
+    partitions: np.ndarray,
+    n_partitions: int,
+) -> dict[str, Any]: ...
+def gene_trends(
+    expression: np.ndarray,
+    pseudotime: np.ndarray,
+    branch_probs: np.ndarray,
+    branch_params: dict[str, object],
+    gene_trend_params: dict[str, object],
+) -> dict[str, Any]: ...
+def sc_bonsai(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def mc_bonsai(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    gene_indices: np.ndarray,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def bonsai_layout(
+    parent: np.ndarray,
+    branch: np.ndarray,
+    n_leaves: int,
+    layout: str,
+    hyperbolic: bool,
+) -> dict[str, Any]: ...

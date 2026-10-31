@@ -23,6 +23,8 @@ mod qc;
 mod reader;
 mod synthetic;
 mod testing;
+mod traj;
+mod trees;
 
 /// Register the extension module.
 ///
@@ -142,6 +144,12 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(metacells::mc_fit_residuals, m)?,
         wrap_pyfunction!(metacells::mc_residual_variance, m)?,
         wrap_pyfunction!(metacells::mc_pca_residuals, m)?,
+        wrap_pyfunction!(traj::palantir, m)?,
+        wrap_pyfunction!(traj::paga, m)?,
+        wrap_pyfunction!(traj::gene_trends, m)?,
+        wrap_pyfunction!(trees::sc_bonsai, m)?,
+        wrap_pyfunction!(trees::mc_bonsai, m)?,
+        wrap_pyfunction!(trees::bonsai_layout, m)?,
     ] {
         m.add_function(f)?;
     }

@@ -42,8 +42,9 @@ pub use bixverse_rs::single_cell::sc_processing::magic::parse_magic_layer;
 use bixverse_rs::single_cell::sc_processing::residuals::{
     assert_ascending, validate_clip_range, validate_groups,
 };
+pub use bixverse_rs::single_cell::sc_trajectory::gene_trends::parse_branch_weighting;
 use bixverse_rs::single_cell::sc_trajectory::gene_trends::{
-    BranchSelectionParams, BranchWeighting, GeneTrendsParams,
+    BranchSelectionParams, GeneTrendsParams,
 };
 use bixverse_rs::single_cell::sc_trajectory::palantir::PalantirParams;
 
@@ -3771,26 +3772,6 @@ impl FromRList for GeneTrendsParams {
     }
 }
 
-/// Parse the R-side weighting string into a [BranchWeighting].
-///
-/// ### Params
-///
-/// * `s` - The weighting name, `"hard_mask"` or `"fate_probability"`,
-///   case-insensitive.
-///
-/// ### Returns
-///
-/// The matching weighting, or `None` if the string is not recognised.
-pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
-    match s.to_lowercase().as_str() {
-        "hard_mask" | "hardmask" | "mask" => Some(BranchWeighting::HardMask),
-        "fate_probability" | "fateprobability" | "fate_prob" => {
-            Some(BranchWeighting::FateProbability)
-        }
-        _ => None,
-    }
-}
-
 //////////////
 // DIALOGUE //
 //////////////
@@ -4999,10 +4980,7 @@ impl FromRList for AprGroupedFit {
 
 #[cfg(feature = "bonsai")]
 mod bonsai_wrappers {
-    use bonsai_rs::bonsai::StartTree;
     use bonsai_rs::sanity_sc_rs::config::VarianceRule;
-    use bonsai_rs::search::nni::NniSearch;
-    use bonsai_rs::search::spr::SprSearch;
     use bonsai_rs::tree::NO_NODE;
     use extendr_api::*;
     use std::collections::HashMap;
@@ -5011,6 +4989,9 @@ mod bonsai_wrappers {
     use crate::r_rust_interface::r_list_to_map;
     use bixverse_rs::single_cell::sc_analysis::bonsai::{
         BonsaiScParams, BonsaiScResult, parse_bonsai_layout,
+    };
+    pub use bixverse_rs::single_cell::sc_analysis::bonsai::{
+        parse_nni_search, parse_spr_search, parse_start_tree, parse_variance_rule,
     };
 
     impl FromRList for BonsaiScParams {
@@ -5086,77 +5067,6 @@ mod bonsai_wrappers {
             }
 
             Ok(out)
-        }
-    }
-
-    /// Parse a Sanity variance rule other than `"fixed"`, which needs a value.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"marginalise"`, `"posterior_mean"` or `"max_posterior"`
-    ///
-    /// ### Returns
-    ///
-    /// The rule, or `None` if the name is not recognised.
-    pub fn parse_variance_rule(s: &str) -> Option<VarianceRule> {
-        match s {
-            "marginalise" => Some(VarianceRule::Marginalise),
-            "posterior_mean" => Some(VarianceRule::PosteriorMean),
-            "max_posterior" => Some(VarianceRule::MaxPosterior),
-            _ => None,
-        }
-    }
-
-    /// Parse the Bonsai start tree.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"linkage"` or `"greedy_merge"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The start tree, or `None` if the name is not recognised.
-    pub fn parse_start_tree(s: &str) -> Option<StartTree> {
-        match s.to_lowercase().as_str() {
-            "linkage" => Some(StartTree::Linkage),
-            "greedy_merge" => Some(StartTree::GreedyMerge),
-            _ => None,
-        }
-    }
-
-    /// Parse the SPR search mode.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"approximate"` (upstream's default approximations) or
-    ///   `"exact"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The search mode, or `None` if the name is not recognised.
-    pub fn parse_spr_search(s: &str) -> Option<SprSearch> {
-        match s.to_lowercase().as_str() {
-            "approximate" => Some(SprSearch::default()),
-            "exact" => Some(SprSearch::Exact),
-            _ => None,
-        }
-    }
-
-    /// Parse the NNI search mode.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"approximate"` (upstream's default approximations) or
-    ///   `"exact"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The search mode, or `None` if the name is not recognised.
-    pub fn parse_nni_search(s: &str) -> Option<NniSearch> {
-        match s.to_lowercase().as_str() {
-            "approximate" => Some(NniSearch::default()),
-            "exact" => Some(NniSearch::Exact),
-            _ => None,
         }
     }
 

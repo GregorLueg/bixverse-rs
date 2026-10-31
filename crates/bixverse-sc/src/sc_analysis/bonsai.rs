@@ -20,16 +20,22 @@
 //! dependency, so its `SanityOutput` is always the type
 //! `from_sanity_output` expects.
 
-use bonsai_rs::bonsai::{BonsaiParams, bonsai};
+use bonsai_rs::bonsai::{BonsaiParams, StartTree, bonsai};
 use bonsai_rs::errors::BonsaiErrors;
 use bonsai_rs::ingest::{from_sanity_output, sanity_gene_passes};
-use bonsai_rs::sanity_sc_rs::config::{SanityParams, Verbosity as SanityVerbosity};
+use bonsai_rs::sanity_sc_rs::config::{SanityParams, VarianceRule, Verbosity as SanityVerbosity};
 use bonsai_rs::sanity_sc_rs::input::CountMatrix;
 use bonsai_rs::sanity_sc_rs::{GeneView, SanityOutput, sanity_select};
+use bonsai_rs::search::nni::NniSearch;
+use bonsai_rs::search::spr::SprSearch;
+use bonsai_rs::tree::Tree;
 use bonsai_rs::tree::layout::{Layout, dendrogram, equal_angle, equal_daylight};
-use bonsai_rs::tree::{NO_NODE, Tree};
 use indexmap::IndexSet;
+use serde::Deserialize;
 use std::time::Instant;
+
+/// The parent of the root in a parent array.
+pub use bonsai_rs::tree::NO_NODE;
 
 use crate::prelude::*;
 use bixverse_sc_data::data_io::SingleCellReading;
@@ -82,8 +88,83 @@ pub fn parse_bonsai_layout(s: &str) -> Option<BonsaiLayout> {
     }
 }
 
+/// Parse a Sanity variance rule other than `"fixed"`, which needs a value.
+///
+/// ### Params
+///
+/// * `s` - `"marginalise"`, `"posterior_mean"` or `"max_posterior"`
+///
+/// ### Returns
+///
+/// The rule, or `None` if the name is not recognised.
+pub fn parse_variance_rule(s: &str) -> Option<VarianceRule> {
+    match s {
+        "marginalise" => Some(VarianceRule::Marginalise),
+        "posterior_mean" => Some(VarianceRule::PosteriorMean),
+        "max_posterior" => Some(VarianceRule::MaxPosterior),
+        _ => None,
+    }
+}
+
+/// Parse the Bonsai start tree.
+///
+/// ### Params
+///
+/// * `s` - `"linkage"` or `"greedy_merge"`, case-insensitive
+///
+/// ### Returns
+///
+/// The start tree, or `None` if the name is not recognised.
+pub fn parse_start_tree(s: &str) -> Option<StartTree> {
+    match s.to_lowercase().as_str() {
+        "linkage" => Some(StartTree::Linkage),
+        "greedy_merge" => Some(StartTree::GreedyMerge),
+        _ => None,
+    }
+}
+
+/// Parse the SPR search mode.
+///
+/// ### Params
+///
+/// * `s` - `"approximate"` (upstream's default approximations) or `"exact"`,
+///   case-insensitive
+///
+/// ### Returns
+///
+/// The search mode, or `None` if the name is not recognised.
+pub fn parse_spr_search(s: &str) -> Option<SprSearch> {
+    match s.to_lowercase().as_str() {
+        "approximate" => Some(SprSearch::default()),
+        "exact" => Some(SprSearch::Exact),
+        _ => None,
+    }
+}
+
+/// Parse the NNI search mode.
+///
+/// ### Params
+///
+/// * `s` - `"approximate"` (upstream's default approximations) or `"exact"`,
+///   case-insensitive
+///
+/// ### Returns
+///
+/// The search mode, or `None` if the name is not recognised.
+pub fn parse_nni_search(s: &str) -> Option<NniSearch> {
+    match s.to_lowercase().as_str() {
+        "approximate" => Some(NniSearch::default()),
+        "exact" => Some(NniSearch::Exact),
+        _ => None,
+    }
+}
+
 /// Parameters for Bonsai over single cell counts.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the flat R `params_sc_bonsai()` list, see
+/// [`BonsaiScParamsSpec`].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "BonsaiScParamsSpec")]
 pub struct BonsaiScParams {
     /// Sanity run parameters.
     pub sanity: SanityParams,
@@ -114,6 +195,105 @@ impl Default for BonsaiScParams {
             layout: BonsaiLayout::default(),
             hyperbolic: false,
         }
+    }
+}
+
+/// The keys a [`BonsaiScParams`] deserialises from, as its R list conversion
+/// reads them. Every key is optional: a missing one leaves the
+/// [`BonsaiScParams`] default in place, and a string naming no known option is
+/// an error rather than a fallback.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct BonsaiScParamsSpec {
+    /// `"marginalise"`, `"posterior_mean"`, `"max_posterior"` or `"fixed"`.
+    pub variance_rule: Option<String>,
+    /// The variance for `variance_rule = "fixed"`.
+    pub fixed_variance: Option<f64>,
+    /// Bins in the log-spaced variance grid.
+    pub variance_bins: Option<usize>,
+    /// Smallest variance on the grid.
+    pub variance_min: Option<f64>,
+    /// Largest variance on the grid.
+    pub variance_max: Option<f64>,
+    /// Genes below this signal-to-noise ratio are left out of the tree.
+    pub min_signal_to_noise: Option<f64>,
+    /// `"linkage"` or `"greedy_merge"`.
+    pub start: Option<String>,
+    /// `"approximate"` or `"exact"`.
+    pub spr_search: Option<String>,
+    /// `"approximate"` or `"exact"`.
+    pub nni_search: Option<String>,
+    /// Seed for the linkage, SPR and NNI searches.
+    pub seed: Option<u64>,
+    /// Reroot the finished tree for display.
+    pub reroot: Option<bool>,
+    /// `"equal_angle"`, `"equal_daylight"` or `"dendrogram"`.
+    pub layout: Option<String>,
+    /// Project the layout onto the hyperbolic disk.
+    pub hyperbolic: Option<bool>,
+}
+
+impl TryFrom<BonsaiScParamsSpec> for BonsaiScParams {
+    type Error = String;
+
+    /// Apply the given keys onto the defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`BonsaiScParams`], or an error naming an unknown option or a
+    /// `"fixed"` rule without its variance.
+    fn try_from(s: BonsaiScParamsSpec) -> Result<Self, String> {
+        let unknown = |k: &str, v: &str| format!("Invalid Bonsai {k}: {v}");
+        let mut out = Self::default();
+        if let Some(v) = s.variance_rule.as_deref() {
+            out.sanity.variance_rule = match v.to_lowercase().as_str() {
+                "fixed" => VarianceRule::Fixed(
+                    s.fixed_variance
+                        .ok_or("Bonsai variance_rule 'fixed' needs fixed_variance")?,
+                ),
+                r => parse_variance_rule(r).ok_or_else(|| unknown("variance_rule", v))?,
+            };
+        }
+        if let Some(v) = s.variance_bins {
+            out.sanity.variance_bins = v;
+        }
+        if let Some(v) = s.variance_min {
+            out.sanity.variance_min = v;
+        }
+        if let Some(v) = s.variance_max {
+            out.sanity.variance_max = v;
+        }
+        if let Some(v) = s.min_signal_to_noise {
+            out.bonsai.ingest.min_signal_to_noise = v;
+        }
+        if let Some(v) = s.start.as_deref() {
+            out.bonsai.start = parse_start_tree(v).ok_or_else(|| unknown("start", v))?;
+        }
+        if let Some(v) = s.spr_search.as_deref() {
+            out.bonsai.spr.search = parse_spr_search(v).ok_or_else(|| unknown("spr_search", v))?;
+        }
+        if let Some(v) = s.nni_search.as_deref() {
+            out.bonsai.nni.search = parse_nni_search(v).ok_or_else(|| unknown("nni_search", v))?;
+        }
+        if let Some(v) = s.seed {
+            out.bonsai.linkage.seed = v as usize;
+            out.bonsai.spr.seed = v;
+            out.bonsai.nni.seed = v;
+        }
+        if let Some(v) = s.reroot {
+            out.bonsai.reroot = v;
+        }
+        if let Some(v) = s.layout.as_deref() {
+            out.layout = parse_bonsai_layout(v).ok_or_else(|| unknown("layout", v))?;
+        }
+        if let Some(v) = s.hyperbolic {
+            out.hyperbolic = v;
+        }
+        Ok(out)
     }
 }
 

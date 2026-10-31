@@ -48,7 +48,7 @@ use crate::pp::{PyResidualFit, index_vec, mat_array, stats_dict};
 ///////////
 
 /// A meta cell matrix as its CSR parts: `(data, indices, indptr, shape)`.
-type CsrParts<'a, 'py> = (
+pub(crate) type CsrParts<'a, 'py> = (
     &'a PyReadonlyArray1<'py, f32>,
     &'a PyReadonlyArray1<'py, u32>,
     &'a PyReadonlyArray1<'py, u32>,
@@ -72,7 +72,7 @@ type CsrParts<'a, 'py> = (
 /// ### Returns
 ///
 /// The matrix, or a `ValueError` when the parts do not line up.
-fn csr_from_parts<T: BixverseNumeric>(
+pub(crate) fn csr_from_parts<T: BixverseNumeric>(
     parts: CsrParts<'_, '_>,
     cast: impl Fn(f32) -> T,
 ) -> PyResult<CompressedSparseData2<T, f32>> {
