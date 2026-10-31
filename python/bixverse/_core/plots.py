@@ -115,6 +115,8 @@ OUTLIER_COLOURS = {False: GREY["lightgrey"], True: "orange"}
 
 # ggplot sizes are mm, matplotlib wants points
 _PT_PER_MM = 72.27 / 25.4
+# ggplot's `.stroke`: stroke widths are in 1/96 inch
+_STROKE_PT = 96 / 25.4
 RASTER_CELLS = 100_000
 
 
@@ -188,9 +190,13 @@ def _cmap(palette: Palette, reverse: bool = False) -> Colormap:
 
 
 @beartype
-def _area(size_mm: float) -> float:
-    """A ggplot point size (mm diameter) as a matplotlib marker area."""
-    return (size_mm * _PT_PER_MM) ** 2
+def _area(size_mm: float, stroke: float = 0.5) -> float:
+    """A ggplot point size (mm diameter) as a matplotlib marker area.
+
+    ggplot draws a point at `size * .pt + stroke * .stroke / 2`; the stroke
+    term (0.5 by default) dominates small points, so it is kept.
+    """
+    return (size_mm * _PT_PER_MM + stroke * _STROKE_PT / 2) ** 2
 
 
 @beartype
@@ -1332,7 +1338,8 @@ def feature_scatter_plot(
             yv,
             c=dens,
             cmap=cmap,
-            s=_area(point_size),
+            # R draws these with `stroke = 0`
+            s=_area(point_size, stroke=0.0),
             alpha=point_alpha,
             linewidths=0,
             rasterized=raster,
