@@ -33,6 +33,7 @@ from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
+from bixverse._core.subset import ScOrScSubset
 from bixverse.params import (
     BbknnParams,
     FastmnnParams,
@@ -199,7 +200,7 @@ class GraphConnectivityScores:
 
 
 @beartype
-def _labels(sc: SingleCells, column: str) -> tuple[np.ndarray, list[str]]:
+def _labels(sc: ScOrScSubset, column: str) -> tuple[np.ndarray, list[str]]:
     """0-based `factor()` codes of an obs column over the kept cells.
 
     Raises:
@@ -212,7 +213,7 @@ def _labels(sc: SingleCells, column: str) -> tuple[np.ndarray, list[str]]:
 
 
 @beartype
-def _hard_state(sc: SingleCells, labels: Sequence[str]) -> None:
+def _hard_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
     """R's `assert_sc_state`: refuse stale inputs.
 
     Raises:
@@ -224,7 +225,7 @@ def _hard_state(sc: SingleCells, labels: Sequence[str]) -> None:
 
 
 @beartype
-def _soft_state(sc: SingleCells, labels: Sequence[str]) -> None:
+def _soft_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
     """R's `.warn_sc_state`: warn on stale inputs."""
     state = sc.check_state(labels)
     if isinstance(state, str):
@@ -250,7 +251,7 @@ def _pca_keys(
 
 
 @beartype
-def _knn_for_metric(sc: SingleCells, n: int, what: str) -> KnnGraph | None:
+def _knn_for_metric(sc: ScOrScSubset, n: int, what: str) -> KnnGraph | None:
     """The cached kNN, warning when absent or stale.
 
     Raises:
@@ -272,7 +273,7 @@ def _knn_for_metric(sc: SingleCells, n: int, what: str) -> KnnGraph | None:
 
 
 @beartype
-def _embedding_for_metric(sc: SingleCells, name: str) -> np.ndarray | None:
+def _embedding_for_metric(sc: ScOrScSubset, name: str) -> np.ndarray | None:
     """A cached embedding by name, warning when absent or stale."""
     embd = _embedding(sc, name)
     if embd is None:
@@ -291,7 +292,7 @@ def _embedding_for_metric(sc: SingleCells, name: str) -> np.ndarray | None:
 
 @beartype
 def _harmony(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     additional_batch_columns: Sequence[str] | None,
     params: HarmonyParams | HarmonyV2Params,
@@ -330,7 +331,7 @@ def _harmony(
 
 @beartype
 def harmony(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
@@ -373,7 +374,7 @@ def harmony(
 
 @beartype
 def harmony_v2(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
@@ -421,7 +422,7 @@ def harmony_v2(
 
 @beartype
 def bbknn(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     no_neighbours_to_keep: int = 5,
@@ -512,7 +513,7 @@ def bbknn(
 
 @beartype
 def _anchor_correction(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     batch_hvg_genes: np.ndarray | Sequence[int] | Sequence[str],
     params: dict[str, object],
@@ -555,7 +556,7 @@ def _anchor_correction(
 
 @beartype
 def fast_mnn(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     batch_hvg_genes: np.ndarray | Sequence[int] | Sequence[str],
     *,
@@ -708,7 +709,7 @@ def seurat_rpca(
 
 @beartype
 def calculate_kbet(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     threshold: float = 0.05,
@@ -759,7 +760,7 @@ def calculate_kbet(
 
 @beartype
 def calculate_lisi(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     label_column: str,
     *,
     type: LisiType = "batch",
@@ -822,7 +823,7 @@ def calculate_lisi(
 
 @beartype
 def calculate_batch_asw(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     embd_to_use: str = "pca",
@@ -876,7 +877,7 @@ def calculate_batch_asw(
 
 @beartype
 def calculate_pcr(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     embd_to_use: str = "pca",
@@ -936,7 +937,7 @@ def calculate_pcr(
 
 @beartype
 def calculate_cell_type_asw(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     cell_type_column: str,
     *,
     embd_to_use: str = "pca",
@@ -993,7 +994,7 @@ def calculate_cell_type_asw(
 
 @beartype
 def calculate_graph_connectivity(
-    sc: SingleCells, cell_type_column: str
+    sc: ScOrScSubset, cell_type_column: str
 ) -> GraphConnectivityScores | None:
     """Graph connectivity per cell type on the cached kNN, as R's
     `calculate_graph_connectivity_sc`.
@@ -1034,7 +1035,7 @@ def calculate_graph_connectivity(
 
 @beartype
 def calculate_integration_metrics(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     cell_type_column: str | None = None,

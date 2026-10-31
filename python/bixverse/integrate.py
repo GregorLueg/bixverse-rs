@@ -4,8 +4,9 @@ correction methods and the scIB-style metrics.
 Corrections take a `SingleCells` first and write what R writes: Harmony,
 fastMNN, CCA and rPCA an embedding to `sc.cache.embeddings`, BBKNN the kNN
 and the neighbour graph, all stamped. The `calculate_*` metrics return
-records and leave the experiment alone. See `bixverse._core.integrate` for
-the workflow.
+records and leave the experiment alone. All but `seurat_cca` and
+`seurat_rpca` also take a `SingleCellsSubset`, as in R. See
+`bixverse._core.integrate` for the workflow.
 """
 
 from bixverse._core.integrate import (

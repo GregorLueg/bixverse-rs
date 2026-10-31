@@ -38,6 +38,7 @@ from bixverse._core.ingest import _prepare
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import MagicLayer
+from bixverse._core.subset import ScOrScSubset
 from bixverse.params import (
     AprParams,
     HvgParams,
@@ -198,7 +199,7 @@ def _factor_codes(values: pl.Series, name: str) -> tuple[np.ndarray, list[str]]:
 
 
 @beartype
-def _obs_aligned(sc: SingleCells, cols: Sequence[str] | None = None) -> pl.DataFrame:
+def _obs_aligned(sc: ScOrScSubset, cols: Sequence[str] | None = None) -> pl.DataFrame:
     """obs rows of the kept cells in `cells_to_keep` order, R's
     `.residual_obs`.
 
@@ -210,8 +211,7 @@ def _obs_aligned(sc: SingleCells, cols: Sequence[str] | None = None) -> pl.DataF
         ValueError: If a kept cell has no obs row.
     """
     if cols is not None:
-        with db.connect(sc.db_path, read_only=True) as con:
-            present = db.columns(con, "obs")
+        present = sc.obs_columns()
         cols = [c for c in dict.fromkeys(["cell_idx", *cols]) if c in present]
     obs = sc.obs(cols=None if cols is None else list(cols), filtered=True)
     order = pl.DataFrame({"cell_idx": sc.cells_to_keep})
@@ -225,7 +225,7 @@ def _obs_aligned(sc: SingleCells, cols: Sequence[str] | None = None) -> pl.DataF
 
 
 @beartype
-def _fit_usable(sc: SingleCells) -> ResidualFit:
+def _fit_usable(sc: ScOrScSubset) -> ResidualFit:
     """The cached residual model, if it is safe to compute with, R's
     `.assert_fit_usable`.
 
@@ -264,7 +264,7 @@ def _check_not_residual(params: HvgParams, fn: str, hint: str) -> None:
 
 @beartype
 def _hvg_stats(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     cell_indices: np.ndarray,
     params: HvgParams,
     streaming: bool | None,
@@ -282,7 +282,7 @@ def _hvg_stats(
 
 
 @beartype
-def _find_hvg_residual(sc: SingleCells, hvg_no: int, verbose: bool) -> None:
+def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
     """Residual variance HVGs, R's `.find_hvg_residual`.
 
     Writes `residual_variance` (the mean over groups, NULL for genes the
@@ -299,9 +299,11 @@ def _find_hvg_residual(sc: SingleCells, hvg_no: int, verbose: bool) -> None:
         None,
         verbose,
     )
-    full = np.full(sc.n_genes, np.nan)
-    full[genes.astype(np.int64)] = variance.mean(axis=1)
-    sc.add_var(pl.DataFrame({"residual_variance": full}).fill_nan(None))
+    # a subset leaves var alone, as R's `write_var = FALSE`
+    if isinstance(sc, SingleCells):
+        full = np.full(sc.n_genes, np.nan)
+        full[genes.astype(np.int64)] = variance.mean(axis=1)
+        sc.add_var(pl.DataFrame({"residual_variance": full}).fill_nan(None))
     if verbose and fit.n_groups > 1:
         logger.info(
             "Selected %i variable features: the union of the top %i of each of "
@@ -315,7 +317,7 @@ def _find_hvg_residual(sc: SingleCells, hvg_no: int, verbose: bool) -> None:
 
 @beartype
 def find_hvg(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     hvg_no: int = 2000,
     hvg_params: HvgParams | None = None,
@@ -329,7 +331,8 @@ def find_hvg(
     `dispersion_scaled`, `bin` for `"meanvarbin"` / `"dispersion"`;
     `scran_mean`, `scran_var`, `scran_fitted`, `scran_residual` for
     `"scran"`), the top `hvg_no` genes on the ranking statistic to
-    `sc.map.hvg`.
+    `sc.map.hvg`. On a `SingleCellsSubset` only the selection is stored, as
+    in R.
 
     `method = "residual"` ranks on the residual variance of the model from
     `fit_residuals`, writes `residual_variance` instead, and treats `hvg_no`
@@ -353,7 +356,8 @@ def find_hvg(
         return
     res = _hvg_stats(sc, sc.cells_to_keep, params, streaming, verbose)
     hvg = _top(res[HVG_RANK_COL[params.method]], hvg_no)
-    sc.add_var(pl.DataFrame(res))
+    if isinstance(sc, SingleCells):
+        sc.add_var(pl.DataFrame(res))
     sc.map.hvg = hvg
 
 
@@ -441,7 +445,7 @@ def _combine_batches(
 
 @beartype
 def find_hvg_batch_aware(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     batch_column: str,
     *,
     hvg_no: int = 2000,
@@ -534,7 +538,7 @@ def _check_residual_pca_params(params: PcaParams) -> None:
 
 @beartype
 def _calculate_pca_residual(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     no_pcs: int,
     params: PcaParams,
     selected: np.ndarray,
@@ -589,7 +593,7 @@ def _calculate_pca_residual(
 
 @beartype
 def _set_pca(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     scores: np.ndarray,
     loadings: np.ndarray,
     singular_vals: np.ndarray,
@@ -605,7 +609,7 @@ def _set_pca(
 
 @beartype
 def calculate_pca(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     no_pcs: int,
     *,
     pca_params: PcaParams | None = None,
@@ -734,7 +738,7 @@ def _covariates(
 
 @beartype
 def fit_residuals(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     method: ResidualMethod = "sctransform",
     group_column: str | None = None,
@@ -831,7 +835,7 @@ def fit_residuals(
 
 @beartype
 def sct_corrected_counts(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     dir_out: Path | str | None = None,
     build_cell_store: bool = True,
@@ -919,7 +923,7 @@ def sct_corrected_counts(
 
 @beartype
 def run_magic(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     features: Sequence[str],
     *,
     magic_params: MagicParams | None = None,

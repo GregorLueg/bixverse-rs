@@ -2,8 +2,9 @@
 the port of the bixverse R DGE and differential abundance methods.
 
 Marker tests return polars frames; the specific markers, NEBULA, Milo and
-MELD return records with R's getters. See `bixverse._core.de` for the
-workflow.
+MELD return records with R's getters. The markers, NEBULA and the
+pseudobulk functions also take a `SingleCellsSubset`, as in R. See
+`bixverse._core.de` for the workflow.
 """
 
 from bixverse._core.de import (

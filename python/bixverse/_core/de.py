@@ -37,13 +37,13 @@ import polars as pl
 from beartype import BeartypeConf, beartype
 
 from bixverse import _bixverse
-from bixverse._core import db
 from bixverse._core.doublets import _as_character
 from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.integrate import _hard_state
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import Selection, SingleCells
 from bixverse._core.state import CsrMatrix
+from bixverse._core.subset import ScOrScSubset
 from bixverse.params import EdgerQlParams, MeldParams, NebulaParams, to_rust
 from bixverse.params._checks import check_range
 
@@ -278,20 +278,13 @@ class PseudoBulked:
 
 
 @beartype(conf=_CONF)
-def _obs_columns(sc: SingleCells) -> list[str]:
-    """The obs column names."""
-    with db.connect(sc.db_path, read_only=True) as con:
-        return db.columns(con, "obs")
-
-
-@beartype(conf=_CONF)
-def _require_columns(sc: SingleCells, cols: Sequence[str]) -> None:
+def _require_columns(sc: ScOrScSubset, cols: Sequence[str]) -> None:
     """R's `.assert_group_by` for several columns.
 
     Raises:
         ValueError: If one is not in obs.
     """
-    present = _obs_columns(sc)
+    present = sc.obs_columns()
     missing = [c for c in cols if c not in present]
     if missing:
         raise ValueError(f"Not found in the obs table: {', '.join(missing)}.")
@@ -426,7 +419,7 @@ def _groups_to_cells(
 
 @beartype(conf=_CONF)
 def find_markers(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     cells_1: Selection,
     cells_2: Selection,
     *,
@@ -471,7 +464,7 @@ def find_markers(
 
 @beartype(conf=_CONF)
 def find_all_markers(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     column_of_interest: str,
     *,
     method: Method = "wilcox",
@@ -531,7 +524,7 @@ def find_all_markers(
 
 @beartype(conf=_CONF)
 def find_specific_markers(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     column_of_interest: str,
     *,
     reference_group: str | None = None,
@@ -696,7 +689,7 @@ def get_marker_comparisons(x: ScSpecificMarkers) -> pl.DataFrame:
 
 @beartype(conf=_CONF)
 def get_pseudobulked(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     cell_list: dict[str, Selection],
     *,
     return_format: Literal["dense", "sparse"] = "dense",
@@ -818,7 +811,7 @@ def run_edger_ql(
 
 @beartype(conf=_CONF)
 def pseudobulk_dge(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     cell_list: dict[str, Selection],
     design: np.ndarray | pl.DataFrame,
     *,
@@ -877,7 +870,7 @@ def pseudobulk_dge(
 
 @beartype(conf=_CONF)
 def nebula(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     subject_col: str,
     design: str,
     *,

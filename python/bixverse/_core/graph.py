@@ -30,6 +30,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
+from bixverse._core.subset import ScOrScSubset
 from bixverse.params import FastClusterParams, KnnParams, NeighboursParams, to_rust
 
 ###########
@@ -97,7 +98,7 @@ class FastClusters:
 
 
 @beartype
-def _embedding(sc: SingleCells, name: str) -> np.ndarray | None:
+def _embedding(sc: ScOrScSubset, name: str) -> np.ndarray | None:
     """A cached embedding by name, `"pca"` for the PCA scores."""
     if name == "pca":
         return sc.cache.pca_factors
@@ -275,7 +276,7 @@ def calc_knn_metrics(ref_knn: KnnGraph, query_knn: KnnGraph) -> KnnMetrics:
 
 @beartype
 def find_neighbours(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     embd_to_use: str = "pca",
     no_embd_to_use: int | None = None,
@@ -333,7 +334,7 @@ def find_neighbours(
 
 
 @beartype
-def get_connectivities(sc: SingleCells) -> CsrMatrix | None:
+def get_connectivities(sc: ScOrScSubset) -> CsrMatrix | None:
     """The neighbour graph, R's `get_connectivities` / `as_igraph`.
 
     The undirected graph as its symmetric CSR, rows sorted, every edge
@@ -358,7 +359,7 @@ def get_connectivities(sc: SingleCells) -> CsrMatrix | None:
 
 @beartype
 def find_clusters(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     cluster_algorithm: ClusterAlgorithm = "leiden",
     res: float = 1.0,
@@ -434,7 +435,7 @@ def find_clusters(
 
 @beartype
 def fast_cluster(
-    sc: SingleCells,
+    sc: ScOrScSubset,
     *,
     embd_to_use: str = "pca",
     no_embd_to_use: int | None = None,

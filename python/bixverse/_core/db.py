@@ -322,6 +322,7 @@ def get_table(
     indices: np.ndarray | None = None,
     cols: list[str] | None = None,
     filtered: bool = False,
+    where_equal: dict[str, str] | None = None,
 ) -> pl.DataFrame:
     """Read a table, optionally restricted to rows and columns.
 
@@ -333,6 +334,9 @@ def get_table(
         indices: Optional 0-based row indices to keep.
         cols: Optional columns to return. `None` returns all.
         filtered: Keep only `to_keep` cells. Only valid for `obs`.
+        where_equal: Keep rows whose column equals the value. The value is
+            cast to the column type, not the column to a string, as R does,
+            so `"1"` matches a numeric 1 whose string form would be `"1.0"`.
 
     Returns:
         The table with its index column 0-based.
@@ -355,14 +359,27 @@ def get_table(
         where.append("t.to_keep = TRUE")
     if indices is not None:
         where.append(f"t.{_qi(key)} IN (SELECT {_qi(key)} FROM bixverse_keys)")
+    params: list[object] = []
+    if where_equal:
+        _check_columns(con, table, list(where_equal))
+        types = dict(
+            con.execute(
+                "SELECT column_name, data_type FROM duckdb_columns() "
+                "WHERE database_name = current_database() AND table_name = ?",
+                [table],
+            ).fetchall()
+        )
+        for col, value in where_equal.items():
+            where.append(f"t.{_qi(col)} = TRY_CAST(? AS {types[col]})")
+            params.append(value)
     where_part = f"WHERE {' AND '.join(where)}" if where else ""
     sql = f"SELECT {col_part} FROM {_qi(table)} t {where_part} ORDER BY t.{_qi(key)}"
 
     if indices is None:
-        frame = _fetch(con, sql)
+        frame = _fetch(con, sql, params)
     else:
         with _registered(con, "bixverse_keys", _key_frame(key, indices)):
-            frame = _fetch(con, sql)
+            frame = _fetch(con, sql, params)
     return _to_zero_based(frame, key)
 
 

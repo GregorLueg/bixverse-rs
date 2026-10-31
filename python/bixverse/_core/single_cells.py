@@ -44,12 +44,163 @@ GENES_BIN: str = "counts_genes.bin"
 Selection = np.ndarray | Sequence[int] | Sequence[str]
 
 
+##########
+# ScBase #
+##########
+
+
+class ScBase:
+    """State access shared by `SingleCells` and `SingleCellsSubset`.
+
+    Everything here works off the store (`dir`, `reader`), the map and the
+    cache, so it means the same on an experiment and on a subset of it: cell
+    indices are 0-based positions in the store, `cells_to_keep` is the cell
+    set results align to. obs / var access lives on the two classes, because
+    one reads the DuckDB and the other holds them in memory.
+
+    Attributes:
+        dir: The experiment directory.
+        reader: The cell-major store.
+        map: Ids and index sets.
+        cache: Analysis results held in memory.
+    """
+
+    dir: Path
+    reader: _bixverse.CellReader
+    map: ScMap
+    cache: ScCache
+
+    #########
+    # Paths #
+    #########
+
+    @property
+    def cells_path(self) -> Path:
+        """The cell-major store."""
+        return self.dir / CELLS_BIN
+
+    @property
+    def genes_path(self) -> Path:
+        """The gene-major store."""
+        return self.dir / GENES_BIN
+
+    ########
+    # Dims #
+    ########
+
+    @property
+    def dims(self) -> tuple[int, int]:
+        """`(cells, genes)` in the store, before any cell filter."""
+        return (self.reader.total_cells, self.reader.total_genes)
+
+    @property
+    def n_cells(self) -> int:
+        """Number of kept cells."""
+        return len(self.map.cells_to_keep)
+
+    @property
+    def n_genes(self) -> int:
+        """Number of genes."""
+        return self.reader.total_genes
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """`(kept cells, genes)`, as R's `dim()`."""
+        return (self.n_cells, self.n_genes)
+
+    @property
+    def cells_to_keep(self) -> np.ndarray:
+        """0-based store indices of the kept cells."""
+        return self.map.cells_to_keep
+
+    def _all_cells(self) -> np.ndarray:
+        """0-based store indices of every cell, ignoring the cell filter."""
+        return np.arange(self.dims[0], dtype=np.uint32)
+
+    ##############
+    # Id lookups #
+    ##############
+
+    @beartype
+    def cell_ids(
+        self,
+        indices: np.ndarray | Sequence[int] | None = None,
+        *,
+        filtered: bool = False,
+    ) -> np.ndarray:
+        """Cell ids, all, kept only, or for 0-based store indices."""
+        if indices is not None:
+            return self.map.cell_ids[np.asarray(indices, dtype=np.int64)]
+        return self.map.cell_names(filtered=filtered)
+
+    @beartype
+    def gene_ids(self, indices: np.ndarray | Sequence[int] | None = None) -> np.ndarray:
+        """Gene ids, all or for 0-based store indices."""
+        if indices is None:
+            return self.map.gene_ids
+        return self.map.gene_ids[np.asarray(indices, dtype=np.int64)]
+
+    @beartype
+    def cell_indices(self, cell_ids: Sequence[str]) -> np.ndarray:
+        """0-based store indices of cells by id. Unknown ids warn and drop."""
+        return self.map.cell_indices(cell_ids)
+
+    @beartype
+    def gene_indices(self, gene_ids: Sequence[str]) -> np.ndarray:
+        """0-based store indices of genes by id. Unknown ids warn and drop."""
+        return self.map.gene_indices(gene_ids)
+
+    @beartype
+    def _resolve_cells(self, cells: Selection) -> np.ndarray:
+        """0-based cell indices from indices or ids."""
+        arr = np.asarray(cells)
+        if arr.dtype.kind in "USO":
+            return self.cell_indices([str(c) for c in arr])
+        return _check_range(arr, self.dims[0], "cells")
+
+    @beartype
+    def _resolve_genes(self, genes: Selection) -> np.ndarray:
+        """0-based gene indices from indices or ids."""
+        arr = np.asarray(genes)
+        if arr.dtype.kind in "USO":
+            return self.gene_indices([str(g) for g in arr])
+        return _check_range(arr, self.dims[1], "genes")
+
+    ##############
+    # Provenance #
+    ##############
+
+    def cells_hash(self) -> str:
+        """Hash of the current cell set, as recorded in stamps."""
+        return cells_hash(self.map.cells_to_keep)
+
+    @beartype
+    def stamp(self, artefact: str, *, parents: Sequence[str] = ()) -> Stamp:
+        """Stamp a cached artefact against the current cell set.
+
+        Args:
+            artefact: `"pca"`, `"knn"`, `"connectivities"`, `"magic"`,
+                `"residuals"` or an embedding name.
+            parents: Labels of the artefacts it was derived from.
+        """
+        return self.cache.stamp(artefact, self.cells_hash(), parents)
+
+    def cache_status(self) -> pl.DataFrame:
+        """One row per cached artefact: stamped, stale and why."""
+        return state_report(self.cache, self.cells_hash())
+
+    @beartype
+    def check_state(self, artefacts: Sequence[str]) -> bool | str:
+        """`True` if the artefacts are fresh, else what is stale and why."""
+        return check_state(self.cache, self.cells_hash(), artefacts)
+
+
 ###############
 # SingleCells #
 ###############
 
 
-class SingleCells:
+class SingleCells(ScBase):
     """A single cell experiment on disk.
 
     The constructor rebuilds the map from the DuckDB (ids from `obs` / `var`,
@@ -108,94 +259,6 @@ class SingleCells:
         """The obs / var DuckDB."""
         return db.db_path(self.dir)
 
-    @property
-    def cells_path(self) -> Path:
-        """The cell-major store."""
-        return self.dir / CELLS_BIN
-
-    @property
-    def genes_path(self) -> Path:
-        """The gene-major store."""
-        return self.dir / GENES_BIN
-
-    ########
-    # Dims #
-    ########
-
-    @property
-    def dims(self) -> tuple[int, int]:
-        """`(cells, genes)` in the store, before any cell filter."""
-        return (self.reader.total_cells, self.reader.total_genes)
-
-    @property
-    def n_cells(self) -> int:
-        """Number of kept cells."""
-        return len(self.map.cells_to_keep)
-
-    @property
-    def n_genes(self) -> int:
-        """Number of genes."""
-        return self.reader.total_genes
-
-    @property
-    def shape(self) -> tuple[int, int]:
-        """`(kept cells, genes)`, as R's `dim()`."""
-        return (self.n_cells, self.n_genes)
-
-    @property
-    def cells_to_keep(self) -> np.ndarray:
-        """0-based store indices of the kept cells."""
-        return self.map.cells_to_keep
-
-    ##############
-    # Id lookups #
-    ##############
-
-    @beartype
-    def cell_ids(
-        self,
-        indices: np.ndarray | Sequence[int] | None = None,
-        *,
-        filtered: bool = False,
-    ) -> np.ndarray:
-        """Cell ids, all, kept only, or for 0-based store indices."""
-        if indices is not None:
-            return self.map.cell_ids[np.asarray(indices, dtype=np.int64)]
-        return self.map.cell_names(filtered=filtered)
-
-    @beartype
-    def gene_ids(self, indices: np.ndarray | Sequence[int] | None = None) -> np.ndarray:
-        """Gene ids, all or for 0-based store indices."""
-        if indices is None:
-            return self.map.gene_ids
-        return self.map.gene_ids[np.asarray(indices, dtype=np.int64)]
-
-    @beartype
-    def cell_indices(self, cell_ids: Sequence[str]) -> np.ndarray:
-        """0-based store indices of cells by id. Unknown ids warn and drop."""
-        return self.map.cell_indices(cell_ids)
-
-    @beartype
-    def gene_indices(self, gene_ids: Sequence[str]) -> np.ndarray:
-        """0-based store indices of genes by id. Unknown ids warn and drop."""
-        return self.map.gene_indices(gene_ids)
-
-    @beartype
-    def _resolve_cells(self, cells: Selection) -> np.ndarray:
-        """0-based cell indices from indices or ids."""
-        arr = np.asarray(cells)
-        if arr.dtype.kind in "USO":
-            return self.cell_indices([str(c) for c in arr])
-        return _check_range(arr, self.dims[0], "cells")
-
-    @beartype
-    def _resolve_genes(self, genes: Selection) -> np.ndarray:
-        """0-based gene indices from indices or ids."""
-        arr = np.asarray(genes)
-        if arr.dtype.kind in "USO":
-            return self.gene_indices([str(g) for g in arr])
-        return _check_range(arr, self.dims[1], "genes")
-
     ##############
     # obs / var #
     ##############
@@ -220,6 +283,11 @@ class SingleCells:
         )
         with db.connect(self.db_path, read_only=True) as con:
             return db.get_table(con, "obs", indices=idx, cols=cols, filtered=filtered)
+
+    def obs_columns(self) -> list[str]:
+        """The obs column names, without reading the table."""
+        with db.connect(self.db_path, read_only=True) as con:
+            return db.columns(con, "obs")
 
     @beartype
     def var(
@@ -345,34 +413,6 @@ class SingleCells:
             db.reset_cells_to_keep(con)
         self.cache = ScCache()
 
-    ##############
-    # Provenance #
-    ##############
-
-    def cells_hash(self) -> str:
-        """Hash of the current cell set, as recorded in stamps."""
-        return cells_hash(self.map.cells_to_keep)
-
-    @beartype
-    def stamp(self, artefact: str, *, parents: Sequence[str] = ()) -> Stamp:
-        """Stamp a cached artefact against the current cell set.
-
-        Args:
-            artefact: `"pca"`, `"knn"`, `"connectivities"`, `"magic"`,
-                `"residuals"` or an embedding name.
-            parents: Labels of the artefacts it was derived from.
-        """
-        return self.cache.stamp(artefact, self.cells_hash(), parents)
-
-    def cache_status(self) -> pl.DataFrame:
-        """One row per cached artefact: stamped, stale and why."""
-        return state_report(self.cache, self.cells_hash())
-
-    @beartype
-    def check_state(self, artefacts: Sequence[str]) -> bool | str:
-        """`True` if the artefacts are fresh, else what is stale and why."""
-        return check_state(self.cache, self.cells_hash(), artefacts)
-
     def __repr__(self) -> str:
         c = self.cache
         stale = stale_artefacts(c, self.cells_hash())
@@ -439,7 +479,7 @@ class Counts:
 
 @beartype
 def get_counts(
-    sc: SingleCells,
+    sc: ScBase,
     *,
     cells: Selection | None = None,
     genes: Selection | None = None,
@@ -454,7 +494,7 @@ def get_counts(
     released.
 
     Args:
-        sc: The experiment.
+        sc: The experiment or a subset of it.
         cells: 0-based store indices or ids. `None` for all (kept) cells.
         genes: 0-based store indices or ids, in the column order wanted.
             `None` for every gene.
@@ -470,11 +510,7 @@ def get_counts(
     """
     del assay  # one modality; the argument mirrors R's `modality`
     if cells is None:
-        idx = (
-            sc.map.cells_to_keep
-            if use_cells_to_keep
-            else np.arange(sc.dims[0], dtype=np.uint32)
-        )
+        idx = sc.map.cells_to_keep if use_cells_to_keep else sc._all_cells()
     else:
         idx = sc._resolve_cells(cells)
         if use_cells_to_keep:

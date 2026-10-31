@@ -27,6 +27,7 @@ from ._bixverse import (
 from ._core.db import TableNotFoundError
 from ._core.single_cells import Counts, SingleCells, get_counts
 from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
+from ._core.subset import SingleCellsSubset, merge_subset_obs
 from .loader import Batch, CellLoader
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "ScCache",
     "ScMap",
     "SingleCells",
+    "SingleCellsSubset",
     "SparseFileError",
     "Stamp",
     "TableNotFoundError",
@@ -54,6 +56,7 @@ __all__ = [
     "graph",
     "integrate",
     "io",
+    "merge_subset_obs",
     "pp",
     "qc",
 ]
