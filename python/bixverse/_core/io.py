@@ -25,6 +25,11 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.multimodal import (
+    SingleCellsMultiModal,
+    mm_from_payload,
+    mm_payload,
+)
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import ScMap, cache_from_payload, cache_payload
 
@@ -51,6 +56,8 @@ def save(sc: SingleCells) -> None:
 
     obs / var changes are in the DuckDB already and need no saving. The
     residual model is opaque for now and is not written; a warning says so.
+    A `SingleCellsMultiModal` also writes its ADT counts, ADT cache and WNN
+    slot, and `load_existing` hands it back as one.
 
     Args:
         sc: The experiment.
@@ -62,6 +69,9 @@ def save(sc: SingleCells) -> None:
     cache_arrays, cache_meta = cache_payload(sc.cache)
     arrays.update(cache_arrays)
     meta = {"format": MEMORY_FORMAT, **cache_meta}
+    if isinstance(sc, SingleCellsMultiModal):
+        mm_arrays, meta["multi_modal"] = mm_payload(sc)
+        arrays.update(mm_arrays)
 
     npz, js = sc.dir / MEMORY_NPZ, sc.dir / MEMORY_JSON
     tmp_npz, tmp_js = npz.with_suffix(".npz.tmp"), js.with_suffix(".json.tmp")
@@ -78,16 +88,20 @@ def save(sc: SingleCells) -> None:
 
 
 @beartype
-def load_existing(directory: Path | str) -> SingleCells:
+def load_existing(directory: Path | str, *, multi_modal: bool = False) -> SingleCells:
     """Open an experiment directory and restore any state Python saved.
 
     Args:
         directory: Written by R or by Python.
+        multi_modal: Open it as a `SingleCellsMultiModal`. A memory file a
+            multi-modal experiment saved does so regardless.
 
     Returns:
         The experiment. With `memory_py.*` present, the cell filter, HVGs and
-        cache come from there; otherwise the map is rebuilt from the DuckDB
-        and the cache is empty.
+        cache come from there (and for a multi-modal one the ADT counts, ADT
+        cache and WNN slot); otherwise the map is rebuilt from the DuckDB and
+        the cache is empty. R keeps its ADT counts in its own memory file, so
+        they do not carry over from R.
 
     Restores the stores from `counts.bxa` when only the archive is there,
     and warns about a store in the v3 format, as R does.
@@ -112,17 +126,23 @@ def load_existing(directory: Path | str) -> SingleCells:
             "format is smaller and faster. Convert it with upgrade_sc_store().",
             stacklevel=2,
         )
-    sc = SingleCells(directory)
-
     npz, js = directory / MEMORY_NPZ, directory / MEMORY_JSON
     if not npz.exists() and not js.exists():
-        return sc
+        return (
+            SingleCellsMultiModal(directory) if multi_modal else SingleCells(directory)
+        )
     if not (npz.exists() and js.exists()):
         raise FileNotFoundError(f"need both {MEMORY_NPZ} and {MEMORY_JSON}")
 
     meta = json.loads(js.read_text())
     if meta.get("format") != MEMORY_FORMAT:
         raise ValueError(f"unknown {MEMORY_JSON} format {meta.get('format')}")
+    mm_meta = meta.get("multi_modal")
+    sc = (
+        SingleCellsMultiModal(directory)
+        if multi_modal or mm_meta is not None
+        else SingleCells(directory)
+    )
     with np.load(npz, allow_pickle=False) as fh:
         arrays = {k: fh[k] for k in fh.files}
 
@@ -134,6 +154,17 @@ def load_existing(directory: Path | str) -> SingleCells:
         arrays.get("map/hvg"),
     )
     sc.cache = cache_from_payload(arrays, meta)
+    if isinstance(sc, SingleCellsMultiModal) and mm_meta is not None:
+        mm_from_payload(sc, arrays, mm_meta)
+        adt = sc.adt
+        if adt is not None:
+            n_missing = int((~np.isin(sc.cell_ids(filtered=True), adt.cell_ids)).sum())
+            if n_missing:
+                warnings.warn(
+                    f"{n_missing} cells to keep are not present in the stored ADT "
+                    "counts.",
+                    stacklevel=2,
+                )
 
     if not np.array_equal(np.sort(sc.map.cells_to_keep), from_db):
         warnings.warn(

@@ -38,6 +38,7 @@ from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.ingest import _prepare
 from bixverse._core.metacells import MetaCells, csr_args
+from bixverse._core.multimodal import Modality, modality_cache, require_fresh, stamp
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import MagicLayer
@@ -1141,19 +1142,23 @@ def run_magic(
     sc: ScOrScSubset,
     features: Sequence[str],
     *,
+    modality: Modality = "rna",
     magic_params: MagicParams | None = None,
     verbose: bool = False,
 ) -> None:
     """Impute genes with MAGIC over the cached kNN graph, as R's
     `run_magic_sc`.
 
-    The imputed layer goes to `sc.cache.magic`, stamped as derived from
-    `"knn"`. Do not feed it to correlation-based methods: the smoothing
-    inflates gene-gene correlation.
+    The imputed layer is RNA whichever graph smoothed it, so it goes to
+    `sc.cache.magic`, stamped as derived from the modality's `"knn"`. Do not
+    feed it to correlation-based methods: the smoothing inflates gene-gene
+    correlation.
 
     Args:
         sc: The experiment, with a kNN graph over the kept cells.
         features: Gene ids to impute. Unknown ids warn and drop.
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
         magic_params: The MAGIC parameters. `None` uses the defaults.
         verbose: Controls verbosity.
 
@@ -1165,10 +1170,8 @@ def run_magic(
         van Dijk, et al., Cell, 2018.
     """
     params = magic_params or MagicParams()
-    state = sc.check_state(["knn"])
-    if state is not True:
-        raise ValueError(state)
-    knn = sc.cache.knn
+    require_fresh(sc, ["knn"], modality)
+    knn = modality_cache(sc, modality).knn
     if knn is None:
         warnings.warn(
             "No kNN data found. Did you run find_neighbours()? Returning the "
@@ -1185,7 +1188,8 @@ def run_magic(
         )
     if verbose:
         logger.info(
-            "Running MAGIC over the kNN graph (%i cells, %i genes, %i steps).",
+            "Running MAGIC over the %s kNN graph (%i cells, %i genes, %i steps).",
+            modality,
             sc.n_cells,
             genes.size,
             params.n_steps,
@@ -1200,4 +1204,4 @@ def run_magic(
         verbose,
     )
     sc.cache.magic = MagicLayer(data=imputed, features=sc.gene_ids(genes))
-    sc.stamp("magic", parents=("knn",))
+    stamp(sc, "magic", parents=(f"{modality}:knn",))

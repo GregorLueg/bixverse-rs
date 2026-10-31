@@ -25,6 +25,12 @@ import manifolds_rs as mf
 import numpy as np
 from beartype import beartype
 
+from bixverse._core.multimodal import (
+    Modality,
+    modality_cache,
+    require_fresh,
+    stamp,
+)
 from bixverse._core.state import RESERVED_EMBEDDINGS
 from bixverse._core.subset import ScOrMc
 
@@ -185,22 +191,31 @@ def _embed(
     embd_to_use: str,
     slot_name: str,
     no_embd_to_use: int | None,
+    modality: Modality,
 ) -> None:
     """Resolve the inputs as R's `.manifold_inputs`, fit, store and stamp.
 
+    With `"wnn"` the embedding comes from the RNA cache, the kNN (always
+    used) and the result live in the WNN slot, as in R.
+
     Raises:
-        ValueError: On a reserved `slot_name`, a stale input, or an absent
-            embedding.
+        ValueError: On a reserved `slot_name`, a stale input, an absent
+            embedding, or no WNN kNN.
     """
     if slot_name in RESERVED_EMBEDDINGS:
         raise ValueError(f"'{slot_name}' is a reserved artefact name")
-    state = sc.check_state([embd_to_use, "knn"] if use_knn else [embd_to_use])
-    if state is not True:
-        raise ValueError(state)
+    source = "rna" if modality == "wnn" else modality
+    use_knn = use_knn or modality == "wnn"
+    out = modality_cache(sc, modality)
+    require_fresh(sc, [embd_to_use], source)
+    if use_knn:
+        require_fresh(sc, ["knn"], modality)
+    knn = out.knn if use_knn else None
+    if modality == "wnn" and knn is None:
+        raise ValueError("WNN-based neighbours were not found.")
+    cache = modality_cache(sc, source)
     embd = (
-        sc.cache.pca_factors
-        if embd_to_use == "pca"
-        else sc.cache.embeddings.get(embd_to_use)
+        cache.pca_factors if embd_to_use == "pca" else cache.embeddings.get(embd_to_use)
     )
     if embd is None:
         raise ValueError(f"Embedding '{embd_to_use}' was not found.")
@@ -208,7 +223,6 @@ def _embed(
         embd = embd[:, : min(no_embd_to_use, embd.shape[1])]
     embd = np.ascontiguousarray(embd, dtype=np.float32)
 
-    knn = sc.cache.knn if use_knn else None
     if use_knn and knn is None:
         warnings.warn(
             "No kNN data found. Attempting to use embeddings for 2D embedding",
@@ -221,10 +235,11 @@ def _embed(
             embd, knn_indices=knn.indices, knn_distances=knn.distances
         )
 
-    sc.cache.embeddings[slot_name] = res
-    sc.stamp(
-        slot_name, parents=(embd_to_use, "knn") if knn is not None else (embd_to_use,)
-    )
+    out.embeddings[slot_name] = res
+    parents = [f"{source}:{embd_to_use}"]
+    if knn is not None:
+        parents.append(f"{modality}:knn")
+    stamp(sc, slot_name, parents=parents, modality=modality)
 
 
 ##############
@@ -240,6 +255,7 @@ def umap(
     embd_to_use: str = "pca",
     slot_name: str = "umap",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.UMAP | None = None,
 ) -> None:
     """UMAP, as R's `umap_sc`.
@@ -255,6 +271,9 @@ def umap(
             `sc.cache.embeddings`.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `umap_defaults()`.
 
     Raises:
@@ -268,6 +287,7 @@ def umap(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )
 
 
@@ -279,6 +299,7 @@ def densmap(
     embd_to_use: str = "pca",
     slot_name: str = "densmap",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.DensMAP | None = None,
 ) -> None:
     """densMAP, UMAP with a density-preserving term, as R's `densmap_sc`.
@@ -291,6 +312,9 @@ def densmap(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `densmap_defaults()`.
 
     Raises:
@@ -306,6 +330,7 @@ def densmap(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )
 
 
@@ -317,6 +342,7 @@ def tsne(
     embd_to_use: str = "pca",
     slot_name: str = "tsne",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.TSNE | None = None,
 ) -> None:
     """t-SNE, as R's `tsne_sc`.
@@ -330,6 +356,9 @@ def tsne(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `tsne_defaults()`.
 
     Raises:
@@ -342,6 +371,7 @@ def tsne(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )
 
 
@@ -353,6 +383,7 @@ def densne(
     embd_to_use: str = "pca",
     slot_name: str = "densne",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.DensNE | None = None,
 ) -> None:
     """den-SNE, t-SNE with a density-preserving term, as R's `densne_sc`.
@@ -365,6 +396,9 @@ def densne(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `densne_defaults()`.
 
     Raises:
@@ -380,6 +414,7 @@ def densne(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )
 
 
@@ -391,6 +426,7 @@ def phate(
     embd_to_use: str = "pca",
     slot_name: str = "phate",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.PHATE | None = None,
 ) -> None:
     """PHATE, as R's `phate_sc`.
@@ -403,6 +439,9 @@ def phate(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `phate_defaults()`.
 
     Raises:
@@ -418,6 +457,7 @@ def phate(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )
 
 
@@ -429,6 +469,7 @@ def forceatlas2(
     embd_to_use: str = "pca",
     slot_name: str = "fa2",
     no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
     params: mf.ForceAtlas2 | None = None,
 ) -> None:
     """ForceAtlas2 on the fuzzy kNN graph, as R's `forceatlas2_sc` with
@@ -444,6 +485,9 @@ def forceatlas2(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`. `"wnn"` reads the embedding from RNA and
+            always uses the WNN kNN.
         params: The estimator. `None` is `forceatlas2_defaults()`.
 
     Raises:
@@ -459,4 +503,5 @@ def forceatlas2(
         embd_to_use=embd_to_use,
         slot_name=slot_name,
         no_embd_to_use=no_embd_to_use,
+        modality=modality,
     )

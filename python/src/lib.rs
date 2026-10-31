@@ -18,6 +18,7 @@ mod integrate;
 mod io;
 mod loader;
 mod metacells;
+mod mm;
 mod nmf;
 mod pathways;
 mod pp;
@@ -183,6 +184,10 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(nmf::nmf_multi_mc, m)?,
         wrap_pyfunction!(nmf::nmf_consensus_mc, m)?,
         wrap_pyfunction!(nmf::nmf_k_sweep_mc, m)?,
+        wrap_pyfunction!(mm::adt_clr, m)?,
+        wrap_pyfunction!(mm::dsb, m)?,
+        wrap_pyfunction!(mm::adt_pca, m)?,
+        wrap_pyfunction!(mm::wnn, m)?,
     ] {
         m.add_function(f)?;
     }

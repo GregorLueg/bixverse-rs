@@ -25,7 +25,6 @@ import logging
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -33,6 +32,12 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells
+from bixverse._core.multimodal import (
+    Modality,
+    check_modality,
+    modality_cache,
+    require_fresh,
+)
 from bixverse._core.pp import _factor_codes
 from bixverse._core.single_cells import get_counts
 from bixverse._core.state import KnnGraph
@@ -48,7 +53,6 @@ from bixverse.params import (
 # Globals #
 ###########
 
-Modality = Literal["rna", "adt", "wnn"]
 
 # kNN metrics the diffusion kernel treats as a metric without a warning
 METRIC_DISTANCES: tuple[str, ...] = ("euclidean", "cosine")
@@ -223,30 +227,16 @@ def _cell_names(sc: ScOrMc) -> np.ndarray:
 
 
 @beartype
-def _check_modality(modality: Modality) -> None:
-    """R's `.assert_modality_available`: only RNA without a multi-modal
-    object, and there is none in Python yet.
+def _knn_or_warn(sc: ScOrMc, n_cells: int, modality: Modality) -> KnnGraph | None:
+    """The cached kNN of a modality, R's hard state tier first.
 
     Raises:
-        ValueError: On anything but `"rna"`.
+        ValueError: If it is stale or does not cover the cells, or on a
+            non-RNA modality of a single modality object.
     """
-    if modality != "rna":
-        raise ValueError(
-            f"modality = '{modality}' is only supported for SingleCellsMultiModal."
-        )
-
-
-@beartype
-def _knn_or_warn(sc: ScOrMc, n_cells: int) -> KnnGraph | None:
-    """The cached kNN, R's hard state tier first.
-
-    Raises:
-        ValueError: If it is stale or does not cover the cells.
-    """
-    state = sc.check_state(["knn"])
-    if state is not True:
-        raise ValueError(state)
-    knn = sc.cache.knn
+    check_modality(sc, modality)
+    require_fresh(sc, ["knn"], modality)
+    knn = modality_cache(sc, modality).knn
     if knn is None:
         warnings.warn(
             "No kNN data found. Did you run find_neighbours(). Returning None.",
@@ -348,7 +338,8 @@ def run_palantir(
         terminal_states: Terminal state cell ids, or label to cell id, the
             labels then naming the `branch_probs` columns. `None` detects
             them from the waypoint Markov chain.
-        modality: Only `"rna"`; the others need a multi-modal object.
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
         palantir_params: The parameters. `None` uses the defaults.
         seed: Seed for the eigensolver, the waypoints and the multiscale kNN.
         verbose: Controls verbosity.
@@ -357,16 +348,15 @@ def run_palantir(
         The `PalantirRes`, or `None` with a warning if there is no kNN.
 
     Raises:
-        ValueError: On a stale kNN, a non-RNA modality, or a cell not in the
-            kNN graph.
+        ValueError: On a stale kNN, a non-RNA modality without a multi-modal
+            object, or a cell not in the kNN graph.
 
     References:
         Setty, et al., Nat. Biotechnol., 2019.
     """
     params = palantir_params or PalantirParams()
-    _check_modality(modality)
     used = _cell_names(sc)
-    knn = _knn_or_warn(sc, len(used))
+    knn = _knn_or_warn(sc, len(used), modality)
     if knn is None:
         return None
     if knn.dist_metric not in METRIC_DISTANCES:
@@ -460,22 +450,22 @@ def run_paga(
             clustering.
         cluster_col: obs column with the clusters. Empty levels of an Enum
             are kept; other columns are sorted into levels.
-        modality: Only `"rna"`; the others need a multi-modal object.
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
         verbose: Controls verbosity.
 
     Returns:
         The `PagaRes`, or `None` with a warning if there is no kNN.
 
     Raises:
-        ValueError: On a stale kNN, a non-RNA modality, a missing column or
-            missing cluster labels.
+        ValueError: On a stale kNN, a non-RNA modality without a multi-modal
+            object, a missing column or missing cluster labels.
 
     References:
         Wolf, et al., Genome Biol., 2019.
     """
-    _check_modality(modality)
     n = len(_cell_names(sc))
-    knn = _knn_or_warn(sc, n)
+    knn = _knn_or_warn(sc, n, modality)
     if knn is None:
         return None
     codes, levels = _as_factor(_cluster_column(sc, cluster_col), cluster_col)

@@ -30,6 +30,12 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.graph import _embedding, _first_dims
+from bixverse._core.multimodal import (
+    CacheModality,
+    modality_cache,
+    require_fresh,
+    stamp,
+)
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
@@ -298,13 +304,15 @@ def _harmony(
     params: HarmonyParams | HarmonyV2Params,
     name: str,
     run: Callable[..., np.ndarray],
+    modality: CacheModality,
     seed: int,
     verbose: bool,
 ) -> None:
     """Shared body of Harmony v1 and v2, R's `harmony_sc` /
     `harmony_v2_sc`."""
-    _hard_state(sc, ["pca"])
-    pca = sc.cache.pca_factors
+    cache = modality_cache(sc, modality)
+    require_fresh(sc, ["pca"], modality)
+    pca = cache.pca_factors
     if pca is None:
         warnings.warn(
             "No PCA embeddings found in the object. Returning class as is",
@@ -323,10 +331,10 @@ def _harmony(
         )
         if verbose:
             logger.info("Auto-determined number of Harmony clusters: %i", d["k"])
-    sc.cache.embeddings[name] = run(
+    cache.embeddings[name] = run(
         np.ascontiguousarray(pca, dtype=np.float32), d, labels, seed, verbose
     )
-    sc.stamp(name, parents=("pca",))
+    stamp(sc, name, parents=("pca",), modality=modality)
 
 
 @beartype
@@ -335,19 +343,22 @@ def harmony(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
     """Harmony on the PCA, as R's `harmony_sc`.
 
-    The corrected embedding goes to `sc.cache.embeddings["harmony"]`,
+    The corrected embedding goes to the modality's `embeddings["harmony"]`,
     stamped as derived from `"pca"`.
 
     Args:
         sc: The experiment, with a PCA.
         batch_column: obs column with the primary batch.
         additional_batch_columns: Further obs columns to regress out.
+        modality: The PCA to correct and the cache to write: `"rna"`, or
+            `"adt"` on a `SingleCellsMultiModal`.
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
@@ -367,6 +378,7 @@ def harmony(
         harmony_params or HarmonyParams(),
         "harmony",
         _bixverse.harmony,
+        modality,
         seed,
         verbose,
     )
@@ -378,19 +390,22 @@ def harmony_v2(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
     """Harmony v2 on the PCA, as R's `harmony_v2_sc`.
 
-    The corrected embedding goes to `sc.cache.embeddings["harmony_v2"]`,
+    The corrected embedding goes to the modality's `embeddings["harmony_v2"]`,
     stamped as derived from `"pca"`.
 
     Args:
         sc: The experiment, with a PCA.
         batch_column: obs column with the primary batch.
         additional_batch_columns: Further obs columns to regress out.
+        modality: The PCA to correct and the cache to write: `"rna"`, or
+            `"adt"` on a `SingleCellsMultiModal`.
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
@@ -410,6 +425,7 @@ def harmony_v2(
         harmony_params or HarmonyV2Params(),
         "harmony_v2",
         _bixverse.harmony_v2,
+        modality,
         seed,
         verbose,
     )

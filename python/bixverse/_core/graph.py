@@ -31,10 +31,23 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells
+from bixverse._core.multimodal import (
+    CacheModality,
+    Modality,
+    modality_cache,
+    require_fresh,
+    stamp,
+)
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrMc, ScOrScSubset
-from bixverse.params import FastClusterParams, KnnParams, NeighboursParams, to_rust
+from bixverse.params import (
+    FastClusterParams,
+    KnnParams,
+    NeighboursParams,
+    WnnParams,
+    to_rust,
+)
 
 ###########
 # Globals #
@@ -101,11 +114,12 @@ class FastClusters:
 
 
 @beartype
-def _embedding(sc: ScOrMc, name: str) -> np.ndarray | None:
-    """A cached embedding by name, `"pca"` for the PCA scores."""
+def _embedding(sc: ScOrMc, name: str, modality: Modality = "rna") -> np.ndarray | None:
+    """A cached embedding of a modality by name, `"pca"` for the PCA scores."""
+    cache = modality_cache(sc, modality)
     if name == "pca":
-        return sc.cache.pca_factors
-    return sc.cache.embeddings.get(name)
+        return cache.pca_factors
+    return cache.embeddings.get(name)
 
 
 @beartype
@@ -117,8 +131,8 @@ def _first_dims(embd: np.ndarray, no_embd_to_use: int | None) -> np.ndarray:
 
 
 @beartype
-def _knn_params(params: NeighboursParams | KnnParams) -> dict[str, object]:
-    """The dict Rust reads the kNN (and graph) settings from.
+def _knn_params(params: NeighboursParams | KnnParams | WnnParams) -> dict[str, object]:
+    """The dict Rust reads the kNN (and graph, or WNN) settings from.
 
     `extract_knn` on `"nndescent"` is the crate's `"nndescent_graph"` method.
     """
@@ -283,6 +297,7 @@ def find_neighbours(
     *,
     embd_to_use: str = "pca",
     no_embd_to_use: int | None = None,
+    modality: CacheModality = "rna",
     neighbours_params: NeighboursParams | None = None,
     seed: int = 42,
     verbose: bool = False,
@@ -290,38 +305,41 @@ def find_neighbours(
     """The kNN and the neighbour graph over an embedding, as R's
     `find_neighbours_sc`.
 
-    The kNN goes to `sc.cache.knn`, stamped as derived from the embedding,
-    and its symmetrisation (`knn_sym`: sNN, UMAP fuzzy simplicial set or kNN
-    union) to `sc.cache.connectivities`, stamped as derived from `"knn"`.
+    The kNN goes to the modality's cache (`sc.cache` for RNA), stamped as
+    derived from the embedding, and its symmetrisation (`knn_sym`: sNN, UMAP
+    fuzzy simplicial set or kNN union) to its `connectivities`, stamped as
+    derived from `"knn"`.
 
     Args:
         sc: The experiment.
-        embd_to_use: The embedding, `"pca"` or a name in `sc.cache.embeddings`.
+        embd_to_use: The embedding, `"pca"` or a name in the cache's
+            `embeddings`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
         neighbours_params: kNN and graph parameters. `None` uses the defaults.
         seed: Seed for the index build.
         verbose: Controls verbosity.
 
     Raises:
-        ValueError: If the embedding is stale.
+        ValueError: If the embedding is stale, or on `"adt"` without a
+            multi-modal object.
     """
     params = neighbours_params or NeighboursParams()
-    embd = _embedding(sc, embd_to_use)
+    cache = modality_cache(sc, modality)
+    embd = _embedding(sc, embd_to_use, modality)
     if embd is None:
         warnings.warn(
             "The desired embedding was not found. Returning class as is.",
             stacklevel=2,
         )
         return
-    state = sc.check_state([embd_to_use])
-    if state is not True:
-        raise ValueError(state)
+    require_fresh(sc, [embd_to_use], modality)
 
     if verbose:
         logger.info("Generating kNN data with %s method.", params.knn_method)
     knn = _knn(_first_dims(embd, no_embd_to_use), params, seed, False, verbose)
-    sc.cache.knn = knn
-    sc.stamp("knn", parents=(embd_to_use,))
+    cache.knn = knn
+    stamp(sc, "knn", parents=(embd_to_use,), modality=modality)
 
     if verbose:
         logger.info("Generating the %s graph.", params.knn_sym)
@@ -332,22 +350,26 @@ def find_neighbours(
         verbose,
     )
     n = knn.indices.shape[0]
-    sc.cache.connectivities = CsrMatrix(data, indices, indptr, (n, n))
-    sc.stamp("connectivities", parents=("knn",))
+    cache.connectivities = CsrMatrix(data, indices, indptr, (n, n))
+    stamp(sc, "connectivities", parents=("knn",), modality=modality)
 
 
 @beartype
-def get_connectivities(sc: ScOrMc) -> CsrMatrix | None:
+def get_connectivities(sc: ScOrMc, *, modality: Modality = "rna") -> CsrMatrix | None:
     """The neighbour graph, R's `get_connectivities` / `as_igraph`.
 
     The undirected graph as its symmetric CSR, rows sorted, every edge
     stored in both directions. No graph library is pulled in: hand
     `.scipy_csr()` to scipy, or the three vectors to igraph / networkx.
 
+    Args:
+        sc: The experiment.
+        modality: `"rna"`, or `"adt"` / `"wnn"` on a `SingleCellsMultiModal`.
+
     Returns:
         The graph, or `None` (with a warning) if none was built.
     """
-    graph = sc.cache.connectivities
+    graph = modality_cache(sc, modality).connectivities
     if graph is None:
         warnings.warn(
             "No neighbour graph found. Did you run find_neighbours()?", stacklevel=2
@@ -367,6 +389,7 @@ def find_clusters(
     cluster_algorithm: ClusterAlgorithm = "leiden",
     res: float = 1.0,
     name: str = "leiden_clustering",
+    modality: Modality = "rna",
     seed: int = 42,
     beta: float = 0.01,
     n_iterations: int | None = None,
@@ -383,6 +406,8 @@ def find_clusters(
         cluster_algorithm: `"leiden"` or `"louvain"`.
         res: Modularity resolution; higher gives more communities.
         name: The obs column to write.
+        modality: The graph: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.
         n_iterations: Full iterations, each starting from the previous
@@ -400,10 +425,8 @@ def find_clusters(
         Traag, Waltman & van Eck, Sci Rep, 2019; Blondel, et al., J Stat
         Mech, 2008.
     """
-    state = sc.check_state(["connectivities"])
-    if state is not True:
-        raise ValueError(state)
-    graph = sc.cache.connectivities
+    require_fresh(sc, ["connectivities"], modality)
+    graph = modality_cache(sc, modality).connectivities
     if graph is None:
         warnings.warn(
             "No neighbour graph found. Did you run find_neighbours(). Returning "

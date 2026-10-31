@@ -1119,3 +1119,23 @@ def nmf_k_sweep_mc(
     seed: int = 42,
     verbose: bool = False,
 ) -> dict[str, Any]: ...
+def adt_clr(counts: np.ndarray, seurat_clr: bool) -> np.ndarray: ...
+def dsb(
+    raw: np.ndarray,
+    background: np.ndarray | None,
+    isotype_indices: list[int],
+    params: dict[str, object],
+    scale_factor: str,
+    seed: int,
+    verbose: int,
+) -> dict[str, Any]: ...
+def adt_pca(
+    x: np.ndarray, no_pcs: int, randomised: bool, seed: int
+) -> tuple[np.ndarray, np.ndarray, list[float]]: ...
+def wnn(
+    emb_one: np.ndarray,
+    emb_two: np.ndarray,
+    params: dict[str, object],
+    seed: int,
+    verbose: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: ...

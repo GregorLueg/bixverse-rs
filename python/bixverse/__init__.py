@@ -25,6 +25,7 @@ from . import (
     integrate,
     io,
     metacells,
+    mm,
     nmf,
     pathways,
     pp,
@@ -41,6 +42,7 @@ from ._bixverse import (
 )
 from ._core.db import TableNotFoundError
 from ._core.metacells import MetaCells
+from ._core.multimodal import SingleCellsMultiModal
 from ._core.single_cells import Counts, SingleCells, get_counts
 from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
 from ._core.subset import SingleCellsSubset, merge_subset_obs
@@ -59,6 +61,7 @@ __all__ = [
     "ScCache",
     "ScMap",
     "SingleCells",
+    "SingleCellsMultiModal",
     "SingleCellsSubset",
     "SparseFileError",
     "Stamp",
@@ -75,6 +78,7 @@ __all__ = [
     "io",
     "merge_subset_obs",
     "metacells",
+    "mm",
     "nmf",
     "pathways",
     "pp",

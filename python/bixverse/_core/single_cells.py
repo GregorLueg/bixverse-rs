@@ -174,6 +174,10 @@ class ScBase:
         """Hash of the current cell set, as recorded in stamps."""
         return cells_hash(self.map.cells_to_keep)
 
+    def _artefacts(self) -> dict[str, Stamp | None]:
+        """Every cached artefact and its stamp."""
+        return self.cache.artefacts()
+
     @beartype
     def stamp(self, artefact: str, *, parents: Sequence[str] = ()) -> Stamp:
         """Stamp a cached artefact against the current cell set.
@@ -187,12 +191,12 @@ class ScBase:
 
     def cache_status(self) -> pl.DataFrame:
         """One row per cached artefact: stamped, stale and why."""
-        return state_report(self.cache, self.cells_hash())
+        return state_report(self._artefacts(), self.cells_hash())
 
     @beartype
     def check_state(self, artefacts: Sequence[str]) -> bool | str:
         """`True` if the artefacts are fresh, else what is stale and why."""
-        return check_state(self.cache, self.cells_hash(), artefacts)
+        return check_state(self._artefacts(), self.cells_hash(), artefacts)
 
 
 ###############
@@ -380,7 +384,7 @@ class SingleCells(ScBase):
         with db.connect(self.db_path) as con:
             db.set_cells_to_keep(con, idx)
 
-        stale = stale_artefacts(self.cache, self.cells_hash())
+        stale = stale_artefacts(self._artefacts(), self.cells_hash())
         if stale:
             warnings.warn(
                 "The cell set changed. These cached artefacts are now stale and "
@@ -399,7 +403,7 @@ class SingleCells(ScBase):
         Raises:
             ValueError: If something would be dropped and `force` is false.
         """
-        destroyed = list(self.cache.artefacts())
+        destroyed = list(self._artefacts())
         if self.map.hvg is not None:
             destroyed.append("the HVG selection")
         if destroyed and not force:
@@ -411,11 +415,15 @@ class SingleCells(ScBase):
         self.map.hvg = None
         with db.connect(self.db_path) as con:
             db.reset_cells_to_keep(con)
+        self._clear_cache()
+
+    def _clear_cache(self) -> None:
+        """Drop everything cached."""
         self.cache = ScCache()
 
     def __repr__(self) -> str:
         c = self.cache
-        stale = stale_artefacts(c, self.cells_hash())
+        stale = stale_artefacts(self._artefacts(), self.cells_hash())
         return (
             "SingleCells(\n"
             f"  dir={str(self.dir)!r},\n"
@@ -484,7 +492,7 @@ def get_counts(
     cells: Selection | None = None,
     genes: Selection | None = None,
     layer: Literal["raw", "norm"] = "raw",
-    assay: Literal["rna"] = "rna",
+    assay: Literal["rna", "adt"] = "rna",
     use_cells_to_keep: bool = True,
 ) -> Counts:
     """Read counts for a selection of cells and genes, as R's `get_sc_counts`.
@@ -497,18 +505,38 @@ def get_counts(
         sc: The experiment or a subset of it.
         cells: 0-based store indices or ids. `None` for all (kept) cells.
         genes: 0-based store indices or ids, in the column order wanted.
-            `None` for every gene.
+            `None` for every gene. ADT feature indices or ids for `"adt"`.
         layer: `"raw"` counts or the `"norm"` layer.
-        assay: Only `"rna"`; `SingleCells` holds one modality.
+        assay: R's `modality`: `"rna"`, or `"adt"` on a
+            `SingleCellsMultiModal`. The ADT counts come from memory,
+            narrowed to `float32`; cells the ADT matrix does not hold warn and
+            drop. `bixverse.mm.get_adt_counts` returns them dense.
         use_cells_to_keep: Restrict to the kept cells.
 
     Returns:
-        The CSR matrix with its row cells and column genes.
+        The CSR matrix with its row cells and column genes (or features).
 
     Raises:
-        ValueError: If no cell is left to read.
+        ValueError: If no cell is left to read, or on `"adt"` without ADT
+            counts.
     """
-    del assay  # one modality; the argument mirrors R's `modality`
+    if assay == "adt":
+        # deferred: multimodal builds on this module
+        from bixverse._core.multimodal import (
+            SingleCellsMultiModal,
+            adt_counts_csr,
+            check_modality,
+        )
+
+        check_modality(sc, assay)
+        assert isinstance(sc, SingleCellsMultiModal)
+        return adt_counts_csr(
+            sc,
+            cells=cells,
+            features=genes,
+            layer=layer,
+            use_cells_to_keep=use_cells_to_keep,
+        )
     if cells is None:
         idx = sc.map.cells_to_keep if use_cells_to_keep else sc._all_cells()
     else:

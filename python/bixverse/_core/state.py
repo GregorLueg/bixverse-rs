@@ -428,8 +428,10 @@ _PLAIN_SLOTS: tuple[str, ...] = ("pca_factors", "pca_loadings", "pca_singular_va
 
 
 @beartype
-def cache_payload(cache: ScCache) -> tuple[dict[str, np.ndarray], dict]:
-    """A cache as npz arrays (keys under `cache/`) and JSON metadata.
+def cache_payload(
+    cache: ScCache, prefix: str = "cache"
+) -> tuple[dict[str, np.ndarray], dict]:
+    """A cache as npz arrays (keys under `<prefix>/`) and JSON metadata.
 
     The residual model is opaque for now and is left out, with a warning.
 
@@ -441,19 +443,19 @@ def cache_payload(cache: ScCache) -> tuple[dict[str, np.ndarray], dict]:
     for slot in _PLAIN_SLOTS:
         value = getattr(cache, slot)
         if value is not None:
-            arrays[f"cache/{slot}"] = value
+            arrays[f"{prefix}/{slot}"] = value
     for i, arr in enumerate(cache.embeddings.values()):
-        arrays[f"cache/embedding/{i}"] = arr
+        arrays[f"{prefix}/embedding/{i}"] = arr
     if cache.knn is not None:
-        arrays["cache/knn/indices"] = cache.knn.indices
-        arrays["cache/knn/distances"] = cache.knn.distances
+        arrays[f"{prefix}/knn/indices"] = cache.knn.indices
+        arrays[f"{prefix}/knn/distances"] = cache.knn.distances
     if cache.connectivities is not None:
-        arrays["cache/connectivities/data"] = cache.connectivities.data
-        arrays["cache/connectivities/indices"] = cache.connectivities.indices
-        arrays["cache/connectivities/indptr"] = cache.connectivities.indptr
+        arrays[f"{prefix}/connectivities/data"] = cache.connectivities.data
+        arrays[f"{prefix}/connectivities/indices"] = cache.connectivities.indices
+        arrays[f"{prefix}/connectivities/indptr"] = cache.connectivities.indptr
     if cache.magic is not None:
-        arrays["cache/magic/data"] = cache.magic.data
-        arrays["cache/magic/features"] = np.asarray(cache.magic.features, dtype=str)
+        arrays[f"{prefix}/magic/data"] = cache.magic.data
+        arrays[f"{prefix}/magic/features"] = np.asarray(cache.magic.features, dtype=str)
     if cache.residual_fit is not None:
         warnings.warn(
             "The residual model is not persisted yet; it will be absent on load.",
@@ -476,32 +478,34 @@ def cache_payload(cache: ScCache) -> tuple[dict[str, np.ndarray], dict]:
 
 
 @beartype
-def cache_from_payload(arrays: dict[str, np.ndarray], meta: dict) -> ScCache:
+def cache_from_payload(
+    arrays: dict[str, np.ndarray], meta: dict, prefix: str = "cache"
+) -> ScCache:
     """Rebuild a cache from `cache_payload` output."""
     cache = ScCache()
     for slot in _PLAIN_SLOTS:
-        if f"cache/{slot}" in arrays:
-            setattr(cache, slot, arrays[f"cache/{slot}"])
+        if f"{prefix}/{slot}" in arrays:
+            setattr(cache, slot, arrays[f"{prefix}/{slot}"])
     for i, name in enumerate(meta["embeddings"]):
-        cache.embeddings[name] = arrays[f"cache/embedding/{i}"]
-    if "cache/knn/indices" in arrays:
+        cache.embeddings[name] = arrays[f"{prefix}/embedding/{i}"]
+    if f"{prefix}/knn/indices" in arrays:
         cache.knn = KnnGraph(
-            arrays["cache/knn/indices"],
-            arrays["cache/knn/distances"],
+            arrays[f"{prefix}/knn/indices"],
+            arrays[f"{prefix}/knn/distances"],
             meta["knn_dist_metric"],
         )
-    if "cache/connectivities/data" in arrays:
+    if f"{prefix}/connectivities/data" in arrays:
         n_rows, n_cols = meta["connectivities_shape"]
         cache.connectivities = CsrMatrix(
-            arrays["cache/connectivities/data"],
-            arrays["cache/connectivities/indices"],
-            arrays["cache/connectivities/indptr"],
+            arrays[f"{prefix}/connectivities/data"],
+            arrays[f"{prefix}/connectivities/indices"],
+            arrays[f"{prefix}/connectivities/indptr"],
             (n_rows, n_cols),
         )
-    if "cache/magic/data" in arrays:
+    if f"{prefix}/magic/data" in arrays:
         cache.magic = MagicLayer(
-            arrays["cache/magic/data"],
-            arrays["cache/magic/features"].astype(object),
+            arrays[f"{prefix}/magic/data"],
+            arrays[f"{prefix}/magic/features"].astype(object),
         )
     for label, s in meta["stamps"].items():
         cache.set_stamp(label, Stamp(s["cells"], s["id"], tuple(s["parents"])))
@@ -552,18 +556,31 @@ def stale_reason(
     return None
 
 
+Artefacts = ScCache | dict[str, Stamp | None]
+
+
 @beartype
-def state_report(cache: ScCache, cells: str) -> pl.DataFrame:
+def _present(src: Artefacts) -> dict[str, Stamp | None]:
+    """The artefacts of a cache, or a ready artefact dict as it is.
+
+    A multi-modal experiment hands in one dict over all its caches, labels
+    qualified by modality (`"adt:pca"`), so parents resolve across them.
+    """
+    return src.artefacts() if isinstance(src, ScCache) else src
+
+
+@beartype
+def state_report(cache: Artefacts, cells: str) -> pl.DataFrame:
     """One row per cached artefact, as R's `get_sc_cache_status()`.
 
     Args:
-        cache: The cache.
+        cache: The cache, or an artefact dict.
         cells: The current `cells_hash`.
 
     Returns:
         Columns `artefact`, `stamped`, `stale`, `reason`, `id` and `parents`.
     """
-    artefacts = cache.artefacts()
+    artefacts = _present(cache)
     rows = []
     for label, stamp in artefacts.items():
         reason = stale_reason(label, artefacts, cells)
@@ -589,14 +606,14 @@ def state_report(cache: ScCache, cells: str) -> pl.DataFrame:
 
 
 @beartype
-def stale_artefacts(cache: ScCache, cells: str) -> list[str]:
+def stale_artefacts(cache: Artefacts, cells: str) -> list[str]:
     """Labels of every stale artefact."""
-    artefacts = cache.artefacts()
+    artefacts = _present(cache)
     return [a for a in artefacts if stale_reason(a, artefacts, cells) is not None]
 
 
 @beartype
-def check_state(cache: ScCache, cells: str, labels: Sequence[str]) -> bool | str:
+def check_state(cache: Artefacts, cells: str, labels: Sequence[str]) -> bool | str:
     """Whether the given artefacts are fresh, as R's `check_sc_state`.
 
     Absent and unstamped artefacts pass.
@@ -604,7 +621,7 @@ def check_state(cache: ScCache, cells: str, labels: Sequence[str]) -> bool | str
     Returns:
         `True`, or a message naming the first stale artefact and why.
     """
-    artefacts = cache.artefacts()
+    artefacts = _present(cache)
     for label in labels:
         reason = stale_reason(label, artefacts, cells)
         if reason is not None:
