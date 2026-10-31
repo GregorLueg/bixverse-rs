@@ -43,6 +43,13 @@ nav:
       - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
       - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
       - Cell trees with Bonsai: vignettes/bonsai.ipynb
+      - Pearson residuals and scTransform: vignettes/single_cell_residuals.ipynb
+      - Doublet detection: vignettes/doublet_detection.ipynb
+      - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
+      - Clustering and annotation: vignettes/cell_type_annotation.ipynb
+      - DIALOGUE: vignettes/dialogue.ipynb
+      - Batch correction: vignettes/single_cell_batch_corrections.ipynb
+      - Trajectory inference: vignettes/trajectory_inference.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md

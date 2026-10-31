@@ -453,9 +453,9 @@ def bbknn(
 
     The kNN goes to `sc.cache.knn`, stamped as derived from the embedding,
     and the max-symmetrised BBKNN connectivities to
-    `sc.cache.connectivities`, stamped as derived from `"knn"`. As in R, the
-    kNN keeps the first `no_neighbours_to_keep` entries per row of the BBKNN
-    distance matrix, which is ordered by cell index, not by distance.
+    `sc.cache.connectivities`, stamped as derived from `"knn"`. The kNN keeps
+    the `no_neighbours_to_keep` nearest of the per-batch neighbours of each
+    cell, by distance.
 
     Args:
         sc: The experiment, with a PCA.

@@ -312,6 +312,8 @@ def _key_rows(
     )
     for text in leg.get_texts()[: len(rows)]:
         text.set_fontweight("bold")
+    # as in `_legend`: unclipped, so it shows and the layout makes room
+    leg.set_clip_on(False)
     ax.add_artist(leg)
 
 
@@ -537,7 +539,16 @@ def embedding_plot(
             x, embedding, obs_cols=cols, modality=embd_modality
         )
     if discrete:
-        frame = frame.with_columns(pl.col(cols).cast(pl.String))
+        # numbers as an Enum in numeric order, as R's as.factor; a plain
+        # string cast would sort 10 before 2
+        frame = frame.with_columns(
+            frame[c]
+            .cast(pl.String)
+            .cast(pl.Enum(frame[c].drop_nulls().unique().sort().cast(pl.String)))
+            if frame[c].dtype.is_numeric()
+            else frame[c].cast(pl.String)
+            for c in dict.fromkeys(cols)
+        )
     n_cells = (
         frame["cell_id"].n_unique() if "cell_id" in frame.columns else frame.height
     )
