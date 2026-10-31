@@ -534,3 +534,71 @@ def cellsweep(
     target_size: float,
     verbose: bool = False,
 ) -> dict[str, Any]: ...
+def dge_mann_whitney(
+    f_path_cell: str,
+    cells_1: np.ndarray,
+    cells_2: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def dge_one_vs_rest(
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    min_prop: float,
+    alternative: str,
+    verbose: bool = False,
+) -> list[dict[str, Any]]: ...
+def dge_one_vs_many(
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    references: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: bool = False,
+) -> list[dict[str, Any]]: ...
+def pseudobulk(
+    f_path_cell: str,
+    cell_groups: list[np.ndarray],
+    assay: str,
+    sparse: bool = False,
+    verbose: bool = False,
+) -> Any: ...
+def edger_ql(
+    counts: np.ndarray,
+    design: np.ndarray,
+    params: dict[str, object],
+    coef: list[int] | None = None,
+    contrast: list[float] | None = None,
+    n_contrasts: int = 1,
+) -> dict[str, Any]: ...
+def nebula(
+    f_path_gene: str,
+    f_path_cell: str,
+    cells_to_keep: np.ndarray,
+    gene_indices: np.ndarray,
+    subject_ids: np.ndarray,
+    design: np.ndarray,
+    params: dict[str, object],
+    offset: np.ndarray | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def milor_nhoods(
+    embd: np.ndarray,
+    knn_indices: np.ndarray,
+    sample_ids: np.ndarray,
+    n_samples: int,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def spatial_fdr(p_values: np.ndarray, connectivity: np.ndarray) -> np.ndarray: ...
+def meld(
+    knn_indices: np.ndarray,
+    knn_dist: np.ndarray,
+    labels: np.ndarray,
+    n_labels: int,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...

@@ -31,7 +31,7 @@
 use edge_rs::core::dgelist::DgeList;
 use edge_rs::core::expression::{ave_log_cpm, cpm};
 use edge_rs::core::filtering::filter_by_expr;
-use edge_rs::core::normalisation::{NormMethod, calc_norm_factors};
+use edge_rs::core::normalisation::{NormMethod, calc_norm_factors, parse_norm_method};
 use edge_rs::dispersion::estimate::estimate_disp;
 use edge_rs::glm::ql_fit::{QlFitParams, glm_ql_fit};
 use edge_rs::glm::test::{GlmTestInput, Tested, glm_ql_ftest};
@@ -45,6 +45,7 @@ use edge_rs::limma::{
 };
 use edge_rs::numeric::stats::p_adjust_bh;
 use edge_rs::prelude::Recycled;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::prelude::*;
 
@@ -129,11 +130,36 @@ fn keep_mask(
 // EdgeRQlParams //
 ///////////////////
 
+/// Deserialise an edgeR normalisation method, checked through
+/// `parse_norm_method`
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding edgeR's spelling, e.g. `"TMM"`
+///
+/// ### Returns
+///
+/// The [NormMethod], or an error naming the unrecognised value.
+pub fn de_norm_method<'de, D: Deserializer<'de>>(d: D) -> Result<NormMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_norm_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "norm_method must be one of 'TMM', 'TMMwsp', 'RLE', 'upperquartile' or \
+             'none', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for [run_edger_ql].
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the flat R `params_edger_ql()` list; missing keys take
+/// the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct EdgeRQlParams {
     /// Library size normalisation. [`NormMethod::None`] leaves every factor at
     /// one, which is what Milo's `logMS` amounts to.
+    #[serde(deserialize_with = "de_norm_method")]
     pub norm_method: NormMethod,
     /// Run `filterByExpr` before fitting.
     pub filter: bool,

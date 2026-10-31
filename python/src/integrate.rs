@@ -44,7 +44,7 @@ use crate::pp::{index_vec, mat_array};
 /// ### Returns
 ///
 /// One `Vec<usize>` per row.
-fn knn_rows(indices: &PyReadonlyArray2<'_, u32>) -> PyResult<Vec<Vec<usize>>> {
+pub(crate) fn knn_rows(indices: &PyReadonlyArray2<'_, u32>) -> PyResult<Vec<Vec<usize>>> {
     let k = indices.shape()[1];
     Ok(indices
         .as_slice()?
@@ -63,7 +63,10 @@ fn knn_rows(indices: &PyReadonlyArray2<'_, u32>) -> PyResult<Vec<Vec<usize>>> {
 /// ### Returns
 ///
 /// One `Vec<f32>` per row, or a `ValueError` on a shape mismatch.
-fn dist_rows(dist: &PyReadonlyArray2<'_, f32>, shape: &[usize]) -> PyResult<Vec<Vec<f32>>> {
+pub(crate) fn dist_rows(
+    dist: &PyReadonlyArray2<'_, f32>,
+    shape: &[usize],
+) -> PyResult<Vec<Vec<f32>>> {
     if dist.shape() != shape {
         return Err(PyValueError::new_err(
             "knn indices and distances must have the same shape",

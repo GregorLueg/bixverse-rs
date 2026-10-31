@@ -52,6 +52,7 @@ SPECS: tuple[str, ...] = (
     "dialogue_hlm",
     "dialogue_pmd",
     "dialogue_refine",
+    "edger_ql",
     "ligand_target",
     "lm_activity",
     "meld",

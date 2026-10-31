@@ -712,6 +712,43 @@ class DialogueRefineParams:
 
 @beartype(conf=_CONF)
 @dataclass(frozen=True, kw_only=True, slots=True)
+class EdgerQlParams:
+    """Wrapper function for parameters for the edgeR quasi-likelihood workflow
+
+    Parameters for the edgeR quasi-likelihood chain, implemented in Rust via the
+    `edge-rs` crate and gated against edgeR 4.8.2. Defaults are edgeR's own. The
+    `legacy` switch picks between two genuinely different pipelines. The current
+    route estimates its own dispersion from the most abundant genes and skips
+    `estimateDisp()`, which is where most of the runtime went and is edgeR 4's own
+    recommendation. The legacy route shrinks the raw residual deviance, needs a
+    dispersion handed to it, and is the only one where the Poisson bound bites.
+
+    Attributes:
+        norm_method: Library size normalisation. `"none"` leaves every factor at
+            one, which is what Milo's `logMS` amounts to.
+        filter: Run `filterByExpr()` before fitting. Turn this off for anything that
+            is not gene expression, e.g. Milo neighbourhood counts, where the
+            heuristic means nothing.
+        min_mean: Drop features whose mean count across samples is below this.
+            Applied on top of `filter`.
+        robust: Robust empirical Bayes squeezing, giving outlier features their own
+            smaller prior degrees of freedom.
+        legacy: Take edgeR's pre-4.0 quasi-likelihood pipeline.
+    """
+
+    norm_method: Literal["TMM", "TMMwsp", "RLE", "upperquartile", "none"] = "TMM"
+    filter: bool = True
+    min_mean: float = 0.0
+    robust: bool = False
+    legacy: bool = False
+
+    def __post_init__(self) -> None:
+        check_range("min_mean", self.min_mean, 0, None, False, True)
+        _extras.run(self)
+
+
+@beartype(conf=_CONF)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LigandTargetParams:
     """Parameters for ligand to target influence computation
 
@@ -3889,6 +3926,7 @@ __all__ = [
     "DialoguePmdParams",
     "DialogueRefineParams",
     "DsbParams",
+    "EdgerQlParams",
     "EmptyDropletsParams",
     "FastClusterDefault",
     "FastClusterParams",

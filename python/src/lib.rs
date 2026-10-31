@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 mod batch;
+mod de;
 mod doublets;
 mod error;
 mod graph;
@@ -112,6 +113,15 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(doublets::scdblfinder, m)?,
         wrap_pyfunction!(doublets::empty_droplets, m)?,
         wrap_pyfunction!(doublets::cellsweep, m)?,
+        wrap_pyfunction!(de::dge_mann_whitney, m)?,
+        wrap_pyfunction!(de::dge_one_vs_rest, m)?,
+        wrap_pyfunction!(de::dge_one_vs_many, m)?,
+        wrap_pyfunction!(de::pseudobulk, m)?,
+        wrap_pyfunction!(de::edger_ql, m)?,
+        wrap_pyfunction!(de::nebula, m)?,
+        wrap_pyfunction!(de::milor_nhoods, m)?,
+        wrap_pyfunction!(de::spatial_fdr, m)?,
+        wrap_pyfunction!(de::meld, m)?,
     ] {
         m.add_function(f)?;
     }

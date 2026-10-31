@@ -220,6 +220,7 @@ dependencies = [
  "bixverse-sc",
  "bixverse-sc-data",
  "crossbeam-channel",
+ "edge-rs",
  "faer",
  "numpy",
  "pyo3",
