@@ -40,6 +40,8 @@ jax = ["jax>=0.5", "optax>=0.2"]
 embed = ["manifolds-rs>=0.4.1"]
 # The `bixverse.pl` plots. The `extract_*` plot data functions need nothing.
 plots = ["matplotlib>=3.8"]
+# `bixverse_gpu`: the GPU twins, a separate wheel built from `gpu/`.
+gpu = ["bixverse-gpu"]
 
 [dependency-groups]
 dev = [
@@ -67,13 +69,21 @@ validation = [
 ]
 
 [tool.maturin]
-manifest-path = "Cargo.toml"
+manifest-path = "crates/bixverse-py/Cargo.toml"
 module-name = "bixverse._bixverse"
 python-source = "."
 strip = true
 include = ["bixverse/py.typed", "bixverse/*.pyi"]
 # A local build otherwise packs whatever bytecode the dev venv left behind.
 exclude = ["**/__pycache__/**"]
+
+# The GPU wheel is a workspace member, so the extra resolves to the checkout.
+# Its build command is in `gpu/pyproject.toml`.
+[tool.uv.workspace]
+members = ["gpu"]
+
+[tool.uv.sources]
+bixverse-gpu = { workspace = true }
 
 [tool.ruff]
 line-length = 88
@@ -86,11 +96,13 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 # The rules take `object` (the generated classes import this module), so
 # attribute access would not type-check; getattr is deliberate.
 "bixverse/params/_extras.py" = ["B009"]
+"gpu/bixverse_gpu/params/_extras.py" = ["B009"]
 # Generated docstrings and checks run long; the generator owns the layout.
 "bixverse/params/_generated.py" = ["E501"]
+"gpu/bixverse_gpu/params/_generated.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["bixverse"]
+known-first-party = ["bixverse", "bixverse_gpu"]
 
 [tool.ty.analysis]
 # The mlx extra only installs on Apple Silicon, so Linux CI never sees it.

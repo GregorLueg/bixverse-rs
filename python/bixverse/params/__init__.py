@@ -10,12 +10,12 @@ written by hand, see `bixverse.params._scenic`.
 from __future__ import annotations
 
 import dataclasses
+import sys
 
 from beartype import beartype
 
 from bixverse.params import _generated
 from bixverse.params._generated import *  # noqa: F403
-from bixverse.params._generated import RUST_NAMES
 from bixverse.params._scenic import ScenicParams
 
 __all__ = [*_generated.__all__, "ScenicParams"]
@@ -29,7 +29,7 @@ def to_rust(p: object) -> dict[str, object]:
     spliced in at its position, as R's `c()` does.
 
     Args:
-        p: A param bundle from this module.
+        p: A param bundle from this module or `bixverse_gpu.params`.
 
     Returns:
         Field name to value, with keyword-clashing names (`lambda_`) mapped
@@ -40,7 +40,9 @@ def to_rust(p: object) -> dict[str, object]:
     """
     if not dataclasses.is_dataclass(p) or isinstance(p, type):
         raise TypeError(f"Expected a param bundle, got {type(p).__name__}.")
-    renames = RUST_NAMES.get(type(p).__name__, {})
+    # each generated module carries the renames of its own bundles
+    names = getattr(sys.modules[type(p).__module__], "RUST_NAMES", {})
+    renames = names.get(type(p).__name__, {})
     out: dict[str, object] = {}
     for f in dataclasses.fields(p):
         v = getattr(p, f.name)

@@ -19,7 +19,9 @@ use crate::mc_generation::hdwgcna_meta_cells::{
     BootstrappedMetaCellParams, assign_bootstrapped_meta_cells, identify_meta_cells,
 };
 use crate::mc_generation::metacells2::{DacParams, MetacellsParams, compute_dac_metacells};
-use crate::mc_generation::seacells::{SEACells, SEACellsParams, assignments_to_metacells};
+use crate::mc_generation::seacells::{
+    SEACells, SEACellsParams, SeacellsFitResult, assignments_to_metacells,
+};
 use crate::mc_generation::super_cells::{SuperCellParams, supercell};
 use crate::prelude::*;
 
@@ -374,8 +376,62 @@ pub fn seacells_on_store(
     seed: usize,
     verbose: usize,
 ) -> Result<SeaCellsRes, ScErrors> {
+    seacells_on_store_with(
+        f_path_cell,
+        embd,
+        knn,
+        cells_to_keep,
+        cells_to_use,
+        params,
+        target_size,
+        seed,
+        verbose,
+        |embd, knn_idx, knn_dist| seacells_fit(embd, knn_idx, knn_dist, params, seed, verbose),
+    )
+}
+
+/// SEACells over a cell-major store, with the fit supplied by the caller.
+///
+/// Everything around the fit (cell mapping, kNN, dropping empty archetypes,
+/// aggregation) is shared, so a device backend only supplies `fit`. Generic
+/// over the backend's error, as the other device seams are.
+///
+/// ### Params
+///
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `embd` - Embedding, one row per working cell
+/// * `knn` - Optional kNN indices and distances over the working rows
+/// * `cells_to_keep` - Store index of each working row; `None` for one-to-one
+/// * `cells_to_use` - Optional narrowing, as store indices
+/// * `params` - The SEACells parameters
+/// * `target_size` - Library size to normalise the aggregates to
+/// * `seed` - Seed for a kNN rebuild
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+/// * `fit` - The fit over the embedding and the kNN actually used, see
+///   [`seacells_fit`]
+///
+/// ### Returns
+///
+/// The [`SeaCellsRes`].
+#[allow(clippy::too_many_arguments)]
+pub fn seacells_on_store_with<E, F>(
+    f_path_cell: &str,
+    embd: MatRef<f32>,
+    knn: Option<KnnRef<'_>>,
+    cells_to_keep: Option<&[usize]>,
+    cells_to_use: Option<&[usize]>,
+    params: &SEACellsParams,
+    target_size: f32,
+    seed: usize,
+    verbose: usize,
+    fit: F,
+) -> Result<SeaCellsRes, E>
+where
+    E: From<ScErrors>,
+    F: FnOnce(MatRef<f32>, &[Vec<usize>], &[Vec<f32>]) -> Result<SeacellsFitResult, E>,
+{
     let start = Instant::now();
-    let reader = ParallelSparseReader::new(f_path_cell)?;
+    let reader = ParallelSparseReader::new(f_path_cell).map_err(ScErrors::from)?;
     let mapping = resolve_cell_mapping(
         cells_to_keep,
         cells_to_use,
@@ -399,7 +455,8 @@ pub fn seacells_on_store(
                 return Err(ScErrors::MetaCellKnnEmbeddingMismatch {
                     knn_rows: idx.len(),
                     embd_rows: embd_mat.nrows(),
-                });
+                }
+                .into());
             }
             (idx, dist)
         }
@@ -409,31 +466,14 @@ pub fn seacells_on_store(
         }
     };
 
-    let mut seacell = SEACells::new(embd_mat.nrows(), params);
-    seacell.construct_kernel_mat(embd_mat, knn_idx, knn_dist, verbose);
-    match params.n_landmarks {
-        Some(n_landmarks) => seacell.initialise_archetypes_landmark(
-            embd_mat,
-            knn_idx,
-            knn_dist,
-            n_landmarks,
-            verbose,
-            seed as u64,
-        )?,
-        None => seacell.initialise_archetypes(knn_idx, knn_dist, verbose, seed as u64)?,
-    }
-    seacell.fit(seed, verbose)?;
-
-    let assignments = seacell.get_hard_assignments()?;
-    let archetypes_raw = seacell.get_archetypes()?;
+    let (_, groups_raw, archetypes_raw, rss) = fit(embd_mat, knn_idx, knn_dist)?;
     let k = params.n_sea_cells;
 
-    let (groups, kept_archetypes): (Vec<Vec<usize>>, Vec<usize>) =
-        assignments_to_metacells(&assignments, k)
-            .into_iter()
-            .zip(archetypes_raw)
-            .filter(|(group, _)| !group.is_empty())
-            .unzip();
+    let (groups, kept_archetypes): (Vec<Vec<usize>>, Vec<usize>) = groups_raw
+        .into_iter()
+        .zip(archetypes_raw)
+        .filter(|(group, _)| !group.is_empty())
+        .unzip();
     if verbose > 0 && groups.len() < k {
         println!(
             "Dropped {} empty archetype(s); keeping {} of {} requested",
@@ -456,9 +496,59 @@ pub fn seacells_on_store(
     }
     Ok(SeaCellsRes {
         base,
-        rss: seacell.get_rss_history().to_vec(),
+        rss,
         archetypes,
     })
+}
+
+/// The SEACells fit on the CPU.
+///
+/// ### Params
+///
+/// * `embd` - Embedding, one row per cell
+/// * `knn_idx` - kNN indices per cell
+/// * `knn_dist` - kNN distances per cell
+/// * `params` - The SEACells parameters
+/// * `seed` - Seed
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `(hard assignments per cell, metacell groupings, archetype cell indices, RSS
+/// history)`, one grouping and archetype per archetype the initialisation
+/// selected.
+pub fn seacells_fit(
+    embd: MatRef<f32>,
+    knn_idx: &[Vec<usize>],
+    knn_dist: &[Vec<f32>],
+    params: &SEACellsParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<SeacellsFitResult, ScErrors> {
+    let mut seacell = SEACells::new(embd.nrows(), params);
+    seacell.construct_kernel_mat(embd, knn_idx, knn_dist, verbose);
+    match params.n_landmarks {
+        Some(n_landmarks) => seacell.initialise_archetypes_landmark(
+            embd,
+            knn_idx,
+            knn_dist,
+            n_landmarks,
+            verbose,
+            seed as u64,
+        )?,
+        None => seacell.initialise_archetypes(knn_idx, knn_dist, verbose, seed as u64)?,
+    }
+    seacell.fit(seed, verbose)?;
+
+    let assignments = seacell.get_hard_assignments()?;
+    let archetypes = seacell.get_archetypes()?;
+    let groups = assignments_to_metacells(&assignments, archetypes.len());
+    Ok((
+        assignments,
+        groups,
+        archetypes,
+        seacell.get_rss_history().to_vec(),
+    ))
 }
 
 /// SuperCells over a cell-major store.

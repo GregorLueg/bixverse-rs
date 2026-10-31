@@ -1,0 +1,49 @@
+# The `bixverse-gpu` wheel: GPU twins of the bixverse single cell methods on
+# wgpu, built from `../crates/bixverse-gpu-py`. A uv workspace member of
+# `python/`, so it shares the dev venv and resolves `bixverse` to the checkout.
+#
+# Build into the dev venv, from this directory:
+#
+#     uv run --no-sync maturin develop --release
+#
+# `--no-sync` stops uv from first building the member through the PEP 517
+# backend. A wheel: `uv run --no-sync maturin build --release`.
+
+[build-system]
+requires = ["maturin>=1.15,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bixverse-gpu"
+description = "GPU twins of the bixverse single cell methods, on wgpu, in Rust."
+license = { text = "MIT" }
+authors = [{ name = "Gregor Lueg", email = "gregorlueg@me.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "bixverse",
+    "beartype>=0.19",
+    "numpy>=1.23",
+    "polars>=2.0.0",
+    # GPU UMAP and t-SNE run in the manifolds-rs wheel.
+    "manifolds-rs>=0.4.1",
+]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Repository = "https://github.com/GregorLueg/bixverse-rs"
+
+[tool.uv.sources]
+bixverse = { workspace = true }
+
+[tool.maturin]
+manifest-path = "../crates/bixverse-gpu-py/Cargo.toml"
+module-name = "bixverse_gpu._bixverse_gpu"
+python-source = "."
+strip = true
+include = ["bixverse_gpu/py.typed", "bixverse_gpu/*.pyi"]
+exclude = ["**/__pycache__/**"]

@@ -27,6 +27,7 @@ import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import ModuleType, SimpleNamespace
 from typing import Literal
 
 import numpy as np
@@ -286,6 +287,34 @@ def scenic_grn(
         Aibar, et al., Nat. Methods, 2017; Moerman, et al., Bioinformatics,
         2019.
     """
+    return _scenic_grn(
+        sc,
+        tf_ids,
+        scenic_params=scenic_params,
+        genes_to_take=genes_to_take,
+        cells_to_take=cells_to_take,
+        streaming=streaming,
+        seed=seed,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype
+def _scenic_grn(
+    sc: ScOrMc,
+    tf_ids: Sequence[str],
+    *,
+    scenic_params: ScenicParams | None = None,
+    genes_to_take: Sequence[str] | None = None,
+    cells_to_take: Sequence[str] | None = None,
+    streaming: bool | None = None,
+    seed: int = 42,
+    verbose: bool = False,
+    ext: ModuleType | SimpleNamespace,
+) -> ScenicGrn:
+    """The body of `scenic_grn`, with the extension module `ext` supplied, so
+    the GPU twin shares it."""
     params = scenic_params or ScenicParams()
     if isinstance(sc, MetaCells):
         params = _mc_params(params, verbose)
@@ -329,11 +358,9 @@ def scenic_grn(
         m = csr_subset(sc.raw, cells, gene_idx)
         pos = {g: i for i, g in enumerate(targets)}
         tf_cols = np.asarray([pos[t] for t in tfs], dtype=np.uint32)
-        imp = _bixverse.mc_scenic_grn(
-            *csr_args(m), tf_cols, to_rust(params), seed, verbose
-        )
+        imp = ext.mc_scenic_grn(*csr_args(m), tf_cols, to_rust(params), seed, verbose)
     else:
-        imp = _bixverse.scenic_grn(
+        imp = ext.scenic_grn(
             str(sc.genes_path),
             cells,
             gene_idx,

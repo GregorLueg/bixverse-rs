@@ -15,6 +15,15 @@ use crate::prelude::*;
 use bixverse_core::core::mat_struct::MatSliceView;
 use bixverse_sc::sc_batch_correction::batch_utils::process_batch_labels;
 use bixverse_sc::sc_batch_correction::bbknn::{bbknn_graph_from_knn, check_batch_size};
+use serde::Deserialize;
+
+///////////////
+// Constants //
+///////////////
+
+/// Trim per neighbour within a batch when `trim` is not given, as the CPU
+/// BBKNN and the R list conversion default it.
+const BBKNN_GPU_TRIM_FACTOR: usize = 10;
 
 ////////////
 // Params //
@@ -23,8 +32,10 @@ use bixverse_sc::sc_batch_correction::bbknn::{bbknn_graph_from_knn, check_batch_
 /// Parameters for GPU BBKNN.
 ///
 /// Mirrors `BbknnParams` with the GPU nearest neighbour parameters in place of
-/// the CPU ones.
-#[derive(Clone, Debug)]
+/// the CPU ones. Deserialises from the R `params_sc_bbknn_gpu()` list, see
+/// [`BbknnParamsGpuSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "BbknnParamsGpuSpec")]
 pub struct BbknnParamsGpu {
     /// How many neighbours per batch to identify
     pub neighbours_within_batch: usize,
@@ -64,6 +75,63 @@ impl BbknnParamsGpu {
 impl Default for BbknnParamsGpu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The keys a [`BbknnParamsGpu`] deserialises from, as its R list conversion
+/// reads them; missing keys take its fallbacks.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct BbknnParamsGpuSpec {
+    /// How many neighbours per batch to identify
+    pub neighbours_within_batch: usize,
+    /// Mixing ratio between union (1.0) and intersection (0.0)
+    pub set_op_mix_ratio: f32,
+    /// How many nearest neighbours of each cell are assumed to be fully
+    /// connected
+    pub local_connectivity: f32,
+    /// Trim to these many top connectivities; `None` is
+    /// `BBKNN_GPU_TRIM_FACTOR * neighbours_within_batch`
+    pub trim: Option<usize>,
+    /// The GPU kNN keys
+    #[serde(flatten)]
+    pub knn_params: KnnParamsGpu,
+}
+
+impl Default for BbknnParamsGpuSpec {
+    fn default() -> Self {
+        let d = BbknnParamsGpu::new();
+        Self {
+            neighbours_within_batch: d.neighbours_within_batch,
+            set_op_mix_ratio: d.set_op_mix_ratio,
+            local_connectivity: d.local_connectivity,
+            trim: None,
+            knn_params: d.knn_params,
+        }
+    }
+}
+
+impl From<BbknnParamsGpuSpec> for BbknnParamsGpu {
+    /// Resolve the trim default.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`BbknnParamsGpu`], always with a trim.
+    fn from(s: BbknnParamsGpuSpec) -> Self {
+        Self {
+            neighbours_within_batch: s.neighbours_within_batch,
+            set_op_mix_ratio: s.set_op_mix_ratio,
+            local_connectivity: s.local_connectivity,
+            trim: Some(
+                s.trim
+                    .unwrap_or(BBKNN_GPU_TRIM_FACTOR * s.neighbours_within_batch),
+            ),
+            knn_params: s.knn_params,
+        }
     }
 }
 

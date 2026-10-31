@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -168,8 +168,12 @@ def _leiden(
     min_gain: float,
     local_moving: LocalMoving,
     seed: int,
+    run: Callable[..., np.ndarray] = _bixverse.leiden,
 ) -> np.ndarray:
     """Leiden or Louvain on a neighbour graph, as R's `leiden_clustering`.
+
+    `run` is the extension call, `leiden` of `bixverse._bixverse` or of its
+    GPU twin.
 
     Returns:
         `uint32` community per node, 0 the largest.
@@ -200,7 +204,7 @@ def _leiden(
         "local_moving": local_moving,
         "seed": seed,
     }
-    return _bixverse.leiden(
+    return run(
         graph.data,
         graph.indices,
         np.ascontiguousarray(graph.indptr, dtype=np.uint32),
@@ -425,6 +429,38 @@ def find_clusters(
         Traag, Waltman & van Eck, Sci Rep, 2019; Blondel, et al., J Stat
         Mech, 2008.
     """
+    _find_clusters(
+        sc,
+        cluster_algorithm=cluster_algorithm,
+        res=res,
+        name=name,
+        modality=modality,
+        seed=seed,
+        beta=beta,
+        n_iterations=n_iterations,
+        min_gain=min_gain,
+        local_moving=local_moving,
+        run=_bixverse.leiden,
+    )
+
+
+@beartype
+def _find_clusters(
+    sc: ScOrMc,
+    *,
+    cluster_algorithm: ClusterAlgorithm,
+    res: float,
+    name: str,
+    modality: Modality,
+    seed: int,
+    beta: float,
+    n_iterations: int | None,
+    min_gain: float,
+    local_moving: LocalMoving,
+    run: Callable[..., np.ndarray],
+) -> None:
+    """The body of `find_clusters`, with the extension call `run` supplied,
+    so the GPU twin shares it."""
     require_fresh(sc, ["connectivities"], modality)
     graph = modality_cache(sc, modality).connectivities
     if graph is None:
@@ -448,6 +484,7 @@ def find_clusters(
         min_gain=min_gain,
         local_moving=local_moving,
         seed=seed,
+        run=run,
     )
     labels = pl.Series(name, labels, dtype=pl.Int32)
     if isinstance(sc, MetaCells):
@@ -497,7 +534,36 @@ def fast_cluster(
     References:
         Wei, et al., PLoS Comput Biol, 2022.
     """
-    params = fc_params or FastClusterParams()
+    return _fast_cluster(
+        sc,
+        embd_to_use=embd_to_use,
+        no_embd_to_use=no_embd_to_use,
+        resolutions=resolutions,
+        params=to_rust(fc_params or FastClusterParams()),
+        n_seeds=n_seeds,
+        return_kmeans=return_kmeans,
+        seed=seed,
+        verbose=verbose,
+        run=_bixverse.fast_cluster,
+    )
+
+
+@beartype
+def _fast_cluster(
+    sc: ScOrScSubset,
+    *,
+    embd_to_use: str,
+    no_embd_to_use: int | None,
+    resolutions: Sequence[float],
+    params: dict[str, object],
+    n_seeds: int,
+    return_kmeans: bool,
+    seed: int,
+    verbose: bool,
+    run: Callable[..., tuple],
+) -> FastClusters:
+    """The body of `fast_cluster` over `to_rust(params)`, with the extension
+    call `run` supplied, so the GPU twin shares it."""
     if not resolutions:
         raise ValueError("resolutions must be non-empty")
     if n_seeds < 1:
@@ -507,13 +573,13 @@ def fast_cluster(
         raise ValueError(f"Embedding '{embd_to_use}' was not found.")
     embd = _first_dims(embd, no_embd_to_use)
 
-    d = to_rust(params)
-    if params.n_centroids is None:
+    d = dict(params)
+    if d["n_centroids"] is None:
         # faiss' IVF default
         d["n_centroids"] = math.floor(4 * math.sqrt(embd.shape[0]))
-    if params.n_iterations is None:
-        d["n_iterations"] = DEFAULT_COMMUNITY_ITERS[params.algorithm]
-    membership, assignments, centroids, seed_stats = _bixverse.fast_cluster(
+    if d["n_iterations"] is None:
+        d["n_iterations"] = DEFAULT_COMMUNITY_ITERS[str(d["algorithm"])]
+    membership, assignments, centroids, seed_stats = run(
         embd, [float(r) for r in resolutions], d, n_seeds, seed, verbose
     )
 

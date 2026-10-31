@@ -25,6 +25,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Literal
 
 import numpy as np
@@ -253,6 +254,22 @@ def bonsai(
         de Groot, et al., Nat. Biotechnol., 2026; Breda, et al., Nat.
         Biotechnol., 2021.
     """
+    return _bonsai(
+        sc, hvg=hvg, bonsai_params=bonsai_params, verbose=verbose, ext=_bixverse
+    )
+
+
+@beartype
+def _bonsai(
+    sc: SingleCells | MetaCells,
+    *,
+    hvg: np.ndarray | Sequence[int] | None,
+    bonsai_params: BonsaiParams | None,
+    verbose: bool,
+    ext: ModuleType,
+) -> BonsaiTree:
+    """The body of `bonsai`, with the extension module `ext` (its `sc_bonsai`
+    and `mc_bonsai`) supplied, so the GPU twin shares it."""
     params = bonsai_params or BonsaiParams()
     genes_in = _genes_in(hvg, sc.n_genes)
     gene_ids = sc.gene_ids(genes_in)
@@ -278,11 +295,11 @@ def bonsai(
     started = time.perf_counter()
     if isinstance(sc, MetaCells):
         data, indices, indptr, shape = csr_args(sc.raw)
-        res = _bixverse.mc_bonsai(
+        res = ext.mc_bonsai(
             data, indices, indptr, shape, genes_in, to_rust(params), verbose
         )
     else:
-        res = _bixverse.sc_bonsai(
+        res = ext.sc_bonsai(
             str(sc.genes_path),
             str(sc.cells_path),
             cell_idx,

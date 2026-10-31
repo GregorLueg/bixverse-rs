@@ -33,6 +33,7 @@ use bixverse_sc::sc_processing::scrublet::{
     FinalScrubletRes, calculate_doublet_scores, call_doublets,
 };
 use bixverse_sc::sc_processing::utils_doublets::*;
+use serde::Deserialize;
 
 ///////////////
 // Constants //
@@ -165,6 +166,111 @@ impl ScrubletParamsGpu {
 impl Default for ScrubletParamsGpu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The non-kNN keys a [`ScrubletParamsGpu`] deserialises from, as its R list
+/// conversion reads them, plus `knn_backend`.
+///
+/// The kNN half is not here: the CPU and the GPU blocks share five key names,
+/// so a flattened pair would hand the shared keys to whichever came first. The
+/// caller deserialises the block `knn_backend` names from the same keys and
+/// joins the two with [`ScrubletGpuSpec::into_params`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct ScrubletGpuSpec {
+    /// `"gpu"` or `"cpu"`: which kNN block the keys hold
+    pub knn_backend: String,
+    /// Whether to log-transform counts after normalisation
+    pub log_transform: bool,
+    /// Whether to mean-centre genes before PCA
+    pub mean_center: bool,
+    /// Whether to scale genes to unit variance before PCA
+    pub normalise_variance: bool,
+    /// Optional target library size
+    pub target_size: Option<f32>,
+    /// Percentile threshold for HVG selection
+    pub min_gene_var_pctl: f32,
+    /// HVG method
+    pub hvg_method: String,
+    /// Loess span for VST fitting
+    pub loess_span: f64,
+    /// Optional clip max for variance stabilisation
+    pub clip_max: Option<f32>,
+    /// Binning strategy
+    pub binning_strategy: String,
+    /// Number of bins for HVG selection
+    pub n_bins: usize,
+    /// Number of principal components
+    pub no_pcs: usize,
+    /// Ratio of simulated doublets to observed cells
+    pub sim_doublet_ratio: f32,
+    /// Expected doublet rate
+    pub expected_doublet_rate: f32,
+    /// Uncertainty in the expected doublet rate
+    pub stdev_doublet_rate: f32,
+    /// Number of histogram bins for the Otsu threshold
+    #[serde(alias = "n_bins_histogram")]
+    pub n_bins_hist: usize,
+    /// Optional manual threshold
+    pub manual_threshold: Option<f32>,
+}
+
+impl Default for ScrubletGpuSpec {
+    fn default() -> Self {
+        let d = ScrubletParamsGpu::new();
+        Self {
+            knn_backend: "gpu".to_string(),
+            log_transform: d.log_transform,
+            mean_center: d.mean_center,
+            normalise_variance: d.normalise_variance,
+            target_size: d.target_size,
+            min_gene_var_pctl: d.min_gene_var_pctl,
+            hvg_method: d.hvg_method,
+            loess_span: d.loess_span,
+            clip_max: d.clip_max,
+            binning_strategy: d.binning_strategy,
+            n_bins: d.n_bins,
+            no_pcs: d.no_pcs,
+            sim_doublet_ratio: d.sim_doublet_ratio,
+            expected_doublet_rate: d.expected_doublet_rate,
+            stdev_doublet_rate: d.stdev_doublet_rate,
+            n_bins_hist: d.n_bins_hist,
+            manual_threshold: d.manual_threshold,
+        }
+    }
+}
+
+impl ScrubletGpuSpec {
+    /// Join the keys with the kNN block.
+    ///
+    /// ### Params
+    ///
+    /// * `knn_params` - The kNN block `knn_backend` names
+    ///
+    /// ### Returns
+    ///
+    /// The [`ScrubletParamsGpu`].
+    pub fn into_params(self, knn_params: ScrubletKnnBackend) -> ScrubletParamsGpu {
+        ScrubletParamsGpu {
+            log_transform: self.log_transform,
+            mean_center: self.mean_center,
+            normalise_variance: self.normalise_variance,
+            target_size: self.target_size,
+            min_gene_var_pctl: self.min_gene_var_pctl,
+            hvg_method: self.hvg_method,
+            loess_span: self.loess_span,
+            clip_max: self.clip_max,
+            binning_strategy: self.binning_strategy,
+            n_bins: self.n_bins,
+            no_pcs: self.no_pcs,
+            sim_doublet_ratio: self.sim_doublet_ratio,
+            expected_doublet_rate: self.expected_doublet_rate,
+            stdev_doublet_rate: self.stdev_doublet_rate,
+            n_bins_hist: self.n_bins_hist,
+            manual_threshold: self.manual_threshold,
+            knn_params,
+        }
     }
 }
 

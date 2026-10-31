@@ -222,7 +222,8 @@ where
 ///
 /// `SvdResults<T>` with `u` `[n, k]`, `s` of length `k` and `v` `[m, k]`,
 /// where `k <= n_components` (fewer only if the Krylov space closed early or
-/// trailing eigenvalues of the Gram came out non-positive).
+/// trailing eigenvalues of the Gram came out non-positive). Signs
+/// fixed by `SvdResults::flip_signs`, as the CPU Lanczos fixes them.
 ///
 /// ### Errors
 ///
@@ -328,13 +329,14 @@ where
     let u_host = op.forward(&x, k, &client)?.read(&client)?;
 
     let from = |x: f64| T::from_f64(x).expect("f64 casts to the device float");
-    let res = SvdResults {
+    let mut res = SvdResults {
         u: Mat::from_fn(n, k, |i, c| {
             from(u_host[i * k + c].to_f64().expect("float casts to f64") / s[c])
         }),
         s: s.iter().map(|&x| from(x)).collect(),
         v: Mat::from_fn(m, k, |j, c| from(v[(j, c)])),
     };
+    res.flip_signs();
 
     if verbosity.normal_verbosity() {
         println!(

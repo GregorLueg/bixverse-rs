@@ -14,6 +14,12 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[manifest]
+members = [
+    "bixverse",
+    "bixverse-gpu",
+]
+
 [[package]]
 name = "absl-py"
 version = "2.5.1"
@@ -336,6 +342,9 @@ dependencies = [
 embed = [
     { name = "manifolds-rs" },
 ]
+gpu = [
+    { name = "bixverse-gpu" },
+]
 jax = [
     { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "jax", version = "0.12.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -380,6 +389,7 @@ validation = [
 [package.metadata]
 requires-dist = [
     { name = "beartype", specifier = ">=0.19" },
+    { name = "bixverse-gpu", marker = "extra == 'gpu'", editable = "gpu" },
     { name = "duckdb", specifier = ">=2.0" },
     { name = "jax", marker = "extra == 'jax'", specifier = ">=0.5" },
     { name = "manifolds-rs", marker = "extra == 'embed'", specifier = ">=0.4.1" },
@@ -391,7 +401,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'sparse'", specifier = ">=1.9" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4" },
 ]
-provides-extras = ["embed", "jax", "mlx", "plots", "sparse", "torch"]
+provides-extras = ["embed", "gpu", "jax", "mlx", "plots", "sparse", "torch"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -411,6 +421,27 @@ docs = [
 validation = [
     { name = "anndata", specifier = ">=0.10" },
     { name = "scvi-tools", marker = "python_full_version >= '3.12'", specifier = "==1.5.1" },
+]
+
+[[package]]
+name = "bixverse-gpu"
+source = { editable = "gpu" }
+dependencies = [
+    { name = "beartype" },
+    { name = "bixverse" },
+    { name = "manifolds-rs" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "polars" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "beartype", specifier = ">=0.19" },
+    { name = "bixverse", editable = "." },
+    { name = "manifolds-rs", specifier = ">=0.4.1" },
+    { name = "numpy", specifier = ">=1.23" },
+    { name = "polars", specifier = ">=2.0.0" },
 ]
 
 [[package]]

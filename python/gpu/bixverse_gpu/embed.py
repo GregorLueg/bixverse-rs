@@ -1,0 +1,170 @@
+"""GPU UMAP and t-SNE, the port of R's `umap_gpu_sc` and `tsne_gpu_sc`.
+
+The work runs in the `manifolds_rs` GPU estimators (`UMAPGpu`, `TSNEGpu`);
+inputs, slots and stamps are handled exactly as in `bixverse.embed`, which
+runs the same code with the CPU estimators. The `*_defaults()` builders return
+an estimator set to R's defaults (`umap_gpu_sc` plus `params_umap_gpu()`,
+`tsne_gpu_sc` plus `params_tsne_gpu()`).
+
+    >>> bixverse_gpu.graph.find_neighbours(sc)
+    >>> umap(sc)
+"""
+
+from __future__ import annotations
+
+import manifolds_rs as mf
+from beartype import beartype
+
+from bixverse._core.embed import _embed
+from bixverse._core.multimodal import Modality
+from bixverse._core.subset import ScOrMc
+
+############
+# Defaults #
+############
+
+
+@beartype
+def _nn_defaults() -> mf.NeighbourParamsGpu:
+    """R's `params_nn_gpu()`: everything left to Rust but `delta`."""
+    return mf.NeighbourParamsGpu(delta=0.001, extract_knn=False)
+
+
+@beartype
+def umap_defaults() -> mf.UMAPGpu:
+    """GPU UMAP set to R's `umap_gpu_sc` and `params_umap_gpu()` defaults.
+
+    R picks `n_epochs` from the optimiser when it is `NULL`; with its default
+    `"adam_gpu"` that is always 500.
+    """
+    return mf.UMAPGpu(
+        n_components=2,
+        n_neighbors=15,
+        min_dist=0.5,
+        spread=1.0,
+        n_epochs=500,
+        learning_rate=1.0,
+        init="spectral",
+        ann="nndescent_gpu",
+        optimiser="adam_gpu",
+        randomised=False,
+        seed=42,
+        nn_params=_nn_defaults(),
+        graph_params=mf.UmapGraph(
+            bandwidth=1e-5, local_connectivity=1.0, mix_weight=1.0
+        ),
+        optim_params=mf.UmapOptim(gamma=1.0, neg_sample_rate=5),
+    )
+
+
+@beartype
+def tsne_defaults() -> mf.TSNEGpu:
+    """GPU t-SNE set to R's `tsne_gpu_sc` and `params_tsne_gpu()` defaults:
+    perplexity 20, the GPU three-kernel FFT optimiser and an IVF kNN."""
+    return mf.TSNEGpu(
+        n_components=2,
+        perplexity=20.0,
+        n_epochs=1000,
+        learning_rate=None,
+        init="pca",
+        ann="ivf_gpu",
+        approx="fft_3k_gpu",
+        randomised_init=True,
+        seed=42,
+        nn_params=_nn_defaults(),
+        optim_params=mf.TsneOptim(
+            early_exag_iter=250,
+            early_exag_factor=12.0,
+            theta=0.5,
+            n_interp_points=3,
+            max_depth=7,
+        ),
+    )
+
+
+##############
+# Embeddings #
+##############
+
+
+@beartype
+def umap(
+    sc: ScOrMc,
+    *,
+    use_knn: bool = True,
+    embd_to_use: str = "pca",
+    slot_name: str = "umap",
+    no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
+    params: mf.UMAPGpu | None = None,
+) -> None:
+    """GPU UMAP, as R's `umap_gpu_sc`.
+
+    With `use_knn` the cached kNN is reused and only the optimisation runs
+    on the GPU; without one cached, a warning and a GPU search.
+
+    Args:
+        sc: The experiment.
+        use_knn: Reuse the cached kNN.
+        embd_to_use: The input embedding, `"pca"` or a name in
+            `sc.cache.embeddings`.
+        slot_name: The name in `sc.cache.embeddings` to write.
+        no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
+        params: The estimator. `None` is `umap_defaults()`.
+
+    Raises:
+        ValueError: If the embedding or the kNN is stale, the embedding is
+            absent, or `slot_name` is reserved.
+    """
+    _embed(
+        sc,
+        params or umap_defaults(),
+        use_knn=use_knn,
+        embd_to_use=embd_to_use,
+        slot_name=slot_name,
+        no_embd_to_use=no_embd_to_use,
+        modality=modality,
+    )
+
+
+@beartype
+def tsne(
+    sc: ScOrMc,
+    *,
+    use_knn: bool = False,
+    embd_to_use: str = "pca",
+    slot_name: str = "tsne",
+    no_embd_to_use: int | None = None,
+    modality: Modality = "rna",
+    params: mf.TSNEGpu | None = None,
+) -> None:
+    """GPU t-SNE, as R's `tsne_gpu_sc`.
+
+    `approx="fft_3k_gpu"` (the default) runs the optimiser on the GPU in
+    fp32; the CPU approximations keep it on the CPU with only the kNN on the
+    GPU.
+
+    Args:
+        sc: The experiment.
+        use_knn: Reuse the cached kNN.
+        embd_to_use: The input embedding.
+        slot_name: The name in `sc.cache.embeddings` to write.
+        no_embd_to_use: Number of leading dimensions to use. `None` for all.
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+            `SingleCellsMultiModal`.
+        params: The estimator. `None` is `tsne_defaults()`.
+
+    Raises:
+        ValueError: As `umap`.
+    """
+    _embed(
+        sc,
+        params or tsne_defaults(),
+        use_knn=use_knn,
+        embd_to_use=embd_to_use,
+        slot_name=slot_name,
+        no_embd_to_use=no_embd_to_use,
+        modality=modality,
+    )

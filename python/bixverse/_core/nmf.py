@@ -22,6 +22,7 @@ import logging
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Literal
 
 import numpy as np
@@ -409,11 +410,41 @@ def nmf(
     Raises:
         ValueError: On `k` below 1 or without genes.
     """
+    return _nmf(
+        sc,
+        k,
+        cell_ids=cell_ids,
+        gene_ids=gene_ids,
+        preprocessing=preprocessing,
+        use_second_layer=use_second_layer,
+        nmf_hals_params=nmf_hals_params,
+        seed=seed,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype
+def _nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    seed: int = 42,
+    verbose: bool = False,
+    ext: ModuleType,
+) -> NmfResult:
+    """The body of `nmf`, with the extension module `ext` supplied, so
+    the GPU twin shares it."""
     _check_k(k, 1)
     hals = nmf_hals_params or NmfHalsParams()
     cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
     if isinstance(sc, MetaCells):
-        res = _bixverse.nmf_single_mc(
+        res = ext.nmf_single_mc(
             *_mc_matrix(sc, cells, genes, use_second_layer),
             k,
             preprocessing,
@@ -423,7 +454,7 @@ def nmf(
             verbose,
         )
     else:
-        res = _bixverse.nmf_single_sc(
+        res = ext.nmf_single_sc(
             str(sc.genes_path),
             genes,
             cells,
@@ -483,13 +514,45 @@ def stabilised_nmf(
     Raises:
         ValueError: On `k` or `n_runs` below 1, or without genes.
     """
+    return _stabilised_nmf(
+        sc,
+        k,
+        cell_ids=cell_ids,
+        gene_ids=gene_ids,
+        preprocessing=preprocessing,
+        use_second_layer=use_second_layer,
+        nmf_hals_params=nmf_hals_params,
+        n_runs=n_runs,
+        seed=seed,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype
+def _stabilised_nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+    ext: ModuleType,
+) -> StabilisedNmfResult:
+    """The body of `stabilised_nmf`, with the extension module `ext` supplied, so
+    the GPU twin shares it."""
     _check_k(k, 1)
     if n_runs < 1:
         raise ValueError("n_runs must be at least 1.")
     hals = nmf_hals_params or NmfHalsParams()
     cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
     if isinstance(sc, MetaCells):
-        res = _bixverse.nmf_multi_mc(
+        res = ext.nmf_multi_mc(
             *_mc_matrix(sc, cells, genes, use_second_layer),
             k,
             preprocessing,
@@ -500,7 +563,7 @@ def stabilised_nmf(
             verbose,
         )
     else:
-        res = _bixverse.nmf_multi_sc(
+        res = ext.nmf_multi_sc(
             str(sc.genes_path),
             genes,
             cells,
@@ -610,6 +673,40 @@ def consensus_nmf(
     References:
         Kotliar, et al., eLife, 2019.
     """
+    return _consensus_nmf(
+        sc,
+        k,
+        cell_ids=cell_ids,
+        gene_ids=gene_ids,
+        preprocessing=preprocessing,
+        use_second_layer=use_second_layer,
+        nmf_hals_params=nmf_hals_params,
+        nmf_consensus_params=nmf_consensus_params,
+        n_runs=n_runs,
+        seed=seed,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype
+def _consensus_nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    nmf_consensus_params: NmfConsensusParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+    ext: ModuleType,
+) -> ConsensusNmfResult:
+    """The body of `consensus_nmf`, with the extension module `ext` supplied, so
+    the GPU twin shares it."""
     _check_k(k, 2)
     if n_runs < 2:
         raise ValueError("n_runs must be at least 2.")
@@ -619,7 +716,7 @@ def consensus_nmf(
     _warn_target_w(cons, cells.size, k, n_runs)
     try:
         if isinstance(sc, MetaCells):
-            res = _bixverse.nmf_consensus_mc(
+            res = ext.nmf_consensus_mc(
                 *_mc_matrix(sc, cells, genes, use_second_layer),
                 k,
                 preprocessing,
@@ -631,7 +728,7 @@ def consensus_nmf(
                 verbose,
             )
         else:
-            res = _bixverse.nmf_consensus_sc(
+            res = ext.nmf_consensus_sc(
                 str(sc.genes_path),
                 genes,
                 cells,
@@ -713,6 +810,40 @@ def nmf_k_sweep(
     References:
         Kotliar, et al., eLife, 2019.
     """
+    return _nmf_k_sweep(
+        sc,
+        k_range,
+        cell_ids=cell_ids,
+        gene_ids=gene_ids,
+        preprocessing=preprocessing,
+        use_second_layer=use_second_layer,
+        nmf_hals_params=nmf_hals_params,
+        nmf_consensus_params=nmf_consensus_params,
+        n_runs=n_runs,
+        seed=seed,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype
+def _nmf_k_sweep(
+    sc: ScOrMc,
+    k_range: Sequence[int] | range,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    nmf_consensus_params: NmfConsensusParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+    ext: ModuleType,
+) -> NmfKSweepResult:
+    """The body of `nmf_k_sweep`, with the extension module `ext` supplied, so
+    the GPU twin shares it."""
     ks = [int(k) for k in k_range]
     if not ks or len(set(ks)) != len(ks) or min(ks) < 2:
         raise ValueError("k_range must hold unique integers of at least 2.")
@@ -723,7 +854,7 @@ def nmf_k_sweep(
     cells, genes, _, _ = _selection(sc, cell_ids, gene_ids)
     _warn_target_w(cons, cells.size, max(ks), n_runs)
     if isinstance(sc, MetaCells):
-        res = _bixverse.nmf_k_sweep_mc(
+        res = ext.nmf_k_sweep_mc(
             *_mc_matrix(sc, cells, genes, use_second_layer),
             ks,
             preprocessing,
@@ -735,7 +866,7 @@ def nmf_k_sweep(
             verbose,
         )
     else:
-        res = _bixverse.nmf_k_sweep_sc(
+        res = ext.nmf_k_sweep_sc(
             str(sc.genes_path),
             genes,
             cells,

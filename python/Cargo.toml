@@ -1,38 +1,38 @@
-[package]
-name = "bixverse-py"
+# Own workspace root, deliberately. The parent workspace is published to
+# crates.io and its release job runs `cargo publish`, which must not see a
+# path-dependent sibling. This also keeps a root `cargo test` from building pyo3.
+#
+# Two extensions, built one at a time by maturin: `bixverse-py` (the `bixverse`
+# wheel) and `bixverse-gpu-py` (the `bixverse-gpu` wheel). They share
+# `py-common` at compile time and nothing at run time; the wheels meet through
+# store paths and NumPy arrays.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.3.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
-description = "Python bindings for bixverse-rs"
 publish = false
 
-# Own workspace root, deliberately. The parent workspace is published to
-# crates.io and its release job runs `cargo publish`, which must not see a
-# path-dependent sibling. This also keeps a root `cargo test` from building pyo3.
-[workspace]
-
-[lib]
-name = "_bixverse"
-crate-type = ["cdylib"]
-
-[dependencies]
-# The single cell crates, no extendr, so no libR on the link line. Python
-# extras cannot switch Rust features, so the wheel carries every sc feature.
-bixverse-sc = { path = "../crates/bixverse-sc", features = ["multi-modal", "bonsai"] }
-# `hdf5-static` compiles the bundled HDF5 C library instead of linking a
-# system one, so the wheel loads without an HDF5 install. `parquet` hands the
-# h5ad / 10x obs and var to DuckDB.
-bixverse-sc-data = { path = "../crates/bixverse-sc-data", features = ["hdf5-static", "parquet"] }
-# the neighbour graph and Leiden, and the edgeR chain behind pseudobulk and Milo
-bixverse-methods = { path = "../crates/bixverse-methods", features = ["dge"] }
-# `mad_outlier` for the QC calls; the macOS table below adds Accelerate.
+[workspace.dependencies]
+py-common = { path = "crates/py-common" }
 bixverse-core = { path = "../crates/bixverse-core" }
+bixverse-gpu = { path = "../crates/bixverse-gpu" }
+bixverse-methods = { path = "../crates/bixverse-methods" }
+bixverse-sc = { path = "../crates/bixverse-sc" }
+bixverse-sc-data = { path = "../crates/bixverse-sc-data" }
+bixverse-sc-gpu = { path = "../crates/bixverse-sc-gpu" }
 crossbeam-channel = "0.5"
+cubecl = { version = "0.11.0", features = ["wgpu"] }
+cubecl-utils-rs = "0.2.0"
 # the `Tested` the edgeR test takes; one copy with bixverse-methods
 edge-rs = "0.3.2"
 # Same features as the workspace: the default `npy` feature drags `stacker`
 # into the tree.
+indexmap = "2.13.0"
 faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg", "rand"] }
 numpy = "0.29"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
@@ -44,10 +44,6 @@ scx-core = { version = "0.5.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 sprs = "0.11"
-
-# Accelerate GEMM on macOS, as the R package builds it.
-[target.'cfg(target_os = "macos")'.dependencies]
-bixverse-core = { path = "../crates/bixverse-core", features = ["accelerate"] }
 
 [profile.release]
 lto = "thin"

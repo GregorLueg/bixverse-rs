@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -235,6 +236,36 @@ def generate_seacells(
     References:
         Persad, et al., Nat Biotechnol, 2023.
     """
+    return _generate_seacells(
+        sc,
+        seacell_params,
+        embd_to_use=embd_to_use,
+        no_embd_to_use=no_embd_to_use,
+        cells_to_use=cells_to_use,
+        regenerate_knn=regenerate_knn,
+        target_size=target_size,
+        seed=seed,
+        verbose=verbose,
+        run=_bixverse.seacells,
+    )
+
+
+@beartype
+def _generate_seacells(
+    sc: ScOrScSubset,
+    seacell_params: SeacellsParams,
+    *,
+    embd_to_use: str,
+    no_embd_to_use: int | None,
+    cells_to_use: Sequence[str] | None,
+    regenerate_knn: bool,
+    target_size: float,
+    seed: int,
+    verbose: bool,
+    run: Callable[..., dict[str, Any]],
+) -> MetaCells:
+    """The body of `generate_seacells`, with the extension call `run`
+    supplied, so the GPU twin shares it."""
     _require_fresh(sc, [embd_to_use] if regenerate_knn else [embd_to_use, "knn"])
     embd = _embedding(sc, embd_to_use, no_embd_to_use)
     if embd is None:
@@ -242,7 +273,7 @@ def generate_seacells(
     to_use = None if cells_to_use is None else sc.cell_indices(list(cells_to_use))
     knn = None if regenerate_knn else sc.cache.knn
 
-    res = _bixverse.seacells(
+    res = run(
         str(sc.cells_path),
         embd,
         None if knn is None else np.ascontiguousarray(knn.indices),

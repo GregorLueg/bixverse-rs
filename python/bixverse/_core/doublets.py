@@ -501,11 +501,40 @@ def scrublet(
     References:
         Wolock, et al., Cell Syst, 2019.
     """
-    params = to_rust(scrublet_params or ScrubletParams())
+    return _scrublet(
+        sc,
+        to_rust(scrublet_params or ScrubletParams()),
+        _bixverse.scrublet,
+        seed=seed,
+        streaming=streaming,
+        cells_to_use=cells_to_use,
+        group_by=group_by,
+        return_combined_pca=return_combined_pca,
+        return_pairs=return_pairs,
+        verbose=verbose,
+    )
+
+
+@beartype
+def _scrublet(
+    sc: SingleCells,
+    params: dict[str, object],
+    rust_fn: Callable[..., dict[str, Any]],
+    *,
+    seed: int,
+    streaming: bool | None,
+    cells_to_use: Selection | None,
+    group_by: str | None,
+    return_combined_pca: bool,
+    return_pairs: bool,
+    verbose: bool,
+) -> ScrubletRes:
+    """The body of `scrublet` over `to_rust(params)`, with the extension call
+    `rust_fn` supplied, so the GPU twin shares it."""
     cells = _cells(sc, cells_to_use)
 
     def run(c: np.ndarray) -> dict[str, Any]:
-        return _bixverse.scrublet(
+        return rust_fn(
             str(sc.genes_path),
             str(sc.cells_path),
             c,

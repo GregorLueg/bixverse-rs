@@ -1,7 +1,11 @@
 # Dump the bixverse devforge param specs to JSON, flattened the way the
 # generated `params_*()` constructors flatten them before Rust sees the list.
 #
-# Usage: Rscript dev/dump_param_specs.R <bixverse checkout> <out.json> <name>...
+# Usage: Rscript dev/dump_param_specs.R <checkout> <out.json> <name>...
+#
+# The checkout is bixverse, or bixverse.gpu with `BIXVERSE_BASE_DIR` pointing
+# at a bixverse checkout: its specs are loaded first, so a GPU spec can merge a
+# bixverse block (`p_merge(quote(bixverse::params_knn_graph_defaults()))`).
 #
 # Every merge block is resolved recursively (base spec, then `drop`, then
 # `overrides`, then the merge field's own default), exactly as
@@ -18,22 +22,39 @@ bixverse_dir <- args[[1]]
 out_path <- args[[2]]
 wanted <- args[-(1:2)]
 
-spec_env <- new.env()
-for (f in list.files(file.path(bixverse_dir, "inst", "params"), full.names = TRUE)) {
-  sys.source(f, envir = spec_env)
+spec_dirs <- c(Sys.getenv("BIXVERSE_BASE_DIR"), bixverse_dir)
+specs <- list()
+for (d in spec_dirs[nzchar(spec_dirs)]) {
+  spec_env <- new.env()
+  for (f in list.files(file.path(d, "inst", "params"), full.names = TRUE)) {
+    sys.source(f, envir = spec_env)
+  }
+  found <- mget(grep("^spec_", ls(spec_env), value = TRUE), envir = spec_env)
+  names(found) <- vapply(found, `[[`, character(1), "name")
+  specs[names(found)] <- found
 }
-specs <- mget(grep("^spec_", ls(spec_env), value = TRUE), envir = spec_env)
-names(specs) <- vapply(specs, `[[`, character(1), "name")
 
 gen_env <- new.env()
 for (f in c("params-prelude-generated.R", "params-generated.R")) {
   sys.source(file.path(bixverse_dir, "R", f), envir = gen_env)
 }
 
-# Is this merge resolvable from spec data alone? A computed base (SCENIC picks
-# its learner block at call time) is not.
-is_static_merge <- function(field) {
-  is.character(field$from) && length(field$from) == 1L
+# The spec a merge block comes from: a name, or a call to a bixverse
+# constructor. NULL for a computed base (SCENIC picks its learner block at call
+# time), which is not resolvable from spec data alone.
+merge_source <- function(field) {
+  from <- field$from
+  if (is.character(from) && length(from) == 1L) {
+    return(from)
+  }
+  if (is.call(from)) {
+    src <- paste(deparse(from), collapse = "")
+    m <- regmatches(src, regexec("^bixverse::params_(\\w+)\\(\\)$", src))[[1]]
+    if (length(m) == 2L && !is.null(specs[[m[[2]]]])) {
+      return(m[[2]])
+    }
+  }
+  NULL
 }
 
 # Split an override object into constant defaults and derived expressions.
@@ -86,10 +107,11 @@ resolve_fields <- function(spec, origin = NULL) {
       out[[fname]] <- field_record(fname, field, origin)
       next
     }
-    if (!is_static_merge(field)) {
+    source <- merge_source(field)
+    if (is.null(source)) {
       stop(sprintf("dynamic merge %s$%s", spec$name, fname))
     }
-    block <- resolve_fields(specs[[field$from]], origin = origin %||% fname)
+    block <- resolve_fields(specs[[source]], origin = origin %||% fname)
     for (d in field$drop) {
       block[[d]] <- NULL
     }

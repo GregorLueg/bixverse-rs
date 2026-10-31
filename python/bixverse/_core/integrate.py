@@ -301,15 +301,16 @@ def _harmony(
     sc: ScOrScSubset,
     batch_column: str,
     additional_batch_columns: Sequence[str] | None,
-    params: HarmonyParams | HarmonyV2Params,
+    params: object,
     name: str,
     run: Callable[..., np.ndarray],
     modality: CacheModality,
     seed: int,
     verbose: bool,
 ) -> None:
-    """Shared body of Harmony v1 and v2, R's `harmony_sc` /
-    `harmony_v2_sc`."""
+    """Shared body of Harmony v1, v2 and the GPU twin, R's `harmony_sc` /
+    `harmony_v2_sc`. `params` is any Harmony bundle; `run` the extension
+    call."""
     cache = modality_cache(sc, modality)
     require_fresh(sc, ["pca"], modality)
     pca = cache.pca_factors
@@ -325,7 +326,7 @@ def _harmony(
         raise ValueError("The batch columns do not cover the rows of the PCA.")
 
     d = to_rust(params)
-    if params.k is None:
+    if d["k"] is None:
         d["k"] = min(
             round(pca.shape[0] / HARMONY_CELLS_PER_CLUSTER), HARMONY_MAX_CLUSTERS
         )
@@ -474,47 +475,76 @@ def bbknn(
     References:
         Polański, et al., Bioinformatics, 2020.
     """
-    params = bbknn_params or BbknnParams()
+    _bbknn(
+        sc,
+        batch_column,
+        no_neighbours_to_keep=no_neighbours_to_keep,
+        embd_to_use=embd_to_use,
+        no_embd_to_use=no_embd_to_use,
+        params=to_rust(bbknn_params or BbknnParams()),
+        seed=seed,
+        verbose=verbose,
+        run=_bixverse.bbknn_graph,
+    )
+
+
+@beartype
+def _bbknn(
+    sc: ScOrScSubset,
+    batch_column: str,
+    *,
+    no_neighbours_to_keep: int,
+    embd_to_use: str,
+    no_embd_to_use: int | None,
+    params: dict[str, object],
+    seed: int,
+    verbose: bool,
+    run: Callable[..., tuple],
+) -> None:
+    """The body of `bbknn` over `to_rust(params)`, with the extension call
+    `run` supplied, so the GPU twin shares it."""
     if sc.cache.knn is not None:
-        warnings.warn("Prior kNN matrix found. Will be overwritten.", stacklevel=2)
+        warnings.warn("Prior kNN matrix found. Will be overwritten.", stacklevel=3)
     _hard_state(sc, [embd_to_use])
     embd = _embedding(sc, embd_to_use)
     if embd is None:
         warnings.warn(
             "The desired embedding was not found. Please check the parameters. "
             "Returning None.",
-            stacklevel=2,
+            stacklevel=3,
         )
         return
     codes, levels = _labels(sc, batch_column)
     if len(levels) < 2:
         warnings.warn(
             "The batch column only has one batch. Returning object as is.",
-            stacklevel=2,
+            stacklevel=3,
         )
         return
 
-    n_generated = len(levels) * params.neighbours_within_batch
+    n_within = params["neighbours_within_batch"]
+    assert isinstance(n_within, int)
+    n_generated = len(levels) * n_within
     if no_neighbours_to_keep > n_generated:
         warnings.warn(
             "The number of desired neighbours cannot be generated with these BBKNN "
             "parameters (too few generated neighbours). Please adopt "
             "neighbours_within_batch accordingly. Returning all neighbours from "
             "BBKNN.",
-            stacklevel=2,
+            stacklevel=3,
         )
     if verbose:
         logger.info("Running BBKNN algorithm.")
-    indices, distances, data, cols, indptr = _bixverse.bbknn_graph(
+    indices, distances, data, cols, indptr = run(
         _first_dims(embd, no_embd_to_use),
         codes,
-        to_rust(params),
+        params,
         min(no_neighbours_to_keep, n_generated),
         seed,
         verbose,
     )
     sc.cache.knn = KnnGraph(
-        indices=indices, distances=distances, dist_metric=params.ann_dist
+        indices=indices, distances=distances, dist_metric=str(params["ann_dist"])
     )
     sc.stamp("knn", parents=(embd_to_use,))
     n = indices.shape[0]

@@ -10,10 +10,11 @@ use ann_search_rs::{
     query_ivf_index_gpu, query_ivf_index_gpu_self, query_nndescent_index_gpu,
     query_nndescent_index_gpu_self,
 };
-use bixverse_sc::sc_processing::knn::knn_graph_to_rows;
+use bixverse_sc::sc_processing::knn::{knn_graph_to_rows, to_true_distances};
 use cubecl::Device;
 use faer::MatRef;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::prelude::*;
 
@@ -31,8 +32,11 @@ const NNDESCENT_GPU_DEFAULT_DEGREE: usize = 30;
 // Types //
 ///////////
 
-/// Neighbour indices from a GPU cross-query and, if requested, the distances.
+/// Neighbour indices from a GPU query and, if requested, the distances.
 pub(crate) type GpuKnnQueryResult = Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), ScGpuErrors>;
+
+/// Neighbour indices and distances from a GPU self-query, one row per cell.
+pub type GpuKnnWithDist = Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), ScGpuErrors>;
 
 //////////
 // Enum //
@@ -82,6 +86,48 @@ pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
     }
 }
 
+/// Deserialise a GPU kNN method name, checked through [`parse_knn_method_gpu`]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_knn_method_gpu<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_knn_method_gpu(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "knn_method must be one of 'exhaustive', 'ivf', 'nndescent' (or 'cagra') \
+             or 'nndescent_graph', got '{s}'"
+        ))),
+    }
+}
+
+/// Deserialise a GPU distance metric name
+///
+/// The GPU kernels have no Manhattan, so only `"euclidean"` and `"cosine"`
+/// pass.
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unsupported value.
+pub fn de_ann_dist_gpu<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match s.as_str() {
+        "euclidean" | "cosine" => Ok(s),
+        _ => Err(D::Error::custom(format!(
+            "ann_dist must be 'euclidean' or 'cosine' on the GPU, got '{s}'"
+        ))),
+    }
+}
+
 ////////////
 // Params //
 ////////////
@@ -91,13 +137,19 @@ pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
 /// The GPU backends take a different parameter set from the CPU ones, so this
 /// is a sibling of `KnnParams` rather than a reuse of it. Fields left as
 /// `None` fall back to the heuristics documented on each field.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_knn_gpu_defaults()` list;
+/// missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct KnnParamsGpu {
     /// Which GPU method to use. One of `"exhaustive"`, `"ivf"`, `"cagra"` or
     /// `"nndescent_graph"`.
+    #[serde(deserialize_with = "de_knn_method_gpu")]
     pub knn_method: String,
     /// Distance metric. One of `"euclidean"` or `"cosine"`. Manhattan is not
     /// supported by the GPU kernels.
+    #[serde(deserialize_with = "de_ann_dist_gpu")]
     pub ann_dist: String,
     /// Number of neighbours to return.
     pub k: usize,
@@ -260,6 +312,86 @@ pub fn dispatch_knn_gpu(
     seed: usize,
     verbose: usize,
 ) -> Result<Vec<Vec<usize>>, ScGpuErrors> {
+    let (raw_indices, _) = self_query_gpu(embd, k, params, device, seed, verbose, false)?;
+    Ok(drop_self_neighbours(raw_indices, k))
+}
+
+/// GPU kNN with the distances, self excluded.
+///
+/// The sibling of [`dispatch_knn_gpu`] for callers that keep the distances,
+/// as the CPU `generate_knn_with_dist` does. Euclidean distances come back as
+/// true L2, not squared, via `to_true_distances`.
+///
+/// ### Params
+///
+/// * `embd` - Embedding matrix of `n_cells x features`.
+/// * `k` - Number of neighbours to return per cell.
+/// * `params` - The [`KnnParamsGpu`] for this run.
+/// * `device` - CubeCL runtime device.
+/// * `seed` - Seed for reproducibility of the index builds.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
+///
+/// ### Returns
+///
+/// The kNN indices and distances, one row per cell, each at most `k` long and
+/// sorted by distance.
+///
+/// ### Errors
+///
+/// As [`dispatch_knn_gpu`].
+pub fn knn_with_dist_gpu(
+    embd: MatRef<f32>,
+    k: usize,
+    params: &KnnParamsGpu,
+    device: Device,
+    seed: usize,
+    verbose: usize,
+) -> GpuKnnWithDist {
+    let (raw_indices, raw_dist) = self_query_gpu(embd, k, params, device, seed, verbose, true)?;
+    let raw_dist = raw_dist.expect("every GPU self-query returns distances when asked");
+    let (indices, mut dist): (Vec<Vec<usize>>, Vec<Vec<f32>>) = raw_indices
+        .into_par_iter()
+        .zip(raw_dist)
+        .enumerate()
+        .map(|(i, (idx, d))| {
+            idx.into_iter()
+                .zip(d)
+                .filter(|&(j, _)| j != i)
+                .take(k)
+                .unzip()
+        })
+        .unzip();
+    to_true_distances(&mut dist, &params.ann_dist);
+    Ok((indices, dist))
+}
+
+/// Run the GPU self-query the parameters ask for.
+///
+/// ### Params
+///
+/// * `embd` - Embedding matrix of `n_cells x features`.
+/// * `k` - Number of neighbours wanted per cell, self excluded.
+/// * `params` - The [`KnnParamsGpu`] for this run.
+/// * `device` - CubeCL runtime device.
+/// * `seed` - Seed for reproducibility of the index builds.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
+/// * `return_dist` - Also return the distances, as the backend reports them.
+///
+/// ### Returns
+///
+/// The raw rows, up to `k + 1` long and possibly holding the query point, and
+/// the distances if asked for.
+fn self_query_gpu(
+    embd: MatRef<f32>,
+    k: usize,
+    params: &KnnParamsGpu,
+    device: Device,
+    seed: usize,
+    verbose: usize,
+    return_dist: bool,
+) -> GpuKnnQueryResult {
     // The index builds and queries only print at detailed verbosity here.
     let ann_verbosity = verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity());
 
@@ -275,11 +407,11 @@ pub fn dispatch_knn_gpu(
     // point afterwards.
     let k_query = k + 1;
 
-    let (raw_indices, _) = match method {
+    let res = match method {
         KnnSearchGpu::ExhaustiveGpu => {
             let index =
                 build_exhaustive_index_gpu::<f32>(embd, &params.ann_dist, device, ann_verbosity)?;
-            query_exhaustive_index_gpu_self(&index, k_query, false, ann_verbosity)?
+            query_exhaustive_index_gpu_self(&index, k_query, return_dist, ann_verbosity)?
         }
         KnnSearchGpu::IvfGpu => {
             let index = build_ivf_index_gpu::<f32>(
@@ -291,7 +423,14 @@ pub fn dispatch_knn_gpu(
                 ann_verbosity,
                 device,
             )?;
-            query_ivf_index_gpu_self(&index, k_query, params.n_probe, None, false, ann_verbosity)?
+            query_ivf_index_gpu_self(
+                &index,
+                k_query,
+                params.n_probe,
+                None,
+                return_dist,
+                ann_verbosity,
+            )?
         }
         KnnSearchGpu::CagraGpu => {
             let mut index = build_nndescent_index_gpu::<f32>(
@@ -315,12 +454,12 @@ pub fn dispatch_knn_gpu(
                 &mut index,
                 k_query,
                 Some(query_params),
-                false,
+                return_dist,
                 ann_verbosity,
             )?
         }
         KnnSearchGpu::NNDescentGraphGpu => {
-            // No self-edge requested, so `drop_self_neighbours` below only
+            // No self-edge requested, so dropping self afterwards only
             // truncates.
             let graph_params = NNDescentGpuKnnParams::new(
                 k,
@@ -331,7 +470,7 @@ pub fn dispatch_knn_gpu(
                 params.rho,
                 params.refine_knn,
                 false,
-                false,
+                return_dist,
             );
             let graph = build_knn_graph_nndescent_gpu::<f32>(
                 embd,
@@ -346,7 +485,7 @@ pub fn dispatch_knn_gpu(
         }
     };
 
-    Ok(drop_self_neighbours(raw_indices, k))
+    Ok(res)
 }
 
 /// Build a GPU index on `reference` and query it with every row of `query`.

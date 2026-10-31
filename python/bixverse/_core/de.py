@@ -30,6 +30,7 @@ import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Literal
 
 import numpy as np
@@ -192,16 +193,15 @@ class ScNebula:
     def __repr__(self) -> str:
         """R's `print.ScNebula`."""
         res, p = self.results, self.params
-        nebula_params = p["nebula_params"]
-        assert isinstance(nebula_params, NebulaParams)
+        # the CPU or the GPU bundle
+        method = to_rust(p["nebula_params"])["nebula_method"]
         failed = int((res["convergence"] <= NEBULA_FAILED_CONVERGENCE).sum())
         collapsed = int(res["sigma_at_bound"].sum())
         return "\n".join(
             [
                 f"ScNebula: {res.height} genes fitted, "
                 f"{self.coefficients.width - 1} coefficients",
-                f"  Method:   {nebula_params.nebula_method} | subject column: "
-                f"{p['subject_col']}",
+                f"  Method:   {method} | subject column: {p['subject_col']}",
                 f"  Tested:   {p['tested']}",
                 f"  Subjects: {p['n_subjects']} | cells: {p['n_cells']}",
                 f"  Warnings: {failed} did not converge, {collapsed} collapsed to "
@@ -915,6 +915,38 @@ def nebula(
     References:
         He, et al., Commun Biol, 2021.
     """
+    return _nebula(
+        sc,
+        subject_col,
+        design,
+        coef=coef,
+        contrast=contrast,
+        genes_to_use=genes_to_use,
+        cells_to_use=cells_to_use,
+        offset=offset,
+        nebula_params=nebula_params,
+        verbose=verbose,
+        ext=_bixverse,
+    )
+
+
+@beartype(conf=_CONF)
+def _nebula(
+    sc: ScOrScSubset,
+    subject_col: str,
+    design: str,
+    *,
+    coef: int | str | None = None,
+    contrast: np.ndarray | Sequence[float] | None = None,
+    genes_to_use: Selection | None = None,
+    cells_to_use: Sequence[str] | None = None,
+    offset: np.ndarray | Sequence[float] | None = None,
+    nebula_params: object = None,
+    verbose: bool = False,
+    ext: ModuleType,
+) -> ScNebula:
+    """The body of `nebula`, with the extension module `ext` supplied, so
+    the GPU twin shares it. `nebula_params` is the CPU or the GPU bundle."""
     params = nebula_params or NebulaParams()
     terms = _formula_terms(design)
     needed = list(dict.fromkeys([*terms, subject_col]))
@@ -991,7 +1023,7 @@ def nebula(
         else sc._resolve_genes(genes_to_use)
     )
 
-    res = _bixverse.nebula(
+    res = ext.nebula(
         str(sc.genes_path),
         str(sc.cells_path),
         cells,

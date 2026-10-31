@@ -12,7 +12,62 @@ use cubecl::Device;
 use faer::{Mat, MatRef};
 
 use crate::prelude::*;
+use bixverse_core::ml::clustering::k_means::parse_kmeans_init;
 use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
+use serde::Deserialize;
+
+////////////
+// Params //
+////////////
+
+/// The k-means keys of the R `params_sc_fast_cluster_gpu()` and
+/// `params_kmeans_gpu()` lists, as `KMeansGpuParams::from_r_list` reads them;
+/// missing keys take its defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct KMeansGpuSpec {
+    /// Lloyd's iterations
+    pub k_means_iter: usize,
+    /// Optional initialisation, see `parse_kmeans_init`
+    pub k_means_init: Option<String>,
+    /// Run every iteration without a convergence check
+    pub fixed: bool,
+    /// Hold the data buffer at fp16 on the device
+    pub quantise: bool,
+}
+
+impl Default for KMeansGpuSpec {
+    fn default() -> Self {
+        Self {
+            k_means_iter: 50,
+            k_means_init: None,
+            fixed: true,
+            quantise: false,
+        }
+    }
+}
+
+impl KMeansGpuSpec {
+    /// Check the initialisation and assemble the GPU k-means parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansGpuParams`], or an error naming an unknown initialisation.
+    pub fn into_params(self) -> Result<KMeansGpuParams, String> {
+        let init = self
+            .k_means_init
+            .map(|s| {
+                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
+            })
+            .transpose()?;
+        Ok(KMeansGpuParams::new(
+            self.k_means_iter,
+            init,
+            self.fixed,
+            self.quantise,
+        ))
+    }
+}
 
 ///////////////
 // GpuKMeans //
