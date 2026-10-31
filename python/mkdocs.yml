@@ -55,6 +55,7 @@ nav:
           - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
       - Methods:
           - Differential expression: vignettes/differential_expression.ipynb
+          - Differential abundance: vignettes/differential_abundance.ipynb
           - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
           - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
           - DIALOGUE: vignettes/dialogue.ipynb
