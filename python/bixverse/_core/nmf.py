@@ -1,0 +1,877 @@
+"""HALS NMF over single cells and meta cells: one run, stabilised restarts,
+consensus NMF and the consensus k sweep.
+
+The port of R's `nmf_sc`, `stabilised_nmf_sc`, `consensus_nmf_sc` and
+`nmf_k_sweep_sc` (`R/methods_sc_pathways.R`, `R/methods_mc_analysis.R`) and
+the `NmfResult`, `StabilisedNmfResult`, `ConsensusNmfResult` and
+`NmfKSweepResult` classes. The work runs in Rust.
+
+    >>> sweep = nmf_k_sweep(sc, k_range=range(3, 9))
+    >>> res = consensus_nmf(sc, k=5)
+    >>> sc.add_obs(get_data(res))
+
+The factorisation is genes x cells: `w` holds the gene loadings (genes x k),
+`h` the cell usages (k x cells), as in R. Genes default to the HVGs. Every
+index is 0-based, the run and component numbers of the consensus clusters
+included; the `component_id` strings keep R's 1-based names.
+"""
+
+from __future__ import annotations
+
+import logging
+import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Literal
+
+import numpy as np
+import polars as pl
+from beartype import beartype
+
+from bixverse import _bixverse
+from bixverse._core.metacells import MetaCells, csr_args
+from bixverse._core.subset import ScOrMc
+from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
+
+###########
+# Globals #
+###########
+
+Preprocessing = Literal["none", "sd", "sqrt_sd"]
+
+# above this many cells `consensus_target = "w"` clusters a dense
+# `(k * n_runs) x n_cells` matrix, so R warns
+CELL_SPACE_CUTOFF: int = 20000
+
+CONSENSUS_ADVICE: str = (
+    "\nOptions: raise `density_threshold` in NmfConsensusParams (2 switches the "
+    "filter off entirely), increase `n_runs`, or run the k sweep first to find a "
+    "k the restarts actually agree on."
+)
+
+logger = logging.getLogger(__name__)
+
+
+###########
+# Records #
+###########
+
+
+@beartype
+@dataclass(frozen=True, repr=False)
+class NmfResult:
+    """A single HALS NMF run, R's `NmfResult`.
+
+    Attributes:
+        w: `(n_genes, k)` gene loadings.
+        h: `(k, n_cells)` cell usages.
+        gene_ids: The genes, the rows of `w`.
+        cell_ids: The cells (meta cells), the columns of `h`.
+        cell_indices: 0-based store index (meta cell row) of each cell.
+        final_loss: The final reconstruction loss.
+        n_iter: Iterations run; `None` for a run taken from a stabilised fit.
+        converged: Whether the tolerance was met.
+        source_class: `"SingleCells"` or `"MetaCells"`.
+        params: The parameters of the run.
+    """
+
+    w: np.ndarray
+    h: np.ndarray
+    gene_ids: tuple[str, ...]
+    cell_ids: tuple[str, ...]
+    cell_indices: np.ndarray
+    final_loss: float
+    n_iter: int | None
+    converged: bool
+    source_class: str
+    params: dict[str, object]
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        """`(n_genes, n_cells, k)`, R's `dim()`."""
+        return (self.w.shape[0], self.h.shape[1], self.w.shape[1])
+
+    def __repr__(self) -> str:
+        """R's `print.NmfResult`."""
+        n_iter = "NA" if self.n_iter is None else str(self.n_iter)
+        return "\n".join(
+            [
+                "NmfResult (single-run HALS NMF)",
+                f"  Source class:     {self.source_class}",
+                f"  No genes:         {self.w.shape[0]}",
+                f"  No cells:         {self.h.shape[1]}",
+                f"  No components:    {self.w.shape[1]}",
+                f"  Final loss:       {self.final_loss:.4g}",
+                f"  Iterations:       {n_iter}",
+                f"  Converged:        {self.converged}",
+                f"  Preprocessing:    {self.params['preprocessing']}",
+            ]
+        )
+
+
+@beartype
+@dataclass(frozen=True, repr=False)
+class StabilisedNmfResult:
+    """Randomly initialised HALS NMF restarts, R's `StabilisedNmfResult`.
+
+    Attributes:
+        w_all: `(n_genes, k * n_runs)` gene loadings, run blocks side by side,
+            columns named in `w_all_columns`.
+        w_all_columns: `run_01.comp_01`, ..., as R names them.
+        h_per_run: One `(k, n_cells)` usage matrix per run.
+        gene_ids: The genes.
+        cell_ids: The cells (meta cells).
+        cell_indices: 0-based store index (meta cell row) of each cell.
+        losses: Final loss per run.
+        converged: Convergence per run.
+        best_idx: 0-based run with the lowest loss.
+        source_class: `"SingleCells"` or `"MetaCells"`.
+        params: The parameters of the run.
+    """
+
+    w_all: np.ndarray
+    w_all_columns: tuple[str, ...]
+    h_per_run: tuple[np.ndarray, ...]
+    gene_ids: tuple[str, ...]
+    cell_ids: tuple[str, ...]
+    cell_indices: np.ndarray
+    losses: np.ndarray
+    converged: tuple[bool, ...]
+    best_idx: int
+    source_class: str
+    params: dict[str, object]
+
+    def __repr__(self) -> str:
+        """R's `print.StabilisedNmfResult`, the best run 0-based."""
+        n_runs = len(self.h_per_run)
+        return "\n".join(
+            [
+                "StabilisedNmfResult (multi-run HALS NMF)",
+                f"  Source class:     {self.source_class}",
+                f"  No genes:         {self.w_all.shape[0]}",
+                f"  No cells:         {self.h_per_run[0].shape[1]}",
+                f"  No components:    {self.params['k']}",
+                f"  No runs:          {n_runs}",
+                f"  No converged:     {sum(self.converged)} / {n_runs}",
+                f"  Loss range:       [{self.losses.min():.4g}, "
+                f"{self.losses.max():.4g}]",
+                f"  Best run:         {self.best_idx} (loss = "
+                f"{self.losses[self.best_idx]:.4g})",
+                f"  Preprocessing:    {self.params['preprocessing']}",
+            ]
+        )
+
+
+@beartype
+@dataclass(frozen=True, repr=False)
+class ConsensusNmfResult:
+    """Consensus HALS NMF, R's `ConsensusNmfResult`.
+
+    Attributes:
+        w: `(n_genes, k)` consensus gene loadings.
+        h: `(k, n_cells)` cell usages refit against them.
+        gene_ids: The genes.
+        cell_ids: The cells (meta cells).
+        cell_indices: 0-based store index (meta cell row) of each cell.
+        stability: Mean silhouette of the consensus clustering.
+        rel_error: Relative reconstruction error of the consensus fit.
+        rel_run_errors: Relative error per restart.
+        clusters: One row per pooled component: `component_id`, `run`,
+            `component`, `pooled_idx`, `cluster` (null when dropped),
+            `local_density`, `silhouette` (null when dropped) and `kept`.
+        cluster_sizes: `cluster` and `n`.
+        n_dropped: Components the density filter dropped.
+        n_empty_clusters: Clusters left empty.
+        source_class: `"SingleCells"` or `"MetaCells"`.
+        params: The parameters of the run.
+    """
+
+    w: np.ndarray
+    h: np.ndarray
+    gene_ids: tuple[str, ...]
+    cell_ids: tuple[str, ...]
+    cell_indices: np.ndarray
+    stability: float
+    rel_error: float
+    rel_run_errors: np.ndarray
+    clusters: pl.DataFrame
+    cluster_sizes: pl.DataFrame
+    n_dropped: int
+    n_empty_clusters: int
+    source_class: str
+    params: dict[str, object]
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        """`(n_genes, n_cells, k)`, R's `dim()`."""
+        return (self.w.shape[0], self.h.shape[1], self.w.shape[1])
+
+    def __repr__(self) -> str:
+        """R's `print.ConsensusNmfResult`."""
+        return "\n".join(
+            [
+                "ConsensusNmfResult (consensus HALS NMF)",
+                f"  Source class:     {self.source_class}",
+                f"  No genes:         {self.w.shape[0]}",
+                f"  No cells:         {self.h.shape[1]}",
+                f"  No components:    {self.w.shape[1]}",
+                f"  No runs:          {len(self.rel_run_errors)}",
+                f"  Stability:        {self.stability:.4g}",
+                f"  Relative error:   {self.rel_error:.4g}",
+                f"  Dropped:          {self.n_dropped} / {self.clusters.height} "
+                "components",
+                f"  Preprocessing:    {self.params['preprocessing']}",
+            ]
+        )
+
+
+@beartype
+@dataclass(frozen=True, repr=False)
+class NmfKSweepResult:
+    """A consensus NMF k sweep, R's `NmfKSweepResult`.
+
+    Attributes:
+        frame: One row per k: `k`, `stability` (null where the consensus step
+            failed), `best_error`, `median_error`, `consensus_failed`,
+            `n_dropped`, `n_empty_clusters` and `n_converged`.
+        source_class: `"SingleCells"` or `"MetaCells"`.
+        params: The parameters of the sweep.
+    """
+
+    frame: pl.DataFrame
+    source_class: str
+    params: dict[str, object]
+
+    def __repr__(self) -> str:
+        """R's `print.NmfKSweepResult`."""
+        f = self.frame
+        usable = f.filter(pl.col("stability").is_not_null())
+        lines = [
+            "NmfKSweepResult (consensus NMF k sweep)",
+            f"  Source class:     {self.source_class}",
+            f"  k range:          {f['k'].min()} to {f['k'].max()}",
+            f"  No runs per k:    {self.params['n_runs']}",
+        ]
+        if usable.height:
+            best = usable.sort("stability", descending=True, maintain_order=True).row(
+                0, named=True
+            )
+            lines.append(
+                f"  Most stable k:    {best['k']} (stability = {best['stability']:.4g})"
+            )
+        else:
+            lines.append("  Most stable k:    none, every k failed the consensus step")
+        return "\n".join([*lines, "", str(f)])
+
+
+###########
+# Helpers #
+###########
+
+
+@beartype
+def _selection(
+    sc: ScOrMc, cell_ids: Sequence[str] | None, gene_ids: Sequence[str] | None
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...], tuple[str, ...]]:
+    """R's `.resolve_sc_nmf_selection` / `.resolve_mc_nmf_selection`: the
+    cells (kept ones by default) and the genes (the HVGs by default).
+
+    Returns:
+        `(cell_indices, gene_indices, cell_ids, gene_ids)`, 0-based store
+        indices (meta cell rows).
+
+    Raises:
+        ValueError: Without genes and without HVGs.
+    """
+    if isinstance(sc, MetaCells):
+        cells = (
+            np.arange(sc.n_cells, dtype=np.uint32)
+            if cell_ids is None
+            else sc.cell_indices(list(cell_ids))
+        )
+        hvg = sc.hvg
+        all_cells = sc.cell_ids()
+    else:
+        cells = (
+            np.asarray(sc.cells_to_keep, dtype=np.uint32)
+            if cell_ids is None
+            else sc.cell_indices(list(cell_ids))
+        )
+        hvg = sc.map.hvg
+        all_cells = sc.cell_ids()
+    if gene_ids is not None:
+        genes = sc.gene_indices(list(gene_ids))
+    elif hvg is not None:
+        genes = np.asarray(hvg, dtype=np.uint32)
+    else:
+        raise ValueError("No HVGs found. Run find_hvg() first or pass gene_ids.")
+    cells = np.asarray(cells, dtype=np.uint32)
+    genes = np.asarray(genes, dtype=np.uint32)
+    return (
+        cells,
+        genes,
+        tuple(all_cells[cells.astype(np.int64)].tolist()),
+        tuple(sc.gene_ids(genes).tolist()),
+    )
+
+
+@beartype
+def _mc_matrix(
+    sc: MetaCells, cells: np.ndarray, genes: np.ndarray, use_second_layer: bool
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
+    """The selected meta cell counts as CSR parts: the normalised layer with
+    `use_second_layer`, else the raw counts, as R picks the assay."""
+    layer = "norm" if use_second_layer else "raw"
+    return csr_args(sc.counts(cells=cells, genes=genes, layer=layer))
+
+
+@beartype
+def _source(sc: ScOrMc) -> str:
+    """R's `source_class`."""
+    return "MetaCells" if isinstance(sc, MetaCells) else "SingleCells"
+
+
+@beartype
+def _check_k(k: int, lo: int) -> None:
+    """Raises:
+    ValueError: If `k` is below `lo`."""
+    if k < lo:
+        raise ValueError(f"k must be at least {lo}.")
+
+
+@beartype
+def _warn_target_w(
+    params: NmfConsensusParams, n_samples: int, k: int, n_runs: int
+) -> None:
+    """R's `.warn_consensus_target_w`."""
+    if params.consensus_target == "w" and n_samples > CELL_SPACE_CUTOFF:
+        warnings.warn(
+            f"consensus_target = 'w' clusters in cell space over {n_samples} cells, "
+            f"which means a dense {k * n_runs} x {n_samples} matrix and an "
+            "exhaustive cosine search across it. Use consensus_target = 'h' unless "
+            "you specifically want the cell-side consensus.",
+            stacklevel=3,
+        )
+
+
+@beartype
+def _base_params(
+    hals: NmfHalsParams,
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    seed: int,
+) -> dict[str, object]:
+    """The `params` R stores: the HALS keys plus the call arguments."""
+    return {
+        **to_rust(hals),
+        "k": k,
+        "preprocessing": preprocessing,
+        "use_second_layer": use_second_layer,
+        "seed": seed,
+    }
+
+
+#######
+# NMF #
+#######
+
+
+@beartype
+def nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    seed: int = 42,
+    verbose: bool = False,
+) -> NmfResult:
+    """One HALS NMF run, as R's `nmf_sc`.
+
+    Args:
+        sc: The experiment, a subset or meta cells.
+        k: Number of components.
+        cell_ids: Cell (meta cell) ids. `None` for the kept cells.
+        gene_ids: Gene ids. `None` for the HVGs.
+        preprocessing: `"none"`, per gene `"sd"` or `"sqrt_sd"` scaling.
+        use_second_layer: Factorise the normalised rather than the raw counts.
+        nmf_hals_params: The solver. `None` uses the defaults (NNDSVD).
+        seed: Seed for a random initialisation.
+        verbose: Controls verbosity.
+
+    Returns:
+        The `NmfResult`.
+
+    Raises:
+        ValueError: On `k` below 1 or without genes.
+    """
+    _check_k(k, 1)
+    hals = nmf_hals_params or NmfHalsParams()
+    cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
+    if isinstance(sc, MetaCells):
+        res = _bixverse.nmf_single_mc(
+            *_mc_matrix(sc, cells, genes, use_second_layer),
+            k,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            seed,
+            verbose,
+        )
+    else:
+        res = _bixverse.nmf_single_sc(
+            str(sc.genes_path),
+            genes,
+            cells,
+            k,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            seed,
+            verbose,
+        )
+    return NmfResult(
+        w=np.ascontiguousarray(res["h"].T),
+        h=np.ascontiguousarray(res["w"].T),
+        gene_ids=g_ids,
+        cell_ids=c_ids,
+        cell_indices=cells,
+        final_loss=res["final_loss"],
+        n_iter=res["n_iter"],
+        converged=res["converged"],
+        source_class=_source(sc),
+        params=_base_params(hals, k, preprocessing, use_second_layer, seed),
+    )
+
+
+@beartype
+def stabilised_nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+) -> StabilisedNmfResult:
+    """Randomly initialised HALS NMF restarts, as R's `stabilised_nmf_sc`.
+
+    Args:
+        sc: The experiment, a subset or meta cells.
+        k: Number of components.
+        cell_ids: Cell (meta cell) ids. `None` for the kept cells.
+        gene_ids: Gene ids. `None` for the HVGs.
+        preprocessing: `"none"`, per gene `"sd"` or `"sqrt_sd"` scaling.
+        use_second_layer: Factorise the normalised rather than the raw counts.
+        nmf_hals_params: The solver; `nmf_init` is ignored, the restarts are
+            random.
+        n_runs: Number of restarts.
+        seed: Base seed of the restarts.
+        verbose: Controls verbosity.
+
+    Returns:
+        The `StabilisedNmfResult`.
+
+    Raises:
+        ValueError: On `k` or `n_runs` below 1, or without genes.
+    """
+    _check_k(k, 1)
+    if n_runs < 1:
+        raise ValueError("n_runs must be at least 1.")
+    hals = nmf_hals_params or NmfHalsParams()
+    cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
+    if isinstance(sc, MetaCells):
+        res = _bixverse.nmf_multi_mc(
+            *_mc_matrix(sc, cells, genes, use_second_layer),
+            k,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            n_runs,
+            seed,
+            verbose,
+        )
+    else:
+        res = _bixverse.nmf_multi_sc(
+            str(sc.genes_path),
+            genes,
+            cells,
+            k,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            n_runs,
+            seed,
+            verbose,
+        )
+    runs = len(res["h_per_run"])
+    w_all = np.hstack([h.T for h in res["h_per_run"]])
+    h_per_run = tuple(
+        np.ascontiguousarray(res["w_all"][:, i * k : (i + 1) * k].T)
+        for i in range(runs)
+    )
+    params = _base_params(hals, k, preprocessing, use_second_layer, seed)
+    params["n_runs"] = n_runs
+    return StabilisedNmfResult(
+        w_all=w_all,
+        w_all_columns=tuple(
+            f"run_{r + 1:02d}.comp_{c + 1:02d}" for r in range(runs) for c in range(k)
+        ),
+        h_per_run=h_per_run,
+        gene_ids=g_ids,
+        cell_ids=c_ids,
+        cell_indices=cells,
+        losses=res["losses"],
+        converged=tuple(res["converged"]),
+        best_idx=res["best_idx"],
+        source_class=_source(sc),
+        params=params,
+    )
+
+
+@beartype
+def _clusters_frame(res: dict, k: int, n_runs: int) -> pl.DataFrame:
+    """R's `.nmf_cluster_dt`, 0-based."""
+    n = k * n_runs
+    run = np.repeat(np.arange(n_runs), k)
+    comp = np.tile(np.arange(k), n_runs)
+    kept = np.zeros(n, dtype=bool)
+    kept[res["kept"].astype(np.int64)] = True
+    sil = np.full(n, np.nan)
+    sil[res["kept"].astype(np.int64)] = res["silhouette"]
+    labels = res["labels"]
+    return pl.DataFrame(
+        {
+            "component_id": [
+                f"run_{r + 1:02d}.comp_{c + 1:02d}"
+                for r, c in zip(run, comp, strict=True)
+            ],
+            "run": run.astype(np.int64),
+            "component": comp.astype(np.int64),
+            "pooled_idx": np.arange(n, dtype=np.int64),
+            "cluster": pl.Series(labels).replace(-1, None),
+            "local_density": res["local_density"],
+            "silhouette": pl.Series(sil).fill_nan(None),
+            "kept": kept,
+        }
+    )
+
+
+@beartype
+def consensus_nmf(
+    sc: ScOrMc,
+    k: int,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    nmf_consensus_params: NmfConsensusParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+) -> ConsensusNmfResult:
+    """Consensus HALS NMF (cNMF), as R's `consensus_nmf_sc`.
+
+    Pools the components of `n_runs` random restarts, drops the ones in
+    sparse neighbourhoods, clusters the rest into `k` programmes and takes
+    each cluster's median; the usages are refit against it. The k-means of
+    the consensus step is seeded from `seed`, as R injects it.
+
+    Args:
+        sc: The experiment, a subset or meta cells.
+        k: Number of components, at least 2.
+        cell_ids: Cell (meta cell) ids. `None` for the kept cells.
+        gene_ids: Gene ids. `None` for the HVGs.
+        preprocessing: `"none"`, per gene `"sd"` or `"sqrt_sd"` scaling.
+        use_second_layer: Factorise the normalised rather than the raw counts.
+        nmf_hals_params: The solver.
+        nmf_consensus_params: The consensus step. `None` uses the defaults.
+        n_runs: Number of restarts, at least 2.
+        seed: Base seed of the restarts and the consensus k-means.
+        verbose: Controls verbosity.
+
+    Returns:
+        The `ConsensusNmfResult`.
+
+    Raises:
+        ValueError: On `k` or `n_runs` below 2, without genes, or when the
+            consensus step fails (the message says what to try).
+
+    References:
+        Kotliar, et al., eLife, 2019.
+    """
+    _check_k(k, 2)
+    if n_runs < 2:
+        raise ValueError("n_runs must be at least 2.")
+    hals = nmf_hals_params or NmfHalsParams()
+    cons = nmf_consensus_params or NmfConsensusParams()
+    cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
+    _warn_target_w(cons, cells.size, k, n_runs)
+    try:
+        if isinstance(sc, MetaCells):
+            res = _bixverse.nmf_consensus_mc(
+                *_mc_matrix(sc, cells, genes, use_second_layer),
+                k,
+                preprocessing,
+                use_second_layer,
+                to_rust(hals),
+                to_rust(cons),
+                n_runs,
+                seed,
+                verbose,
+            )
+        else:
+            res = _bixverse.nmf_consensus_sc(
+                str(sc.genes_path),
+                genes,
+                cells,
+                k,
+                preprocessing,
+                use_second_layer,
+                to_rust(hals),
+                to_rust(cons),
+                n_runs,
+                seed,
+                verbose,
+            )
+    except _bixverse.BixverseError as e:
+        raise ValueError(f"{e}{CONSENSUS_ADVICE}") from e
+    params = _base_params(hals, k, preprocessing, use_second_layer, seed)
+    params.update({"nmf_consensus_params": cons, "n_runs": n_runs})
+    return ConsensusNmfResult(
+        w=np.ascontiguousarray(res["h"].T),
+        h=np.ascontiguousarray(res["w"].T),
+        gene_ids=g_ids,
+        cell_ids=c_ids,
+        cell_indices=cells,
+        stability=res["stability"],
+        rel_error=res["rel_error"],
+        rel_run_errors=res["rel_run_errors"],
+        clusters=_clusters_frame(res, k, len(res["rel_run_errors"])),
+        cluster_sizes=pl.DataFrame(
+            {
+                "cluster": np.arange(k, dtype=np.int64),
+                "n": res["cluster_sizes"].astype(np.int64),
+            }
+        ),
+        n_dropped=res["n_dropped"],
+        n_empty_clusters=res["n_empty_clusters"],
+        source_class=_source(sc),
+        params=params,
+    )
+
+
+@beartype
+def nmf_k_sweep(
+    sc: ScOrMc,
+    k_range: Sequence[int] | range,
+    *,
+    cell_ids: Sequence[str] | None = None,
+    gene_ids: Sequence[str] | None = None,
+    preprocessing: Preprocessing = "none",
+    use_second_layer: bool = True,
+    nmf_hals_params: NmfHalsParams | None = None,
+    nmf_consensus_params: NmfConsensusParams | None = None,
+    n_runs: int = 30,
+    seed: int = 42,
+    verbose: bool = False,
+) -> NmfKSweepResult:
+    """Consensus NMF over a range of k, as R's `nmf_k_sweep_sc`.
+
+    High stability while the error is still falling is the sweet spot. A k
+    whose consensus step fails gets a null stability and a warning.
+
+    Args:
+        sc: The experiment, a subset or meta cells.
+        k_range: The ranks, unique and at least 2.
+        cell_ids: Cell (meta cell) ids. `None` for the kept cells.
+        gene_ids: Gene ids. `None` for the HVGs.
+        preprocessing: `"none"`, per gene `"sd"` or `"sqrt_sd"` scaling.
+        use_second_layer: Factorise the normalised rather than the raw counts.
+        nmf_hals_params: The solver.
+        nmf_consensus_params: The consensus step. `None` uses the defaults.
+        n_runs: Restarts per k, at least 2.
+        seed: Base seed of the restarts and the consensus k-means.
+        verbose: Controls verbosity.
+
+    Returns:
+        The `NmfKSweepResult`.
+
+    Raises:
+        ValueError: On an invalid `k_range` or `n_runs`, or without genes.
+
+    References:
+        Kotliar, et al., eLife, 2019.
+    """
+    ks = [int(k) for k in k_range]
+    if not ks or len(set(ks)) != len(ks) or min(ks) < 2:
+        raise ValueError("k_range must hold unique integers of at least 2.")
+    if n_runs < 2:
+        raise ValueError("n_runs must be at least 2.")
+    hals = nmf_hals_params or NmfHalsParams()
+    cons = nmf_consensus_params or NmfConsensusParams()
+    cells, genes, _, _ = _selection(sc, cell_ids, gene_ids)
+    _warn_target_w(cons, cells.size, max(ks), n_runs)
+    if isinstance(sc, MetaCells):
+        res = _bixverse.nmf_k_sweep_mc(
+            *_mc_matrix(sc, cells, genes, use_second_layer),
+            ks,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            to_rust(cons),
+            n_runs,
+            seed,
+            verbose,
+        )
+    else:
+        res = _bixverse.nmf_k_sweep_sc(
+            str(sc.genes_path),
+            genes,
+            cells,
+            ks,
+            preprocessing,
+            use_second_layer,
+            to_rust(hals),
+            to_rust(cons),
+            n_runs,
+            seed,
+            verbose,
+        )
+    failed = np.asarray(res["consensus_failed"], dtype=bool)
+    frame = pl.DataFrame(
+        {
+            "k": res["k"].astype(np.int64),
+            "stability": pl.Series(np.where(failed, np.nan, res["stability"])).fill_nan(
+                None
+            ),
+            "best_error": res["best_error"],
+            "median_error": res["median_error"],
+            "consensus_failed": failed,
+            "n_dropped": res["n_dropped"].astype(np.int64),
+            "n_empty_clusters": res["n_empty_clusters"].astype(np.int64),
+            "n_converged": res["n_converged"].astype(np.int64),
+        }
+    )
+    if failed.any():
+        warnings.warn(
+            f"The consensus step failed for {int(failed.sum())} of {len(ks)} values "
+            "of k (too few components survived the density filter). Their stability "
+            "is null. Raise `density_threshold` in NmfConsensusParams or add "
+            "restarts.",
+            stacklevel=2,
+        )
+    n_empty = int((frame["n_empty_clusters"] > 0).sum())
+    if n_empty:
+        warnings.warn(
+            f"{n_empty} of {len(ks)} values of k left at least one cluster empty. "
+            "Stability is reported as 0 when fewer than two clusters are "
+            "populated, so treat those rows as uninformative rather than as "
+            "genuinely unstable.",
+            stacklevel=2,
+        )
+    params: dict[str, object] = {
+        **to_rust(hals),
+        "k_range": ks,
+        "preprocessing": preprocessing,
+        "use_second_layer": use_second_layer,
+        "nmf_consensus_params": cons,
+        "n_runs": n_runs,
+        "seed": seed,
+    }
+    return NmfKSweepResult(frame=frame, source_class=_source(sc), params=params)
+
+
+###########
+# Getters #
+###########
+
+
+@beartype
+def get_w(x: NmfResult | StabilisedNmfResult | ConsensusNmfResult) -> pl.DataFrame:
+    """The gene loadings, R's `get_w`: `gene_id` and one column per
+    component (`comp_01`, ..., or `run_01.comp_01`, ... for restarts)."""
+    if isinstance(x, StabilisedNmfResult):
+        w, cols = x.w_all, list(x.w_all_columns)
+    else:
+        w, cols = x.w, [f"comp_{j + 1:02d}" for j in range(x.w.shape[1])]
+    return pl.DataFrame(
+        {"gene_id": list(x.gene_ids), **dict(zip(cols, w.T, strict=True))}
+    )
+
+
+@beartype
+def get_h(
+    x: NmfResult | StabilisedNmfResult | ConsensusNmfResult,
+) -> np.ndarray | tuple[np.ndarray, ...]:
+    """The cell usages, R's `get_h`: `(k, n_cells)`, one per run for
+    restarts."""
+    if isinstance(x, StabilisedNmfResult):
+        return x.h_per_run
+    return x.h
+
+
+@beartype
+def get_best_run(x: StabilisedNmfResult) -> NmfResult:
+    """The lowest loss run as an `NmfResult`, R's `get_best_run`."""
+    k = x.params["k"]
+    assert isinstance(k, int)
+    b = x.best_idx
+    return NmfResult(
+        w=np.ascontiguousarray(x.w_all[:, b * k : (b + 1) * k]),
+        h=x.h_per_run[b],
+        gene_ids=x.gene_ids,
+        cell_ids=x.cell_ids,
+        cell_indices=x.cell_indices,
+        final_loss=float(x.losses[b]),
+        n_iter=None,
+        converged=x.converged[b],
+        source_class=x.source_class,
+        params=x.params,
+    )
+
+
+@beartype
+def get_stability(x: ConsensusNmfResult) -> dict[str, object]:
+    """The consensus diagnostics, R's `get_stability`."""
+    return {
+        "stability": x.stability,
+        "rel_error": x.rel_error,
+        "rel_run_errors": x.rel_run_errors,
+        "clusters": x.clusters,
+        "cluster_sizes": x.cluster_sizes,
+        "n_dropped": x.n_dropped,
+        "n_empty_clusters": x.n_empty_clusters,
+    }
+
+
+@beartype
+def get_params(
+    x: NmfResult | StabilisedNmfResult | ConsensusNmfResult | NmfKSweepResult,
+) -> dict[str, object]:
+    """The parameters of the run, R's `get_params`."""
+    return dict(x.params)
+
+
+@beartype
+def get_data(x: NmfResult | ConsensusNmfResult) -> pl.DataFrame:
+    """The cell usages as an obs frame for `add_obs`, R's `get_data`: one
+    `comp_XX` column per component and the 0-based `cell_idx`
+    (`meta_cell_idx` for meta cells)."""
+    idx_col = "meta_cell_idx" if x.source_class == "MetaCells" else "cell_idx"
+    return pl.DataFrame(
+        {
+            **{f"comp_{j + 1:02d}": x.h[j] for j in range(x.h.shape[0])},
+            idx_col: x.cell_indices.astype(np.uint32),
+        }
+    )

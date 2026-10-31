@@ -3,7 +3,8 @@
 One frozen dataclass per bixverse R `params_*()` constructor, flattened the way
 R flattens them before Rust sees the list: `ScrubletParams(no_pcs=10, k=0)`
 rather than nested blocks. Field names, defaults and ranges are generated from
-the R specs, so both front ends hand Rust the same values.
+the R specs, so both front ends hand Rust the same values. `ScenicParams` is
+written by hand, see `bixverse.params._scenic`.
 """
 
 from __future__ import annotations
@@ -12,13 +13,20 @@ import dataclasses
 
 from beartype import beartype
 
+from bixverse.params import _generated
 from bixverse.params._generated import *  # noqa: F403
-from bixverse.params._generated import RUST_NAMES, __all__  # noqa: F401
+from bixverse.params._generated import RUST_NAMES
+from bixverse.params._scenic import ScenicParams
+
+__all__ = [*_generated.__all__, "ScenicParams"]
 
 
 @beartype
 def to_rust(p: object) -> dict[str, object]:
     """The flat dict Rust deserialises a bundle from.
+
+    A field holding another bundle (the learner block of `ScenicParams`) is
+    spliced in at its position, as R's `c()` does.
 
     Args:
         p: A param bundle from this module.
@@ -33,6 +41,11 @@ def to_rust(p: object) -> dict[str, object]:
     if not dataclasses.is_dataclass(p) or isinstance(p, type):
         raise TypeError(f"Expected a param bundle, got {type(p).__name__}.")
     renames = RUST_NAMES.get(type(p).__name__, {})
-    return {
-        renames.get(f.name, f.name): getattr(p, f.name) for f in dataclasses.fields(p)
-    }
+    out: dict[str, object] = {}
+    for f in dataclasses.fields(p):
+        v = getattr(p, f.name)
+        if dataclasses.is_dataclass(v) and not isinstance(v, type):
+            out.update(to_rust(v))
+        else:
+            out[renames.get(f.name, f.name)] = v
+    return out

@@ -18,6 +18,8 @@ mod integrate;
 mod io;
 mod loader;
 mod metacells;
+mod nmf;
+mod pathways;
 mod pp;
 mod qc;
 mod reader;
@@ -150,6 +152,37 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(trees::sc_bonsai, m)?,
         wrap_pyfunction!(trees::mc_bonsai, m)?,
         wrap_pyfunction!(trees::bonsai_layout, m)?,
+        wrap_pyfunction!(pathways::module_scores, m)?,
+        wrap_pyfunction!(pathways::aucell, m)?,
+        wrap_pyfunction!(pathways::mc_aucell, m)?,
+        wrap_pyfunction!(pathways::regulon_thresholds, m)?,
+        wrap_pyfunction!(pathways::vision, m)?,
+        wrap_pyfunction!(pathways::mc_vision, m)?,
+        wrap_pyfunction!(pathways::vision_autocor, m)?,
+        wrap_pyfunction!(pathways::mc_vision_autocor, m)?,
+        wrap_pyfunction!(pathways::lm_activity, m)?,
+        wrap_pyfunction!(pathways::mc_lm_activity, m)?,
+        wrap_pyfunction!(pathways::hotspot_autocor, m)?,
+        wrap_pyfunction!(pathways::hotspot_gene_cor, m)?,
+        wrap_pyfunction!(pathways::mc_hotspot_autocor, m)?,
+        wrap_pyfunction!(pathways::mc_hotspot_gene_cor, m)?,
+        wrap_pyfunction!(pathways::hotspot_cluster_genes, m)?,
+        wrap_pyfunction!(pathways::scenic_filter, m)?,
+        wrap_pyfunction!(pathways::scenic_grn, m)?,
+        wrap_pyfunction!(pathways::mc_scenic_grn, m)?,
+        wrap_pyfunction!(pathways::top_k_targets, m)?,
+        wrap_pyfunction!(pathways::importance_threshold, m)?,
+        wrap_pyfunction!(pathways::pairwise_gene_cors, m)?,
+        wrap_pyfunction!(pathways::mc_pairwise_gene_cors, m)?,
+        wrap_pyfunction!(pathways::cistarget, m)?,
+        wrap_pyfunction!(nmf::nmf_single_sc, m)?,
+        wrap_pyfunction!(nmf::nmf_multi_sc, m)?,
+        wrap_pyfunction!(nmf::nmf_consensus_sc, m)?,
+        wrap_pyfunction!(nmf::nmf_k_sweep_sc, m)?,
+        wrap_pyfunction!(nmf::nmf_single_mc, m)?,
+        wrap_pyfunction!(nmf::nmf_multi_mc, m)?,
+        wrap_pyfunction!(nmf::nmf_consensus_mc, m)?,
+        wrap_pyfunction!(nmf::nmf_k_sweep_mc, m)?,
     ] {
         m.add_function(f)?;
     }

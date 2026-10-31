@@ -808,3 +808,314 @@ def bonsai_layout(
     layout: str,
     hyperbolic: bool,
 ) -> dict[str, Any]: ...
+def module_scores(
+    f_path_cells: str,
+    f_path_genes: str,
+    gene_sets: list[np.ndarray],
+    cells_to_keep: np.ndarray,
+    nbin: int,
+    ctrl: int,
+    seed: int,
+    streaming: bool,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def aucell(
+    f_path: str,
+    gene_sets: list[np.ndarray],
+    cells_to_keep: np.ndarray,
+    params: dict[str, object],
+    streaming: bool,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def mc_aucell(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    gene_sets: list[np.ndarray],
+    params: dict[str, object],
+    verbose: bool = False,
+) -> np.ndarray: ...
+def regulon_thresholds(
+    auc: np.ndarray, params: dict[str, object]
+) -> dict[str, Any]: ...
+def vision(
+    f_path: str,
+    sigs: list[tuple[np.ndarray, np.ndarray]],
+    cells_to_keep: np.ndarray,
+    streaming: bool,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def mc_vision(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    sigs: list[tuple[np.ndarray, np.ndarray]],
+    verbose: bool = False,
+) -> np.ndarray: ...
+def vision_autocor(
+    f_path: str,
+    sigs: list[tuple[np.ndarray, np.ndarray]],
+    random_sigs: list[list[tuple[np.ndarray, np.ndarray]]],
+    cluster_membership: np.ndarray,
+    cells_to_keep: np.ndarray,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    streaming: bool,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def mc_vision_autocor(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    sigs: list[tuple[np.ndarray, np.ndarray]],
+    random_sigs: list[list[tuple[np.ndarray, np.ndarray]]],
+    cluster_membership: np.ndarray,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def lm_activity(
+    f_path: str,
+    net: list[tuple[np.ndarray, np.ndarray]],
+    cells_to_keep: np.ndarray,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def mc_lm_activity(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    net: list[tuple[np.ndarray, np.ndarray]],
+    params: dict[str, object],
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def hotspot_autocor(
+    f_path_genes: str,
+    f_path_cells: str,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    cells_to_keep: np.ndarray,
+    genes_to_use: np.ndarray,
+    streaming: bool,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def hotspot_gene_cor(
+    f_path_genes: str,
+    f_path_cells: str,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    cells_to_keep: np.ndarray,
+    genes_to_use: np.ndarray,
+    working_mem_gb: float,
+    streaming: bool,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def mc_hotspot_autocor(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    cells_to_keep: np.ndarray,
+    genes_to_use: np.ndarray,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def mc_hotspot_gene_cor(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_dist: np.ndarray | None,
+    params: dict[str, object],
+    cells_to_keep: np.ndarray,
+    genes_to_use: np.ndarray,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def hotspot_cluster_genes(
+    z: np.ndarray, fdr_threshold: float, min_size: int
+) -> np.ndarray: ...
+def scenic_filter(
+    f_path_genes: str,
+    cell_indices: np.ndarray,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> np.ndarray: ...
+def scenic_grn(
+    f_path_genes: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    tf_indices: np.ndarray,
+    params: dict[str, object],
+    streaming: bool,
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def mc_scenic_grn(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    tf_indices: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def top_k_targets(
+    importance: np.ndarray, k: int, by_gene: bool, min_value: float | None = None
+) -> dict[str, np.ndarray]: ...
+def importance_threshold(
+    importance: np.ndarray, n_sd: float, min_value: float | None = None
+) -> dict[str, np.ndarray]: ...
+def pairwise_gene_cors(
+    f_path_genes: str,
+    genes_1: np.ndarray,
+    genes_2: np.ndarray,
+    cells_to_keep: np.ndarray,
+    spearman: bool,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def mc_pairwise_gene_cors(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    genes_1: np.ndarray,
+    genes_2: np.ndarray,
+    spearman: bool,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def cistarget(
+    rankings: np.ndarray,
+    gene_sets: list[np.ndarray],
+    auc_threshold: int,
+    nes_threshold: float,
+    max_rank: int,
+    method: str,
+    n_mean: int,
+    verbose: bool = False,
+) -> list[dict[str, Any]]: ...
+def nmf_single_sc(
+    f_path_gene: str,
+    gene_indices: np.ndarray,
+    cell_indices: np.ndarray,
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_multi_sc(
+    f_path_gene: str,
+    gene_indices: np.ndarray,
+    cell_indices: np.ndarray,
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_consensus_sc(
+    f_path_gene: str,
+    gene_indices: np.ndarray,
+    cell_indices: np.ndarray,
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    consensus: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_k_sweep_sc(
+    f_path_gene: str,
+    gene_indices: np.ndarray,
+    cell_indices: np.ndarray,
+    k_range: list[int],
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    consensus: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_single_mc(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_multi_mc(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_consensus_mc(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    k: int,
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    consensus: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def nmf_k_sweep_mc(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    k_range: list[int],
+    preprocessing: str,
+    use_second_layer: bool,
+    params: dict[str, object],
+    consensus: dict[str, object],
+    n_runs: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...

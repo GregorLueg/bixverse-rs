@@ -24,6 +24,9 @@ pub type ScKnnOptionVersion = Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), S
 /// Single cell Knn results with distances
 pub type ScKnnResults<E = ScErrors> = Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), E>;
 
+/// A kNN graph as `(indices, distances)`, one row per cell, self excluded
+pub type KnnRows = (Vec<Vec<usize>>, Vec<Vec<f32>>);
+
 //////////
 // Enum //
 //////////
@@ -1084,6 +1087,48 @@ pub fn generate_knn_with_dist(
     }
 
     Ok((indices, distances))
+}
+
+/// A supplied kNN graph, or one searched on the embedding
+///
+/// What the HotSpot, VISION and MELD entry points do with an optional cached
+/// graph: take it as is, else search `embd` without validation.
+///
+/// ### Params
+///
+/// * `knn` - Optional `(indices, distances)` without self. The caller vouches
+///   that the rows line up with `embd`.
+/// * `embd` - Cells x features embedding to search when `knn` is `None`
+/// * `knn_params` - The search parameters
+/// * `seed` - Seed for the index build
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// `(indices, distances)`, self excluded, true distances.
+pub fn knn_or_generate(
+    knn: Option<KnnRows>,
+    embd: MatRef<f32>,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: bool,
+) -> ScKnnResults {
+    match knn {
+        Some(knn) => {
+            if verbose {
+                println!("Using provided kNN graph.");
+            }
+            Ok(knn)
+        }
+        None => {
+            if verbose {
+                println!("Generating a kNN graph from scratch.");
+            }
+            let (indices, dist) =
+                generate_knn_with_dist(embd, knn_params, true, false, seed, verbose)?;
+            Ok((indices, dist.expect("return_dist is set")))
+        }
+    }
 }
 
 /// Pad the rows a search left short of `k` neighbours

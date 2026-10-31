@@ -15,6 +15,7 @@
 //! Scores stay `f32` to match the AUCell output, every accumulator is `f64`.
 
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use bixverse_core::core::math::vector_helpers::quantile_sorted;
@@ -56,7 +57,11 @@ const UNIMODAL_SD_MULTIPLE: f64 = 2.0;
 ////////////
 
 /// Parameters for the regulon binarisation
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the R `params_scenic_binarise()` list; missing keys take
+/// the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct BinariseParams {
     /// Multiplier on the Silverman bandwidth of the kernel density estimate.
     /// Values above one smooth away shallow troughs, which is what AUCell does

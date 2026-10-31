@@ -107,7 +107,7 @@ pub(crate) fn csr_from_parts<T: BixverseNumeric>(
 ///
 /// Both as rows, `None` without indices.
 #[allow(clippy::type_complexity)]
-fn knn_pair(
+pub(crate) fn knn_pair(
     indices: Option<&PyReadonlyArray2<'_, u32>>,
     distances: Option<&PyReadonlyArray2<'_, f32>>,
 ) -> PyResult<Option<(Vec<Vec<usize>>, Vec<Vec<f32>>)>> {

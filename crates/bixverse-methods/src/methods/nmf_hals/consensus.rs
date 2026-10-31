@@ -16,6 +16,7 @@ use ann_search_rs::prelude::AnnSearchFloat;
 use ann_search_rs::{build_exhaustive_index, query_exhaustive_self};
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use super::refit::{nmf_refit_h, nmf_refit_w};
 use super::{HalsOpts, NmfInput, StabilisedNmfResult, stabilised_nmf};
@@ -159,6 +160,74 @@ impl<F: BixverseFloat> Default for ConsensusParams<F> {
             kmeans_n_init: DEFAULT_KMEANS_N_INIT,
             seed: 42,
         }
+    }
+}
+
+/// The keys of the R `params_nmf_consensus()` list, plus the `consensus_seed`
+/// the R wrappers inject from the run seed.
+///
+/// [ConsensusParamsSpec::into_params] applies the readings of the R binding: a
+/// `density_threshold` of 2 or more switches the filter off, since cosine
+/// distance cannot exceed 2, and `n_neighbours = 0` picks for you. Missing keys
+/// take the [ConsensusParams] defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct ConsensusParamsSpec {
+    /// `"h"` or `"w"`, see [parse_consensus_target]
+    pub consensus_target: String,
+    /// Neighbours for the density filter; 0 for the heuristic
+    pub n_neighbours: usize,
+    /// Mean cosine distance cutoff; 2 or more disables the filter
+    pub density_threshold: f64,
+    /// Lloyd iterations per k-means restart
+    pub kmeans_iters: usize,
+    /// Number of k-means restarts
+    pub kmeans_n_init: usize,
+    /// Seed for the k-means restarts; `None` keeps the default
+    pub consensus_seed: Option<u64>,
+}
+
+impl Default for ConsensusParamsSpec {
+    fn default() -> Self {
+        Self {
+            consensus_target: "h".to_string(),
+            n_neighbours: 0,
+            density_threshold: DEFAULT_DENSITY_THRESHOLD,
+            kmeans_iters: DEFAULT_KMEANS_ITERS,
+            kmeans_n_init: DEFAULT_KMEANS_N_INIT,
+            consensus_seed: None,
+        }
+    }
+}
+
+impl ConsensusParamsSpec {
+    /// Resolve the keys into consensus options.
+    ///
+    /// Unlike the R binding, an unrecognised `consensus_target` is an error
+    /// rather than a silent fall back to `"h"`.
+    ///
+    /// ### Returns
+    ///
+    /// The [ConsensusParams], or an error naming an unrecognised
+    /// `consensus_target`.
+    pub fn into_params<F: BixverseFloat>(self) -> Result<ConsensusParams<F>, MethodsErrors> {
+        let target = parse_consensus_target(&self.consensus_target).ok_or_else(|| {
+            CoreErrors::InvalidArgument(format!(
+                "consensus_target must be 'h' or 'w', got '{}'",
+                self.consensus_target
+            ))
+        })?;
+        let density_threshold =
+            (self.density_threshold < 2.0).then(|| F::from_f64(self.density_threshold).unwrap());
+        Ok(ConsensusParams::new(
+            target,
+            (self.n_neighbours > 0).then_some(self.n_neighbours),
+            density_threshold,
+            self.kmeans_iters,
+            self.kmeans_n_init,
+            self.consensus_seed
+                .unwrap_or_else(|| ConsensusParams::<F>::default().seed),
+        ))
     }
 }
 

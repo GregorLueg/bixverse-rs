@@ -47,7 +47,7 @@ use crate::pp::index_vec;
 /// ### Returns
 ///
 /// The array.
-fn f64_array<'py>(py: Python<'py>, v: &[f32]) -> Bound<'py, PyAny> {
+pub(crate) fn f64_array<'py>(py: Python<'py>, v: &[f32]) -> Bound<'py, PyAny> {
     v.iter()
         .map(|&x| x as f64)
         .collect::<Vec<f64>>()
@@ -65,7 +65,7 @@ fn f64_array<'py>(py: Python<'py>, v: &[f32]) -> Bound<'py, PyAny> {
 /// ### Returns
 ///
 /// The array.
-fn u32_array<'py>(py: Python<'py>, v: &[usize]) -> Bound<'py, PyAny> {
+pub(crate) fn u32_array<'py>(py: Python<'py>, v: &[usize]) -> Bound<'py, PyAny> {
     v.iter()
         .map(|&x| x as u32)
         .collect::<Vec<u32>>()
@@ -83,7 +83,10 @@ fn u32_array<'py>(py: Python<'py>, v: &[usize]) -> Bound<'py, PyAny> {
 /// ### Returns
 ///
 /// The `(nrows, ncols)` array.
-fn mat_f64<'py, T: Copy + Into<f64>>(py: Python<'py>, m: &Mat<T>) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn mat_f64<'py, T: Copy + Into<f64>>(
+    py: Python<'py>,
+    m: &Mat<T>,
+) -> PyResult<Bound<'py, PyAny>> {
     let (r, c) = (m.nrows(), m.ncols());
     let data: Vec<f64> = (0..r)
         .flat_map(|i| (0..c).map(move |j| m[(i, j)].into()))
