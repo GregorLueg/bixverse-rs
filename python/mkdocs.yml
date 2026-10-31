@@ -51,6 +51,7 @@ nav:
       - DIALOGUE: vignettes/dialogue.ipynb
       - Batch correction: vignettes/single_cell_batch_corrections.ipynb
       - Trajectory inference: vignettes/trajectory_inference.ipynb
+      - Meta cells: vignettes/meta_cells.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md
