@@ -36,24 +36,28 @@ nav:
   - Quickstart: quickstart.md
   - scVI: scvi.md
   - Vignettes:
-      - Thinking the bixverse way: vignettes/thinking_single_cell.ipynb
-      - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
-      - Data I/O: vignettes/single_cell_io.ipynb
-      - kNN searches: vignettes/knn_searches.ipynb
-      - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
-      - Plotting: vignettes/single_cell_visualisation.ipynb
-      - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
-      - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
-      - Cell trees with Bonsai: vignettes/bonsai.ipynb
-      - Pearson residuals and scTransform: vignettes/single_cell_residuals.ipynb
-      - Doublet detection: vignettes/doublet_detection.ipynb
-      - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
-      - Clustering and annotation: vignettes/cell_type_annotation.ipynb
-      - DIALOGUE: vignettes/dialogue.ipynb
-      - Batch correction: vignettes/single_cell_batch_corrections.ipynb
-      - Trajectory inference: vignettes/trajectory_inference.ipynb
-      - Meta cells: vignettes/meta_cells.ipynb
-      - Scaling to millions of cells: vignettes/single_cell_big_data.ipynb
+      - Getting started:
+          - Design choices: vignettes/design_single_cell.ipynb
+          - Thinking the bixverse way: vignettes/thinking_single_cell.ipynb
+          - Data I/O: vignettes/single_cell_io.ipynb
+          - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
+          - Plotting: vignettes/single_cell_visualisation.ipynb
+          - Scaling to millions of cells: vignettes/single_cell_big_data.ipynb
+      - Core workflow:
+          - kNN searches: vignettes/knn_searches.ipynb
+          - Pearson residuals and scTransform: vignettes/single_cell_residuals.ipynb
+          - Doublet detection: vignettes/doublet_detection.ipynb
+          - Batch correction: vignettes/single_cell_batch_corrections.ipynb
+          - Clustering and annotation: vignettes/cell_type_annotation.ipynb
+          - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
+          - Meta cells: vignettes/meta_cells.ipynb
+          - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
+      - Methods:
+          - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
+          - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
+          - DIALOGUE: vignettes/dialogue.ipynb
+          - Trajectory inference: vignettes/trajectory_inference.ipynb
+          - Cell trees with Bonsai: vignettes/bonsai.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md
