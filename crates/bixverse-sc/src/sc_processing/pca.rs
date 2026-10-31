@@ -6,6 +6,7 @@
 use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -123,15 +124,38 @@ pub fn parse_pca_solver(s: &str) -> Option<PcaSolver> {
     }
 }
 
+/// Deserialise a [PcaSolver] through [parse_pca_solver]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The solver, or an error naming the unrecognised value.
+pub fn de_pca_solver<'de, D: Deserializer<'de>>(d: D) -> Result<PcaSolver, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_pca_solver(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "svd_solver must be one of 'auto', 'covariance', 'randomised' or 'exact', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for the main single cell PCA around normalisations and which
 /// solver to use.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_pca()` list; missing keys
+/// take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SingleCellPcaParams {
     /// Mean center the data
     pub mean_center: bool,
     /// Normalise the variance
     pub normalise_variance: bool,
     /// Which solver to use
+    #[serde(deserialize_with = "de_pca_solver")]
     pub svd_solver: PcaSolver,
     /// Apply the CLR transformation
     pub clr: bool,
@@ -1694,6 +1718,87 @@ pub fn sparse_pca_accelerator_input<S: SingleCellReading>(
     }
 
     Ok((csc, col_means, col_stds))
+}
+
+///////////////////////
+// Store entry point //
+///////////////////////
+
+/// PCA over a cell and gene selection of an on-disk experiment.
+///
+/// Loads the CLR offsets from the cell-major store when `params_pca.clr` asks
+/// for the `PFlogPF` transformation, then runs [`pca_on_sc_sparse`] or the
+/// dense [`pca_on_sc`].
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file, read only for the
+///   CLR offsets
+/// * `cell_indices` - The cells, 0-based, in output row order
+/// * `gene_indices` - The genes, 0-based, in loading row order
+/// * `no_pcs` - Number of principal components
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `sparse` - Solve on the sparse matrix rather than the densified one
+/// * `seed` - Seed for the randomised SVD
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The [SingleCellPcaRes].
+///
+/// ### References
+///
+/// Booeshaghi, et al., bioRxiv, 2026 (`PFlogPF`)
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    sparse: bool,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaRes {
+    let offsets = if params_pca.clr {
+        if parse_verbosity_level(verbose).normal_verbosity() {
+            println!("PFlogPF-transformation requested. Loading offsets from disk.")
+        }
+        let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+        Some(cell_reader.get_clr_offsets(cell_indices, None)?)
+    } else {
+        None
+    };
+
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let offsets = offsets.as_deref();
+    if sparse {
+        pca_on_sc_sparse(
+            &reader,
+            cell_indices,
+            gene_indices,
+            no_pcs,
+            params_pca,
+            offsets,
+            seed,
+            verbose,
+        )
+    } else {
+        let (scores, loadings, s, _) = pca_on_sc(
+            &reader,
+            cell_indices,
+            gene_indices,
+            no_pcs,
+            params_pca,
+            offsets,
+            seed,
+            false,
+            verbose,
+        )?;
+        Ok((scores, loadings, s))
+    }
 }
 
 ///////////

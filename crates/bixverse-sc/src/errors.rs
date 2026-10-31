@@ -1158,6 +1158,27 @@ pub enum ScErrors {
         reason: String,
     },
 
+    /// A fitted residual model is used on a different cell selection.
+    ///
+    /// The per-cell offsets and group labels are aligned to the fitted cells
+    /// by position, so any other selection, reordering included, would score
+    /// cells under another cell's parameters.
+    #[error(
+        "The residual model was fitted on {fitted} cell(s) that are not the {given} cell(s) given here. Refit after changing the cell selection."
+    )]
+    ResidualFitCellMismatch {
+        /// Cells the model was fitted on
+        fitted: usize,
+        /// Cells given now
+        given: usize,
+    },
+
+    /// Corrected counts were asked of an analytic Pearson fit.
+    #[error(
+        "Corrected counts need a scTransform fit; the analytic Pearson model has no corrected-count equivalent."
+    )]
+    ResidualCorrectedCountsNeedSct,
+
     /// The covariates supplied are not the ones the model was fitted with.
     ///
     /// Only the count is cheap to check, and the count matching is exactly the

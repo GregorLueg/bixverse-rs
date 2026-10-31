@@ -12,6 +12,7 @@ mod error;
 mod h5ad_write;
 mod io;
 mod loader;
+mod pp;
 mod qc;
 mod reader;
 mod synthetic;
@@ -40,6 +41,7 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<reader::PyCellReader>()?;
     m.add_class::<loader::PyCellLoader>()?;
     m.add_class::<loader::PyCellLoaderIter>()?;
+    m.add_class::<pp::PyResidualFit>()?;
 
     m.add_function(wrap_pyfunction!(testing::write_synthetic_store, m)?)?;
 
@@ -76,6 +78,15 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(qc::mad_outlier, m)?,
         wrap_pyfunction!(qc::top_genes_perc, m)?,
         wrap_pyfunction!(qc::gene_set_perc, m)?,
+        wrap_pyfunction!(pp::hvg, m)?,
+        wrap_pyfunction!(pp::hvg_batch_aware, m)?,
+        wrap_pyfunction!(pp::pca, m)?,
+        wrap_pyfunction!(pp::fit_residuals, m)?,
+        wrap_pyfunction!(pp::residual_variance, m)?,
+        wrap_pyfunction!(pp::pca_residuals, m)?,
+        wrap_pyfunction!(pp::sct_corrected_counts, m)?,
+        wrap_pyfunction!(pp::gene_store_to_cell_store_py, m)?,
+        wrap_pyfunction!(pp::magic_impute, m)?,
     ] {
         m.add_function(f)?;
     }

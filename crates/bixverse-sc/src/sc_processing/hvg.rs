@@ -16,6 +16,7 @@
 
 use edge_rs::limma::scran_lowess::{ScranLowessParams, scran_lowess};
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::f64::consts::LN_2;
 use std::time::Instant;
 use thousands::Separable;
@@ -23,6 +24,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use bixverse_core::core::base::info::{BinningStrategy, parse_bin_strategy_type};
 use bixverse_core::core::base::loess::*;
+use bixverse_sc_data::in_memory_io::CellSubset;
 
 ////////////
 // Consts //
@@ -130,6 +132,24 @@ pub fn parse_hvg_method(s: &str) -> Option<HvgMethod> {
     }
 }
 
+/// Deserialise an [HvgMethod] through [parse_hvg_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The method, or an error naming the unrecognised value.
+pub fn de_hvg_method<'de, D: Deserializer<'de>>(d: D) -> Result<HvgMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_hvg_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "method must be one of 'vst', 'meanvarbin', 'dispersion' or 'scran', got '{s}'"
+        ))
+    })
+}
+
 /// Options shared by every HVG entry point.
 #[derive(Clone, Copy, Debug)]
 pub struct HvgRunOpts {
@@ -144,21 +164,30 @@ pub struct HvgRunOpts {
 /// Mirrors scrapper's `fitVarianceTrend` arguments, defaults included. Note
 /// that the R package defaults `use_minimum_width` to `false`, the opposite of
 /// the underlying C++ library.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the trend keys of the R `params_sc_hvg()` list
+/// (`mean_filter`, `min_mean`, `transform`, `use_min_width`, `min_width`,
+/// `min_window_count`, `span`); missing keys take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct ScranTrendParams {
     /// Drop genes below `minimum_mean` from the fit and extrapolate their
     /// trend linearly to the origin instead.
     pub mean_filter: bool,
     /// Mean log2-expression threshold for the fit.
+    #[serde(rename = "min_mean")]
     pub minimum_mean: f64,
     /// Fit on the quarter root of the variance, as `limma::voom` does.
     pub transform: bool,
     /// Size windows by `minimum_width` and `minimum_window_count` rather than
     /// by `span`.
+    #[serde(rename = "use_min_width")]
     pub use_minimum_width: bool,
     /// Minimum window width in mean log2-expression.
+    #[serde(rename = "min_width")]
     pub minimum_width: f64,
     /// Minimum number of genes per window under `use_minimum_width`.
+    #[serde(rename = "min_window_count")]
     pub minimum_window_count: usize,
     /// Proportion of genes per window when `use_minimum_width` is off.
     pub span: f64,
@@ -214,6 +243,72 @@ impl Default for ScranTrendParams {
             span: 0.3,
         }
     }
+}
+
+/// Everything an HVG run on a store needs, as the R `params_sc_hvg()` list
+/// carries it.
+///
+/// The scran trend parameters sit flat next to the rest, as in R; the trend's
+/// span is always `loess_span`, see [`HvgParams::scran_trend`]. Missing keys
+/// take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HvgParams {
+    /// Which HVG method to run.
+    #[serde(deserialize_with = "de_hvg_method")]
+    pub method: HvgMethod,
+    /// Span of the loess (`vst`) or lowess (`scran`) trend.
+    pub loess_span: f64,
+    /// Number of bins for `meanvarbin` and `dispersion`.
+    #[serde(rename = "num_bin")]
+    pub n_bins: usize,
+    /// Binning strategy for `meanvarbin` and `dispersion`, see
+    /// [`parse_bin_strategy_type`].
+    #[serde(rename = "bin_method")]
+    pub binning: String,
+    /// Optional clipping value (`vst` only). `None` uses `sqrt(n_cells)`.
+    pub clip_max: Option<f32>,
+    /// The scran trend parameters.
+    #[serde(flatten)]
+    pub scran: ScranTrendParams,
+}
+
+impl Default for HvgParams {
+    fn default() -> Self {
+        Self {
+            method: HvgMethod::default(),
+            loess_span: 0.3,
+            n_bins: 20,
+            binning: "equal_width".to_string(),
+            clip_max: None,
+            scran: ScranTrendParams::default(),
+        }
+    }
+}
+
+impl HvgParams {
+    /// The scran trend parameters with the span taken from `loess_span`.
+    ///
+    /// ### Returns
+    ///
+    /// The [`ScranTrendParams`] the scran driver runs with.
+    pub fn scran_trend(&self) -> ScranTrendParams {
+        ScranTrendParams {
+            span: self.loess_span,
+            ..self.scran
+        }
+    }
+}
+
+/// Per-gene HVG statistics of one method.
+#[derive(Clone, Debug)]
+pub enum HvgStats {
+    /// `vst`
+    Vst(HvgRes),
+    /// `meanvarbin` and `dispersion`
+    Dispersion(HvgDispersionRes),
+    /// `scran`
+    Scran(HvgScranRes),
 }
 
 ////////////////////
@@ -2225,6 +2320,201 @@ pub fn get_hvg_scran_batch_aware_streaming<S: SingleCellReading>(
     };
 
     run_hvg_scran(reader, &index, &params.unwrap_or_default(), opts)
+}
+
+///////////////////////
+// Store entry point //
+///////////////////////
+
+/// HVG statistics over one reader.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major store, on disk or an in-memory cell subset
+/// * `cell_set` - The selected cells, as indices into `reader`
+/// * `params` - The HVG parameters
+/// * `streaming` - Read the genes in batches
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The statistics of `params.method`.
+fn hvg_on_reader<S: SingleCellReading>(
+    reader: &S,
+    cell_set: &[usize],
+    params: &HvgParams,
+    streaming: bool,
+    verbose: usize,
+) -> Result<HvgStats, ScErrors> {
+    let span = params.loess_span as f32;
+    let (binning, n_bins) = (params.binning.as_str(), params.n_bins);
+    Ok(match params.method {
+        HvgMethod::Vst => HvgStats::Vst(if streaming {
+            get_hvg_vst_streaming(reader, cell_set, span, params.clip_max, verbose)?
+        } else {
+            get_hvg_vst(reader, cell_set, span, params.clip_max, verbose)?
+        }),
+        HvgMethod::MeanVarBin => HvgStats::Dispersion(if streaming {
+            get_hvg_mvb_streaming(reader, cell_set, binning, n_bins, verbose)?
+        } else {
+            get_hvg_mvb(reader, cell_set, binning, n_bins, verbose)?
+        }),
+        HvgMethod::Dispersion => HvgStats::Dispersion(if streaming {
+            get_hvg_dispersion_streaming(reader, cell_set, binning, n_bins, verbose)?
+        } else {
+            get_hvg_dispersion(reader, cell_set, binning, n_bins, verbose)?
+        }),
+        HvgMethod::Scran => {
+            let trend = Some(params.scran_trend());
+            HvgStats::Scran(if streaming {
+                get_hvg_scran_streaming(reader, cell_set, trend, verbose)?
+            } else {
+                get_hvg_scran(reader, cell_set, trend, verbose)?
+            })
+        }
+    })
+}
+
+/// Batch-aware HVG statistics over one reader.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major store, on disk or an in-memory cell subset
+/// * `cell_set` - The selected cells, as indices into `reader`
+/// * `batch_set` - Batch label per selected cell, 0-based and dense
+/// * `params` - The HVG parameters
+/// * `streaming` - Read the genes in batches
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// One set of statistics per batch, in batch id order.
+fn hvg_batch_aware_on_reader<S: SingleCellReading>(
+    reader: &S,
+    cell_set: &[usize],
+    batch_set: &[usize],
+    params: &HvgParams,
+    streaming: bool,
+    verbose: usize,
+) -> Result<Vec<HvgStats>, ScErrors> {
+    let span = params.loess_span as f32;
+    let (binning, n_bins) = (params.binning.as_str(), params.n_bins);
+    let (cells, batches) = (cell_set, batch_set);
+    let stats = match params.method {
+        HvgMethod::Vst => {
+            let clip = params.clip_max;
+            let res = if streaming {
+                get_hvg_vst_batch_aware_streaming(reader, cells, batches, span, clip, verbose)?
+            } else {
+                get_hvg_vst_batch_aware(reader, cells, batches, span, clip, verbose)?
+            };
+            res.into_iter().map(HvgStats::Vst).collect()
+        }
+        HvgMethod::MeanVarBin => {
+            let res = if streaming {
+                get_hvg_mvb_batch_aware_streaming(reader, cells, batches, binning, n_bins, verbose)?
+            } else {
+                get_hvg_mvb_batch_aware(reader, cells, batches, binning, n_bins, verbose)?
+            };
+            res.into_iter().map(HvgStats::Dispersion).collect()
+        }
+        HvgMethod::Dispersion => {
+            let res = if streaming {
+                get_hvg_dispersion_batch_aware_streaming(
+                    reader, cells, batches, binning, n_bins, verbose,
+                )?
+            } else {
+                get_hvg_dispersion_batch_aware(reader, cells, batches, binning, n_bins, verbose)?
+            };
+            res.into_iter().map(HvgStats::Dispersion).collect()
+        }
+        HvgMethod::Scran => {
+            let trend = Some(params.scran_trend());
+            let res = if streaming {
+                get_hvg_scran_batch_aware_streaming(reader, cells, batches, trend, verbose)?
+            } else {
+                get_hvg_scran_batch_aware(reader, cells, batches, trend, verbose)?
+            };
+            res.into_iter().map(HvgStats::Scran).collect()
+        }
+    };
+    Ok(stats)
+}
+
+/// HVG statistics for a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]); otherwise the gene-major store is swept.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_set` - The selected cells, 0-based, unique and within the store
+/// * `params` - The HVG parameters
+/// * `streaming` - Read the genes in batches
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The statistics of `params.method`, one entry per store gene.
+pub fn hvg_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_set: &[usize],
+    params: &HvgParams,
+    streaming: bool,
+    verbose: usize,
+) -> Result<HvgStats, ScErrors> {
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = reader.get_header().total_cells;
+    match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
+        Some(sub) => hvg_on_reader(&sub.reader()?, &sub.local, params, streaming, verbose),
+        None => hvg_on_reader(&reader, cell_set, params, streaming, verbose),
+    }
+}
+
+/// Batch-aware HVG statistics for a cell selection of an on-disk experiment.
+///
+/// As [`hvg_on_store`], per batch. The batch labels are per selected cell, so
+/// they carry over to an in-memory subset unchanged.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_set` - The selected cells, 0-based, unique and within the store
+/// * `batch_set` - Batch label per selected cell, densely covering
+///   `0..n_batches`
+/// * `params` - The HVG parameters
+/// * `streaming` - Read the genes in batches
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// One set of statistics per batch, in batch id order.
+pub fn hvg_batch_aware_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_set: &[usize],
+    batch_set: &[usize],
+    params: &HvgParams,
+    streaming: bool,
+    verbose: usize,
+) -> Result<Vec<HvgStats>, ScErrors> {
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = reader.get_header().total_cells;
+    match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
+        Some(sub) => hvg_batch_aware_on_reader(
+            &sub.reader()?,
+            &sub.local,
+            batch_set,
+            params,
+            streaming,
+            verbose,
+        ),
+        None => hvg_batch_aware_on_reader(&reader, cell_set, batch_set, params, streaming, verbose),
+    }
 }
 
 ////////////////////////

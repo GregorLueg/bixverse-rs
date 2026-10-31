@@ -10,6 +10,7 @@ pub mod magic;
 pub mod metrics;
 pub mod pca;
 pub mod qc;
+pub mod residual_fit;
 pub mod residuals;
 pub mod scdblfinder;
 pub mod scrublet;

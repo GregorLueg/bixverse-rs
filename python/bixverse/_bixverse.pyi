@@ -284,3 +284,100 @@ def gene_set_perc(
     streaming: bool,
     verbose: bool = False,
 ) -> list[np.ndarray]: ...
+def hvg(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    params: dict[str, object],
+    streaming: bool,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def hvg_batch_aware(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    batch_labels: np.ndarray,
+    params: dict[str, object],
+    streaming: bool,
+    verbose: bool = False,
+) -> dict[str, np.ndarray]: ...
+def pca(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    no_pcs: int,
+    params: dict[str, object],
+    sparse: bool,
+    seed: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+
+class ResidualFit:
+    @property
+    def method(self) -> str: ...
+    @property
+    def n_groups(self) -> int: ...
+    @property
+    def cell_indices(self) -> np.ndarray: ...
+    @property
+    def genes(self) -> np.ndarray: ...
+    @property
+    def group_of_cell(self) -> np.ndarray: ...
+
+def fit_residuals(
+    f_path_gene: str,
+    f_path_cell: str,
+    method: str,
+    cell_indices: np.ndarray,
+    group_of_cell: np.ndarray | None,
+    covariates: list[tuple[str, np.ndarray]],
+    params: dict[str, object],
+    gene_batch_size: int | None = None,
+    seed: int = 42,
+    verbose: bool = False,
+) -> ResidualFit: ...
+def residual_variance(
+    f_path_gene: str,
+    f_path_cell: str,
+    fit: ResidualFit,
+    cell_indices: np.ndarray,
+    n_hvg: int,
+    gene_batch_size: int | None = None,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def pca_residuals(
+    f_path_gene: str,
+    f_path_cell: str,
+    fit: ResidualFit,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    no_pcs: int,
+    params: dict[str, object],
+    seed: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def sct_corrected_counts(
+    f_path_gene: str,
+    fit: ResidualFit,
+    cell_indices: np.ndarray,
+    f_path_out: str,
+    gene_batch_size: int | None = None,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def gene_store_to_cell_store(
+    f_path_in: str,
+    f_path_out: str,
+    cells_per_phase: int,
+    gene_batch_size: int,
+    verbose: bool = False,
+) -> None: ...
+def magic_impute(
+    f_path_gene: str,
+    knn_indices: np.ndarray,
+    knn_distances: np.ndarray,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> np.ndarray: ...

@@ -248,6 +248,7 @@ dependencies = [
  "rand 0.9.5",
  "rayon",
  "rustc-hash",
+ "serde",
  "statrs",
  "thiserror 2.0.21",
  "thousands",

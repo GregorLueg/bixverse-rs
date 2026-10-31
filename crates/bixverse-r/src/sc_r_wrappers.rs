@@ -36,7 +36,8 @@ use bixverse_rs::single_cell::sc_analysis::{
     },
     vision::SignatureGenes,
 };
-use bixverse_rs::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use bixverse_rs::single_cell::sc_processing::magic::MagicParams;
+pub use bixverse_rs::single_cell::sc_processing::magic::parse_magic_layer;
 use bixverse_rs::single_cell::sc_processing::residuals::{
     assert_ascending, validate_clip_range, validate_groups,
 };
@@ -3681,23 +3682,6 @@ impl FromRList for MagicParams {
             layer,
             allow_large,
         })
-    }
-}
-
-/// Parse the R-side layer string into a [MagicLayer].
-///
-/// ### Params
-///
-/// * `s` - The layer name, `"norm"` or `"raw"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The matching layer, or `None` if the string is not recognised.
-pub fn parse_magic_layer(s: &str) -> Option<MagicLayer> {
-    match s.to_lowercase().as_str() {
-        "norm" | "normalised" | "normalized" => Some(MagicLayer::Norm),
-        "raw" | "counts" => Some(MagicLayer::Raw),
-        _ => None,
     }
 }
 

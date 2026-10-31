@@ -37,6 +37,7 @@ indexmap.workspace = true
 rand.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
 statrs.workspace = true
 thiserror.workspace = true
 thousands.workspace = true
