@@ -43,7 +43,7 @@ use crate::error::BvErr;
 /// ### Returns
 ///
 /// The struct, or a `ValueError` naming the offending key.
-fn from_py<T: DeserializeOwned>(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<T> {
+pub(crate) fn from_py<T: DeserializeOwned>(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<T> {
     depythonize(obj).map_err(|e| PyValueError::new_err(format!("invalid {what}: {e}")))
 }
 
@@ -56,7 +56,7 @@ fn from_py<T: DeserializeOwned>(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<
 /// ### Returns
 ///
 /// The view.
-fn mat_view<'a>(m: &'a PyReadonlyArray2<'_, f32>) -> PyResult<MatRef<'a, f32>> {
+pub(crate) fn mat_view<'a>(m: &'a PyReadonlyArray2<'_, f32>) -> PyResult<MatRef<'a, f32>> {
     let (n, d) = (m.shape()[0], m.shape()[1]);
     Ok(MatRef::from_row_major_slice(m.as_slice()?, n, d))
 }
@@ -73,7 +73,7 @@ fn mat_view<'a>(m: &'a PyReadonlyArray2<'_, f32>) -> PyResult<MatRef<'a, f32>> {
 /// ### Returns
 ///
 /// The array.
-fn flat_array<'py, T: numpy::Element>(
+pub(crate) fn flat_array<'py, T: numpy::Element>(
     py: Python<'py>,
     v: Vec<T>,
     n: usize,

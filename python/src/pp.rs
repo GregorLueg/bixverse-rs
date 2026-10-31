@@ -61,7 +61,7 @@ fn from_py<T: DeserializeOwned>(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<
 /// ### Returns
 ///
 /// The indices.
-fn index_vec(idx: &PyReadonlyArray1<'_, u32>) -> PyResult<Vec<usize>> {
+pub(crate) fn index_vec(idx: &PyReadonlyArray1<'_, u32>) -> PyResult<Vec<usize>> {
     Ok(idx.as_slice()?.iter().map(|&x| x as usize).collect())
 }
 
@@ -93,7 +93,7 @@ fn u32_array<'py>(py: Python<'py>, v: &[usize]) -> Bound<'py, PyAny> {
 /// ### Returns
 ///
 /// The `(nrows, ncols)` `float32` array.
-fn mat_array<'py>(py: Python<'py>, m: &Mat<f32>) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn mat_array<'py>(py: Python<'py>, m: &Mat<f32>) -> PyResult<Bound<'py, PyAny>> {
     let (r, c) = (m.nrows(), m.ncols());
     let data: Vec<f32> = (0..r)
         .flat_map(|i| (0..c).map(move |j| m[(i, j)]))

@@ -1724,6 +1724,37 @@ pub fn sparse_pca_accelerator_input<S: SingleCellReading>(
 // Store entry point //
 ///////////////////////
 
+/// The per-cell CLR offsets from the cell-major store, if `clr` asks for them.
+///
+/// Every store entry point that may recompute a PCA with the `PFlogPF`
+/// transformation reads them here.
+///
+/// ### Params
+///
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The cells, 0-based, in output row order
+/// * `clr` - Whether the `PFlogPF` transformation was requested
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The offsets aligned to `cell_indices`, or `None` without `clr`.
+pub fn clr_offsets_on_store(
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    clr: bool,
+    verbose: usize,
+) -> Result<Option<Vec<f64>>, ScErrors> {
+    if !clr {
+        return Ok(None);
+    }
+    if parse_verbosity_level(verbose).normal_verbosity() {
+        println!("PFlogPF-transformation requested. Loading offsets from disk.")
+    }
+    let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+    Ok(Some(cell_reader.get_clr_offsets(cell_indices, None)?))
+}
+
 /// PCA over a cell and gene selection of an on-disk experiment.
 ///
 /// Loads the CLR offsets from the cell-major store when `params_pca.clr` asks
@@ -1762,16 +1793,7 @@ pub fn pca_on_store(
     seed: usize,
     verbose: usize,
 ) -> SingleCellPcaRes {
-    let offsets = if params_pca.clr {
-        if parse_verbosity_level(verbose).normal_verbosity() {
-            println!("PFlogPF-transformation requested. Loading offsets from disk.")
-        }
-        let cell_reader = ParallelSparseReader::new(f_path_cell)?;
-        Some(cell_reader.get_clr_offsets(cell_indices, None)?)
-    } else {
-        None
-    };
-
+    let offsets = clr_offsets_on_store(f_path_cell, cell_indices, params_pca.clr, verbose)?;
     let reader = ParallelSparseReader::new(f_path_gene)?;
     let offsets = offsets.as_deref();
     if sparse {

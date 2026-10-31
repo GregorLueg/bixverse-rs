@@ -8,6 +8,7 @@ use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use ann_search_rs::*;
 use faer::MatRef;
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use crate::sc_batch_correction::batch_utils::process_batch_labels;
@@ -23,8 +24,16 @@ use bixverse_core::core::math::sparse::*;
 const SMOOTH_K_TOLERANCE: f32 = 1e-5;
 const MIN_K_DIST_SCALE: f32 = 1e-3;
 
+/// Default trim as a multiple of `neighbours_within_batch`, the BBKNN
+/// reference's `trim = 10 * neighbors_within_batch`.
+const BBKNN_TRIM_FACTOR: usize = 10;
+
 /// Structure to store the BBKNN pamareters
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_bbknn()` list, see
+/// [`BbknnParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "BbknnParamsSpec")]
 pub struct BbknnParams {
     /// How many neighbours per batch to identify
     pub neighbours_within_batch: usize,
@@ -39,6 +48,62 @@ pub struct BbknnParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+}
+
+/// The keys a [`BbknnParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take its fallbacks.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct BbknnParamsSpec {
+    /// How many neighbours per batch to identify
+    pub neighbours_within_batch: usize,
+    /// Mixing ratio between union (1.0) and intersection (0.0)
+    pub set_op_mix_ratio: f32,
+    /// How many nearest neighbours of each cell are assumed to be fully
+    /// connected
+    pub local_connectivity: f32,
+    /// Trim to these many top connectivities; `None` is
+    /// `10 * neighbours_within_batch`
+    pub trim: Option<usize>,
+    /// The kNN keys
+    #[serde(flatten)]
+    pub knn_params: KnnParams,
+}
+
+impl Default for BbknnParamsSpec {
+    fn default() -> Self {
+        Self {
+            neighbours_within_batch: 3,
+            set_op_mix_ratio: 1.0,
+            local_connectivity: 1.0,
+            trim: None,
+            knn_params: KnnParams::default(),
+        }
+    }
+}
+
+impl From<BbknnParamsSpec> for BbknnParams {
+    /// Resolve the trim default.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`BbknnParams`], always with a trim.
+    fn from(s: BbknnParamsSpec) -> Self {
+        Self {
+            neighbours_within_batch: s.neighbours_within_batch,
+            set_op_mix_ratio: s.set_op_mix_ratio,
+            local_connectivity: s.local_connectivity,
+            trim: Some(
+                s.trim
+                    .unwrap_or(BBKNN_TRIM_FACTOR * s.neighbours_within_batch),
+            ),
+            knn_params: s.knn_params,
+        }
+    }
 }
 
 ///////////////////
@@ -760,4 +825,40 @@ pub fn bbknn(
         bbknn_params.trim,
         verbose,
     )
+}
+
+/// The kNN the R package stores after BBKNN: the first `k` stored entries of
+/// each row of the distance CSR from [`bbknn`].
+///
+/// That CSR is sorted by column index, so these are the `k` lowest-index
+/// neighbours of the batch-balanced set, not the `k` nearest. Kept as the R
+/// wrapper (`rs_bbknn_filtering`) does it so both front ends store the same
+/// kNN. Zero distances are not stored in the CSR, so a cell with duplicates
+/// can come back with a shorter row.
+///
+/// ### Params
+///
+/// * `distances` - The distance CSR from [`bbknn`]
+/// * `k` - Entries to keep per row
+///
+/// ### Returns
+///
+/// `(indices, distances)` per cell, each row at most `k` long.
+pub fn bbknn_first_neighbours(
+    distances: &CompressedSparseData2<f32>,
+    k: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    (0..distances.shape.0)
+        .map(|i| {
+            let start = distances.indptr[i] as usize;
+            let end = (distances.indptr[i + 1] as usize).min(start + k);
+            (
+                distances.indices[start..end]
+                    .iter()
+                    .map(|&j| j as usize)
+                    .collect(),
+                distances.data[start..end].to_vec(),
+            )
+        })
+        .unzip()
 }

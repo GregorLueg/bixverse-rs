@@ -21,8 +21,11 @@ use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 
 use crate::prelude::*;
 use crate::sc_batch_correction::harmony::BatchInfo;
-use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
+use bixverse_core::ml::clustering::k_means::{
+    KMeansParamsWrappers, parse_kmean_path, parse_kmeans_init,
+};
 use bixverse_core::utils::gemm::gemm;
+use serde::Deserialize;
 
 ///////////
 // Const //
@@ -60,6 +63,69 @@ const MAX_LANES: usize = 8;
 /// Pivot threshold below which the arrowhead Schur complement is treated as
 /// degenerate and the solve falls back to LU.
 const ARROWHEAD_EPS: f64 = 1e-10;
+
+//////////////////
+// k-means keys //
+//////////////////
+
+/// The k-means keys of the R `params_sc_harmony()` and
+/// `params_sc_harmony_v2()` lists, as `kmeans_params_from_r_list_with_iters`
+/// reads them with [`HARMONY_KMEANS_ITERS`] as the fallback; missing keys
+/// take its defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HarmonyKMeansSpec {
+    /// Lloyd iterations of the initial k-means
+    pub k_means_iter: usize,
+    /// Optional initialisation, see `parse_kmeans_init`
+    pub k_means_init: Option<String>,
+    /// Optional GEMM assignment
+    pub gemm: Option<bool>,
+    /// Optional Hamerly bounds
+    pub hamerly: Option<bool>,
+}
+
+impl Default for HarmonyKMeansSpec {
+    fn default() -> Self {
+        Self {
+            k_means_iter: HARMONY_KMEANS_ITERS,
+            k_means_init: None,
+            gemm: None,
+            hamerly: None,
+        }
+    }
+}
+
+impl TryFrom<HarmonyKMeansSpec> for KMeansParamsWrappers {
+    type Error = String;
+
+    /// Check the initialisation and assemble the k-means parameters.
+    ///
+    /// No path is set when neither `gemm` nor `hamerly` is given; one missing
+    /// flag of the two counts as `false`.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansParamsWrappers`], or an error naming an unknown
+    /// initialisation.
+    fn try_from(spec: HarmonyKMeansSpec) -> Result<Self, String> {
+        let init = spec
+            .k_means_init
+            .map(|s| {
+                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
+            })
+            .transpose()?;
+        let path = match (spec.gemm, spec.hamerly) {
+            (None, None) => None,
+            (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
+        };
+        Ok(KMeansParamsWrappers::new(spec.k_means_iter, init, path))
+    }
+}
 
 ///////////
 // Types //

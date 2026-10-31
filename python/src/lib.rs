@@ -11,6 +11,7 @@ mod batch;
 mod error;
 mod graph;
 mod h5ad_write;
+mod integrate;
 mod io;
 mod loader;
 mod pp;
@@ -93,6 +94,18 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(graph::knn_graph, m)?,
         wrap_pyfunction!(graph::leiden, m)?,
         wrap_pyfunction!(graph::fast_cluster, m)?,
+        wrap_pyfunction!(integrate::harmony, m)?,
+        wrap_pyfunction!(integrate::harmony_v2, m)?,
+        wrap_pyfunction!(integrate::bbknn_graph, m)?,
+        wrap_pyfunction!(integrate::fast_mnn, m)?,
+        wrap_pyfunction!(integrate::seurat_cca, m)?,
+        wrap_pyfunction!(integrate::seurat_rpca, m)?,
+        wrap_pyfunction!(integrate::kbet, m)?,
+        wrap_pyfunction!(integrate::lisi, m)?,
+        wrap_pyfunction!(integrate::batch_asw, m)?,
+        wrap_pyfunction!(integrate::cell_type_asw, m)?,
+        wrap_pyfunction!(integrate::pcr, m)?,
+        wrap_pyfunction!(integrate::graph_connectivity, m)?,
     ] {
         m.add_function(f)?;
     }

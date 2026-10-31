@@ -414,3 +414,84 @@ def fast_cluster(
     seed: int = 42,
     verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]: ...
+def harmony(
+    pca: np.ndarray,
+    params: dict[str, object],
+    batch_labels: list[np.ndarray],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def harmony_v2(
+    pca: np.ndarray,
+    params: dict[str, object],
+    batch_labels: list[np.ndarray],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def bbknn_graph(
+    embd: np.ndarray,
+    batch_labels: np.ndarray,
+    params: dict[str, object],
+    k: int,
+    seed: int = 42,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: ...
+def fast_mnn(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    batch_indices: np.ndarray,
+    precomputed_pca: np.ndarray | None,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def seurat_cca(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    batch_indices: np.ndarray,
+    precomputed_pca: np.ndarray | None,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def seurat_rpca(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    batch_indices: np.ndarray,
+    precomputed_pca: np.ndarray | None,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = False,
+) -> np.ndarray: ...
+def kbet(
+    knn: np.ndarray, batches: np.ndarray, verbose: bool = False
+) -> dict[str, Any]: ...
+def lisi(
+    knn: np.ndarray,
+    knn_dist: np.ndarray | None,
+    labels: np.ndarray,
+    perplexity: float | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def batch_asw(
+    embd: np.ndarray,
+    batches: np.ndarray,
+    max_cells: int | None,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def cell_type_asw(
+    embd: np.ndarray,
+    labels: np.ndarray,
+    max_cells: int | None,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def pcr(embd: np.ndarray, batches: np.ndarray) -> dict[str, Any]: ...
+def graph_connectivity(knn: np.ndarray, labels: np.ndarray) -> dict[str, Any]: ...

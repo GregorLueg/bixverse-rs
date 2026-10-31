@@ -9,6 +9,7 @@
 //! - Theta scaling by batch size
 
 use faer::{Mat, MatRef};
+use serde::Deserialize;
 use std::time::Instant;
 use thousands::*;
 
@@ -18,9 +19,10 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
 use super::harmony::{BatchInfo, HarmonyResult, StageTimes, create_batch_infos};
 use super::harmony_core::{
-    HARMONY_KMEANS_ITERS, RidgeSettings, Variant, base_error_and_entropy, distances_and_base,
-    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
-    row_major_to_mat, to_row_major, update_assignments, window_converged,
+    HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
+    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
+    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
+    window_converged,
 };
 
 ////////////
@@ -28,6 +30,11 @@ use super::harmony_core::{
 ////////////
 
 /// Parameters for Harmony v2 batch correction.
+///
+/// Deserialises from the flat R `params_sc_harmony_v2()` list with `k`
+/// resolved, see [`HarmonyParamsV2Spec`].
+#[derive(Deserialize)]
+#[serde(try_from = "HarmonyParamsV2Spec")]
 pub struct HarmonyParamsV2 {
     /// Number of clusters
     pub k: usize,
@@ -80,6 +87,102 @@ impl Default for HarmonyParamsV2 {
             use_dynamic_lambda: true,
             kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
         }
+    }
+}
+
+/// The keys a [`HarmonyParamsV2`] deserialises from, as its R list
+/// conversion reads them; missing keys take the [`HarmonyParamsV2`]
+/// defaults.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct HarmonyParamsV2Spec {
+    /// Number of clusters
+    pub k: usize,
+    /// Per-cluster diversity weights (length 1 or K)
+    pub sigma: Vec<f32>,
+    /// Per-variable diversity penalties (length 1 or n_variables)
+    pub theta: Vec<f32>,
+    /// Ridge penalty (length 1)
+    pub lambda: Vec<f32>,
+    /// Fraction of cells to update per block (0.0-1.0)
+    pub block_size: f32,
+    /// Maximum diversity-refinement iterations per Harmony round
+    pub max_iter_kmeans: usize,
+    /// Maximum Harmony outer iterations
+    pub max_iter_harmony: usize,
+    /// Clustering convergence threshold
+    pub epsilon_kmeans: f32,
+    /// Harmony convergence threshold
+    pub epsilon_harmony: f32,
+    /// Window size for convergence checking
+    pub window_size: usize,
+    /// Alpha for dynamic lambda estimation (0 < alpha < 1)
+    pub alpha: f32,
+    /// Tau for theta scaling by batch size (0 = no scaling)
+    pub tau: f32,
+    /// Batch proportion cutoff for pruning in ridge regression
+    pub batch_proportion_cutoff: f32,
+    /// Whether to estimate lambda dynamically per cluster
+    pub use_dynamic_lambda: bool,
+    /// The k-means keys
+    #[serde(flatten)]
+    pub kmeans: HarmonyKMeansSpec,
+}
+
+impl Default for HarmonyParamsV2Spec {
+    fn default() -> Self {
+        let d = HarmonyParamsV2::default();
+        Self {
+            k: d.k,
+            sigma: d.sigma,
+            theta: d.theta,
+            lambda: d.lambda,
+            block_size: d.block_size,
+            max_iter_kmeans: d.max_iter_kmeans,
+            max_iter_harmony: d.max_iter_harmony,
+            epsilon_kmeans: d.epsilon_kmeans,
+            epsilon_harmony: d.epsilon_harmony,
+            window_size: d.window_size,
+            alpha: d.alpha,
+            tau: d.tau,
+            batch_proportion_cutoff: d.batch_proportion_cutoff,
+            use_dynamic_lambda: d.use_dynamic_lambda,
+            kmeans: HarmonyKMeansSpec::default(),
+        }
+    }
+}
+
+impl TryFrom<HarmonyParamsV2Spec> for HarmonyParamsV2 {
+    type Error = String;
+
+    /// Assemble the parameters, checking the k-means initialisation.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`HarmonyParamsV2`], or an error naming an unknown
+    /// initialisation.
+    fn try_from(s: HarmonyParamsV2Spec) -> Result<Self, String> {
+        Ok(Self {
+            k: s.k,
+            sigma: s.sigma,
+            theta: s.theta,
+            lambda: s.lambda,
+            block_size: s.block_size,
+            max_iter_kmeans: s.max_iter_kmeans,
+            max_iter_harmony: s.max_iter_harmony,
+            epsilon_kmeans: s.epsilon_kmeans,
+            epsilon_harmony: s.epsilon_harmony,
+            window_size: s.window_size,
+            alpha: s.alpha,
+            tau: s.tau,
+            batch_proportion_cutoff: s.batch_proportion_cutoff,
+            use_dynamic_lambda: s.use_dynamic_lambda,
+            kmeans_params: s.kmeans.try_into()?,
+        })
     }
 }
 

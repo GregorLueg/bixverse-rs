@@ -16,7 +16,7 @@ Batches are sparse CSR by default. Pass ``sparse=False`` for a dense
 scatter over every gene whether or not it holds a count.
 """
 
-from . import _bixverse, graph, io, pp, qc
+from . import _bixverse, graph, integrate, io, pp, qc
 from ._bixverse import (
     BixverseError,
     CellReader,
@@ -49,6 +49,7 @@ __all__ = [
     "_bixverse",
     "get_counts",
     "graph",
+    "integrate",
     "io",
     "pp",
     "qc",
