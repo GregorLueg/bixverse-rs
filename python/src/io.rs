@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bixverse_sc_data::archive_io::{archive_cell_file, restore_archive};
 use bixverse_sc_data::bin_merge_io::{BinMergeTask, merge_sc_bin_files};
 use bixverse_sc_data::data_io::{
     CellQuality, MinCellQuality, ParallelSparseReader, SingleCellReading, peek_file_version,
@@ -32,7 +33,6 @@ use bixverse_sc_data::obs_var_io::{
 use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj_io::write_r_counts;
 use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v4};
-use bixverse_sc_data::archive_io::{archive_cell_file, restore_archive};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -280,7 +280,9 @@ fn info_dict<'py>(py: Python<'py>, info: ParquetFrameInfo) -> PyResult<Bound<'py
 /// The [FrameKind], or a `ValueError` naming the bad value.
 fn frame_kind(frame: &str) -> PyResult<FrameKind> {
     parse_frame_kind(frame).ok_or_else(|| {
-        PyValueError::new_err(format!("frame must be one of 'obs' or 'var', got '{frame}'"))
+        PyValueError::new_err(format!(
+            "frame must be one of 'obs' or 'var', got '{frame}'"
+        ))
     })
 }
 
@@ -399,7 +401,9 @@ pub fn csr_to_file<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     if indptr.len() != shape.0 + 1 {
-        return Err(PyValueError::new_err("indptr must have n_cells + 1 entries"));
+        return Err(PyValueError::new_err(
+            "indptr must have n_cells + 1 entries",
+        ));
     }
     let csr = CompressedSparseData2::<u32>::new_csr(
         data.as_slice()?,
@@ -670,7 +674,15 @@ pub fn multi_h5ad_to_file<'py>(
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let tasks: Vec<H5adFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
-        .detach(|| h5ad_multifile_io::multi_h5ad_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose))
+        .detach(|| {
+            h5ad_multifile_io::multi_h5ad_to_file(
+                &tasks,
+                &f_path_cells,
+                universe_size,
+                &qc,
+                verbose,
+            )
+        })
         .map_err(BvErr::from)?;
     let per_file = res
         .per_file
@@ -715,7 +727,9 @@ pub fn multi_mtx_to_file<'py>(
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let tasks: Vec<MtxFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
-        .detach(|| mtx_multifile_io::multi_mtx_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose))
+        .detach(|| {
+            mtx_multifile_io::multi_mtx_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose)
+        })
         .map_err(BvErr::from)?;
     let per_file = res
         .per_file
@@ -1029,7 +1043,13 @@ pub fn h5ad_obs_var_to_parquet<'py>(
     let keep = keep_rows(keep)?;
     let info = py
         .detach(|| {
-            h5ad_frame_to_parquet(&h5_path, kind, keep.as_deref(), id_col.as_deref(), &out_path)
+            h5ad_frame_to_parquet(
+                &h5_path,
+                kind,
+                keep.as_deref(),
+                id_col.as_deref(),
+                &out_path,
+            )
         })
         .map_err(BvErr::from)?;
     info_dict(py, info)
@@ -1162,11 +1182,17 @@ pub fn h5_strings(py: Python<'_>, h5_path: PathBuf, dataset: &str) -> PyResult<V
 ///
 /// `(version, n_cells, n_genes)`, `n_genes` counting every modality.
 #[pyfunction]
-pub fn tenx_h5_metadata(py: Python<'_>, h5_path: PathBuf) -> PyResult<(&'static str, usize, usize)> {
+pub fn tenx_h5_metadata(
+    py: Python<'_>,
+    h5_path: PathBuf,
+) -> PyResult<(&'static str, usize, usize)> {
     let (version, (n_cells, n_genes)) = py
         .detach(|| {
             let v = detect_tenx_version(&h5_path)?;
-            Ok::<_, bixverse_sc_data::errors::ScDataErrors>((v, get_tenx_dimensions(&h5_path, Some(v))?))
+            Ok::<_, bixverse_sc_data::errors::ScDataErrors>((
+                v,
+                get_tenx_dimensions(&h5_path, Some(v))?,
+            ))
         })
         .map_err(BvErr::from)?;
     Ok((tenx_name(version), n_cells, n_genes))
@@ -1210,7 +1236,9 @@ pub fn write_tenx(
 ) -> PyResult<()> {
     let version = tenx_version(version)?;
     if indptr.len() != shape.0 + 1 {
-        return Err(PyValueError::new_err("indptr must have n_cells + 1 entries"));
+        return Err(PyValueError::new_err(
+            "indptr must have n_cells + 1 entries",
+        ));
     }
     let counts = CompressedSparseData2::<u32>::new_csr(
         data.as_slice()?,

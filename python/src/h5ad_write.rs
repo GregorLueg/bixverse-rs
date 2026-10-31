@@ -93,9 +93,7 @@ fn to_columns(cols: Vec<(String, String, Bound<'_, PyAny>)>, n: usize) -> PyResu
                     ColumnData::Categorical { codes, levels }
                 }
                 "int" => ColumnData::Int(payload.extract::<PyReadonlyArray1<i32>>()?.to_vec()?),
-                "float" => {
-                    ColumnData::Float(payload.extract::<PyReadonlyArray1<f64>>()?.to_vec()?)
-                }
+                "float" => ColumnData::Float(payload.extract::<PyReadonlyArray1<f64>>()?.to_vec()?),
                 "bool" => ColumnData::Bool(payload.extract::<PyReadonlyArray1<bool>>()?.to_vec()?),
                 "string" => ColumnData::String(payload.extract()?),
                 other => {
@@ -158,13 +156,8 @@ fn to_csr(
 ) -> PyResult<Vec<(String, CsMatI<f32, u32>)>> {
     mats.into_iter()
         .map(|(name, (data, indices, indptr))| {
-            let mat = CsMatI::try_new(
-                (n, n),
-                indptr.to_vec()?,
-                indices.to_vec()?,
-                data.to_vec()?,
-            )
-            .map_err(|(_, _, _, e)| PyValueError::new_err(format!("obsp '{name}': {e}")))?;
+            let mat = CsMatI::try_new((n, n), indptr.to_vec()?, indices.to_vec()?, data.to_vec()?)
+                .map_err(|(_, _, _, e)| PyValueError::new_err(format!("obsp '{name}': {e}")))?;
             Ok((name, mat))
         })
         .collect()
@@ -342,7 +335,11 @@ pub fn save_h5ad(
     uns_json: &str,
     chunk_size: usize,
 ) -> PyResult<()> {
-    let cells: Vec<usize> = cell_indices.as_slice()?.iter().map(|&c| c as usize).collect();
+    let cells: Vec<usize> = cell_indices
+        .as_slice()?
+        .iter()
+        .map(|&c| c as usize)
+        .collect();
     let (n_obs, n_vars) = (cells.len(), var_index.len());
     let chunk_size = chunk_size.max(1);
     let path = f_path_cells

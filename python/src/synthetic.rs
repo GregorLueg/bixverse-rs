@@ -3,8 +3,8 @@
 //! hands their buffers to numpy. Every index comes back 0-based.
 
 use bixverse_sc_data::sc_synthetic_data::{
-    CellSweepSyntheticParams, CellTypeConfig, DialogueSyntheticParams,
-    create_adt_synthetic_data, create_cellsweep_synthetic_data, create_celltype_sparse_csr_data,
+    CellSweepSyntheticParams, CellTypeConfig, DialogueSyntheticParams, create_adt_synthetic_data,
+    create_cellsweep_synthetic_data, create_celltype_sparse_csr_data,
     create_dialogue_synthetic_data, generate_sample_labels, parse_sample_bias,
 };
 use faer::Mat;
@@ -50,7 +50,9 @@ fn u32_array<'py>(py: Python<'py>, v: &[usize]) -> Bound<'py, PyAny> {
 /// The `(nrows, ncols)` `float64` array.
 fn mat_array<'py>(py: Python<'py>, m: &Mat<f64>) -> PyResult<Bound<'py, PyAny>> {
     let (r, c) = (m.nrows(), m.ncols());
-    let data: Vec<f64> = (0..r).flat_map(|i| (0..c).map(move |j| m[(i, j)])).collect();
+    let data: Vec<f64> = (0..r)
+        .flat_map(|i| (0..c).map(move |j| m[(i, j)]))
+        .collect();
     Ok(data.into_pyarray(py).reshape([r, c])?.into_any())
 }
 
@@ -220,8 +222,8 @@ pub fn synthetic_dialogue_data<'py>(
     params: &Bound<'py, PyAny>,
     seed: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let params: DialogueSyntheticParams = depythonize(params)
-        .map_err(|e| PyValueError::new_err(format!("invalid params: {e}")))?;
+    let params: DialogueSyntheticParams =
+        depythonize(params).map_err(|e| PyValueError::new_err(format!("invalid params: {e}")))?;
     let synthetic = py
         .detach(|| create_dialogue_synthetic_data(&params, seed))
         .map_err(BvErr::from)?;
@@ -280,8 +282,8 @@ pub fn synthetic_cellsweep_data<'py>(
     params: &Bound<'py, PyAny>,
     seed: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let params: CellSweepSyntheticParams = depythonize(params)
-        .map_err(|e| PyValueError::new_err(format!("invalid params: {e}")))?;
+    let params: CellSweepSyntheticParams =
+        depythonize(params).map_err(|e| PyValueError::new_err(format!("invalid params: {e}")))?;
     let synthetic = py
         .detach(|| create_cellsweep_synthetic_data(&params, seed))
         .map_err(BvErr::from)?;
