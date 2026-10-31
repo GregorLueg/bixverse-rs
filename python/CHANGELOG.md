@@ -9,6 +9,48 @@ Requires `bixverse-sc-data` 0.10.0.
 
 **Features**
 
+- The single cell suite of the bixverse R package, ported. `SingleCells`
+  opens the same experiment directories as R (the two binary stores plus the
+  DuckDB with obs and var), so a directory written on one side opens on the
+  other. Module functions take the experiment first and write their results
+  into it, as the R generics do; obs and var come back as polars frames.
+  Parity with R is tested function by function against the R package.
+  - `bv.io`: h5ad, 10x h5 and MTX loaders (single and multi-sample, with
+    prescans), in-memory CSR, saving and reopening, h5ad and Cell Ranger
+    writers, archives, store upgrades, synthetic data and the example data
+    downloaders.
+  - `bv.qc`: gene set proportions, MAD outlier calls with `CellQc`, fixed
+    thresholds, rescue.
+  - `bv.pp`: HVGs (VST, batch aware, residual), PCA, Pearson residuals and
+    scTransform, MAGIC.
+  - `bv.graph`: kNN (all the `ann-search-rs` indices), neighbour graphs,
+    Leiden / Louvain, fast clustering, kNN metrics. `bv.embed`: UMAP, t-SNE,
+    PHATE, densMAP, den-SNE and ForceAtlas2 through manifolds-rs (`embed`
+    extra).
+  - `bv.integrate`: fastMNN, Harmony v1 and v2, Seurat CCA and RPCA, BBKNN,
+    kBET and the integration metrics.
+  - `bv.doublets`: Scrublet, boosted doublet detection, scDblFinder, empty
+    droplet calls and CellSweep ambient RNA removal.
+  - `bv.de`: markers, pseudobulk with edgeR QL, NEBULA, Milo and MELD.
+  - `bv.annotate`: scType and Symphony reference mapping.
+  - `bv.metacells`: SEACells, SuperCells, hdWGCNA-style and MetaCells2 meta
+    cells as `MetaCells`, with their quality metrics.
+  - `bv.traj`: Palantir and PAGA. `bv.trees`: Bonsai cell trees.
+  - `bv.pathways` and `bv.nmf`: module scores, AUCell, VISION, Hotspot, SCENIC /
+    CisTarget regulons, decoupler-style activities, consensus NMF.
+  - `bv.mm`: `SingleCellsMultiModal` with ADT counts, DSB / CLR and WNN.
+  - `bv.lr`: CellPhoneDB and NicheNet-style ligand-receptor analysis.
+    `bv.dialogue`: DIALOGUE multicellular programmes.
+  - `SingleCellsSubset` for sub-clustering, and `bv.pipeline` for per-group
+    pipelines (`Pipeline([...])` or chained with `>>`).
+  - `bv.pl`: the plot data extractors, and matplotlib plots (`plots` extra)
+    for embeddings, features, dot plots, heatmaps, violins, QC, PAGA and Milo.
+  - `bv.params`: every parameter set as a frozen dataclass, generated from the
+    R package's parameter specs, so names and defaults match R.
+- `bixverse-gpu`, a separate wheel (`gpu` extra) with the GPU twins of PCA,
+  kNN, UMAP / t-SNE, Harmony, Scrublet, DE, meta cells, NMF, pathways and
+  Bonsai, under the same module names (`bixverse_gpu.pp.calculate_pca(sc,
+  ...)`).
 - `bixverse.nn` on JAX (`bixverse[jax]`, `backend="jax"`): the same scVI as
   the torch and MLX backends, as pure functions over parameter pytrees with an
   optax Adam and one `jax.jit` per training step. Torch weights convert with
