@@ -533,6 +533,29 @@ fn moe_correct_query(
 // Reference //
 ///////////////
 
+/// Error unless an input has the length it must have.
+///
+/// ### Params
+///
+/// * `name` - Input name, for the message
+/// * `expected` - Required length
+/// * `found` - Supplied length
+///
+/// ### Returns
+///
+/// `Ok(())`, or a [`CoreErrors::LengthMismatch`].
+fn check_len(name: &'static str, expected: usize, found: usize) -> Result<(), ScErrors> {
+    if expected != found {
+        return Err(CoreErrors::LengthMismatch {
+            name,
+            expected,
+            found,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Build a Symphony reference.
 ///
 /// Runs sparse PCA over the HVGs (capturing per-gene means and SDs), runs
@@ -577,17 +600,14 @@ pub fn build_symphony_reference<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(verbose);
     let start = Instant::now();
 
-    assert!(
-        !batch_labels.is_empty(),
-        "Need at least one batch variable for reference Harmony"
-    );
-    for (i, labels) in batch_labels.iter().enumerate() {
-        assert_eq!(
-            labels.len(),
-            cell_indices.len(),
-            "batch_labels[{}] length must equal cell_indices.len()",
-            i
-        );
+    if batch_labels.is_empty() {
+        return Err(CoreErrors::InvalidArgument(
+            "Need at least one batch variable for reference Harmony".into(),
+        )
+        .into());
+    }
+    for labels in batch_labels {
+        check_len("batch_labels", cell_indices.len(), labels.len())?;
     }
 
     if verbosity.normal_verbosity() {
@@ -739,18 +759,9 @@ pub fn symphony_map_query<S: SingleCellReading>(
     let start = Instant::now();
 
     let n_hvgs = reference.gene_indices.len();
-    assert_eq!(
-        ref_to_query_gene_map.len(),
-        n_hvgs,
-        "Gene map length must equal number of reference HVGs"
-    );
-    for (i, labels) in batch_labels_query.iter().enumerate() {
-        assert_eq!(
-            labels.len(),
-            cell_indices_query.len(),
-            "batch_labels_query[{}] length must equal cell_indices_query.len()",
-            i
-        );
+    check_len("ref_to_query_gene_map", n_hvgs, ref_to_query_gene_map.len())?;
+    for labels in batch_labels_query {
+        check_len("batch_labels_query", cell_indices_query.len(), labels.len())?;
     }
 
     let n_q = cell_indices_query.len();
@@ -855,16 +866,11 @@ pub fn symphony_map_query_parts<S: SingleCellReading>(
     let start = Instant::now();
 
     let n_hvgs = ref_gene_means.len();
-    assert_eq!(ref_to_query_gene_map.len(), n_hvgs);
-    assert_eq!(ref_gene_sds.len(), n_hvgs);
-    assert_eq!(ref_loadings.nrows(), n_hvgs);
-    for (i, labels) in batch_labels_query.iter().enumerate() {
-        assert_eq!(
-            labels.len(),
-            cell_indices_query.len(),
-            "batch_labels_query[{}] length must equal cell_indices_query.len()",
-            i
-        );
+    check_len("ref_to_query_gene_map", n_hvgs, ref_to_query_gene_map.len())?;
+    check_len("ref_gene_sds", n_hvgs, ref_gene_sds.len())?;
+    check_len("ref_loadings rows", n_hvgs, ref_loadings.nrows())?;
+    for labels in batch_labels_query {
+        check_len("batch_labels_query", cell_indices_query.len(), labels.len())?;
     }
 
     let n_q = cell_indices_query.len();
@@ -1083,7 +1089,13 @@ pub fn knn_majority_vote(
             for &nb in neighbours {
                 counts[reference_labels[nb]] += 1;
             }
-            let (best, &count) = counts.iter().enumerate().max_by_key(|(_, c)| **c).unwrap();
+            // `max_by_key` returns the last maximum; keying on the reversed
+            // index makes the lowest label win a tie, as documented.
+            let (best, &count) = counts
+                .iter()
+                .enumerate()
+                .max_by_key(|&(i, c)| (*c, std::cmp::Reverse(i)))
+                .expect("n_labels > 0");
             (best, count as f32 / neighbours.len() as f32)
         })
         .unzip()
@@ -1344,5 +1356,16 @@ mod tests {
                 assert!(result[(i, j)].is_finite());
             }
         }
+    }
+
+    #[test]
+    fn test_knn_majority_vote_ties_go_to_lowest_label() {
+        // Query 0: labels 2 and 1 tie at two votes each; query 1: clear win.
+        let reference_labels = vec![2, 2, 1, 1, 0];
+        let knn = vec![vec![0, 1, 2, 3], vec![4, 4, 0]];
+        let (labels, conf) = knn_majority_vote(&knn, &reference_labels, 3);
+        assert_eq!(labels, vec![1, 0]);
+        assert_relative_eq!(conf[0], 0.5);
+        assert_relative_eq!(conf[1], 2.0 / 3.0);
     }
 }
