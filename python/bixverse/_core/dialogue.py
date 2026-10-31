@@ -11,8 +11,7 @@ the `DialogueResult` class. The work runs in Rust.
 `features` is not computed here: per cell type a frame of `cell_id` (the
 meta cell id for meta cells) plus at least two numeric feature columns, rows
 matched to cells by id. Use a PCA per cell type, not a slice of a global
-one. Programmes are numbered from 1, matching their `mcp_01`, ... names;
-every other index is 0-based.
+one. Programmes are 0-based, like every other index, and named `mcp_00`, ...
 
 References:
     Jerby-Arnon & Regev, Nat. Biotechnol., 2022.
@@ -64,7 +63,7 @@ class DialogueResult:
             canonical correlation `pair_cor`.
         mcp_cell_types: Per programme the cell types it spans.
         scores: Per cell type the final programme scores, `cell_id` plus
-            `mcp_01`, ...
+            `mcp_00`, ...
         cca_scores: The same for stage one's canonical scores.
         refit_fidelity: `cell_type` plus one column per programme: the
             correlation between the two. Low means the gene-level refit
@@ -115,7 +114,7 @@ class DialogueResult:
             f"  Shared samples:   {len(self.shared_samples)}",
             f"  Programmes:       {k}",
             *(
-                f"    mcp_{i + 1:02d} - worst pair p: {worst[i]:.4g} | spans "
+                f"    mcp_{i:02d} - worst pair p: {worst[i]:.4g} | spans "
                 f"{len(self.mcp_cell_types[i])} cell type(s)"
                 for i in range(k)
             ),
@@ -364,7 +363,7 @@ def _signature_frame(
         "direction": [],
     }
     for ct, per_type in zip(cell_types, sigs, strict=True):
-        for p, sig in enumerate(per_type, start=1):
+        for p, sig in enumerate(per_type):
             for direction in ("up", "down"):
                 g = sig[direction]
                 rows["cell_type"] += [ct] * len(g)
@@ -397,12 +396,12 @@ def _dialogue_result(
     """
     cell_types = prepped.cell_types
     k = res["emp_p"].shape[0]
-    mcp = [f"mcp_{i + 1:02d}" for i in range(k)]
+    mcp = [f"mcp_{i:02d}" for i in range(k)]
     # Rust orders the pair columns as R's `combn(.., 2)` does
     pairs = list(itertools.combinations(cell_types, 2))
     programmes = pl.DataFrame(
         {
-            "programme": list(range(1, k + 1)) * len(pairs),
+            "programme": list(range(k)) * len(pairs),
             "cell_type_a": [a for a, _ in pairs for _ in range(k)],
             "cell_type_b": [b for _, b in pairs for _ in range(k)],
             "emp_p": res["emp_p"].T.ravel(),
@@ -431,7 +430,7 @@ def _dialogue_result(
     verdicts = pl.DataFrame(
         {
             "cell_type": [cell_types[i] for i in v["cell_type"].tolist()],
-            "programme": (v["programme"].astype(np.int64) + 1).tolist(),
+            "programme": v["programme"].astype(np.int64).tolist(),
             "gene_id": genes[v["gene"]].tolist(),
             "up": v["up"],
             "n_supporting": v["n_supporting"].astype(np.int64),

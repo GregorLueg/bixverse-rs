@@ -425,7 +425,7 @@ def test_dialogue_runs_and_names_everything(dlg):
         assert res.scores[ct]["cell_id"].to_list() == (
             data.obs.filter(pl.col("cell_grp") == ct)["cell_id"].to_list()
         )
-        assert res.scores[ct].columns == ["cell_id", "mcp_01", "mcp_02"]
+        assert res.scores[ct].columns == ["cell_id", "mcp_00", "mcp_01"]
     assert set(res.signatures["list"]) <= {"permissive", "strict"}
     assert res.refit_fidelity["cell_type"].to_list() == list(types)
     assert "DialogueResult" in repr(res)

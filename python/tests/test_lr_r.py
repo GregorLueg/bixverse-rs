@@ -176,8 +176,13 @@ def dlg_data():
 PMD = DialoguePmdParams(k=2, n_permutations=20, abn_c=10, n_genes=12)
 
 
+def _zero_based(want: dict) -> dict:
+    """R numbers programmes from 1; Python from 0."""
+    return {**want, "programme": [p - 1 for p in _as_list(want["programme"])]}
+
+
 def _same_dialogue(got: dialogue.DialogueResult, want: dict) -> None:
-    _same_frame(got.programmes, want["programmes"], "programmes")
+    _same_frame(got.programmes, _zero_based(want["programmes"]), "programmes")
     assert got.cell_types == tuple(_as_list(want["cell_types"]))
     assert got.source_class == want["source_class"]
     assert got.shared_samples == tuple(_as_list(want["shared_samples"]))
@@ -199,8 +204,8 @@ def _same_dialogue(got: dialogue.DialogueResult, want: dict) -> None:
     _close(
         got.refit_fidelity.drop("cell_type").to_numpy(), want["refit_fidelity"], "fid"
     )
-    _same_frame(got.verdicts, want["verdicts"], "verdicts")
-    _same_frame(got.signatures, want["signatures"], "signatures")
+    _same_frame(got.verdicts, _zero_based(want["verdicts"]), "verdicts")
+    _same_frame(got.signatures, _zero_based(want["signatures"]), "signatures")
 
 
 ############
