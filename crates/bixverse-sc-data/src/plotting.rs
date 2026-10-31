@@ -214,23 +214,24 @@ pub fn extract_grouped_gene_stats<S: SingleCellReading>(
     group_ids: &[usize],
     group_levels: &[String],
 ) -> Result<GroupedGeneStats, ScDataErrors> {
-    assert_eq!(
-        cell_indices.len(),
-        group_ids.len(),
-        "cell_indices and group_ids must have equal length"
-    );
+    if cell_indices.len() != group_ids.len() {
+        return Err(ScDataErrors::InvalidArgument(format!(
+            "cell_indices ({}) and group_ids ({}) must have equal length",
+            cell_indices.len(),
+            group_ids.len()
+        )));
+    }
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_groups = group_levels.len();
 
     let mut group_sizes = vec![0usize; n_groups];
     for &g in group_ids {
-        debug_assert!(
-            g < n_groups,
-            "group_id {} out of bounds for {} levels",
-            g,
-            n_groups
-        );
+        if g >= n_groups {
+            return Err(ScDataErrors::InvalidArgument(format!(
+                "group_id {g} out of bounds for {n_groups} levels"
+            )));
+        }
         group_sizes[g] += 1;
     }
 
