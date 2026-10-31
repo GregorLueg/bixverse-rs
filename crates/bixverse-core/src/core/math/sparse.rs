@@ -1900,7 +1900,8 @@ where
 ///
 /// ### Returns
 ///
-/// `SvdResults` containing U (n×k), S (length k), and V (m×k)
+/// `SvdResults` containing U (n×k), S (length k), and V (m×k), signs fixed by
+/// [SvdResults::flip_signs] so repeated runs agree.
 pub fn sparse_svd_lanczos<T, U, F>(
     matrix: &CompressedSparseData2<T, U>,
     n_components: usize,
@@ -2068,11 +2069,13 @@ where
         }
     }
 
-    Ok(SvdResults {
+    let mut res = SvdResults {
         u,
         s: singular_values,
         v,
-    })
+    };
+    res.flip_signs();
+    Ok(res)
 }
 
 ///////////
@@ -2156,6 +2159,11 @@ mod tests {
         let y_norm = 1.25_f64.sqrt();
         let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
         assert!(dot_v.abs() > 0.999);
+
+        // Sign convention: the largest loading is positive, so the pair comes
+        // back as (+x, +y) rather than either sign.
+        assert!(dot_v > 0.999);
+        assert!(dot_u > 0.999);
     }
 
     /// Thirty components of a centred uniform noise matrix match a dense SVD.

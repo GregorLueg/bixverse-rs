@@ -101,6 +101,37 @@ impl<T> SvdResult<T> for SvdResults<T> {
     }
 }
 
+impl<T: Float> SvdResults<T> {
+    /// Fix the sign of every component, in place
+    ///
+    /// Each singular pair is only defined up to a joint sign flip, and
+    /// iterative solvers return either sign depending on their start vector
+    /// and on summation order across threads. The largest-magnitude entry of
+    /// each column of `v` is made positive and the matching column of `u`
+    /// flipped with it, the rule of scikit-learn's `svd_flip`. Using the
+    /// largest entry rather than the first non-zero one keeps the decision
+    /// clear of rounding noise.
+    pub fn flip_signs(&mut self) {
+        for c in 0..self.v.ncols() {
+            let mut pivot = T::zero();
+            for r in 0..self.v.nrows() {
+                let x = self.v[(r, c)];
+                if x.abs() > pivot.abs() {
+                    pivot = x;
+                }
+            }
+            if pivot < T::zero() {
+                for r in 0..self.v.nrows() {
+                    self.v[(r, c)] = -self.v[(r, c)];
+                }
+                for r in 0..self.u.nrows() {
+                    self.u[(r, c)] = -self.u[(r, c)];
+                }
+            }
+        }
+    }
+}
+
 /////////////
 // Helpers //
 /////////////
