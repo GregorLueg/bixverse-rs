@@ -110,8 +110,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 # Generated docstrings and checks run long; the generator owns the layout.
 "bixverse/params/_generated.py" = ["E501"]
 "gpu/bixverse_gpu/params/_generated.py" = ["E501"]
-# A bare expression at the end of a notebook cell is its displayed output.
-"docs/vignettes/*.py" = ["B018"]
+# A bare expression at the end of a notebook cell is its displayed output;
+# markdown tables cannot wrap.
+"docs/vignettes/*.py" = ["B018", "E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["bixverse", "bixverse_gpu"]
