@@ -16,7 +16,7 @@ Batches are sparse CSR by default. Pass ``sparse=False`` for a dense
 scatter over every gene whether or not it holds a count.
 """
 
-from . import _bixverse
+from . import _bixverse, io
 from ._bixverse import (
     BixverseError,
     CellReader,
@@ -24,6 +24,9 @@ from ._bixverse import (
     __core_version__,
     __version__,
 )
+from ._core.db import TableNotFoundError
+from ._core.single_cells import Counts, SingleCells, get_counts
+from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
 from .loader import Batch, CellLoader
 
 __all__ = [
@@ -31,8 +34,19 @@ __all__ = [
     "BixverseError",
     "CellLoader",
     "CellReader",
+    "Counts",
+    "CsrMatrix",
+    "KnnGraph",
+    "MagicLayer",
+    "ScCache",
+    "ScMap",
+    "SingleCells",
     "SparseFileError",
+    "Stamp",
+    "TableNotFoundError",
     "__core_version__",
     "__version__",
     "_bixverse",
+    "get_counts",
+    "io",
 ]
