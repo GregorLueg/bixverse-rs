@@ -75,7 +75,7 @@ use bixverse_rs::single_cell::sc_processing::sctransform::model::{
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::SctGroupedFit;
 use bixverse_rs::single_cell::sc_processing::{
     cellsweep::{
-        CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
+        CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, EmptyDropletCallSpec,
     },
     doublet_detection::BoostParams,
     hvg::ScranTrendParams,
@@ -4258,11 +4258,8 @@ impl FromRList for CellSweepParams {
 
 /// Resolve the empty droplet calling strategy from an R list.
 ///
-/// The method name and its numeric argument arrive as separate list entries,
-/// so the variant is parsed first and then filled in. An unrecognised method
-/// errors rather than falling back, and so does a method whose argument is
-/// missing: a silent zero cutoff would call nothing empty and the model would
-/// then fail much further downstream.
+/// Reads the keys of [EmptyDropletCallSpec], which checks the method and its
+/// argument.
 ///
 /// ### Params
 ///
@@ -4275,34 +4272,16 @@ impl FromRList for CellSweepParams {
 pub fn empty_droplet_call_from_r_list(r_list: List) -> Result<EmptyDropletCall> {
     let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
-    let method = params
-        .get("method")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Other("Empty droplet params need a 'method' entry.".to_string()))?;
+    let spec = EmptyDropletCallSpec {
+        method: params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        umi_cutoff: r_list_count(&params, "umi_cutoff")?.map(|x| x as u32),
+        expected_cells: r_list_count(&params, "expected_cells")?,
+    };
 
-    let call = parse_empty_droplet_call(method).ok_or_else(|| {
-        Error::Other(format!(
-            "'{method}' is not a known empty droplet method. Use one of 'supplied', 'umi_cutoff', 'expected_cells', 'knee'."
-        ))
-    })?;
-
-    Ok(match call {
-        EmptyDropletCall::UmiCutoff(_) => {
-            let cutoff = r_list_count(&params, "umi_cutoff")?.ok_or_else(|| {
-                Error::Other("method = 'umi_cutoff' needs a 'umi_cutoff' entry.".to_string())
-            })?;
-            EmptyDropletCall::UmiCutoff(cutoff as u32)
-        }
-        EmptyDropletCall::ExpectedCells(_) => {
-            let expected = r_list_count(&params, "expected_cells")?.ok_or_else(|| {
-                Error::Other(
-                    "method = 'expected_cells' needs an 'expected_cells' entry.".to_string(),
-                )
-            })?;
-            EmptyDropletCall::ExpectedCells(expected)
-        }
-        other => other,
-    })
+    EmptyDropletCall::try_from(spec).map_err(Error::Other)
 }
 
 /// Generate a CellSweepSample from an R list

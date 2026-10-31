@@ -9,13 +9,15 @@
 
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::Deserialize;
 use std::time::Instant;
 
 use crate::prelude::*;
 use crate::sc_analysis::fast_clusters::*;
-use crate::sc_processing::pca::PcaSolver;
+use crate::sc_processing::pca::{PcaSolver, de_pca_solver};
 use crate::sc_processing::utils_doublets::*;
 use bixverse_core::core::math::stats::*;
+use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::knn_graph::*;
 
@@ -27,7 +29,12 @@ use bixverse_methods::graph::knn_graph::*;
 ///
 /// Controls preprocessing, simulation, clustering, iteration count and
 /// the voting-based doublet calling.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_boost()` list: the kNN, fast
+/// cluster and k-means keys are read from the same level. Missing keys take
+/// [`BoostParams::default`]; `louvain_iters` has no R key.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct BoostParams {
     // -- processing --
     /// Whether to log-transform counts after normalisation.
@@ -57,8 +64,8 @@ pub struct BoostParams {
     /// Number of principal components.
     pub no_pcs: usize,
     /// Which PCA solver to use, see [PcaSolver].
+    #[serde(deserialize_with = "de_pca_solver")]
     pub svd_solver: PcaSolver,
-    /// Resolution parameter for Louvain clustering.
 
     // -- boosted --
     /// Ratio of simulated doublets to observed cells.
@@ -79,16 +86,58 @@ pub struct BoostParams {
     // -- knn --
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
 
     // -- fast cluster --
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
     /// The k-means for the fast clustering path, standard or mini-batch
+    #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
     /// distance, Louvain iterations and level are set from the fields above.
+    #[serde(flatten)]
     pub fast_cluster_params: FastClusterParams,
+}
+
+/// The fallbacks of the R list conversion. `params_boost()` always sends
+/// every key, and its defaults differ from these.
+impl Default for BoostParams {
+    fn default() -> Self {
+        Self {
+            log_transform: false,
+            mean_center: true,
+            normalise_variance: true,
+            target_size: None,
+            min_gene_var_pctl: 0.85,
+            hvg_method: "vst".to_string(),
+            loess_span: 0.3,
+            clip_max: None,
+            binning_strategy: "equal_width".to_string(),
+            n_bins: 20,
+            no_pcs: 30,
+            svd_solver: PcaSolver::Covariance,
+            boost_rate: 0.25,
+            replace: false,
+            resolution: 1.0,
+            louvain_iters: 10,
+            n_iters: 10,
+            p_thresh: 1e-7,
+            voter_thresh: 0.9,
+            knn_params: KnnParams::default(),
+            fast_cluster: false,
+            fast_cluster_kmeans: CpuKMeans::new(
+                CpuKMeansKind::MiniBatch {
+                    batch_size: 4096,
+                    drift_threshold: 1e-4,
+                    lr_alpha: 1.0,
+                },
+                KMeansParamsWrappers::default(),
+            ),
+            fast_cluster_params: FastClusterParams::default(),
+        }
+    }
 }
 
 /// Results from the Boost doublet detection algorithm.

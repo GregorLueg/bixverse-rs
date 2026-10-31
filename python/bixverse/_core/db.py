@@ -1095,6 +1095,35 @@ def obs_from_multi_duckdb(
 
 
 @beartype
+def obs_from_duckdb_subset(
+    con: duckdb.DuckDBPyConnection, source: Path, cell_idx: np.ndarray
+) -> None:
+    """Build `obs` from a subset of a source DuckDB's rows, in a given order.
+
+    R's `populate_obs_from_duckdb_subset`: every source column bar
+    `cell_idx` and `to_keep`, rows picked by position so the caller's order
+    survives, renumbered from one.
+
+    Args:
+        con: Open connection to the target.
+        source: The source DuckDB.
+        cell_idx: 0-based source cell indices, in target order.
+
+    Raises:
+        ValueError: If an index is beyond the source obs.
+    """
+    with connect(source, read_only=True) as src:
+        frame = _fetch(src, "SELECT * FROM obs ORDER BY cell_idx")
+    if len(cell_idx) and int(cell_idx.max()) >= frame.height:
+        raise ValueError(
+            f"cell_idx goes up to {int(cell_idx.max())} but the source obs has "
+            f"{frame.height} rows."
+        )
+    frame = frame.drop([c for c in ("cell_idx", "to_keep") if c in frame.columns])
+    populate_from_frame(con, "obs", frame[cell_idx.astype(np.int64)])
+
+
+@beartype
 def var_from_duckdb_reordered(
     con: duckdb.DuckDBPyConnection, source: Path, gene_ids: list[str]
 ) -> None:

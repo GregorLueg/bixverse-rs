@@ -495,3 +495,42 @@ def cell_type_asw(
 ) -> dict[str, Any]: ...
 def pcr(embd: np.ndarray, batches: np.ndarray) -> dict[str, Any]: ...
 def graph_connectivity(knn: np.ndarray, labels: np.ndarray) -> dict[str, Any]: ...
+def scrublet(
+    f_path_gene: str,
+    f_path_cell: str,
+    cells: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    streaming: bool = False,
+    return_combined_pca: bool = False,
+    return_pairs: bool = False,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def boost(
+    f_path_gene: str,
+    f_path_cell: str,
+    cells: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    streaming: bool = False,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def scdblfinder(
+    f_path_gene: str,
+    f_path_cell: str,
+    cells: np.ndarray,
+    params: dict[str, object],
+    return_features: bool = False,
+    seed: int = 42,
+    streaming: bool = False,
+    verbose: bool = False,
+) -> dict[str, Any]: ...
+def empty_droplets(lib_size: np.ndarray, params: dict[str, object]) -> np.ndarray: ...
+def cellsweep(
+    f_path_source: str,
+    f_path_target: str,
+    samples: list[dict[str, Any]],
+    params: dict[str, object],
+    target_size: float,
+    verbose: bool = False,
+) -> dict[str, Any]: ...

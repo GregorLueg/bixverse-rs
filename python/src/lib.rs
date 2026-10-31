@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 mod batch;
+mod doublets;
 mod error;
 mod graph;
 mod h5ad_write;
@@ -106,6 +107,11 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(integrate::cell_type_asw, m)?,
         wrap_pyfunction!(integrate::pcr, m)?,
         wrap_pyfunction!(integrate::graph_connectivity, m)?,
+        wrap_pyfunction!(doublets::scrublet, m)?,
+        wrap_pyfunction!(doublets::boost, m)?,
+        wrap_pyfunction!(doublets::scdblfinder, m)?,
+        wrap_pyfunction!(doublets::empty_droplets, m)?,
+        wrap_pyfunction!(doublets::cellsweep, m)?,
     ] {
         m.add_function(f)?;
     }
