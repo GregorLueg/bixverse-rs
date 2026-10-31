@@ -2,11 +2,12 @@
 MetaCells2.
 
 The port of R's `generate_bt_meta_cells_sc`, `generate_seacells_sc`,
-`generate_supercells_sc`, `generate_metacells2_sc` and
-`meta_cells_per_group`. Each takes a `SingleCells` or `SingleCellsSubset`,
-leaves it untouched, and returns a `MetaCells`. The search, the partition and
-the aggregation run in Rust over the cell-major store; this layer resolves
-the embedding, kNN and cell sets and assembles the result.
+`generate_supercells_sc` and `generate_metacells2_sc`. Each takes a
+`SingleCells` or `SingleCellsSubset`, leaves it untouched, and returns a
+`MetaCells`. The search, the partition and the aggregation run in Rust over
+the cell-major store; this layer resolves the embedding, kNN and cell sets
+and assembles the result. `meta_cells_per_group` lives in
+`bixverse._core.pipeline`.
 
     >>> params = BtMetacellsParams(target_no_metacells=200)
     >>> mc = generate_bt_meta_cells(sc, params=params)
@@ -15,7 +16,6 @@ the embedding, kNN and cell sets and assembles the result.
 
 from __future__ import annotations
 
-import logging
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -25,9 +25,8 @@ import polars as pl
 from beartype import beartype
 
 from bixverse import _bixverse
-from bixverse._core.metacells import MetaCells, build_metacells, merge_meta_cells
-from bixverse._core.single_cells import SingleCells
-from bixverse._core.subset import ScOrScSubset, SingleCellsSubset
+from bixverse._core.metacells import MetaCells, build_metacells
+from bixverse._core.subset import ScOrScSubset
 from bixverse.params import (
     BtMetacellsParams,
     Metacells2DacParams,
@@ -36,16 +35,6 @@ from bixverse.params import (
     SupercellParams,
     to_rust,
 )
-
-###########
-# Globals #
-###########
-
-# R's `.sc_metacell_generator`; MetaCells2 is not one of its choices.
-PER_GROUP_METHODS: tuple[str, ...] = ("bootstrapped", "seacells", "supercells")
-
-logger = logging.getLogger(__name__)
-
 
 ###########
 # Helpers #
@@ -457,74 +446,3 @@ def generate_metacells2(
     return build_metacells(
         res, var, "metacells2", cells_to_keep=sc.cells_to_keep, other_data=other
     )
-
-
-#############
-# Per group #
-#############
-
-
-@beartype
-def meta_cells_per_group(
-    sc: SingleCells,
-    group_col: str,
-    *,
-    method: str = "bootstrapped",
-    mc_params: dict[str, object] | None = None,
-    prep: Callable[[SingleCellsSubset], object] | None = None,
-    groups: Sequence[str] | None = None,
-    feature_space: str = "intersect",
-    verbose: bool = False,
-) -> MetaCells:
-    """Source-pure meta cells: one generator run per group, merged, as R's
-    `meta_cells_per_group`.
-
-    Meta cells never mix two groups (patients, samples), yet end up in one
-    object. The generators need an embedding and usually a kNN, so `prep`
-    runs on each subset first, e.g. HVGs, PCA and `find_neighbours`; it
-    stands in for R's `pipeline`.
-
-    Args:
-        sc: The experiment.
-        group_col: obs column to split on.
-        method: `"bootstrapped"`, `"seacells"` or `"supercells"`.
-        mc_params: Keyword arguments for the generator; SEACells needs
-            `seacell_params`.
-        prep: Called on each subset before its meta cells are generated.
-        groups: The levels to use; `None` for every level among the kept
-            cells, in order of appearance.
-        feature_space: Passed to `merge_meta_cells`.
-        verbose: Controls verbosity.
-
-    Returns:
-        The merged meta cells, a `source_id` column in obs.
-
-    Raises:
-        ValueError: On an unknown method or a missing column.
-    """
-    generators: dict[str, Callable[..., MetaCells | None]] = {
-        "bootstrapped": generate_bt_meta_cells,
-        "seacells": generate_seacells,
-        "supercells": generate_supercells,
-    }
-    if method not in generators:
-        raise ValueError(f"method must be one of {PER_GROUP_METHODS}, got '{method}'")
-    if group_col not in sc.obs_columns():
-        raise ValueError(f"Column '{group_col}' not found in obs.")
-    if groups is None:
-        values = sc.obs(cols=[group_col], filtered=True)[group_col].cast(pl.String)
-        groups = values.unique(maintain_order=True).to_list()
-
-    fn = generators[method]
-    out: dict[str, MetaCells] = {}
-    for g in groups:
-        if verbose:
-            logger.info("Generating meta cells for group '%s'.", g)
-        sub = SingleCellsSubset(sc, group_col, g)
-        if prep is not None:
-            prep(sub)
-        mc = fn(sub, **(mc_params or {}))
-        if mc is None:
-            raise ValueError(f"No meta cells for group '{g}'; see the warning above.")
-        out[str(g)] = mc
-    return merge_meta_cells(out, feature_space=feature_space, verbose=verbose)

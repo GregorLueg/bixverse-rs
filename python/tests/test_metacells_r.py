@@ -39,6 +39,7 @@ from bixverse.params import (
     SeacellsParams,
     SupercellParams,
 )
+from bixverse.pipeline import step_hvg, step_neighbours, step_pca
 
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_metacells_fixtures.R"
 
@@ -405,16 +406,12 @@ def test_subset_bootstrapped_matches_r(ref, sc):
 
 
 def test_per_group_matches_r(ref, sc):
-    def prep(sub: bv.SingleCellsSubset) -> None:
-        pp.find_hvg(sub, hvg_no=100)
-        pp.calculate_pca(sub, 10)
-        graph.find_neighbours(sub)
-
+    prep = step_hvg(hvg_no=100) >> step_pca(10) >> step_neighbours()
     mc = metacells.meta_cells_per_group(
         sc,
         "cell_grp",
         mc_params={"params": BtMetacellsParams(target_no_metacells=10, k=10)},
-        prep=prep,
+        pipeline=prep,
     )
     want = ref["per_group"]
     _check_mc(mc, want)

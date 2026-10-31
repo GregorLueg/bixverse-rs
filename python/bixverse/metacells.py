@@ -19,7 +19,6 @@ from bixverse._core.metacells_generate import (
     generate_metacells2,
     generate_seacells,
     generate_supercells,
-    meta_cells_per_group,
 )
 from bixverse._core.metacells_metrics import (
     calc_diffusion_coordinates,
@@ -29,6 +28,7 @@ from bixverse._core.metacells_metrics import (
     calc_meta_cell_separation,
     get_meta_cell_purity,
 )
+from bixverse._core.pipeline import meta_cells_per_group
 
 __all__ = [
     "MetaCellAssignment",
