@@ -12,6 +12,7 @@ use crate::r_rust_interface::{
 };
 use crate::{FromRList, FromRMap, ToRList};
 use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
+use bixverse_rs::graph::leiden::parse_community_algorithm;
 use bixverse_rs::ml::clustering::hierarchical::parse_linkage_method;
 use bixverse_rs::ml::clustering::k_means::{KMeansParamsWrappers, KMeansType, parse_k_means};
 use bixverse_rs::ml::gp::LandmarkGpParams;
@@ -926,15 +927,11 @@ impl FromRList for FastClusterParams {
 
         let mut community = defaults.community;
         if let Some(a) = params.get("algorithm").and_then(|v| v.as_str()) {
-            community.refine = match a.to_lowercase().as_str() {
-                "louvain" => false,
-                "leiden" => true,
-                other => {
-                    return Err(Error::Other(format!(
-                        "Unknown algorithm '{other}'; expected 'louvain' or 'leiden'"
-                    )));
-                }
-            };
+            community.refine = parse_community_algorithm(a).ok_or_else(|| {
+                Error::Other(format!(
+                    "Unknown algorithm '{a}'; expected 'louvain' or 'leiden'"
+                ))
+            })?;
         }
         community.beta = r_list_real(&params, "beta")?.unwrap_or(community.beta);
         community.n_iterations =

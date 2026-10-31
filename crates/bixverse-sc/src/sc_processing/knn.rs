@@ -8,6 +8,7 @@ use ann_search_rs::*;
 use faer::{MatRef, RowRef};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -72,6 +73,45 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
     }
 }
 
+/// Deserialise a kNN method name, checked through [parse_knn_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_knn_method<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_knn_method(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "knn_method must be one of 'kmknn', 'annoy', 'hnsw', 'nndescent', \
+             'nndescent_graph', 'exhaustive' or 'ivf', got '{s}'"
+        ))),
+    }
+}
+
+/// Deserialise a distance metric name, checked through `parse_ann_dist`
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_ann_dist<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_ann_dist(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "distance must be one of 'euclidean', 'cosine' or 'manhattan', got '{s}'"
+        ))),
+    }
+}
+
 ////////////
 // Params //
 ////////////
@@ -80,17 +120,24 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 ///
 /// Contains the parameters for the kNN searches used in the single cell parts
 /// of this crate
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the kNN keys of the R `params_knn_defaults()` list
+/// (`n_trees` for [`KnnParams::n_tree`]); missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct KnnParams {
     ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`, `"ivf"`,
     /// `"kmknn"`, `"exhaustive"`, `"nndescent"` or `"nndescent_graph"` are
     /// supported for now.
+    #[serde(deserialize_with = "de_knn_method")]
     pub knn_method: String,
     /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
+    #[serde(deserialize_with = "de_ann_dist")]
     pub ann_dist: String,
     /// Number of neighbours to return
     pub k: usize,
     /// Annoy: Number of trees to build
+    #[serde(rename = "n_trees")]
     pub n_tree: usize,
     /// Annoy: optional search budget. If not provided, will default to k * 20
     /// per tree.
@@ -1037,6 +1084,133 @@ pub fn generate_knn_with_dist(
     }
 
     Ok((indices, distances))
+}
+
+/// Pad the rows a search left short of `k` neighbours
+///
+/// A short row repeats its last neighbour (and distance); an empty row
+/// points at itself at distance 0. Only `"nndescent_graph"` leaves rows
+/// short; every index search fills them.
+///
+/// ### Params
+///
+/// * `indices` - Neighbour indices per node, padded in place
+/// * `distances` - Optional distances per node, padded alongside
+/// * `k` - Target row length
+///
+/// ### Returns
+///
+/// The number of rows that were padded.
+pub fn pad_knn_rows(
+    indices: &mut [Vec<usize>],
+    mut distances: Option<&mut [Vec<f32>]>,
+    k: usize,
+) -> usize {
+    let mut padded = 0;
+    for (i, idx_row) in indices.iter_mut().enumerate() {
+        if idx_row.len() >= k {
+            continue;
+        }
+        padded += 1;
+        let (fill_idx, fill_dist) = match (idx_row.last(), distances.as_ref()) {
+            (Some(&last), Some(dists)) => (last, dists[i].last().copied().unwrap_or(0.0)),
+            (Some(&last), None) => (last, 0.0),
+            (None, _) => (i, 0.0),
+        };
+        idx_row.resize(k, fill_idx);
+        if let Some(dists) = distances.as_mut() {
+            dists[i].resize(k, fill_dist);
+        }
+    }
+    padded
+}
+
+/// Recall and distance ratio of one kNN against a reference kNN
+#[derive(Clone, Debug)]
+pub struct KnnMetrics {
+    /// Neighbours shared with the reference, per node
+    pub all_matches: Vec<usize>,
+    /// Summed query distance over summed reference distance, per node. Nodes
+    /// whose reference distances sum to (almost) zero are skipped, so this
+    /// can be shorter than `all_matches`.
+    pub all_ratios: Vec<f64>,
+    /// Mean of `matches / k` over all nodes
+    pub final_recall: f64,
+    /// Mean of `all_ratios`
+    pub final_ratio: f64,
+}
+
+/// Reference distance sums at or below this are skipped in the ratio.
+const KNN_RATIO_MIN_SUM: f64 = 1e-12;
+
+/// Compare a kNN against a reference kNN
+///
+/// The per-node counts run in parallel; the means are summed in node order,
+/// so the result does not depend on the thread count.
+///
+/// ### Params
+///
+/// * `idx_ref` - Reference neighbour indices, row-major, `k` per node
+/// * `dist_ref` - Reference distances, same layout
+/// * `idx_query` - Query neighbour indices, same layout
+/// * `dist_query` - Query distances, same layout
+/// * `k` - Neighbours per node
+///
+/// ### Returns
+///
+/// The [`KnnMetrics`], or an error if the layouts do not match.
+pub fn compare_knn(
+    idx_ref: &[u32],
+    dist_ref: &[f32],
+    idx_query: &[u32],
+    dist_query: &[f32],
+    k: usize,
+) -> Result<KnnMetrics, ScErrors> {
+    if k == 0
+        || !idx_ref.len().is_multiple_of(k)
+        || idx_ref.len() != idx_query.len()
+        || dist_ref.len() != idx_ref.len()
+        || dist_query.len() != idx_ref.len()
+    {
+        return Err(CoreErrors::InvalidArgument(format!(
+            "both kNNs need the same number of nodes and k = {k} neighbours each, with \
+             one distance per neighbour"
+        ))
+        .into());
+    }
+
+    let all_matches: Vec<usize> = idx_ref
+        .par_chunks(k)
+        .zip(idx_query.par_chunks(k))
+        .map(|(a, b)| {
+            let set: FxHashSet<u32> = a.iter().copied().collect();
+            let query: FxHashSet<u32> = b.iter().copied().collect();
+            query.intersection(&set).count()
+        })
+        .collect();
+    let final_recall = all_matches
+        .iter()
+        .map(|&m| m as f64 / k as f64)
+        .sum::<f64>()
+        / all_matches.len() as f64;
+
+    let all_ratios: Vec<f64> = dist_ref
+        .chunks(k)
+        .zip(dist_query.chunks(k))
+        .filter_map(|(a, b)| {
+            let sum_a: f64 = a.iter().map(|&x| x as f64).sum();
+            let sum_b: f64 = b.iter().map(|&x| x as f64).sum();
+            (sum_a > KNN_RATIO_MIN_SUM).then(|| sum_b / sum_a)
+        })
+        .collect();
+    let final_ratio = all_ratios.iter().sum::<f64>() / all_ratios.len() as f64;
+
+    Ok(KnnMetrics {
+        all_matches,
+        all_ratios,
+        final_recall,
+        final_ratio,
+    })
 }
 
 ///////////

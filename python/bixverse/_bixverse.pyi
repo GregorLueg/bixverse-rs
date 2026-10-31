@@ -381,3 +381,36 @@ def magic_impute(
     params: dict[str, object],
     verbose: bool = False,
 ) -> np.ndarray: ...
+def knn_with_dist(
+    embd: np.ndarray,
+    params: dict[str, object],
+    validate_index: bool = False,
+    seed: int = 42,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]: ...
+def knn_metrics(
+    idx_ref: np.ndarray,
+    dist_ref: np.ndarray,
+    idx_query: np.ndarray,
+    dist_query: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float, float]: ...
+def knn_graph(
+    indices: np.ndarray,
+    distances: np.ndarray | None,
+    params: dict[str, object],
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def leiden(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    params: dict[str, object],
+) -> np.ndarray: ...
+def fast_cluster(
+    embd: np.ndarray,
+    resolutions: list[float],
+    params: dict[str, object],
+    n_seeds: int = 1,
+    seed: int = 42,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]: ...

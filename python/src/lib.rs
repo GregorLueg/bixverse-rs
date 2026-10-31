@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 mod batch;
 mod error;
+mod graph;
 mod h5ad_write;
 mod io;
 mod loader;
@@ -87,6 +88,11 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(pp::sct_corrected_counts, m)?,
         wrap_pyfunction!(pp::gene_store_to_cell_store_py, m)?,
         wrap_pyfunction!(pp::magic_impute, m)?,
+        wrap_pyfunction!(graph::knn_with_dist, m)?,
+        wrap_pyfunction!(graph::knn_metrics, m)?,
+        wrap_pyfunction!(graph::knn_graph, m)?,
+        wrap_pyfunction!(graph::leiden, m)?,
+        wrap_pyfunction!(graph::fast_cluster, m)?,
     ] {
         m.add_function(f)?;
     }

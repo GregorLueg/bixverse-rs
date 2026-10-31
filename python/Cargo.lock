@@ -216,6 +216,7 @@ name = "bixverse-py"
 version = "0.3.0"
 dependencies = [
  "bixverse-core",
+ "bixverse-methods",
  "bixverse-sc",
  "bixverse-sc-data",
  "crossbeam-channel",

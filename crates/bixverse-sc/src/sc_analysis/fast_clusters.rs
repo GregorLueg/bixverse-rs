@@ -18,18 +18,22 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 use std::fmt::Debug;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::knn::generate_knn_with_dist;
+use crate::sc_processing::knn::{de_ann_dist, generate_knn_with_dist};
 use bixverse_core::core::math::vector_helpers::{mean_nan, median};
 use bixverse_core::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_core::ml::clustering::k_means::*;
 use bixverse_methods::graph::graph_metrics::conductance_undirected;
 use bixverse_methods::graph::graph_structures::*;
 use bixverse_methods::graph::knn_graph::*;
-use bixverse_methods::graph::leiden::{LeidenParams, community_detection};
+use bixverse_methods::graph::leiden::{
+    LeidenParams, community_detection, parse_community_algorithm, parse_leiden_iterations,
+    parse_local_moving,
+};
 
 ///////////
 // Const //
@@ -154,7 +158,11 @@ pub enum CpuKMeansKind {
 }
 
 /// CPU k-means coarsener.
-#[derive(Clone, Debug, Default)]
+///
+/// Deserialises from the k-means keys of the R `params_sc_fast_cluster()`
+/// list, see [`CpuKMeansSpec`].
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(try_from = "CpuKMeansSpec")]
 pub struct CpuKMeans {
     /// Standard or mini-batch
     pub kind: CpuKMeansKind,
@@ -175,6 +183,89 @@ impl CpuKMeans {
     /// Initialised self
     pub fn new(kind: CpuKMeansKind, params: KMeansParamsWrappers) -> Self {
         Self { kind, params }
+    }
+}
+
+/// The keys a [`CpuKMeans`] deserialises from, as
+/// `cpu_kmeans_from_r_list` reads them; missing keys take its defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct CpuKMeansSpec {
+    /// `"standard"` or `"minibatch"`
+    pub km_type: String,
+    /// Mini-batch: cells per batch
+    pub batch_size: usize,
+    /// Mini-batch: stop once the centroids move less than this
+    pub drift_threshold: f32,
+    /// Mini-batch: learning rate exponent
+    pub lr_alpha: f32,
+    /// k-means iterations
+    pub k_means_iter: usize,
+    /// Optional initialisation, see `parse_kmeans_init`
+    pub k_means_init: Option<String>,
+    /// Optional GEMM assignment
+    pub gemm: Option<bool>,
+    /// Optional Hamerly bounds
+    pub hamerly: Option<bool>,
+}
+
+impl Default for CpuKMeansSpec {
+    fn default() -> Self {
+        Self {
+            km_type: "standard".to_string(),
+            batch_size: 4096,
+            drift_threshold: 1e-4,
+            lr_alpha: 1.0,
+            k_means_iter: 30,
+            k_means_init: None,
+            gemm: None,
+            hamerly: None,
+        }
+    }
+}
+
+impl TryFrom<CpuKMeansSpec> for CpuKMeans {
+    type Error = String;
+
+    /// Check the names and assemble the coarsener.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`CpuKMeans`], or an error naming an unknown `km_type` or
+    /// initialisation.
+    fn try_from(spec: CpuKMeansSpec) -> Result<Self, String> {
+        let kind = match parse_k_means(&spec.km_type) {
+            Some(KMeansType::StandardKMeans) => CpuKMeansKind::Standard,
+            Some(KMeansType::MiniBatchKMeans) => CpuKMeansKind::MiniBatch {
+                batch_size: spec.batch_size,
+                drift_threshold: spec.drift_threshold,
+                lr_alpha: spec.lr_alpha,
+            },
+            None => {
+                return Err(format!(
+                    "km_type must be 'standard' or 'minibatch', got '{}'",
+                    spec.km_type
+                ));
+            }
+        };
+        let init = spec
+            .k_means_init
+            .map(|s| {
+                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
+            })
+            .transpose()?;
+        let path = match (spec.gemm, spec.hamerly) {
+            (None, None) => None,
+            (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
+        };
+        Ok(CpuKMeans::new(
+            kind,
+            KMeansParamsWrappers::new(spec.k_means_iter, init, path),
+        ))
     }
 }
 
@@ -247,7 +338,11 @@ impl Default for CentroidGraph {
 
 /// Parameters for fast clustering. The coarsening backend is passed
 /// separately, see [`Coarsener`].
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_fast_cluster()` list, see
+/// [`FastClusterParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "FastClusterParamsSpec")]
 pub struct FastClusterParams {
     /// Number of k-means centroids, clamped below the number of cells
     pub n_centroids: usize,
@@ -282,6 +377,121 @@ impl Default for FastClusterParams {
             multi_level: true,
             max_evals: 10,
         }
+    }
+}
+
+/// The keys a [`FastClusterParams`] deserialises from, as its R parser reads
+/// them; missing keys take [`FastClusterParams::default`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct FastClusterParamsSpec {
+    /// Number of k-means centroids; `None` keeps the default
+    pub n_centroids: Option<usize>,
+    /// `"euclidean"` or `"cosine"`
+    #[serde(deserialize_with = "de_ann_dist")]
+    pub dist: String,
+    /// Build the cell-mediated graph instead of the centroid kNN
+    pub cell_mediated: bool,
+    /// Cell-mediated: nearest centroids per cell
+    pub n_anchors: usize,
+    /// Centroid kNN: neighbours per centroid
+    pub centroid_k: usize,
+    /// Centroid kNN: the symmetrisation, from its flat keys
+    #[serde(flatten)]
+    pub sym: KnnSymmetrisation,
+    /// `"louvain"` or `"leiden"`
+    pub algorithm: Option<String>,
+    /// Leiden refinement randomness
+    pub beta: Option<f64>,
+    /// Signed iteration count; negative iterates until stable
+    pub n_iterations: Option<f64>,
+    /// Stop gain when iterating until stable
+    pub min_gain: Option<f64>,
+    /// `"queue"` or `"coloured"`
+    pub local_moving: Option<String>,
+    /// Full multi-level run
+    pub multi_level: bool,
+    /// Cap on node evaluations per local-moving phase
+    pub max_evals: usize,
+}
+
+impl Default for FastClusterParamsSpec {
+    fn default() -> Self {
+        let d = FastClusterParams::default();
+        Self {
+            n_centroids: None,
+            dist: d.dist,
+            cell_mediated: false,
+            n_anchors: 5,
+            centroid_k: match d.graph {
+                CentroidGraph::Knn { k, .. } => k,
+                CentroidGraph::CellMediated { .. } => 15,
+            },
+            sym: KnnSymmetrisation::default(),
+            algorithm: None,
+            beta: None,
+            n_iterations: None,
+            min_gain: None,
+            local_moving: None,
+            multi_level: d.multi_level,
+            max_evals: d.max_evals,
+        }
+    }
+}
+
+impl TryFrom<FastClusterParamsSpec> for FastClusterParams {
+    type Error = String;
+
+    /// Assemble the centroid graph and the community detection settings.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`FastClusterParams`], or an error naming an unusable value.
+    fn try_from(spec: FastClusterParamsSpec) -> Result<Self, String> {
+        let defaults = FastClusterParams::default();
+        let graph = if spec.cell_mediated {
+            CentroidGraph::CellMediated {
+                n_anchors: spec.n_anchors,
+            }
+        } else {
+            CentroidGraph::Knn {
+                k: spec.centroid_k,
+                sym: spec.sym,
+            }
+        };
+
+        let mut community = defaults.community;
+        if let Some(a) = spec.algorithm {
+            community.refine = parse_community_algorithm(&a)
+                .ok_or_else(|| format!("algorithm must be 'louvain' or 'leiden', got '{a}'"))?;
+        }
+        if let Some(v) = spec.n_iterations {
+            community.n_iterations = parse_leiden_iterations(v).ok_or_else(|| {
+                format!(
+                    "n_iterations must be a positive whole number, or negative to iterate \
+                     until stable; got {v}"
+                )
+            })?;
+        }
+        if let Some(s) = spec.local_moving {
+            community.local_moving = parse_local_moving(&s)
+                .ok_or_else(|| format!("local_moving must be 'queue' or 'coloured', got '{s}'"))?;
+        }
+        community.beta = spec.beta.unwrap_or(community.beta);
+        community.min_gain = spec.min_gain.unwrap_or(community.min_gain);
+
+        Ok(Self {
+            n_centroids: spec.n_centroids.unwrap_or(defaults.n_centroids),
+            dist: spec.dist,
+            graph,
+            community,
+            multi_level: spec.multi_level,
+            max_evals: spec.max_evals,
+        })
     }
 }
 

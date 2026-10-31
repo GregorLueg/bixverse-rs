@@ -24,6 +24,8 @@ bixverse-sc = { path = "../crates/bixverse-sc", features = ["multi-modal", "bons
 # system one, so the wheel loads without an HDF5 install. `parquet` hands the
 # h5ad / 10x obs and var to DuckDB.
 bixverse-sc-data = { path = "../crates/bixverse-sc-data", features = ["hdf5-static", "parquet"] }
+# the neighbour graph and Leiden
+bixverse-methods = { path = "../crates/bixverse-methods" }
 # `mad_outlier` for the QC calls; the macOS table below adds Accelerate.
 bixverse-core = { path = "../crates/bixverse-core" }
 crossbeam-channel = "0.5"

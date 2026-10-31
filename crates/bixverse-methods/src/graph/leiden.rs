@@ -27,6 +27,7 @@
 use num_traits::{ToPrimitive, Zero};
 use rand::prelude::*;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -99,6 +100,44 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
     }
 }
 
+/// Parse a community detection algorithm name into the refinement flag.
+///
+/// ### Params
+///
+/// * `s` - `"leiden"` or `"louvain"`, case-insensitive
+///
+/// ### Returns
+///
+/// `Some(true)` for Leiden, `Some(false)` for Louvain, `None` for an unknown
+/// name
+pub fn parse_community_algorithm(s: &str) -> Option<bool> {
+    match s.to_lowercase().as_str() {
+        "leiden" => Some(true),
+        "louvain" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse a signed iteration count, as igraph takes it.
+///
+/// ### Params
+///
+/// * `v` - The count. Negative means "until stable".
+///
+/// ### Returns
+///
+/// `Some(None)` for a negative value, `Some(Some(k))` for a positive whole
+/// number, `None` for 0 or a fraction
+pub fn parse_leiden_iterations(v: f64) -> Option<Option<usize>> {
+    if v < 0.0 {
+        Some(None)
+    } else if v >= 1.0 && v.fract() == 0.0 {
+        Some(Some(v as usize))
+    } else {
+        None
+    }
+}
+
 /// Parameters for [`leiden_sparse_graph`].
 ///
 /// ### Fields
@@ -116,7 +155,11 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
 /// * `local_moving` - How local moving visits the nodes; the parallel modes
 ///   only run on levels of at least `LEIDEN_PAR_MIN_NODES` (4096) nodes,
 ///   smaller ones use the queue
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `leiden_params` list, see
+/// [`LeidenParamsSpec`].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "LeidenParamsSpec")]
 pub struct LeidenParams {
     /// Modularity resolution parameter (gamma)
     pub resolution: f64,
@@ -181,6 +224,83 @@ impl Default for LeidenParams {
             seed: 42,
             local_moving: LocalMoving::Queue,
         }
+    }
+}
+
+/// The keys a [`LeidenParams`] deserialises from; missing keys take
+/// [`LeidenParams::default`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct LeidenParamsSpec {
+    /// Modularity resolution parameter
+    pub resolution: f64,
+    /// Randomness of the refinement merges
+    pub beta: f64,
+    /// Signed iteration count, see [`parse_leiden_iterations`]; `None` keeps
+    /// the default
+    pub n_iterations: Option<f64>,
+    /// Modularity gain at or below which iterating until stable stops
+    pub min_gain: f64,
+    /// Leiden (`true`) or Louvain (`false`)
+    pub refine: bool,
+    /// Random seed
+    pub seed: u64,
+    /// `"queue"` or `"coloured"`
+    pub local_moving: String,
+}
+
+impl Default for LeidenParamsSpec {
+    fn default() -> Self {
+        let d = LeidenParams::default();
+        Self {
+            resolution: d.resolution,
+            beta: d.beta,
+            n_iterations: None,
+            min_gain: d.min_gain,
+            refine: d.refine,
+            seed: d.seed,
+            local_moving: "queue".to_string(),
+        }
+    }
+}
+
+impl TryFrom<LeidenParamsSpec> for LeidenParams {
+    type Error = String;
+
+    /// Check the iteration count and the local-moving name.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`LeidenParams`], or an error naming the unusable value.
+    fn try_from(spec: LeidenParamsSpec) -> Result<Self, String> {
+        let n_iterations = match spec.n_iterations {
+            None => LeidenParams::default().n_iterations,
+            Some(v) => parse_leiden_iterations(v).ok_or_else(|| {
+                format!(
+                    "n_iterations must be a positive whole number, or negative to iterate \
+                     until stable; got {v}"
+                )
+            })?,
+        };
+        let local_moving = parse_local_moving(&spec.local_moving).ok_or_else(|| {
+            format!(
+                "local_moving must be 'queue' or 'coloured', got '{}'",
+                spec.local_moving
+            )
+        })?;
+        Ok(Self {
+            resolution: spec.resolution,
+            beta: spec.beta,
+            n_iterations,
+            min_gain: spec.min_gain,
+            refine: spec.refine,
+            seed: spec.seed,
+            local_moving,
+        })
     }
 }
 

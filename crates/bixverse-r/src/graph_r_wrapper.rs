@@ -7,7 +7,9 @@ use crate::prelude::*;
 use bixverse_rs::graph::knn_graph::{
     KnnSymmetrisation, SNN_PRUNE_DEFAULT, SnnSimilarity, parse_snn_similarity,
 };
-use bixverse_rs::graph::leiden::{LeidenParams, LocalMoving, parse_local_moving};
+use bixverse_rs::graph::leiden::{
+    LeidenParams, LocalMoving, parse_leiden_iterations, parse_local_moving,
+};
 
 //////////////////
 // LeidenParams //
@@ -85,11 +87,11 @@ pub fn r_local_moving(params: &HashMap<&str, Robj>) -> Result<Option<LocalMoving
 pub fn r_leiden_iterations(params: &HashMap<&str, Robj>) -> Result<Option<Option<usize>>> {
     match r_list_real(params, "n_iterations")? {
         None => Ok(None),
-        Some(v) if v < 0.0 => Ok(Some(None)),
-        Some(v) if v >= 1.0 && v.fract() == 0.0 => Ok(Some(Some(v as usize))),
-        Some(v) => Err(Error::Other(format!(
-            "n_iterations must be a positive whole number, or negative to iterate until stable; got {v}"
-        ))),
+        Some(v) => parse_leiden_iterations(v).map(Some).ok_or_else(|| {
+            Error::Other(format!(
+                "n_iterations must be a positive whole number, or negative to iterate until stable; got {v}"
+            ))
+        }),
     }
 }
 
