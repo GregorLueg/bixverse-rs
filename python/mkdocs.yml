@@ -53,6 +53,7 @@ nav:
       - Batch correction: vignettes/single_cell_batch_corrections.ipynb
       - Trajectory inference: vignettes/trajectory_inference.ipynb
       - Meta cells: vignettes/meta_cells.ipynb
+      - Scaling to millions of cells: vignettes/single_cell_big_data.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md
