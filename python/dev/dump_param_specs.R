@@ -183,6 +183,6 @@ for (name in wanted) {
 }
 
 writeLines(
-  jsonlite::toJSON(res, auto_unbox = TRUE, null = "null", digits = NA, pretty = TRUE),
+  jsonlite::toJSON(res, auto_unbox = TRUE, null = "null", digits = I(17), pretty = TRUE),
   out_path
 )

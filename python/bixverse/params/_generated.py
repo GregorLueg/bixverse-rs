@@ -692,7 +692,7 @@ class DialogueRefineParams:
     """
 
     support_p: float = 0.1
-    min_support_fraction: float = 0.333333333333333
+    min_support_fraction: float = 0.3333333333333333
     min_stratum: int = 5
     early_stop_cor: float = 0.95
     permissive_p: float = 0.001
@@ -1444,7 +1444,7 @@ class CellsweepParams:
     ambient_lambda: float = 50.0
     bulk_lambda: float = 10.0
     eps: float = 1e-12
-    log_eps: float = 9.99999999999999e-301
+    log_eps: float = 9.999999999999994e-301
     max_iter: int = 2000
     del0_ll_tol: float = 0.001
     min_ll_tol: float = 1e-06
@@ -2226,7 +2226,7 @@ class Metacells2Params:
     target_metacell_umis: float = 160000.0
     similarity_method: Literal["abs_pearson", "pearson"] = "abs_pearson"
     log_data: bool = True
-    value_regularisation: float = 0.142857142857143
+    value_regularisation: float = 0.14285714285714285
     min_genes: int = 100
     min_gene_total: int = 50
     min_gene_top3: int = 4
