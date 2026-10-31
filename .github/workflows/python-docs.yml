@@ -26,3 +26,6 @@ permissions:
 jobs:
   docs:
     uses: GregorLueg/personal-actions/.github/workflows/python-docs.yml@v1
+    with:
+      # mkdocs-jupyter renders the executed vignette notebooks (no execution)
+      docs-deps: 'mkdocs mkdocs-material mkdocstrings[python] mkdocs-jupyter'
