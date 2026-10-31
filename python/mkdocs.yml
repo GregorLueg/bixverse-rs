@@ -37,6 +37,7 @@ nav:
   - scVI: scvi.md
   - Vignettes:
       - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
+      - Data I/O: vignettes/single_cell_io.ipynb
       - kNN searches: vignettes/knn_searches.ipynb
       - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
       - Plotting: vignettes/single_cell_visualisation.ipynb
