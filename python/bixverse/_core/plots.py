@@ -370,7 +370,8 @@ def _label_centroids(
         ax.text(
             x,
             y,
-            str(lab),
+            # booleans as the legend spells them
+            {True: "TRUE", False: "FALSE"}[lab] if isinstance(lab, bool) else str(lab),
             color=colour,
             fontsize=size * _PT_PER_MM,
             fontweight=font if font in ("bold", "normal") else "normal",
