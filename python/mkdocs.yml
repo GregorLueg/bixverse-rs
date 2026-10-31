@@ -47,12 +47,14 @@ nav:
           - kNN searches: vignettes/knn_searches.ipynb
           - Pearson residuals and scTransform: vignettes/single_cell_residuals.ipynb
           - Doublet detection: vignettes/doublet_detection.ipynb
+          - Ambient RNA removal: vignettes/cell_sweep.ipynb
           - Batch correction: vignettes/single_cell_batch_corrections.ipynb
           - Clustering and annotation: vignettes/cell_type_annotation.ipynb
           - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
           - Meta cells: vignettes/meta_cells.ipynb
           - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
       - Methods:
+          - Differential expression: vignettes/differential_expression.ipynb
           - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
           - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
           - DIALOGUE: vignettes/dialogue.ipynb
