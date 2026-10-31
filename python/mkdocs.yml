@@ -38,6 +38,7 @@ nav:
   - Vignettes:
       - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
       - kNN searches: vignettes/knn_searches.ipynb
+      - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
   - API reference:
       - Top level: api/toplevel.md
       - Loader: api/loader.md
