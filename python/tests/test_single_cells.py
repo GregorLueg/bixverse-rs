@@ -109,8 +109,9 @@ def test_missing_table_raises(tmp_path):
 def test_cell_filter_round_trips_through_to_keep(exp):
     path, _ = exp
     sc = bv.SingleCells(path)
-    sc.set_cells_to_keep([9, 3, 1])
-    assert sc.cells_to_keep.tolist() == [9, 3, 1]
+    sc.set_cells_to_keep([9, 3, 1, 3])
+    # unique and ascending, whatever order is given
+    assert sc.cells_to_keep.tolist() == [1, 3, 9]
     assert sc.shape == (3, N_GENES)
     assert sorted(
         r[0] for r in _raw_sql(path, "SELECT cell_idx FROM obs WHERE to_keep")
@@ -120,7 +121,7 @@ def test_cell_filter_round_trips_through_to_keep(exp):
         10,
     ]
     assert sc.obs(filtered=True)["cell_idx"].to_list() == [1, 3, 9]
-    # a fresh handle reads the filter back from the DuckDB, ascending
+    # a fresh handle reads the same filter back from the DuckDB
     assert bv.SingleCells(path).cells_to_keep.tolist() == [1, 3, 9]
 
     sc.reset_cells_to_keep()
@@ -133,7 +134,7 @@ def test_cell_filter_by_id(exp):
     sc = bv.SingleCells(path)
     with pytest.warns(UserWarning, match="could not be matched"):
         sc.set_cells_to_keep(["cell_04", "nope", "cell_01"])
-    assert sc.cells_to_keep.tolist() == [4, 1]
+    assert sc.cells_to_keep.tolist() == [1, 4]
 
 
 def test_add_obs_aligns_to_kept_cells(exp):
@@ -285,8 +286,8 @@ def test_get_counts_respects_the_cell_filter(exp):
     sc = bv.SingleCells(path)
     sc.set_cells_to_keep([8, 3])
     c = bv.get_counts(sc)
-    np.testing.assert_array_equal(c.cells, [8, 3])
-    np.testing.assert_array_equal(c.scipy_csr().toarray(), dense[[8, 3]])
+    np.testing.assert_array_equal(c.cells, [3, 8])
+    np.testing.assert_array_equal(c.scipy_csr().toarray(), dense[[3, 8]])
 
     picked = bv.get_counts(sc, cells=[1, 3, 8])
     np.testing.assert_array_equal(picked.cells, [3, 8])
@@ -410,7 +411,7 @@ def test_save_and_load_round_trip(exp):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         back = bv.io.load_existing(path)
-    assert back.cells_to_keep.tolist() == [5, 1, 9, 2]
+    assert back.cells_to_keep.tolist() == [1, 2, 5, 9]
     assert back.map.hvg.tolist() == [3, 0]
     np.testing.assert_array_equal(
         back.cache.embeddings["umap"], sc.cache.embeddings["umap"]
@@ -430,7 +431,8 @@ def test_load_reports_a_filter_changed_on_the_other_side(exp):
         db.set_cells_to_keep(con, np.array([1, 2, 3], dtype=np.uint32))
     with pytest.warns(UserWarning, match="differs"):
         back = bv.io.load_existing(path)
-    assert back.cells_to_keep.tolist() == [1, 2]
+    # obs.to_keep is the filter's single source of truth
+    assert back.cells_to_keep.tolist() == [1, 2, 3]
 
 
 def test_half_a_memory_file_is_an_error(exp):

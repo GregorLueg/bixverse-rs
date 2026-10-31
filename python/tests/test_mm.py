@@ -132,7 +132,7 @@ def test_adt_rows_follow_cells_not_store(sc):
         sc.set_cells_to_keep(keep)
     got = mm.get_adt_counts(sc)
     assert sc.adt is not None
-    np.testing.assert_array_equal(got, sc.adt.raw_counts[keep])
+    np.testing.assert_array_equal(got, sc.adt.raw_counts[np.sort(keep)])
 
 
 def test_dsb_checks(adt, sc):

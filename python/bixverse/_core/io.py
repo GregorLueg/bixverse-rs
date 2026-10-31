@@ -146,11 +146,11 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
     with np.load(npz, allow_pickle=False) as fh:
         arrays = {k: fh[k] for k in fh.files}
 
-    from_db = sc.map.cells_to_keep
+    saved_keep = np.unique(arrays["map/cells_to_keep"])
     sc.map = ScMap(
         sc.map.cell_ids,
         sc.map.gene_ids,
-        arrays["map/cells_to_keep"],
+        sc.map.cells_to_keep,
         arrays.get("map/hvg"),
     )
     sc.cache = cache_from_payload(arrays, meta)
@@ -166,11 +166,11 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
                     stacklevel=2,
                 )
 
-    if not np.array_equal(np.sort(sc.map.cells_to_keep), from_db):
+    if not np.array_equal(saved_keep, sc.map.cells_to_keep):
         warnings.warn(
-            f"The saved cell filter ({len(sc.map.cells_to_keep)} cells) differs "
-            f"from obs.to_keep in {db.DB_NAME} ({len(from_db)} cells). The saved "
-            "one is used; call set_cells_to_keep() to adopt the other.",
+            f"The saved cell filter ({len(saved_keep)} cells) differs from "
+            f"obs.to_keep in {db.DB_NAME} ({len(sc.map.cells_to_keep)} cells). "
+            "obs.to_keep is used; cached artefacts from the saved filter are stale.",
             stacklevel=2,
         )
     return sc

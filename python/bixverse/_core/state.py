@@ -141,7 +141,8 @@ class ScMap:
         Raises:
             ValueError: On an index outside the store.
         """
-        self.cells_to_keep = _as_index(self.cells_to_keep, "cells_to_keep")
+        # a filter has no order: unique and ascending, as DuckDB `to_keep` holds it
+        self.cells_to_keep = np.unique(_as_index(self.cells_to_keep, "cells_to_keep"))
         if self.cells_to_keep.size and self.cells_to_keep.max() >= len(self.cell_ids):
             raise ValueError("cells_to_keep holds an index past the last cell")
         if self.hvg is not None:

@@ -215,16 +215,15 @@ def test_permute_square_matches_dense():
     np.testing.assert_allclose(out.scipy_csr().toarray(), dense[np.ix_(order, order)])
 
 
-def test_save_h5ad_reorders_and_skips_stale(data, tmp_path):
+def test_save_h5ad_skips_stale(data, tmp_path):
     sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
-    keep = np.array([7, 3, 50, 1], dtype=np.uint32)
-    sc.set_cells_to_keep(keep)
-    sc.cache.embeddings["umap"] = np.arange(8, dtype=np.float32).reshape(4, 2)
-    sc.stamp("umap")
+    sc.set_cells_to_keep(np.array([7, 3, 50, 20], dtype=np.uint32))
     sc.cache.embeddings["old"] = np.zeros((4, 2), dtype=np.float32)
     sc.stamp("old")
-    sc.set_cells_to_keep(keep[::-1].copy())
-    sc.cache.embeddings["umap"] = sc.cache.embeddings["umap"][::-1].copy()
+    keep = np.array([7, 3, 50, 1], dtype=np.uint32)
+    with pytest.warns(UserWarning, match="stale"):
+        sc.set_cells_to_keep(keep)
+    sc.cache.embeddings["umap"] = np.arange(8, dtype=np.float32).reshape(4, 2)
     sc.stamp("umap")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

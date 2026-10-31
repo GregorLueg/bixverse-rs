@@ -370,14 +370,15 @@ class SingleCells(ScBase):
     def set_cells_to_keep(self, cells: Selection) -> None:
         """Restrict the experiment to a set of cells.
 
-        Updates the map and the `to_keep` column. The order given is the order
-        later results align to. Anything cached was computed on the old cell
-        set; it is kept, not deleted, and a warning names what went stale.
+        Updates the map and the `to_keep` column. The cells are stored unique
+        and ascending; results align to that order, not the order given.
+        Anything cached was computed on the old cell set; it is kept, not
+        deleted, and a warning names what went stale.
 
         Args:
             cells: 0-based store indices or cell ids.
         """
-        idx = self._resolve_cells(cells)
+        idx = np.unique(self._resolve_cells(cells))
         if idx.size == 0:
             raise ValueError("cells must be non-empty")
         self.map.cells_to_keep = idx
