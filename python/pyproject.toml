@@ -38,6 +38,8 @@ mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 jax = ["jax>=0.5", "optax>=0.2"]
 # `bixverse.embed`: UMAP, t-SNE, PHATE and friends.
 embed = ["manifolds-rs>=0.4.1"]
+# The `bixverse.pl` plots. The `extract_*` plot data functions need nothing.
+plots = ["matplotlib>=3.8"]
 
 [dependency-groups]
 dev = [
@@ -47,6 +49,7 @@ dev = [
     "ty>=0.0.1",
     "scipy>=1.9",
     "manifolds-rs>=0.4.1",
+    "matplotlib>=3.8",
 ]
 # mkdocstrings reads the installed package, so a docs build needs the compiled
 # extension present: `maturin develop --release` before `mkdocs build`.

@@ -23,6 +23,7 @@ mod metacells;
 mod mm;
 mod nmf;
 mod pathways;
+mod plot;
 mod pp;
 mod qc;
 mod reader;
@@ -196,6 +197,8 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(lr::cellphonedb, m)?,
         wrap_pyfunction!(dialogue::dialogue_sc, m)?,
         wrap_pyfunction!(dialogue::mc_dialogue, m)?,
+        wrap_pyfunction!(plot::extract_genes_dense, m)?,
+        wrap_pyfunction!(plot::grouped_gene_stats, m)?,
     ] {
         m.add_function(f)?;
     }

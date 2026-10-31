@@ -1197,3 +1197,17 @@ def mc_dialogue(
     refine: dict[str, object],
     verbose: int,
 ) -> dict[str, Any]: ...
+def extract_genes_dense(
+    f_path_gene: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    scale: bool = False,
+    clip: float | None = None,
+) -> np.ndarray: ...
+def grouped_gene_stats(
+    f_path_gene: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    group_ids: np.ndarray,
+    n_groups: int,
+) -> tuple[np.ndarray, np.ndarray]: ...
