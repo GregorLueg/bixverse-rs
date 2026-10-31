@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 mod annotate;
 mod batch;
 mod de;
+mod dialogue;
 mod doublets;
 mod error;
 mod graph;
@@ -17,6 +18,7 @@ mod h5ad_write;
 mod integrate;
 mod io;
 mod loader;
+mod lr;
 mod metacells;
 mod mm;
 mod nmf;
@@ -188,6 +190,12 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(mm::dsb, m)?,
         wrap_pyfunction!(mm::adt_pca, m)?,
         wrap_pyfunction!(mm::wnn, m)?,
+        wrap_pyfunction!(lr::ligand_target_influence, m)?,
+        wrap_pyfunction!(lr::ligand_activity_scores, m)?,
+        wrap_pyfunction!(lr::cluster_expr_stats, m)?,
+        wrap_pyfunction!(lr::cellphonedb, m)?,
+        wrap_pyfunction!(dialogue::dialogue_sc, m)?,
+        wrap_pyfunction!(dialogue::mc_dialogue, m)?,
     ] {
         m.add_function(f)?;
     }

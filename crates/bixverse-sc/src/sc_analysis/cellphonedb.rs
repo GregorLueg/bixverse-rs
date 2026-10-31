@@ -19,6 +19,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use serde::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
@@ -53,7 +54,11 @@ pub struct LrInteraction {
 }
 
 /// Parameters for the CellPhoneDB statistical analysis.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_cellphonedb()` list;
+/// missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, bound(deserialize = "T: BixverseFloat + Deserialize<'de>"))]
 pub struct CellPhoneDbParams<T> {
     /// Number of label permutations.
     pub n_perm: usize,
@@ -691,6 +696,66 @@ pub fn cpdb_deg_gate<T>(
     Ok(relevant)
 }
 
+/// Results of [`cellphonedb_run`].
+#[derive(Clone, Debug)]
+pub struct CellPhoneDbRun<T> {
+    /// Observed statistics. With DEGs, `gate` holds the DEG gate.
+    pub obs: CellPhoneDbObs<T>,
+    /// Permutation p-values, `(interactions, pairs)`. `None` unless the
+    /// statistical analysis ran.
+    pub pvals: Option<Mat<T>>,
+}
+
+/// CellPhoneDB in one of its three flavours.
+///
+/// `statistical` runs [`cellphonedb_statistical`], otherwise
+/// [`cellphonedb_observed`]. With `deg_genes`, the gate is replaced by
+/// [`cpdb_deg_gate`]; the p-values, if any, are left as they are.
+///
+/// ### Params
+///
+/// * `reader` - Gene-based reader. Uses the normalised layer.
+/// * `interactions` - The interactions, resolved to gene indices.
+/// * `clusters` - Disjoint cell indices per cluster.
+/// * `pairs` - Cluster pairs to test. `None` tests all ordered pairs.
+/// * `deg_genes` - Optional differentially expressed gene indices per
+///   cluster, in `clusters` order.
+/// * `statistical` - Compute the permutation p-values.
+/// * `params` - [`CellPhoneDbParams`].
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+///
+/// ### Returns
+///
+/// The [`CellPhoneDbRun`].
+#[allow(clippy::too_many_arguments)]
+pub fn cellphonedb_run<T, S>(
+    reader: &S,
+    interactions: &[LrInteraction],
+    clusters: &[Vec<usize>],
+    pairs: Option<&[(usize, usize)]>,
+    deg_genes: Option<&[Vec<usize>]>,
+    statistical: bool,
+    params: CellPhoneDbParams<T>,
+    verbose: usize,
+) -> Result<CellPhoneDbRun<T>, ScErrors>
+where
+    T: BixverseFloat + Send + Sync,
+    S: SingleCellReading,
+{
+    let (mut obs, pvals) = if statistical {
+        let res =
+            cellphonedb_statistical(reader, interactions, clusters, pairs, Some(params), verbose)?;
+        (res.obs, Some(res.pvals))
+    } else {
+        let obs = cellphonedb_observed(reader, interactions, clusters, pairs, params.threshold)?;
+        (obs, None)
+    };
+    if let Some(deg) = deg_genes {
+        obs.gate = cpdb_deg_gate(interactions, deg, &obs)?;
+    }
+    Ok(CellPhoneDbRun { obs, pvals })
+}
+
 ///////////
 // Tests //
 ///////////
@@ -934,6 +999,64 @@ mod tests {
         let rel = cpdb_deg_gate(&inter, &[vec![1], vec![]], &obs).unwrap();
         // pairs (0,0), (0,1), (1,0), (1,1)
         assert_eq!(rel, vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn test_cpdb_run_dispatches_the_three_methods() {
+        let columns = random_columns(3, 60, 0.8, 4);
+        let matrix = csc_from_columns(&columns);
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let clusters = contiguous_clusters(&[30, 30]);
+        let inter = vec![LrInteraction {
+            partner_a: vec![0, 1],
+            partner_b: vec![2],
+        }];
+        let params = CellPhoneDbParams::<f64>::new(50, 0.1, 3, None);
+
+        let simple = cellphonedb_run(
+            &reader,
+            &inter,
+            &clusters,
+            None,
+            None,
+            false,
+            params.clone(),
+            0,
+        )
+        .unwrap();
+        assert!(simple.pvals.is_none());
+
+        let deg = [vec![1], vec![]];
+        let degs = cellphonedb_run(
+            &reader,
+            &inter,
+            &clusters,
+            None,
+            Some(&deg),
+            false,
+            params.clone(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            degs.obs.gate,
+            cpdb_deg_gate(&inter, &deg, &simple.obs).unwrap()
+        );
+
+        let stat = cellphonedb_run(
+            &reader,
+            &inter,
+            &clusters,
+            None,
+            None,
+            true,
+            params.clone(),
+            0,
+        )
+        .unwrap();
+        let direct =
+            cellphonedb_statistical(&reader, &inter, &clusters, None, Some(params), 0).unwrap();
+        assert_eq!(stat.pvals.unwrap(), direct.pvals);
     }
 
     #[test]

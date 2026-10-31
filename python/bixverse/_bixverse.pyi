@@ -1139,3 +1139,61 @@ def wnn(
     seed: int,
     verbose: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: ...
+def ligand_target_influence(
+    ligand_seeds: list[np.ndarray],
+    ppi_from: np.ndarray,
+    ppi_to: np.ndarray,
+    ppi_weight: np.ndarray,
+    grn_from: np.ndarray,
+    grn_to: np.ndarray,
+    grn_weight: np.ndarray,
+    n_nodes: int,
+    params: dict[str, object],
+) -> np.ndarray: ...
+def ligand_activity_scores(
+    influence: np.ndarray,
+    in_gene_sets: list[list[bool]],
+) -> list[dict[str, np.ndarray]]: ...
+def cluster_expr_stats(
+    f_path_gene: str,
+    gene_indices: np.ndarray,
+    clusters: list[np.ndarray],
+) -> dict[str, np.ndarray]: ...
+def cellphonedb(
+    f_path_gene: str,
+    partner_a: list[np.ndarray],
+    partner_b: list[np.ndarray],
+    clusters: list[np.ndarray],
+    pairs: list[tuple[int, int]] | None,
+    deg_genes: list[np.ndarray] | None,
+    statistical: bool,
+    params: dict[str, object],
+    verbose: int,
+) -> dict[str, Any]: ...
+def dialogue_sc(
+    f_path_gene: str,
+    cell_type_indices: list[np.ndarray],
+    features: list[np.ndarray],
+    sample_ids: np.ndarray,
+    cell_quality: np.ndarray,
+    gene_indices: np.ndarray,
+    pmd: dict[str, object],
+    hlm: dict[str, object],
+    refine: dict[str, object],
+    verbose: int,
+) -> dict[str, Any]: ...
+def mc_dialogue(
+    data: np.ndarray,
+    indices: np.ndarray,
+    indptr: np.ndarray,
+    shape: tuple[int, int],
+    cell_type_indices: list[np.ndarray],
+    features: list[np.ndarray],
+    sample_ids: np.ndarray,
+    cell_quality: np.ndarray,
+    gene_indices: np.ndarray,
+    pmd: dict[str, object],
+    hlm: dict[str, object],
+    refine: dict[str, object],
+    verbose: int,
+) -> dict[str, Any]: ...

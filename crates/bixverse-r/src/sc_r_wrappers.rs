@@ -3848,10 +3848,11 @@ impl FromRMap for PmdParams {
             .and_then(|v| v.as_real())
             .unwrap_or(defaults.mcp_assignment_p);
 
-        // u64 — read as real to dodge R's i32 limit.
+        // u64: a double dodges R's i32 limit, but `params_dialogue_pmd()`
+        // hands over an integer, which `as_real` alone would drop.
         let seed = params
             .get("seed")
-            .and_then(|v| v.as_real())
+            .and_then(|v| v.as_real().or_else(|| v.as_integer().map(f64::from)))
             .map(|v| v as u64)
             .unwrap_or(defaults.seed);
 

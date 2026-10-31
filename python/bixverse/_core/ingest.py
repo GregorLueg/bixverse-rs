@@ -47,12 +47,17 @@ logger = logging.getLogger(__name__)
 @runtime_checkable
 class CsrLike(Protocol):
     """Anything with the three CSR buffers and a shape: a `CsrMatrix` or a
-    `scipy.sparse.csr_matrix` / `csr_array`."""
+    `scipy.sparse.csr_matrix` / `csr_array`. Read-only members, so the
+    frozen `CsrMatrix` satisfies it."""
 
-    data: np.ndarray
-    indices: np.ndarray
-    indptr: np.ndarray
-    shape: tuple[int, int]
+    @property
+    def data(self) -> np.ndarray: ...
+    @property
+    def indices(self) -> np.ndarray: ...
+    @property
+    def indptr(self) -> np.ndarray: ...
+    @property
+    def shape(self) -> tuple[int, int]: ...
 
 
 ###########
