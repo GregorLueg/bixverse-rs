@@ -18,6 +18,10 @@ from bixverse._core.subset import ScOrMc
 from bixverse.params import ScenicParams
 from bixverse_gpu import _bixverse_gpu
 
+__all__ = [
+    "scenic_grn",
+]
+
 ###########
 # Globals #
 ###########

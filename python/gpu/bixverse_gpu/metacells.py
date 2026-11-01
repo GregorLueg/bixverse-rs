@@ -17,6 +17,10 @@ from bixverse._core.subset import ScOrScSubset
 from bixverse.params import SeacellsParams
 from bixverse_gpu import _bixverse_gpu
 
+__all__ = [
+    "generate_seacells",
+]
+
 
 @beartype
 def generate_seacells(

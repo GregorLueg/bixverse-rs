@@ -430,7 +430,19 @@ def run_cell_qc_fixed(
     *,
     groups: Sequence[object] | np.ndarray | pl.Series | None = None,
 ) -> CellQc:
-    """Fixed-threshold cell QC: `run_cell_qc` with MAD off."""
+    """Fixed-threshold cell QC: `run_cell_qc` with MAD off.
+
+    Args:
+        metrics: Metric name to its values, one per cell.
+        cells_to_keep: 0-based store index of each cell, aligned to the
+            metrics.
+        hard_thresholds: Metric name to `{"lower": .., "upper": ..}`
+            (either or both).
+        groups: Optional group label per cell (donor, sample).
+
+    Returns:
+        The calls.
+    """
     return run_cell_qc(
         metrics,
         cells_to_keep,
@@ -543,6 +555,12 @@ def get_data(qc: CellQc) -> pl.DataFrame:
     Columns are R's: the metrics, `cell_idx` (0-based here), `grp`,
     `global_outlier`, then per metric `<m>_is_outlier`, `<m>_mad_outlier`,
     `<m>_hard_outlier` and `<m>_rescued`.
+
+    Args:
+        qc: The calls.
+
+    Returns:
+        One row per cell.
     """
     cols: dict[str, object] = dict(qc.metrics)
     cols["cell_idx"] = qc.cell_idx
@@ -653,6 +671,9 @@ def top_genes_perc(
 @beartype
 def get_available_features(sc: SingleCells) -> pl.DataFrame:
     """Every obs column and gene id, as R's `get_sc_available_features`.
+
+    Args:
+        sc: The experiment.
 
     Returns:
         `feature_name` and `origin` (`"obs"` or `"counts"`).

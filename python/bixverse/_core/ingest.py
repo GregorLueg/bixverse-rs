@@ -417,7 +417,20 @@ def stream_h5ad(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """`load_h5ad(h5ad_streaming=True)`, kept as R keeps it."""
+    """`load_h5ad(h5ad_streaming=True)`, kept as R keeps it.
+
+    Args:
+        directory: The experiment directory, created if missing.
+        h5_path: The h5ad file.
+        qc: Cell and gene QC thresholds and the target size.
+        raw_count_slot: Where the raw counts are. `"auto"` detects it, see
+            `detect_raw_count_slot`.
+        csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
+        verbose: Controls verbosity.
+
+    Returns:
+        The experiment.
+    """
     return load_h5ad(
         directory,
         h5_path,

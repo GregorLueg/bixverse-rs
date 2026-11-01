@@ -414,7 +414,14 @@ def step_hvg(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.pp.find_hvg`; see there for the arguments."""
+    """Pipeline step for `bixverse.pp.find_hvg`.
+
+    Args:
+        hvg_no: Number of HVGs, forwarded.
+        hvg_params: The HVG parameters, forwarded.
+        streaming: Read the genes in batches, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "hvg",
         find_hvg,
@@ -439,8 +446,17 @@ def step_pca(
     residuals: bool = False,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.pp.calculate_pca`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.pp.calculate_pca`.
+
+    Args:
+        no_pcs: Number of components, forwarded.
+        pca_params: The PCA parameters, forwarded.
+        sparse_svd: Solve on the sparse matrix, forwarded.
+        hvg: Gene indices or ids to use instead of the stored HVGs, forwarded.
+        seed: Seed, forwarded.
+        residuals: PCA on the residuals of `fit_residuals`, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "pca",
         calculate_pca,
@@ -467,8 +483,16 @@ def step_neighbours(
     seed: int = 42,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.graph.find_neighbours`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.graph.find_neighbours`.
+
+    Args:
+        embd_to_use: The embedding, forwarded.
+        no_embd_to_use: Number of leading dimensions, forwarded.
+        modality: `"rna"` or `"adt"`, forwarded.
+        neighbours_params: kNN and graph parameters, forwarded.
+        seed: Seed, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "neighbours",
         find_neighbours,
@@ -497,8 +521,19 @@ def step_clusters(
     min_gain: float = 0.0,
     local_moving: LocalMoving = "queue",
 ) -> Step:
-    """Pipeline step for `bixverse.graph.find_clusters`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.graph.find_clusters`.
+
+    Args:
+        cluster_algorithm: `"leiden"` or `"louvain"`, forwarded.
+        res: Modularity resolution, forwarded.
+        name: The obs column to write, forwarded.
+        modality: The graph to cluster, forwarded.
+        seed: Seed, forwarded.
+        beta: Randomness of the Leiden refinement, forwarded.
+        n_iterations: Full iterations, forwarded.
+        min_gain: Stopping gain with a negative `n_iterations`, forwarded.
+        local_moving: `"queue"` or `"coloured"`, forwarded.
+    """
     return Step(
         "clusters",
         find_clusters,
@@ -527,8 +562,17 @@ def step_harmony(
     seed: int = 42,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.integrate.harmony`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.integrate.harmony`.
+
+    Args:
+        batch_column: obs column with the primary batch, forwarded.
+        additional_batch_columns: Further obs columns to regress out,
+            forwarded.
+        modality: The PCA to correct, forwarded.
+        harmony_params: The parameters, forwarded.
+        seed: Seed, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "harmony",
         harmony,
@@ -553,8 +597,17 @@ def step_harmony_v2(
     seed: int = 42,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.integrate.harmony_v2`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.integrate.harmony_v2`.
+
+    Args:
+        batch_column: obs column with the primary batch, forwarded.
+        additional_batch_columns: Further obs columns to regress out,
+            forwarded.
+        modality: The PCA to correct, forwarded.
+        harmony_params: The parameters, forwarded.
+        seed: Seed, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "harmony_v2",
         harmony_v2,
@@ -580,8 +633,18 @@ def step_bbknn(
     seed: int = 42,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.integrate.bbknn`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.integrate.bbknn`.
+
+    Args:
+        batch_column: obs column with the batch, forwarded.
+        no_neighbours_to_keep: Neighbours per cell in the stored kNN,
+            forwarded.
+        embd_to_use: The embedding, only `"pca"`, forwarded.
+        no_embd_to_use: Number of leading dimensions, forwarded.
+        bbknn_params: The parameters, forwarded.
+        seed: Seed, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "bbknn",
         bbknn,
@@ -607,8 +670,16 @@ def step_fast_mnn(
     seed: int = 42,
     verbose: bool = False,
 ) -> Step:
-    """Pipeline step for `bixverse.integrate.fast_mnn`; see there for the
-    arguments."""
+    """Pipeline step for `bixverse.integrate.fast_mnn`.
+
+    Args:
+        batch_column: obs column with the batch, forwarded.
+        batch_hvg_genes: Batch-aware HVG indices or ids, forwarded.
+        fastmnn_params: The parameters, forwarded.
+        use_precomputed_pca: Use the cached PCA, forwarded.
+        seed: Seed, forwarded.
+        verbose: Controls verbosity, forwarded.
+    """
     return Step(
         "fast_mnn",
         fast_mnn,

@@ -127,13 +127,21 @@ class DialogueResult:
 
 @beartype
 def get_params(x: DialogueResult) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`."""
+    """The parameters of the run, R's `get_params`.
+
+    Args:
+        x: The DIALOGUE result.
+    """
     return x.params
 
 
 @beartype
 def get_results(x: DialogueResult) -> pl.DataFrame:
-    """The programme table, R's `get_results`."""
+    """The programme table, R's `get_results`.
+
+    Args:
+        x: The DIALOGUE result.
+    """
     return x.programmes
 
 

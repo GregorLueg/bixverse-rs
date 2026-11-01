@@ -27,6 +27,12 @@ from bixverse.params import to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import BbknnGpuParams, FastmnnGpuParams, HarmonyV2GpuParams
 
+__all__ = [
+    "bbknn",
+    "fast_mnn",
+    "harmony_v2",
+]
+
 logger = logging.getLogger(__name__)
 
 

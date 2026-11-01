@@ -164,6 +164,13 @@ def get_meta_cell_purity(
     """`calc_meta_cell_purity` without touching the object, as R's
     `get_meta_cell_purity`.
 
+    Args:
+        mc: The meta cells.
+        original_cell_type: Labels of the source cells, see
+            `calc_meta_cell_purity`.
+        add_additional_info: `"none"`, `"top_label"` or `"top_two_labels"`.
+        add_entropy: Add `mc_entropy`.
+
     Returns:
         `meta_cell_idx`, `meta_cell_id` and the purity columns, in obs order.
     """
@@ -261,6 +268,9 @@ def calc_manifold_metrics(mc: MetaCells) -> None:
     to the nearest other centroid, higher is better. Both go to obs. Needs
     `calc_diffusion_coordinates` first; without it, or on a merged object, a
     warning and nothing changes.
+
+    Args:
+        mc: The meta cells.
 
     References:
         Persad, et al., Nat Biotechnol, 2023.

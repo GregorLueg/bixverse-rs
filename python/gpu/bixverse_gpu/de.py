@@ -18,6 +18,10 @@ from bixverse._core.subset import ScOrScSubset
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import NebulaGpuParams
 
+__all__ = [
+    "nebula",
+]
+
 # `float` sequences accept ints, as in `bixverse.de`.
 _CONF = BeartypeConf(is_pep484_tower=True)
 

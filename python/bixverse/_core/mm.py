@@ -254,6 +254,9 @@ def new_adt_counts_dsb(
 def get_adt_feature_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
     """Cells expressing each protein, as R's `get_adt_feature_info`.
 
+    Args:
+        adt: The ADT counts, or a multi-modal experiment holding them.
+
     Returns:
         `feature_idx` (0-based), `feature_id` and `nnz`. `nnz` is `Float64`
         because R writes it as a double to `var_adt`.
@@ -272,6 +275,9 @@ def get_adt_feature_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame
 def get_adt_sample_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
     """ADT capture per cell, as R's `get_adt_sample_info`.
 
+    Args:
+        adt: The ADT counts, or a multi-modal experiment holding them.
+
     Returns:
         `cell_idx` (0-based), `adt_nnz` and `adt_lib_size`, both `Float64` as
         R writes them to obs.
@@ -289,6 +295,9 @@ def get_adt_sample_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
 @beartype
 def get_adt_names(adt: AdtCounts | SingleCellsMultiModal) -> list[str] | None:
     """The ADT feature ids, as R's `get_adt_names`.
+
+    Args:
+        adt: The ADT counts, or a multi-modal experiment.
 
     Returns:
         The ids, or `None` (with a warning) on an object without ADT counts.
@@ -583,6 +592,9 @@ def generate_wnn_graph(
 @beartype
 def get_wnn_weights(mm: SingleCellsMultiModal) -> pl.DataFrame:
     """The per-cell modality weights of the WNN integration.
+
+    Args:
+        mm: The multi-modal experiment.
 
     Raises:
         ValueError: Before `generate_wnn_graph`.

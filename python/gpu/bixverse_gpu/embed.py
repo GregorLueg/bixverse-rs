@@ -19,6 +19,13 @@ from bixverse._core.embed import _embed
 from bixverse._core.multimodal import Modality
 from bixverse._core.subset import ScOrMc
 
+__all__ = [
+    "tsne",
+    "tsne_defaults",
+    "umap",
+    "umap_defaults",
+]
+
 ############
 # Defaults #
 ############

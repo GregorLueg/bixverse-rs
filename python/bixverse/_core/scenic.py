@@ -387,14 +387,25 @@ def _scenic_grn(
 
 @beartype
 def get_params(x: ScenicGrn | Hotspot) -> ScenicParams | dict[str, object]:
-    """The parameters of the run, R's `get_params`."""
+    """The parameters of the run, R's `get_params`.
+
+    Args:
+        x: A SCENIC GRN result or a HotSpot result.
+
+    Returns:
+        The `ScenicParams` for a GRN, a dict copy for HotSpot.
+    """
     return x.params if isinstance(x, ScenicGrn) else dict(x.params)
 
 
 @beartype
 def get_tf_to_gene(x: ScenicGrn) -> pl.DataFrame:
     """The TF to gene links, R's `get_tf_to_gene`; empty with a warning
-    before `identify_tf_to_genes`."""
+    before `identify_tf_to_genes`.
+
+    Args:
+        x: The SCENIC GRN result.
+    """
     if x.tf_to_gene_results.height == 0:
         warnings.warn(
             "You did not seem to have run identify_tf_to_genes(). Returning an "
@@ -407,7 +418,11 @@ def get_tf_to_gene(x: ScenicGrn) -> pl.DataFrame:
 @beartype
 def get_cistarget_res(x: ScenicGrn) -> pl.DataFrame:
     """The motif enrichment, R's `get_cistarget_res`; empty with a warning
-    before `tf_to_genes_motif_enrichment`."""
+    before `tf_to_genes_motif_enrichment`.
+
+    Args:
+        x: The SCENIC GRN result.
+    """
     if x.cis_targets_results.height == 0:
         warnings.warn(
             "You did not seem to have run tf_to_genes_motif_enrichment(). "

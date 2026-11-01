@@ -727,26 +727,54 @@ def add_symphony_labels(
 
 @beartype
 def get_symphony_loadings(reference: SymphonyReference) -> np.ndarray:
-    """The PCA gene loadings, `(n_hvgs, d)`, R's `get_symphony_loadings`."""
+    """The PCA gene loadings, `(n_hvgs, d)`, R's `get_symphony_loadings`.
+
+    Args:
+        reference: The Symphony reference.
+
+    Returns:
+        The loadings.
+    """
     return reference.loadings
 
 
 @beartype
 def get_symphony_z_corr(reference: SymphonyReference) -> np.ndarray:
     """The corrected reference embedding, `(N, d)`, R's
-    `get_symphony_z_corr`."""
+    `get_symphony_z_corr`.
+
+    Args:
+        reference: The Symphony reference.
+
+    Returns:
+        The corrected embedding.
+    """
     return reference.z_corr
 
 
 @beartype
 def get_symphony_hvg_names(reference: SymphonyReference) -> list[str]:
-    """The HVG gene ids in loading order, R's `get_symphony_hvg_names`."""
+    """The HVG gene ids in loading order, R's `get_symphony_hvg_names`.
+
+    Args:
+        reference: The Symphony reference.
+
+    Returns:
+        The HVG gene ids.
+    """
     return reference.hvg_gene_names
 
 
 @beartype
 def get_symphony_labels(reference: SymphonyReference) -> pl.DataFrame | None:
-    """The stored labels in `z_corr` row order, R's `get_symphony_labels`."""
+    """The stored labels in `z_corr` row order, R's `get_symphony_labels`.
+
+    Args:
+        reference: The Symphony reference.
+
+    Returns:
+        The labels, or `None` if the reference has none.
+    """
     return reference.labels
 
 

@@ -14,6 +14,10 @@ from bixverse.params import to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import ScrubletGpuParams
 
+__all__ = [
+    "scrublet",
+]
+
 
 @beartype
 def scrublet(

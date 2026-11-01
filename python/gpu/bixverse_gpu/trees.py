@@ -18,6 +18,10 @@ from bixverse._core.trees import BonsaiTree, _bonsai
 from bixverse.params import BonsaiParams
 from bixverse_gpu import _bixverse_gpu
 
+__all__ = [
+    "bonsai",
+]
+
 
 @beartype
 def bonsai(

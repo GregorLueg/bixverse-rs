@@ -878,6 +878,15 @@ def get_data(res: ScrubletRes | BoostRes | ScDblFinderRes) -> pl.DataFrame:
     for Scrublet; every per-cell field for Boost (plus `cell_groups` when
     grouped); `predicted_doublets`, `doublet_score`, `cxds_scores`,
     `weighted` and `cluster_labels` for scDblFinder.
+
+    Args:
+        res: The result of a doublet detection run.
+
+    Returns:
+        One row per cell.
+
+    Raises:
+        TypeError: For any other result type.
     """
     match res:
         case ScrubletRes():
@@ -912,6 +921,12 @@ def get_feature_mat(res: ScDblFinderRes) -> pl.DataFrame | None:
     """The scDblFinder classifier features, R's `get_feature_mat`.
 
     Warns and returns `None` if they were not asked for.
+
+    Args:
+        res: The scDblFinder result.
+
+    Returns:
+        The features, or `None`.
     """
     if res.features is None:
         warnings.warn(
@@ -924,7 +939,15 @@ def get_feature_mat(res: ScDblFinderRes) -> pl.DataFrame | None:
 
 @beartype
 def get_scores(res: ScDblFinderRes, score_type: ScoreType = "weighted") -> np.ndarray:
-    """The weighted or cxds scores, R's `get_scores` on a `ScDblFinderRes`."""
+    """The weighted or cxds scores, R's `get_scores` on a `ScDblFinderRes`.
+
+    Args:
+        res: The scDblFinder result.
+        score_type: `"weighted"` or `"cxds_scores"`.
+
+    Returns:
+        One score per cell.
+    """
     return res.weighted if score_type == "weighted" else res.cxds_scores
 
 

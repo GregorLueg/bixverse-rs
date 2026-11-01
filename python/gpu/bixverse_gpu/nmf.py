@@ -27,6 +27,13 @@ from bixverse._core.subset import ScOrMc
 from bixverse.params import NmfConsensusParams, NmfHalsParams
 from bixverse_gpu import _bixverse_gpu
 
+__all__ = [
+    "consensus_nmf",
+    "nmf",
+    "nmf_k_sweep",
+    "stabilised_nmf",
+]
+
 ###########
 # Globals #
 ###########

@@ -986,6 +986,12 @@ def save_metacells(mc: MetaCells, directory: Path | str) -> None:
 def load_metacells(directory: Path | str) -> MetaCells:
     """Read a `MetaCells` written by `save_metacells`.
 
+    Args:
+        directory: The directory `save_metacells` wrote.
+
+    Returns:
+        The meta cells.
+
     Raises:
         FileNotFoundError: If a file of the format is missing.
         ValueError: On an unknown format version.

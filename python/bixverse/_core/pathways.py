@@ -1137,5 +1137,13 @@ def generate_hotspot_membership(
 
 @beartype
 def get_hotspot_membership(x: Hotspot) -> pl.DataFrame | None:
-    """The module membership, R's `get_hotspot_membership`."""
+    """The module membership, R's `get_hotspot_membership`.
+
+    Args:
+        x: The HotSpot result.
+
+    Returns:
+        `gene_id` and `cluster_member`, or `None` before
+        `generate_hotspot_membership`.
+    """
     return x.module_membership

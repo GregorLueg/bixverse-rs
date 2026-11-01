@@ -18,6 +18,10 @@ from bixverse._core.single_cells import SingleCells
 from bixverse.params import PcaParams, to_rust
 from bixverse_gpu import _bixverse_gpu
 
+__all__ = [
+    "calculate_pca",
+]
+
 logger = logging.getLogger(__name__)
 
 

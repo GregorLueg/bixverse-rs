@@ -672,13 +672,27 @@ def find_specific_markers(
 
 @beartype(conf=_CONF)
 def get_marker_summary(x: ScSpecificMarkers) -> pl.DataFrame:
-    """The per-gene summaries across every rival, R's `get_marker_summary`."""
+    """The per-gene summaries across every rival, R's `get_marker_summary`.
+
+    Args:
+        x: The marker result.
+
+    Returns:
+        A copy of the summary table.
+    """
     return x.summary.clone()
 
 
 @beartype(conf=_CONF)
 def get_marker_comparisons(x: ScSpecificMarkers) -> pl.DataFrame:
-    """The per-rival statistics, R's `get_marker_comparisons`."""
+    """The per-rival statistics, R's `get_marker_comparisons`.
+
+    Args:
+        x: The marker result.
+
+    Returns:
+        A copy of the per-comparison table.
+    """
     return x.per_comparison.clone()
 
 
@@ -1358,7 +1372,14 @@ def add_nhoods_info(
 @beartype(conf=_CONF)
 def get_differential_abundance_res(x: MiloR) -> pl.DataFrame | None:
     """The differential abundance table, R's
-    `get_differential_abundance_res`; warns and returns `None` if untested."""
+    `get_differential_abundance_res`; warns and returns `None` if untested.
+
+    Args:
+        x: The Milo result.
+
+    Returns:
+        The neighbourhood table, or `None` before `test_nhoods()`.
+    """
     if x.nhoods_info is None:
         warnings.warn(
             "No differential abundance results found in x. Did you run "
@@ -1371,7 +1392,14 @@ def get_differential_abundance_res(x: MiloR) -> pl.DataFrame | None:
 @beartype(conf=_CONF)
 def get_index_cells(x: MiloR) -> np.ndarray:
     """The neighbourhood index cells, 0-based positions among the kept cells,
-    R's `get_index_cells`."""
+    R's `get_index_cells`.
+
+    Args:
+        x: The Milo result.
+
+    Returns:
+        The index cell positions.
+    """
     index_cell = x.params["index_cell"]
     assert isinstance(index_cell, np.ndarray)
     return index_cell
@@ -1379,7 +1407,14 @@ def get_index_cells(x: MiloR) -> np.ndarray:
 
 @beartype(conf=_CONF)
 def get_params(x: MiloR | ScNebula) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`."""
+    """The parameters of the run, R's `get_params`.
+
+    Args:
+        x: The Milo or NEBULA result.
+
+    Returns:
+        A copy of the parameters.
+    """
     return dict(x.params)
 
 

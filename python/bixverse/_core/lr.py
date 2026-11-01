@@ -365,7 +365,11 @@ def as_ligand_target_influence(
 @beartype
 def get_influence(x: LigandTargetInfluence) -> np.ndarray:
     """The ligands x genes influence, R's `get_influence`; the names are
-    `x.ligand_names` and `x.gene_ids`."""
+    `x.ligand_names` and `x.gene_ids`.
+
+    Args:
+        x: The ligand target influence result.
+    """
     return x.influence
 
 

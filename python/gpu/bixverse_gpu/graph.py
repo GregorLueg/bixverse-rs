@@ -43,6 +43,13 @@ from bixverse.params import KnnGraphDefaults, to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import FastClusterGpuParams, KnnGpuDefaults
 
+__all__ = [
+    "fast_cluster",
+    "find_clusters",
+    "find_neighbours",
+    "generate_knn",
+]
+
 logger = logging.getLogger(__name__)
 
 

@@ -931,7 +931,11 @@ def _nmf_k_sweep(
 @beartype
 def get_w(x: NmfResult | StabilisedNmfResult | ConsensusNmfResult) -> pl.DataFrame:
     """The gene loadings, R's `get_w`: `gene_id` and one column per
-    component (`comp_01`, ..., or `run_01.comp_01`, ... for restarts)."""
+    component (`comp_01`, ..., or `run_01.comp_01`, ... for restarts).
+
+    Args:
+        x: A single, stabilised or consensus NMF result.
+    """
     if isinstance(x, StabilisedNmfResult):
         w, cols = x.w_all, list(x.w_all_columns)
     else:
@@ -946,7 +950,11 @@ def get_h(
     x: NmfResult | StabilisedNmfResult | ConsensusNmfResult,
 ) -> np.ndarray | tuple[np.ndarray, ...]:
     """The cell usages, R's `get_h`: `(k, n_cells)`, one per run for
-    restarts."""
+    restarts.
+
+    Args:
+        x: A single, stabilised or consensus NMF result.
+    """
     if isinstance(x, StabilisedNmfResult):
         return x.h_per_run
     return x.h
@@ -954,7 +962,11 @@ def get_h(
 
 @beartype
 def get_best_run(x: StabilisedNmfResult) -> NmfResult:
-    """The lowest loss run as an `NmfResult`, R's `get_best_run`."""
+    """The lowest loss run as an `NmfResult`, R's `get_best_run`.
+
+    Args:
+        x: The stabilised NMF result.
+    """
     k = x.params["k"]
     assert isinstance(k, int)
     b = x.best_idx
@@ -974,7 +986,11 @@ def get_best_run(x: StabilisedNmfResult) -> NmfResult:
 
 @beartype
 def get_stability(x: ConsensusNmfResult) -> dict[str, object]:
-    """The consensus diagnostics, R's `get_stability`."""
+    """The consensus diagnostics, R's `get_stability`.
+
+    Args:
+        x: The consensus NMF result.
+    """
     return {
         "stability": x.stability,
         "rel_error": x.rel_error,
@@ -990,7 +1006,11 @@ def get_stability(x: ConsensusNmfResult) -> dict[str, object]:
 def get_params(
     x: NmfResult | StabilisedNmfResult | ConsensusNmfResult | NmfKSweepResult,
 ) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`."""
+    """The parameters of the run, R's `get_params`.
+
+    Args:
+        x: Any NMF result, including a k sweep.
+    """
     return dict(x.params)
 
 
@@ -998,7 +1018,11 @@ def get_params(
 def get_data(x: NmfResult | ConsensusNmfResult) -> pl.DataFrame:
     """The cell usages as an obs frame for `add_obs`, R's `get_data`: one
     `comp_XX` column per component and the 0-based `cell_idx`
-    (`meta_cell_idx` for meta cells)."""
+    (`meta_cell_idx` for meta cells).
+
+    Args:
+        x: A single or consensus NMF result.
+    """
     idx_col = "meta_cell_idx" if x.source_class == "MetaCells" else "cell_idx"
     return pl.DataFrame(
         {
