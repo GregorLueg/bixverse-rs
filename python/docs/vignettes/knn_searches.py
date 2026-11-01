@@ -134,7 +134,7 @@ KnnParams()
 # | search_budget | `None` | **Annoy:** The search budget during querying. If `None` defaults to `k * n_trees * 20`. Higher values allow for better Recall. |
 # | delta | `0.001` | **NNDescent:** The termination criterion for the NNDescent iterations. When less than 0.001 (0.1%) of the edges are updated, the iterations stop and the algorithm is considered converged. |
 # | diversify_prob | `0.0` | **NNDescent:** If you want to do additional diversification after the NNDescent algorithm converged. This is based on the original paper, but in reality usually degrades graph quality while not providing too many benefits. |
-# | ef_budget | `None` | **NNDescent:** The beam width for the query phase for NNDescent. If `None`, it will use the library default, i.e., `(k * 2).clamp(50, 200).max(k)`. Generally not really needed to touch, but limits the number of k neighbours you can confidently return. |
+# | ef_budget | `None` | **NNDescent:** The beam width when querying another matrix, as BBKNN, Symphony and fastMNN do; a plain kNN has no query phase. If `None`, it will use the library default, i.e., `(k * 2).clamp(50, 200).max(k)`. Generally not really needed to touch, but limits the number of k neighbours you can confidently return. |
 # | m | `16` | **HNSW:** The node degree during the index creation. Creates 16 edges per given node in the graph-based index. |
 # | ef_construction | `200` | **HNSW:** The budget to generate good connections during construction of the index. Higher values yields a better initial graph-index. |
 # | ef_search | `100` | **HNSW:** The beam width during querying of the index. If a high quality graph was generated, usually does not need to be too high. If you set `k` high, you should adapt this parameter. |
@@ -244,8 +244,8 @@ print(
 )
 
 # %% [markdown]
-# As we can see, this approximate index also reaches perfect recall and distance
-# ratio.
+# As we can see, this approximate index gets within a whisker of perfect recall,
+# with the distance ratio at 1.
 #
 # NNDescent has no query phase: the descent already builds a kNN graph on its
 # way to convergence, and `"nndescent"` hands you that graph instead of running

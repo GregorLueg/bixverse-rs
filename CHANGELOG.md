@@ -9,9 +9,9 @@
   maps to `parse_annsearch_verbosity`. `bixverse_sparse::verbosity` is gone.
   `verbosity_from_flag()` maps a `verbose: bool` onto it.
 - `extract_knn` is gone from `KnnParams` and `KnnParamsGpu`, and
-  `generate_knn_nndescent()` lost the argument. Use `knn_method =
-  "nndescent_graph"` instead (see Features). `warn_unsupported_extract()` is
-  gone with it.
+  `generate_knn_nndescent()` lost the argument. `knn_method = "nndescent"` is
+  graph-only on every backend now (see Features), and the beam search on the GPU
+  and MLX is opt-in through `"cagra"`. `warn_unsupported_extract()` is gone with it.
 - `bbknn_first_neighbours()` is now `bbknn_nearest_neighbours()`: each
   batch-balanced row is sorted by distance (ties by index) before taking k, so
   the stored kNN holds the k nearest rather than the k lowest-index entries. The
@@ -40,8 +40,7 @@
 
 ### Features
 
-- `"nndescent_graph"` kNN method on the CPU (`KnnSearch::NNDescentGraph`) and
-  the GPU (`KnnSearchGpu::NNDescentGraphGpu`): the NN-Descent kNN graph built
+- `"nndescent"` on the CPU, the GPU and MLX is the NN-Descent kNN graph built
   graph-only through `build_knn_graph_nndescent()` /
   `build_knn_graph_nndescent_gpu()`, with no index kept and no search run.
   The GPU one goes through the clustered build, so datasets past the
@@ -49,6 +48,8 @@
   fastMNN, `batch_knn_search()`) run it as NN-Descent / CAGRA.
   `generate_knn_nndescent_graph()` and `knn_graph_to_rows()` are the CPU
   entry points.
+- `"cagra"` kNN method on the GPU and MLX, the graph with a beam search over it.
+- MLX kNN dispatch: `dispatch_knn_mlx()`, `knn_with_dist_mlx()`, `knn_query_mlx()`.
 - `SingleCellReading::read_genes_sparse_csr()`: genes from a gene-major store
   straight into CSR, without holding the CSC next to its transpose. Default
   method, so every reader has it.
