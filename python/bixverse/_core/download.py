@@ -1,12 +1,11 @@
-"""Example data sets used by the vignettes, as R's `download_*()` helpers.
+"""Example data sets used by the vignettes.
 
-Same files and URLs as R: the pinned `bixverse-data` GitHub release first,
-the Zenodo copy second. Each helper caches into `cache_dir` and returns the
-path straight away when the extracted result is already there, so only the
-first call touches the network.
+The pinned `bixverse-data` GitHub release first, the Zenodo copy second. Each
+helper caches into `cache_dir` and returns the path straight away when the
+extracted result is already there, so only the first call touches the network.
 
-`download_kang_pbmc` and `download_thymus_ageing` fetch h5ad conversions of
-the qs2 `SingleCellExperiment`s R uses; they live in the GitHub release only.
+`download_kang_pbmc` and `download_thymus_ageing` fetch h5ad files; they
+live in the GitHub release only.
 """
 
 from __future__ import annotations
@@ -348,8 +347,7 @@ def download_kang_pbmc(
 ) -> Path:
     """The Kang et al. IFN-beta stimulated PBMCs (Nat Biotechnol, 2018).
 
-    The raw counts with the cell and gene annotations of R's qs2
-    `SingleCellExperiment`, as h5ad.
+    The raw counts with the cell and gene annotations, as h5ad.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
@@ -367,8 +365,7 @@ def download_thymus_ageing(
 ) -> Path:
     """The Baran-Gale et al. ageing thymus data (Development, 2020).
 
-    The raw counts with the cell and gene annotations of R's qs2
-    `SingleCellExperiment`, as h5ad.
+    The raw counts with the cell and gene annotations, as h5ad.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.

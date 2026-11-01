@@ -1,9 +1,8 @@
 """Parameter bundles for the single cell suite.
 
-One frozen dataclass per bixverse R `params_*()` constructor, flattened the way
-R flattens them before Rust sees the list: `ScrubletParams(no_pcs=10, k=0)`
-rather than nested blocks. Field names, defaults and ranges are generated from
-the R specs, so both front ends hand Rust the same values. `ScenicParams` is
+One frozen dataclass per parameter bundle, flat as Rust sees them:
+`ScrubletParams(no_pcs=10, k=0)` rather than nested blocks. Field names,
+defaults and ranges are generated from the parameter specs. `ScenicParams` is
 written by hand, see `bixverse.params._scenic`.
 """
 
@@ -26,14 +25,14 @@ def to_rust(p: object) -> dict[str, object]:
     """The flat dict Rust deserialises a bundle from.
 
     A field holding another bundle (the learner block of `ScenicParams`) is
-    spliced in at its position, as R's `c()` does.
+    spliced in at its position.
 
     Args:
         p: A param bundle from this module or `bixverse_gpu.params`.
 
     Returns:
         Field name to value, with keyword-clashing names (`lambda_`) mapped
-        back to the R / Rust key.
+        back to the Rust key.
 
     Raises:
         TypeError: If `p` is not a dataclass instance.

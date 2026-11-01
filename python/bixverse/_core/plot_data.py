@@ -1,4 +1,4 @@
-"""Plot data extractors, the port of the bixverse R `extract_*` helpers.
+"""Plot data extractors.
 
 Each pulls what one plot needs into a polars frame (or two, for the graph
 plots) and does nothing else, so a plot can be redrawn, restyled or drawn
@@ -6,7 +6,7 @@ with another library from the same frame. None of this needs matplotlib.
 
 Rows follow the cells results align to: the kept cells in `cells_to_keep`
 order, or the meta cells in row order. Factor-like columns (`gene`, `group`,
-`cluster`) are polars Enums whose categories carry R's level order.
+`cluster`) are polars Enums whose categories carry the level order.
 
 `scale=True` z-scores by the sample standard deviation on every path: in Rust
 on the store (the RNA `"norm"` layer of `SingleCells` / `SingleCellsSubset`),
@@ -81,8 +81,8 @@ def _row_ids(sc: ScOrMc) -> np.ndarray:
 def _obs_rows(sc: ScOrMc, cols: Sequence[str]) -> pl.DataFrame:
     """obs columns in row order: kept cells in `cells_to_keep` order.
 
-    R attaches them positionally in obs order, which only agrees while the
-    kept cells are sorted.
+    Joined on `cell_idx`, so the order holds whatever order the kept cells
+    are in.
     """
     cols = list(dict.fromkeys(cols))
     if isinstance(sc, MetaCells):
@@ -113,7 +113,7 @@ def _with_obs(
 
 @beartype
 def _r_labels(values: pl.Series) -> list[str | None]:
-    """R's `as.character`: `TRUE` / `FALSE`, floats to 15 significant digits."""
+    """Labels as strings: `TRUE` / `FALSE`, floats to 15 significant digits."""
     dtype = values.dtype
     raw = values.to_list()
     if dtype == pl.Boolean:
@@ -125,11 +125,10 @@ def _r_labels(values: pl.Series) -> list[str | None]:
 
 @beartype
 def _as_factor(values: pl.Series) -> tuple[np.ndarray, list[str]]:
-    """R's `as.factor`: 0-based codes (-1 for missing) and the levels.
+    """Factor coding: 0-based codes (-1 for missing) and the levels.
 
     An Enum keeps its declared level order, unused levels included; anything
-    else is sorted (numerically for numbers, by code point for strings, where
-    R uses the locale's collation).
+    else is sorted (numerically for numbers, by code point for strings).
     """
     labels = _r_labels(values)
     if isinstance(values.dtype, pl.Enum):
@@ -146,7 +145,7 @@ def _as_factor(values: pl.Series) -> tuple[np.ndarray, list[str]]:
 
 @beartype
 def _drop_levels(codes: np.ndarray, levels: list[str]) -> tuple[np.ndarray, list[str]]:
-    """R's `droplevels`: recode to the levels that occur, in level order."""
+    """Recode to the levels that occur, in level order."""
     used = np.unique(codes[codes >= 0])
     remap = np.full(len(levels), -1, dtype=np.int64)
     remap[used] = np.arange(used.size)
@@ -163,8 +162,7 @@ def _enum(values: Sequence[str | None], levels: Sequence[str], name: str) -> pl.
 
 @beartype
 def _get_embedding(sc: ScOrMc, name: str, modality: Modality) -> np.ndarray:
-    """A cached embedding by name, `"pca"` for the PCA scores, as R's
-    `get_embedding`: a stale one warns.
+    """A cached embedding by name, `"pca"` for the PCA scores: a stale one warns.
 
     Raises:
         ValueError: If it is missing, or on a non-RNA modality of a single
@@ -188,7 +186,7 @@ def _get_embedding(sc: ScOrMc, name: str, modality: Modality) -> np.ndarray:
 
 @beartype
 def _match_features(features: Sequence[str], available: Sequence[str]) -> list[str]:
-    """R's `.match_features`: unknown ids warn and drop, input order kept.
+    """Unknown ids warn and drop, input order kept.
 
     Raises:
         ValueError: If nothing matched.
@@ -209,7 +207,7 @@ def _match_features(features: Sequence[str], available: Sequence[str]) -> list[s
 
 @beartype
 def _scale_in_memory(v: np.ndarray, clip: float | None) -> np.ndarray:
-    """R's `.scale_and_clip_expr`: z-score by the sample sd, then clip."""
+    """Z-score by the sample sd, then clip."""
     s = float(np.std(v, ddof=1)) if v.size > 1 else 0.0
     if s > 1e-8:
         v = (v - v.mean()) / s
@@ -275,7 +273,7 @@ def _in_memory(
 
 @beartype
 def _store_genes(sc: ScOrMc, features: Sequence[str]) -> tuple[np.ndarray, list[str]]:
-    """0-based gene indices and the surviving ids, R's `.resolve_gene_features`.
+    """0-based gene indices and the surviving ids.
 
     Raises:
         ValueError: If nothing matched.
@@ -297,7 +295,7 @@ def extract_embedding_data(
     obs_cols: Sequence[str] | None = None,
     modality: Modality = "rna",
 ) -> pl.DataFrame:
-    """Embedding coordinates for plotting, as R's `extract_embedding_data`.
+    """Embedding coordinates for plotting.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -340,8 +338,7 @@ def extract_gene_expression(
     modality: ExprModality = "rna",
     layer: Layer = "norm",
 ) -> pl.DataFrame:
-    """Per-cell expression, one column per feature, as R's
-    `extract_gene_expression`.
+    """Per-cell expression, one column per feature.
 
     RNA from the store reads the gene-major file in Rust; ADT counts, the
     MAGIC layer and meta cells come from memory. Unknown features warn and
@@ -431,13 +428,11 @@ def extract_dot_plot_data(
     scale_exp: bool = True,
     modality: ExprModality = "rna",
 ) -> pl.DataFrame:
-    """Per-group mean expression and percent expressing, as R's
-    `extract_dot_plot_data`.
+    """Per-group mean expression and percent expressing.
 
     Means run over every cell of the group, zeros included. Cells with a
     missing group are left out and only groups that occur are kept, on every
-    source (R keeps empty Enum levels on the in-memory ones, which turns their
-    scaled values into NA).
+    source.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -531,13 +526,11 @@ def extract_feature_plot_data(
     embd_modality: Modality = "rna",
     layer: Layer = "norm",
 ) -> pl.DataFrame:
-    """Per-cell expression on an embedding, long, as R's
-    `extract_feature_plot_data`.
+    """Per-cell expression on an embedding, long.
 
     The expression and the embedding modality are chosen independently, so
     RNA can colour an ADT embedding and either can go on a WNN one. Both key
-    on the kept cell ids. Rows stay in kept cell order within each gene; R's
-    merge sorts them by cell id.
+    on the kept cell ids. Rows stay in kept cell order within each gene.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -578,8 +571,7 @@ def extract_gene_violin_data(
     modality: ExprModality = "rna",
     layer: Layer = "norm",
 ) -> pl.DataFrame:
-    """Per-cell expression with its group, long, as R's
-    `extract_gene_violin_data`.
+    """Per-cell expression with its group, long.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -612,8 +604,7 @@ def extract_gene_violin_data(
 def _parse_feature_modality(
     feature: str, default: ExprModality
 ) -> tuple[str, ExprModality]:
-    """A `_rna` / `_adt` suffix picks the modality, as R's
-    `.parse_feature_modality`."""
+    """A `_rna` / `_adt` suffix picks the modality."""
     if feature.endswith("_rna"):
         return feature.removesuffix("_rna"), "rna"
     if feature.endswith("_adt"):
@@ -633,11 +624,10 @@ def extract_feature_pair(
     modality: ExprModality = "rna",
     layer: Layer = "norm",
 ) -> pl.DataFrame:
-    """Two features side by side for a scatter, as R's `extract_feature_pair`.
+    """Two features side by side for a scatter.
 
     A `_rna` or `_adt` suffix on either feature picks its modality; without
-    one, `modality` applies. Rows stay in kept cell order; R's merge sorts
-    them by cell id.
+    one, `modality` applies. Rows stay in kept cell order.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -677,7 +667,7 @@ def extract_feature_pair(
 def _upper_edges(
     i: np.ndarray, j: np.ndarray, w: np.ndarray, threshold: float, keep: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Edges of a symmetric graph once, R's `.paga_edges`: `i < j`, weight at
+    """Edges of a symmetric graph once: `i < j`, weight at
     least `threshold`, both ends among `keep`. Sorted by `(i, j)`."""
     mask = (i < j) & (w >= threshold) & np.isin(i, keep) & np.isin(j, keep)
     order = np.lexsort((j[mask], i[mask]))
@@ -724,8 +714,7 @@ def extract_paga_plot_data(
     node_stat_col: str | None = None,
     modality: Modality = "rna",
 ) -> GraphPlotData:
-    """The PAGA graph with every cluster at the centroid of its cells, as
-    R's `extract_paga_plot_data`.
+    """The PAGA graph with every cluster at the centroid of its cells.
 
     Args:
         sc: The object PAGA ran on.
@@ -847,7 +836,7 @@ def extract_milo_plot_data(
     modality: Modality = "rna",
 ) -> GraphPlotData:
     """The Milo neighbourhood graph with every neighbourhood at its index
-    cell, as R's `extract_milo_plot_data` and Milo's `plotNhoodGraphDA`.
+    cell.
 
     Args:
         sc: The object the Milo result was built on.

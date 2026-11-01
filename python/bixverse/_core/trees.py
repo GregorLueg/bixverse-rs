@@ -1,9 +1,7 @@
 """Bonsai trees over cells and meta cells.
 
-The port of R's `bonsai_sc`, `relayout_bonsai` and `set_bonsai_embedding`
-(`R/methods_sc_trees.R`, the `BonsaiTree` class). R keeps the trees apart
-from Palantir and PAGA because they infer a hierarchy over every cell, not a
-process with a start; so does this module.
+Trees live apart from Palantir and PAGA because they infer a hierarchy over
+every cell, not a process with a start.
 
 The raw counts go through Sanity for posterior log fold changes with error
 bars, Bonsai builds a tree with every cell (or meta cell) a leaf, and the tree
@@ -14,8 +12,8 @@ is laid out in 2D. The work runs in Rust; the object is not touched.
     >>> set_bonsai_embedding(sc, tree)
 
 Nodes are 0-based, the root's parent is null, and `hvg` takes 0-based gene
-indices; R numbers all three from 1. As in R, `bonsai` takes a `SingleCells`
-or a `MetaCells`, not a `SingleCellsSubset`.
+indices. `bonsai` takes a `SingleCells` or a `MetaCells`, not a
+`SingleCellsSubset`.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True, repr=False)
 class BonsaiTree:
-    """A Bonsai tree with its layout, R's `BonsaiTree`.
+    """A Bonsai tree with its layout.
 
     Attributes:
         nodes: `node` (0-based), `parent` (0-based, null for the root),
@@ -89,7 +87,7 @@ class BonsaiTree:
     params: BonsaiParams
 
     def __repr__(self) -> str:
-        """R's `print.BonsaiTree`."""
+        """A multi-line summary of the tree."""
         leaves = self.nodes.filter(pl.col("is_leaf"))
         n_leaves = leaves.height
         n_cells = int(leaves["n_cells"].sum())
@@ -121,8 +119,8 @@ class BonsaiTree:
 def _nodes(
     res: dict, cell_names: Sequence[str], leaf_sizes: np.ndarray
 ) -> pl.DataFrame:
-    """The node table, R's `.bonsai_nodes`: leaves first, carrying the cell
-    ids, the root's parent null."""
+    """The node table: leaves first, carrying the cell ids, the root's parent
+    null."""
     parent = np.asarray(res["parent"], dtype=np.int64)
     n_nodes = len(parent)
     n_leaves = len(cell_names)
@@ -156,8 +154,7 @@ def _finish(
     gene_ids: np.ndarray,
     params: BonsaiParams,
 ) -> BonsaiTree:
-    """The `BonsaiTree` with the `total` timing appended, R's
-    `.bonsai_finish` and `new_bonsai_tree`.
+    """The `BonsaiTree` with the `total` timing appended.
 
     Raises:
         ValueError: If the leaves do not match the cells.
@@ -223,7 +220,7 @@ def bonsai(
     bonsai_params: BonsaiParams | None = None,
     verbose: bool = False,
 ) -> BonsaiTree:
-    """A Bonsai tree over the cells, as R's `bonsai_sc`.
+    """A Bonsai tree over the cells.
 
     Every cell is a leaf and the internal nodes are inferred ancestral
     states, with branch lengths that carry the amount of change between
@@ -322,7 +319,7 @@ def relayout_bonsai(
     layout: BonsaiLayout = "equal_angle",
     hyperbolic: bool = False,
 ) -> BonsaiTree:
-    """The tree laid out again without searching, as R's `relayout_bonsai`.
+    """The tree laid out again without searching.
 
     The tree is renumbered on the Rust side, so the inferred ancestors can
     come back with other node numbers; the leaves, and so the cells, keep
@@ -362,8 +359,7 @@ def relayout_bonsai(
 def set_bonsai_embedding(
     sc: SingleCells | MetaCells, tree: BonsaiTree, *, name: str = "bonsai"
 ) -> None:
-    """Store the leaf coordinates as an embedding, as R's
-    `set_bonsai_embedding`.
+    """Store the leaf coordinates as an embedding.
 
     Writes the `(n_leaves, 2)` positions to `sc.cache.embeddings[name]` and
     stamps it, so the embedding helpers can use it.

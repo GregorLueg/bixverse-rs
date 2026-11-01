@@ -1,8 +1,7 @@
 """Metadata of h5ad, 10x h5 and mtx inputs, and the prescans of multi-file loads.
 
-Ports of R's `functions_h5ad.R` helpers and `prescan_mtx_dirs()`. R reads
-the HDF5 side with rhdf5; here the reads go through the Rust core, which
-statically links its own HDF5, so no h5py is needed.
+The reads go through the Rust core, which statically links its own HDF5, so
+no h5py is needed.
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ class Prescan:
     Attributes:
         universe: Gene ids in the order of the final var table.
         file_tasks: One task dict per input, in input order. The keys are the
-            ones the R prescans produce and the Rust loaders read;
+            ones the prescans produce and the Rust loaders read;
             `gene_local_to_universe` is 0-based with `None` for genes outside
             the universe.
     """
@@ -134,8 +133,7 @@ def _exp_ids(paths: InputPaths) -> tuple[list[str], list[Path]]:
 def _universe(gene_sets: list[list[str]], how: GeneUniverse) -> list[str]:
     """Intersection or union of gene sets, sorted.
 
-    R sorts with the session collation; this sorts by code point, so mixed
-    case gene ids can order differently from R.
+    Sorts by code point, so mixed case gene ids order upper case first.
     """
     match how:
         case "intersection":
@@ -245,8 +243,7 @@ def read_h5ad_metadata(f_path: Path | str) -> dict[str, object]:
     """Read the obs and var tables and the layout of an h5ad file.
 
     The tables come through the same reader the loaders use, so column
-    names are snake_cased and the index is `cell_id` / `gene_id`, where R's
-    `read_h5ad_metadata()` keeps the raw names and calls the index `.id`.
+    names are snake_cased and the index is `cell_id` / `gene_id`.
 
     Args:
         f_path: The h5ad file.

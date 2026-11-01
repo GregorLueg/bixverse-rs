@@ -1,9 +1,8 @@
 """Writing h5ad, 10x h5 and CellRanger mtx files.
 
-`save_h5ad` exports an experiment for ScanPy, as R's `save_h5ad()`. The
-other three write fixtures from in-memory counts, as R's `write_h5ad_sc()`,
-`write_tenx_h5_sc()` and `write_cellranger_output()`; tests and examples
-use them to produce input for the loaders.
+`save_h5ad` exports an experiment for ScanPy. The other three write fixtures
+from in-memory counts; tests and examples use them to produce input for the
+loaders.
 """
 
 from __future__ import annotations
@@ -55,11 +54,11 @@ def _check_output(path: Path, *, overwrite: bool) -> None:
 
 @beartype
 def h5ad_columns(frame: pl.DataFrame, *, factorise: bool) -> list[H5adColumn]:
-    """Encode frame columns for the h5ad writer, as R's `.h5ad_columns()`.
+    """Encode frame columns for the h5ad writer.
 
     - with `factorise`, a string column with repeated values becomes a
       categorical, which is what pandas would hold it as (levels sorted by
-      code point, where R's `factor()` uses the session collation)
+      code point)
     - a categorical without levels becomes the literal string `"NA"`
     - integers and booleans with missing values are widened to float, the
       only one of the three with a representation for them; so are integers
@@ -179,14 +178,14 @@ def _export_cache(
     dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     str,
 ]:
-    """The cached embeddings and graph, as R's `.h5ad_export_cache()`.
+    """The cached embeddings and graph.
 
     PCA factors go to `obsm/X_pca`, the loadings (padded out to every gene
     through the HVGs) to `varm/PCs`, every other embedding to
     `obsm/X_<name>`, the neighbour graph to `obsp/connectivities` with the
     `uns/neighbors` block ScanPy looks for. Cached rows follow
     `cells_to_keep`; they are reordered to the ascending cell order of the
-    file, which R does not do.
+    file.
 
     Args:
         sc: The experiment.
@@ -248,7 +247,7 @@ def save_h5ad(
     overwrite: bool = True,
     verbose: bool = False,
 ) -> Path:
-    """Write an experiment to a spec compliant h5ad file, as R's `save_h5ad()`.
+    """Write an experiment to a spec compliant h5ad file.
 
     Writes the kept cells in ascending store order, the obs / var tables
     without the bookkeeping columns, and whatever cached embeddings and
@@ -326,7 +325,7 @@ def write_h5ad_sc(
     *,
     overwrite: bool = True,
 ) -> None:
-    """Write in-memory counts to a sparse h5ad file, as R's `write_h5ad_sc()`.
+    """Write in-memory counts to a sparse h5ad file.
 
     The first column of `obs` / `var` becomes the index, the others are
     written as they are typed. `X` is CSR and stored as `float32`.
@@ -374,7 +373,7 @@ def write_tenx_h5_sc(
     version: Literal["v3", "v2"] = "v3",
     overwrite: bool = True,
 ) -> None:
-    """Write in-memory counts to a 10x h5 file, as R's `write_tenx_h5_sc()`.
+    """Write in-memory counts to a 10x h5 file.
 
     Args:
         f_path: File to write.
@@ -431,7 +430,7 @@ def write_cellranger_output(
     rows: Literal["cells", "genes"] = "cells",
     overwrite: bool = True,
 ) -> None:
-    """Write counts as a CellRanger style trio, as R's `write_cellranger_output()`.
+    """Write counts as a CellRanger style trio.
 
     Writes `matrix.mtx` (integer coordinate format, 1-based) plus
     `barcodes.<format_type>` and `features.<format_type>` with a header row.

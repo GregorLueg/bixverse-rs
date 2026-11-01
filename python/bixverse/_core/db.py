@@ -1,8 +1,7 @@
 """The obs / var DuckDB of a single cell directory.
 
-A port of the bixverse R6 class `SingleCellDuckDB` as plain functions over a
-`duckdb.DuckDBPyConnection`. The file format is shared with R, so the on-disk
-contract is R's: tables `obs` (`cell_idx`, `cell_id`, `to_keep`, ...), `var`
+Plain functions over a `duckdb.DuckDBPyConnection`. The on-disk contract is
+tables `obs` (`cell_idx`, `cell_id`, `to_keep`, ...), `var`
 (`gene_idx`, `gene_id`, ...) and optionally `var_adt` (`feature_idx`,
 `feature_id`, ...), the index columns 1-based, categoricals as ENUM.
 
@@ -55,8 +54,7 @@ PROTECTED_COLUMNS: dict[str, tuple[str, ...]] = {
 
 # Up to this many levels a categorical is cast with an inline ENUM literal;
 # above it the levels go in through a registered frame and a named type,
-# since parsing the literal dominates for millions of levels. Not tuned; the
-# same constant as R's `SC_ENUM_LITERAL_MAX`.
+# since parsing the literal dominates for millions of levels. Not tuned.
 SC_ENUM_LITERAL_MAX: int = 10_000
 
 PARQUET_TYPES: tuple[str, ...] = (
@@ -148,7 +146,7 @@ def db_path(directory: Path) -> Path:
 def connect(
     path: Path, *, read_only: bool = False
 ) -> Generator[duckdb.DuckDBPyConnection]:
-    """Open the DuckDB for one call and close it afterwards, as R does.
+    """Open the DuckDB for one call and close it afterwards.
 
     Args:
         path: The `.db` file.
@@ -335,7 +333,7 @@ def get_table(
         cols: Optional columns to return. `None` returns all.
         filtered: Keep only `to_keep` cells. Only valid for `obs`.
         where_equal: Keep rows whose column equals the value. The value is
-            cast to the column type, not the column to a string, as R does,
+            cast to the column type, not the column to a string,
             so `"1"` matches a numeric 1 whose string form would be `"1.0"`.
 
     Returns:
@@ -387,8 +385,7 @@ def get_table(
 def get_ids(con: duckdb.DuckDBPyConnection, table: Table) -> np.ndarray:
     """The identifier column, positioned by 0-based index.
 
-    The R index maps (`get_obs_index_map`, `get_var_index_map`) as an array:
-    element `i` is the id of row `i`.
+    Element `i` is the id of row `i`.
 
     Raises:
         ValueError: If the index column is not exactly `1..n`, which would
@@ -456,9 +453,8 @@ def _column_types(
 ) -> dict[str, str]:
     """SQL type of every column of a registered frame.
 
-    `pl.Enum` and `pl.Categorical` columns become an ENUM, as a factor does
-    when R writes it, with the Enum's levels in order and a Categorical's
-    distinct values sorted (what `factor()` would make of them). DuckDB itself
+    `pl.Enum` and `pl.Categorical` columns become an ENUM, with the Enum's
+    levels in order and a Categorical's distinct values sorted. DuckDB itself
     would read either as VARCHAR.
     """
     types = {r[0]: r[1] for r in con.execute(f"DESCRIBE {_qi(view)}").fetchall()}
@@ -480,7 +476,7 @@ def _write_columns(
 ) -> None:
     """Write every non-key column of `frame` into `table`, matched on `key`.
 
-    R's `write_columns`: each column is dropped if present, added, and filled
+    Each column is dropped if present, added, and filled
     with one UPDATE. Rows without a match in `frame` end up NULL. `frame[key]`
     must already be 1-based.
     """
@@ -505,8 +501,8 @@ def add_data(
     """Add or replace columns in `obs` or `var`.
 
     With a key column (`cell_idx` / `gene_idx`, 0-based) the frame is joined
-    on it, as R's `join_data_obs`. Without one it must hold one row per table
-    row in index order, as R's `add_data_obs` / `add_data_var`.
+    on it. Without one it must hold one row per table
+    row in index order.
 
     Args:
         con: Open connection.
@@ -546,7 +542,7 @@ def add_data(
 def rename_column(
     con: duckdb.DuckDBPyConnection, table: Literal["obs", "var"], old: str, new: str
 ) -> None:
-    """Rename a column. A missing column warns and does nothing, as in R."""
+    """Rename a column. A missing column warns and does nothing."""
     if old not in columns(con, table):
         warnings.warn(
             f"Column '{old}' not found in table '{table}'. No renaming done.",
@@ -563,7 +559,7 @@ def drop_columns(
     """Drop columns, refusing the identifier and bookkeeping ones.
 
     Protected (`cell_idx`, `cell_id`, `to_keep`; `gene_idx`, `gene_id`) and
-    missing columns warn and are skipped, as in R.
+    missing columns warn and are skipped.
     """
     existing = columns(con, table)
     protected = PROTECTED_COLUMNS[table]
@@ -617,9 +613,7 @@ def populate_from_frame(
 
     The index column is (re)numbered `1..n` in row order and put first,
     followed by the identifier column and then the rest in frame order. Enum
-    and Categorical columns become ENUMs. Column names are taken as they are;
-    R's `populate_obs_from_data.table` additionally snake_cases them and
-    renames the first column to the identifier.
+    and Categorical columns become ENUMs. Column names are taken as they are.
 
     Args:
         con: Open connection.
@@ -776,10 +770,9 @@ def _parquet_parts_levels(
 ) -> list[str] | None:
     """ENUM levels of a column across several Parquet parts.
 
-    Reproduces what `data.table::rbindlist()` makes of the column when at
-    least one part holds it as a factor: per part in order, a categorical adds
-    its levels and a string column its values in row order, each only when not
-    yet seen.
+    When at least one part holds the column as a categorical: per part in order,
+    a categorical adds its levels and a string column its values in row order,
+    each only when not yet seen.
 
     Returns:
         The levels, or `None` if no part holds the column as categorical, or
@@ -895,7 +888,7 @@ def parquet_parts_to_duckdb(
 
 @beartype
 def plain_text_delimiter(path: Path) -> str:
-    """Tab for a `.tsv` / `.tsv.gz`, comma otherwise, as R decides it."""
+    """Tab for a `.tsv` / `.tsv.gz`, comma otherwise."""
     return "\t" if re.search(r"\.tsv(\.gz)?$", path.name, re.IGNORECASE) else ","
 
 
@@ -908,7 +901,7 @@ def plain_text_to_duckdb(
     keep: np.ndarray | None,
     table: Literal["obs", "var"],
 ) -> None:
-    """Load a CSV / TSV metadata file into a table, as R's `.plain_text_to_duckdb`.
+    """Load a CSV / TSV metadata file into a table.
 
     The file goes into a temporary table with insertion order preserved, so
     its `rowid` is the 0-based file row. The first column becomes the
@@ -977,7 +970,7 @@ def _int_like_r(frame: pl.DataFrame) -> pl.DataFrame:
 
 @beartype
 def rbind_fill(frames: list[pl.DataFrame]) -> pl.DataFrame:
-    """Stack frames by column name, as `data.table::rbindlist(fill = TRUE)`.
+    """Stack frames by column name.
 
     Columns appear in order of first appearance and are null where a frame
     lacks them. A column that is categorical in any frame comes out as an
@@ -1034,7 +1027,7 @@ def obs_from_multi_plain_text(
 ) -> None:
     """Build `obs` from several barcode files.
 
-    R's `populate_obs_from_multi_plain_text`: per file the kept rows, the
+    Per file the kept rows, the
     first column as `cell_id` prefixed with the `exp_id`, stacked with the
     union of columns.
 
@@ -1076,7 +1069,7 @@ def obs_from_multi_duckdb(
 ) -> None:
     """Build `obs` from the kept cells of several DuckDBs.
 
-    R's `populate_obs_from_multi_duckdb`: per source the `to_keep` rows in
+    Per source the `to_keep` rows in
     `cell_idx` order, `cell_id` prefixed with the `exp_id`, stacked with the
     union of columns.
 
@@ -1117,7 +1110,7 @@ def obs_from_duckdb_subset(
 ) -> None:
     """Build `obs` from a subset of a source DuckDB's rows, in a given order.
 
-    R's `populate_obs_from_duckdb_subset`: every source column bar
+    Every source column bar
     `cell_idx` and `to_keep`, rows picked by position so the caller's order
     survives, renumbered from one.
 
@@ -1146,7 +1139,7 @@ def var_from_duckdb_reordered(
 ) -> None:
     """Build `var` from a source DuckDB, reordered to `gene_ids`.
 
-    R's `populate_vars_from_duckdb_reordered`. A gene the source does not
+    A gene the source does not
     hold keeps only its id, with a warning.
 
     Args:

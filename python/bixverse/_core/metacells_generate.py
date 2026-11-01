@@ -1,12 +1,10 @@
 """Meta cell generators: bootstrapped (hdWGCNA), SEACells, SuperCells and
 MetaCells2.
 
-The port of R's `generate_bt_meta_cells_sc`, `generate_seacells_sc`,
-`generate_supercells_sc` and `generate_metacells2_sc`. Each takes a
-`SingleCells` or `SingleCellsSubset`, leaves it untouched, and returns a
-`MetaCells`. The search, the partition and the aggregation run in Rust over
-the cell-major store; this layer resolves the embedding, kNN and cell sets
-and assembles the result. `meta_cells_per_group` lives in
+Each generator takes a `SingleCells` or `SingleCellsSubset`, leaves it
+untouched, and returns a `MetaCells`. The search, the partition and the
+aggregation run in Rust over the cell-major store; this layer resolves the
+embedding, kNN and cell sets and assembles the result. `meta_cells_per_group` lives in
 `bixverse._core.pipeline`.
 
     >>> params = BtMetacellsParams(target_no_metacells=200)
@@ -54,7 +52,7 @@ def _knn_dict(
 
 @beartype
 def _require_fresh(sc: ScOrScSubset, artefacts: Sequence[str]) -> None:
-    """R's hard-tier `assert_sc_state`: cell indices go straight into Rust.
+    """Refuse stale inputs: cell indices go straight into Rust.
 
     Raises:
         ValueError: If an artefact is stale.
@@ -80,7 +78,7 @@ def _embedding(
 
 @beartype
 def _no_embedding() -> None:
-    """R's early return when the embedding is missing."""
+    """Warn that the embedding is missing."""
     warnings.warn(
         "The desired embedding was not found. Please check the parameters. "
         "Returning None.",
@@ -112,7 +110,7 @@ def generate_bt_meta_cells(
     seed: int = 42,
     verbose: bool = False,
 ) -> MetaCells | None:
-    """Bootstrapped meta cells after hdWGCNA, as R's `generate_bt_meta_cells_sc`.
+    """Bootstrapped meta cells after hdWGCNA.
 
     Each meta cell is a kNN neighbourhood (the centre and its neighbours), so
     meta cells can share cells. The cached kNN is used unless
@@ -203,7 +201,7 @@ def generate_seacells(
     seed: int = 42,
     verbose: bool = False,
 ) -> MetaCells:
-    """SEACells, kernel archetypal analysis, as R's `generate_seacells_sc`.
+    """SEACells, kernel archetypal analysis.
 
     The kernel is built on the embedding. The cached kNN is used unless
     `regenerate_knn` is set, none is cached, or `cells_to_use` narrows the
@@ -301,7 +299,7 @@ def generate_supercells(
     seed: int = 42,
     verbose: bool = False,
 ) -> MetaCells | None:
-    """SuperCells, walktrap on the kNN graph, as R's `generate_supercells_sc`.
+    """SuperCells, walktrap on the kNN graph.
 
     `ceil(n_cells / graining_factor)` meta cells. The cached kNN is used
     unless `regenerate_knn` asks for one built on the embedding;
@@ -387,8 +385,7 @@ def generate_metacells2(
     seed: int = 42,
     verbose: bool = False,
 ) -> MetaCells:
-    """MetaCells2 (divide and conquer) on the raw counts, as R's
-    `generate_metacells2_sc`.
+    """MetaCells2 (divide and conquer) on the raw counts.
 
     No embedding or kNN needed. Aims at a target size and UMI count rather
     than a number of meta cells and leaves outliers unassigned. `other_data`

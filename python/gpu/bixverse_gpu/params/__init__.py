@@ -1,8 +1,8 @@
 """Parameter bundles for the GPU twins.
 
-One frozen dataclass per bixverse.gpu R `params_*()` constructor the twins
-take, flattened as R flattens them before Rust sees the list. Generated from
-the R specs, except `ScrubletGpuParams`, whose R constructor is hand-written.
+One frozen dataclass per parameter bundle the twins take, flat as Rust sees
+them. Generated from the parameter specs, except `ScrubletGpuParams`, which is
+hand-written.
 Twins with no GPU-specific knobs (PCA, SEACells, Bonsai, NMF, SCENIC) take
 the CPU bundles from `bixverse.params`; `bixverse.params.to_rust` serialises
 both.

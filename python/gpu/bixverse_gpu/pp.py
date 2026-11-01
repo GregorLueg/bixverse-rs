@@ -1,4 +1,4 @@
-"""GPU sparse PCA, the port of R's `calculate_pca_gpu_sc`.
+"""GPU sparse PCA.
 
 Writes what `bixverse.pp.calculate_pca` writes: scores, loadings and the first
 `no_pcs` singular values to `sc.cache`, stamped `"pca"`.
@@ -35,8 +35,7 @@ def calculate_pca(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Sparse PCA over the kept cells and the HVGs on the GPU, as R's
-    `calculate_pca_gpu_sc`.
+    """Sparse PCA over the kept cells and the HVGs on the GPU.
 
     Always sparse, so the data are never scaled into a dense matrix.
     `svd_solver = "randomised"` runs the randomised SVD, every other solver

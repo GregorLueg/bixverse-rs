@@ -12,8 +12,7 @@ dropped cells and genes never enter the store. It then writes the cell-major
 and gene-major stores and loads obs and var into the DuckDB, adding `nnz` and
 `lib_size` to obs and `no_cells_exp` to var. Loading into a directory that
 already holds an experiment overwrites its stores and drops any saved
-`memory_py.*`. A directory written by the R package opens with `load_existing`
-too, with an empty cache.
+`memory_py.*`.
 
 **Several files.** `prescan_h5ad_files`, `prescan_tenx_h5_files` and
 `prescan_mtx_dirs` read the gene sets first and fix the gene universe

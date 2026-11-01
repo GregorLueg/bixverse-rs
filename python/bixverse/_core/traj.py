@@ -1,13 +1,12 @@
 """Trajectory inference: Palantir, PAGA and gene trends.
 
-The port of R's `run_palantir_sc`, `run_paga_sc` and `run_gene_trends_sc`
-(`R/methods_sc_trajectory.R`). Palantir and PAGA only read the cached kNN
-graph, so all three take a `SingleCells`, a `SingleCellsSubset` or a
-`MetaCells`, as in R. The work runs in Rust.
+Palantir and PAGA only read the cached kNN graph, so all three functions take
+a `SingleCells`, a `SingleCellsSubset` or a `MetaCells`. The work runs in
+Rust.
 
-Each returns a frozen record, R's `PalantirRes`, `PagaRes` and
-`GeneTrendsRes`, keyed by cell id. Nothing is written to obs, as in R; to
-colour by pseudotime, join `res.pseudotime` onto obs on `cell_id`.
+Each returns a frozen record, `PalantirRes`, `PagaRes` or `GeneTrendsRes`,
+keyed by cell id. Nothing is written to obs; to colour by pseudotime, join
+`res.pseudotime` onto obs on `cell_id`.
 
     >>> res = run_palantir(sc, early_cell="cell_0001")
     >>> paga = run_paga(sc, "leiden")
@@ -15,8 +14,7 @@ colour by pseudotime, join `res.pseudotime` onto obs on `cell_id`.
 
 Cell ids in and out are the ones the kNN graph was built over: the kept
 cells in `cells_to_keep` order, or the meta cells in row order. The PAGA
-graphs are dense `float64` cluster by cluster arrays rather than R's sparse
-matrices; they are small and the values are the same.
+graphs are dense `float64` cluster by cluster arrays; they are small.
 """
 
 from __future__ import annotations
@@ -68,7 +66,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True, repr=False)
 class PalantirRes:
-    """A Palantir run, R's `PalantirRes`.
+    """A Palantir run.
 
     Attributes:
         pseudotime: `cell_id`, `pseudotime` (min-max scaled to `[0, 1]`; the
@@ -103,7 +101,7 @@ class PalantirRes:
         return list(self.terminal_states)
 
     def __repr__(self) -> str:
-        """R's `print.PalantirRes`."""
+        """A multi-line summary of the run."""
         info = self.run_info
         n_states = len(self.terminal_states)
         lines = [
@@ -130,7 +128,7 @@ class PalantirRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class PagaRes:
-    """A PAGA graph abstraction, R's `PagaRes`.
+    """A PAGA graph abstraction.
 
     Attributes:
         connectivities: `(n_clusters, n_clusters)` `float64`, symmetric with a
@@ -149,7 +147,7 @@ class PagaRes:
     params: dict[str, str]
 
     def __repr__(self) -> str:
-        """R's `print.PagaRes`; both graphs are symmetric, hence the halving."""
+        """A multi-line summary; both graphs are symmetric, hence the halving."""
         return "\n".join(
             [
                 f"PagaRes: {self.sizes.height} clusters, "
@@ -166,7 +164,7 @@ class PagaRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class GeneTrendsRes:
-    """Gene trends along the Palantir branches, R's `GeneTrendsRes`.
+    """Gene trends along the Palantir branches.
 
     Attributes:
         trends: Long frame with `branch` and `gene` (Enums in branch and
@@ -186,7 +184,7 @@ class GeneTrendsRes:
     run_info: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.GeneTrendsRes`."""
+        """A multi-line summary of the trend fit."""
         info = self.run_info
         n_cells = info["n_cells"]
         jitter = info["jitter_used"]
@@ -228,7 +226,7 @@ def _cell_names(sc: ScOrMc) -> np.ndarray:
 
 @beartype
 def _knn_or_warn(sc: ScOrMc, n_cells: int, modality: Modality) -> KnnGraph | None:
-    """The cached kNN of a modality, R's hard state tier first.
+    """The cached kNN of a modality, checked for freshness first.
 
     Raises:
         ValueError: If it is stale or does not cover the cells, or on a
@@ -255,7 +253,7 @@ def _knn_or_warn(sc: ScOrMc, n_cells: int, modality: Modality) -> KnnGraph | Non
 def _cells_to_knn_idx(
     cell_ids: Sequence[str], used_cells: np.ndarray, arg_name: str
 ) -> np.ndarray:
-    """0-based kNN rows of cell ids, R's `.cells_to_knn_idx`.
+    """0-based kNN rows of cell ids.
 
     Raises:
         ValueError: If a cell is not in the kNN graph.
@@ -272,8 +270,8 @@ def _cells_to_knn_idx(
 
 @beartype
 def _as_factor(values: pl.Series, name: str) -> tuple[np.ndarray, list[str]]:
-    """0-based codes and levels of R's `as.factor`: an Enum keeps every
-    level, empty ones included; anything else is `factor()`.
+    """0-based codes and levels of a categorical column: an Enum keeps every
+    level, empty ones included; anything else takes its sorted unique values.
 
     Raises:
         ValueError: On a missing value.
@@ -322,8 +320,7 @@ def run_palantir(
     seed: int = 42,
     verbose: bool = False,
 ) -> PalantirRes | None:
-    """Palantir trajectory inference over the cached kNN graph, as R's
-    `run_palantir_sc`.
+    """Palantir trajectory inference over the cached kNN graph.
 
     Models differentiation as a Markov chain over a diffusion map of the
     cells: a pseudotime per cell, the probability of each cell reaching each
@@ -447,7 +444,7 @@ def run_paga(
     modality: Modality = "rna",
     verbose: bool = False,
 ) -> PagaRes | None:
-    """PAGA graph abstraction of the cached kNN graph, as R's `run_paga_sc`.
+    """PAGA graph abstraction of the cached kNN graph.
 
     Abstracts the kNN graph into a cluster graph whose edge weights measure
     how much more two clusters connect than a random null model expects,
@@ -517,7 +514,7 @@ def _trend_expression(
     obs_cells: np.ndarray,
 ) -> tuple[np.ndarray, list[str]]:
     """The cells x genes `float64` matrix a trend fit runs over, rows in
-    `obs_cells` order, R's `.gene_trends_expression`.
+    `obs_cells` order.
 
     Raises:
         ValueError: On MAGIC for meta cells, a missing or stale imputed layer,
@@ -580,7 +577,7 @@ def run_gene_trends(
     gene_trend_params: GeneTrendsParams | None = None,
     verbose: bool = False,
 ) -> GeneTrendsRes:
-    """Gene trends over the Palantir pseudotime, as R's `run_gene_trends_sc`.
+    """Gene trends over the Palantir pseudotime.
 
     Assigns cells to branches from their fate probabilities, then fits a
     landmark Gaussian process with a Matern-5/2 kernel per branch, the
@@ -662,7 +659,7 @@ def run_gene_trends(
         to_rust(gene_trend_params),
     )
 
-    # each trend is grid x genes; R unrolls it column major, gene by gene
+    # each trend is grid x genes; unrolled column major, gene by gene
     branch_enum = pl.Enum(branches)
     gene_enum = pl.Enum(genes)
     frames = []

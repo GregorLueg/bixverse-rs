@@ -1,25 +1,22 @@
 """Differential expression, markers and differential abundance.
 
-The port of R's `find_markers_sc`, `find_all_markers_sc`,
-`find_specific_markers_sc`, `get_pseudobulked_sc`, `run_edger_ql`,
-`pseudobulk_dge_sc`, `nebula_sc`, `get_miloR_abundances_sc` with
-`test_nhoods` and `add_nhoods_info`, and `meld_sc`. The work runs in Rust.
+Wilcoxon markers, pseudobulk edgeR, NEBULA, Milo neighbourhoods and MELD.
+The work runs in Rust.
 
 Marker tests return polars frames; the specific markers, NEBULA, Milo and
-MELD return frozen records with R's getters. Nothing is written to obs, as in
-R.
+MELD return frozen records. Nothing is written to obs.
 
     >>> markers = find_all_markers(sc, "leiden")
     >>> milo = get_milor_abundances(sc, "sample_id")
     >>> milo = test_nhoods(milo, "~ condition", design_df)
 
-Designs are formulas over a frame, `"~ condition + age"`: R's `model.matrix`
-for additive main effects, an intercept first, numeric columns as they are
+Designs are formulas over a frame, `"~ condition + age"`: additive main
+effects, an intercept first, numeric columns as they are
 and every other column treatment coded against its first (sorted) level,
 named `<column><level>`. Interactions and transformations are not parsed.
 
 Every index is 0-based, Milo's neighbourhoods (`Nhood`) and coefficients
-(`coef`) included; R numbers both from 1.
+(`coef`) included.
 """
 
 from __future__ import annotations
@@ -55,7 +52,7 @@ from bixverse.params._checks import check_range
 # NEBULA's own "this likely failed" marker: a convergence code at or below.
 NEBULA_FAILED_CONVERGENCE: int = -20
 
-# R's `.Machine$double.eps`, the floor on a NEBULA offset.
+# Machine epsilon, the floor on a NEBULA offset.
 DOUBLE_EPS: float = float(np.finfo(np.float64).eps)
 
 INTERCEPT: str = "(Intercept)"
@@ -79,11 +76,9 @@ logger = logging.getLogger(__name__)
 @beartype(conf=_CONF)
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MiloRParams:
-    """Parameters for the Milo neighbourhoods, R's `params_sc_miloR()`.
+    """Parameters for the Milo neighbourhoods.
 
-    R's constructor is hand written rather than generated, so this one is too.
-    It carries the kNN keys the neighbourhood refinement reads; R's `k` and
-    `knn_method` are dropped because nothing reads them.
+    It carries the kNN keys the neighbourhood refinement reads.
 
     Attributes:
         prop: Share of cells sampled as neighbourhood indices.
@@ -136,7 +131,7 @@ class MiloRParams:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScSpecificMarkers:
-    """One-vs-many specific markers, R's `ScSpecificMarkers`.
+    """One-vs-many specific markers.
 
     Attributes:
         summary: Per reference group and gene, the summaries across every
@@ -153,7 +148,7 @@ class ScSpecificMarkers:
     params: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.ScSpecificMarkers`."""
+        """Summary of the reference groups and their markers."""
         refs = self.summary["ref_grp"].unique(maintain_order=True).to_list()
         return "\n".join(
             [
@@ -171,7 +166,7 @@ class ScSpecificMarkers:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScNebula:
-    """NEBULA fits, R's `ScNebula`.
+    """NEBULA fits.
 
     Attributes:
         results: One row per gene that survived NEBULA's expression filter:
@@ -191,7 +186,7 @@ class ScNebula:
     params: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.ScNebula`."""
+        """Summary of the fit and its convergence."""
         res, p = self.results, self.params
         # the CPU or the GPU bundle
         method = to_rust(p["nebula_params"])["nebula_method"]
@@ -213,7 +208,7 @@ class ScNebula:
 @beartype
 @dataclass(frozen=True)
 class MiloR:
-    """Milo neighbourhoods and their test, R's `miloR`.
+    """Milo neighbourhoods and their test.
 
     Attributes:
         nhoods: Membership, `(n_cells, n_nhoods)`; rows are the kept cells in
@@ -242,7 +237,7 @@ class MiloR:
 @beartype
 @dataclass(frozen=True)
 class MeldRes:
-    """MELD densities, R's `meld_sc` list.
+    """MELD densities.
 
     Attributes:
         raw_scores: `cell_id` and one column per sample, the filtered
@@ -258,7 +253,7 @@ class MeldRes:
 @beartype
 @dataclass(frozen=True)
 class PseudoBulked:
-    """Pseudobulked counts, R's `get_pseudobulked_sc` matrix.
+    """Pseudobulked counts.
 
     Attributes:
         counts: `(n_samples, n_genes)`, a dense `float64` array or a CSR,
@@ -279,7 +274,7 @@ class PseudoBulked:
 
 @beartype(conf=_CONF)
 def _require_columns(sc: ScOrScSubset, cols: Sequence[str]) -> None:
-    """R's `.assert_group_by` for several columns.
+    """Check that every column is in obs.
 
     Raises:
         ValueError: If one is not in obs.
@@ -312,7 +307,7 @@ def _formula_terms(formula: str) -> list[str]:
 
 @beartype(conf=_CONF)
 def _model_matrix(frame: pl.DataFrame, formula: str) -> tuple[np.ndarray, list[str]]:
-    """R's `model.matrix` for additive main effects with an intercept.
+    """The design matrix for additive main effects with an intercept.
 
     Numeric columns enter as they are; any other column is treatment coded
     against its first level (Enum order, else sorted), one `<col><level>`
@@ -379,7 +374,7 @@ def _tested(
     coef: Coef | None,
     contrast: np.ndarray | Sequence[float] | None,
 ) -> tuple[list[int] | None, np.ndarray | None]:
-    """R's `.resolve_tested`: `(coef, contrast)`, `coef` defaulting to the
+    """The tested `(coef, contrast)`, `coef` defaulting to the
     last design column.
 
     Raises:
@@ -428,13 +423,13 @@ def find_markers(
     min_prop: float = 0.05,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """Wilcoxon DGE between two groups of cells, as R's `find_markers_sc`.
+    """Wilcoxon DGE between two groups of cells.
 
     Args:
         sc: The experiment.
         cells_1: 0-based cell indices or ids of group 1.
         cells_2: 0-based cell indices or ids of group 2.
-        method: Only `"wilcox"`, reserved as in R.
+        method: Only `"wilcox"`, reserved.
         alternative: The test alternative.
         min_prop: A gene is tested if this share of either group expresses it.
         verbose: Controls verbosity.
@@ -478,8 +473,7 @@ def find_all_markers(
     min_prop: float = 0.05,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """One-vs-rest Wilcoxon DGE for every group of a column, as R's
-    `find_all_markers_sc`.
+    """One-vs-rest Wilcoxon DGE for every group of a column.
 
     All groups are tested in one pass over the genes. Cells without a label
     are left out of every group and of every rest.
@@ -487,7 +481,7 @@ def find_all_markers(
     Args:
         sc: The experiment.
         column_of_interest: The obs column holding the groups.
-        method: Only `"wilcox"`, reserved as in R.
+        method: Only `"wilcox"`, reserved.
         alternative: The test alternative; `"greater"` asks for genes up in
             the group.
         min_prop: A gene is tested for a group if this share of the group or
@@ -543,8 +537,7 @@ def find_specific_markers(
     min_prop: float = 0.05,
     verbose: bool = False,
 ) -> ScSpecificMarkers | None:
-    """Markers that hold up against every rival group separately, as R's
-    `find_specific_markers_sc`.
+    """Markers that hold up against every rival group separately.
 
     Each reference is tested against each other group of the column on its
     own, then summarised per gene across the rivals: a gene marks the
@@ -557,7 +550,7 @@ def find_specific_markers(
         column_of_interest: The obs column holding the groups.
         reference_group: The one reference to report. `None` runs every group
             in turn.
-        method: Only `"wilcox"`, reserved as in R.
+        method: Only `"wilcox"`, reserved.
         alternative: The test alternative; `"greater"` asks for genes up in
             the reference.
         min_prop: A gene is tested if this share of any group expresses it.
@@ -687,7 +680,7 @@ def find_specific_markers(
 
 @beartype(conf=_CONF)
 def get_marker_summary(x: ScSpecificMarkers) -> pl.DataFrame:
-    """The per-gene summaries across every rival, R's `get_marker_summary`.
+    """The per-gene summaries across every rival.
 
     Args:
         x: The marker result.
@@ -700,7 +693,7 @@ def get_marker_summary(x: ScSpecificMarkers) -> pl.DataFrame:
 
 @beartype(conf=_CONF)
 def get_marker_comparisons(x: ScSpecificMarkers) -> pl.DataFrame:
-    """The per-rival statistics, R's `get_marker_comparisons`.
+    """The per-rival statistics.
 
     Args:
         x: The marker result.
@@ -725,7 +718,7 @@ def get_pseudobulked(
     assay: Literal["raw", "norm"] = "raw",
     verbose: bool = False,
 ) -> PseudoBulked:
-    """Pseudobulk groups of cells, as R's `get_pseudobulked_sc`.
+    """Pseudobulk groups of cells.
 
     Args:
         sc: The experiment.
@@ -778,7 +771,7 @@ def run_edger_ql(
     contrast: np.ndarray | Sequence[float] | None = None,
     edger_params: EdgerQlParams | None = None,
 ) -> pl.DataFrame:
-    """edgeR's quasi-likelihood chain, as R's `run_edger_ql`.
+    """edgeR's quasi-likelihood chain.
 
     `filterByExpr`, `calcNormFactors`, `glmQLFit` and `glmQLFTest`, via
     `edge-rs`. The rows do not have to be genes: Milo tests neighbourhoods
@@ -861,8 +854,7 @@ def pseudobulk_dge(
     edger_params: EdgerQlParams | None = None,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """edgeR quasi-likelihood DGE on pseudobulked cells, as R's
-    `pseudobulk_dge_sc`.
+    """edgeR quasi-likelihood DGE on pseudobulked cells.
 
     Sums the raw counts per sample and runs `run_edger_ql` on the result.
 
@@ -927,7 +919,7 @@ def nebula(
     nebula_params: NebulaParams | None = None,
     verbose: bool = False,
 ) -> ScNebula:
-    """NEBULA's negative binomial gamma mixed model, as R's `nebula_sc`.
+    """NEBULA's negative binomial gamma mixed model.
 
     The variance splits into a subject-level random effect and a cell-level
     overdispersion, so the donor structure is modelled rather than ignored.
@@ -1156,8 +1148,7 @@ def get_milor_abundances(
     seed: int = 42,
     verbose: bool = False,
 ) -> MiloR | None:
-    """Milo neighbourhoods and their cell counts per sample, as R's
-    `get_miloR_abundances_sc`.
+    """Milo neighbourhoods and their cell counts per sample.
 
     Samples a share of the cells, moves each towards the median of its kNN
     neighbourhood, and counts the cells of every sample in the neighbourhood
@@ -1254,7 +1245,7 @@ def test_nhoods(
     legacy: bool = True,
     fdr_weighting: FdrWeighting = "k-distance",
 ) -> MiloR:
-    """Differential abundance of the neighbourhoods, as R's `test_nhoods`.
+    """Differential abundance of the neighbourhoods.
 
     edgeR's quasi-likelihood test on the neighbourhood counts, with Milo's
     spatial FDR on top. `filterByExpr` stays off, it means nothing for a
@@ -1264,8 +1255,7 @@ def test_nhoods(
         x: The `MiloR`.
         design: Formula over `design_df`, e.g. `"~ condition"`.
         design_df: One row per sample.
-        sample_col: The `design_df` column with the sample names, R's
-            rownames.
+        sample_col: The `design_df` column with the sample names.
         coef: See `run_edger_ql`.
         contrast: See `run_edger_ql`.
         norm_method: Library size normalisation; Milo's `"logMS"` leaves every
@@ -1362,7 +1352,7 @@ def test_nhoods(
 def add_nhoods_info(
     x: MiloR, cell_info: Sequence[str] | np.ndarray | pl.Series
 ) -> MiloR:
-    """The majority cell type of each neighbourhood, as R's `add_nhoods_info`.
+    """The majority cell type of each neighbourhood.
 
     Adds `majority_celltype` (ties go to the first label in sorted order) and
     `majority_prop` to `nhoods_info`.
@@ -1420,8 +1410,7 @@ def add_nhoods_info(
 
 @beartype(conf=_CONF)
 def get_differential_abundance_res(x: MiloR) -> pl.DataFrame | None:
-    """The differential abundance table, R's
-    `get_differential_abundance_res`; warns and returns `None` if untested.
+    """The differential abundance table; warns and returns `None` if untested.
 
     Args:
         x: The Milo result.
@@ -1440,8 +1429,7 @@ def get_differential_abundance_res(x: MiloR) -> pl.DataFrame | None:
 
 @beartype(conf=_CONF)
 def get_index_cells(x: MiloR) -> np.ndarray:
-    """The neighbourhood index cells, 0-based positions among the kept cells,
-    R's `get_index_cells`.
+    """The neighbourhood index cells, 0-based positions among the kept cells.
 
     Args:
         x: The Milo result.
@@ -1456,7 +1444,7 @@ def get_index_cells(x: MiloR) -> np.ndarray:
 
 @beartype(conf=_CONF)
 def get_params(x: MiloR | ScNebula) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`.
+    """The parameters of the run.
 
     Args:
         x: The Milo or NEBULA result.
@@ -1482,7 +1470,7 @@ def meld(
     seed: int = 42,
     verbose: bool = False,
 ) -> MeldRes | None:
-    """MELD sample densities over the kNN graph, as R's `meld_sc`.
+    """MELD sample densities over the kNN graph.
 
     Smooths the one-hot sample indicators over the kNN graph with a
     Chebyshev-approximated spectral filter, giving a per-cell likelihood for

@@ -1,10 +1,9 @@
-"""Single cell plots, the matplotlib port of the bixverse.plots `*_sc` plots.
+"""Single cell plots in matplotlib.
 
 Every plot takes the object (or the frame its `extract_*` function returns)
-and draws with the bixverse palettes, ordering and facets of the R package.
+and draws with the bixverse palettes, ordering and facets.
 Single panel plots take an optional `ax` and return it; multi-panel ones
-return the `Figure`. ggplot sizes (mm) are converted to points, so the R
-defaults keep their meaning.
+return the `Figure`. Sizes given in mm are converted to points.
 
 Needs matplotlib, the `plots` extra.
 """
@@ -67,8 +66,8 @@ from bixverse._core.traj import PagaRes
 Palette = Literal["main", "sequential", "diverging", "viridis", "spectral"]
 ContinuousPalette = Literal["sequential", "spectral", "viridis", "diverging"]
 
-# MetBrewer Austria, Benedictus[6:10], Hiroshige and RColorBrewer Spectral
-# reversed, dumped from R.
+# MetBrewer Austria, Benedictus[6:10], Hiroshige and ColorBrewer Spectral
+# reversed.
 _AUSTRIA = ("#a40000", "#16317d", "#007e2f", "#ffcd12", "#b86092", "#721b3e", "#00b7a7")
 # MetBrewer's discrete pick: a colour is used once n reaches its rank
 _AUSTRIA_ORDER = (1, 2, 3, 4, 6, 5, 7)
@@ -101,7 +100,7 @@ _RAMPS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# R's named greys
+# Named greys
 GREY = {
     "grey30": "#4d4d4d",
     "grey40": "#666666",
@@ -113,9 +112,9 @@ GREY = {
 }
 OUTLIER_COLOURS = {False: GREY["lightgrey"], True: "orange"}
 
-# ggplot sizes are mm, matplotlib wants points
+# sizes are in mm, matplotlib wants points
 _PT_PER_MM = 72.27 / 25.4
-# ggplot's `.stroke`: stroke widths are in 1/96 inch
+# stroke widths are in 1/96 inch
 _STROKE_PT = 96 / 25.4
 RASTER_CELLS = 100_000
 
@@ -136,10 +135,9 @@ def _ramp(colours: Sequence[str], n: int) -> list[str]:
 def bx_colors(
     palette: Palette = "main", *, n: int = 20, reverse: bool = False
 ) -> list[str]:
-    """The bixverse palettes, as R's `bx_colors`.
+    """The bixverse palettes.
 
-    Palettes shorter than `n` are ramped up (in RGB; R ramps the fixed
-    length ones in Lab).
+    Palettes shorter than `n` are ramped up (in RGB).
 
     Args:
         palette: `"main"` (MetBrewer Austria), `"sequential"` (Benedictus),
@@ -194,10 +192,10 @@ def _cmap(palette: Palette, reverse: bool = False) -> Colormap:
 
 @beartype
 def _area(size_mm: float, stroke: float = 0.5) -> float:
-    """A ggplot point size (mm diameter) as a matplotlib marker area.
+    """A point size (mm diameter) as a matplotlib marker area.
 
-    ggplot draws a point at `size * .pt + stroke * .stroke / 2`; the stroke
-    term (0.5 by default) dominates small points, so it is kept.
+    The drawn diameter is `size * _PT_PER_MM + stroke * _STROKE_PT / 2`; the
+    stroke term (0.5 by default) dominates small points, so it is kept.
     """
     return (size_mm * _PT_PER_MM + stroke * _STROKE_PT / 2) ** 2
 
@@ -212,7 +210,7 @@ def _figure(ax: Axes) -> Figure:
 
 @beartype
 def auto_point_size(n_samples: int, raster: bool = False) -> float:
-    """Seurat's `AutoPointSize`, as R's `auto_point_size`."""
+    """Seurat's `AutoPointSize`."""
     return 1.0 if raster else min(1583 / max(n_samples, 1), 1.0)
 
 
@@ -235,7 +233,7 @@ def _is_discrete(s: pl.Series) -> bool:
 
 @beartype
 def _factor(s: pl.Series) -> tuple[np.ndarray, list[str]]:
-    """Codes and the levels that occur, in level order, as a ggplot scale."""
+    """Codes and the levels that occur, in level order."""
     codes, levels = _as_factor(s)
     used = sorted(set(codes[codes >= 0].tolist()))
     remap = {c: i for i, c in enumerate(used)}
@@ -363,7 +361,7 @@ def _label_centroids(
     size: float,
     font: str,
 ) -> None:
-    """Boxed labels at the mean position of each group, R's `label_centroids`."""
+    """Boxed labels at the mean position of each group."""
     if frame[label_by].dtype.is_numeric():
         raise ValueError("label_centroids(): label_by is continuous.")
     cent = (
@@ -401,7 +399,7 @@ def _scatter(
     highlight: bool = False,
     highlight_quantile: float = 0.25,
 ) -> PathCollection | None:
-    """R's `.plot_embedding` on one panel: points in data order coloured by
+    """One embedding panel: points in data order coloured by
     a discrete or continuous column. Returns the colour mappable, if any."""
     values = frame[colour]
     x, y = frame["dim_1"].to_numpy(), frame["dim_2"].to_numpy()
@@ -473,7 +471,7 @@ def _axis_labels(ax: Axes, embedding: str | None) -> None:
 
 @beartype
 def _relabel(features: Sequence[str], labels: Mapping[str, str] | None) -> list[str]:
-    """Display labels, R's `feature_labels[...]` lookup.
+    """Display labels looked up from `labels`.
 
     Raises:
         ValueError: If a feature has no label.
@@ -509,7 +507,7 @@ def embedding_plot(
     label_font: str = "bold",
     ax: Axes | None = None,
 ) -> Axes:
-    """An embedding coloured by an obs column, as R's `embedding_plot_sc`.
+    """An embedding coloured by an obs column.
 
     Args:
         x: The object, or `extract_embedding_data` output holding
@@ -548,7 +546,7 @@ def embedding_plot(
             x, embedding, obs_cols=cols, modality=embd_modality
         )
     if discrete:
-        # numbers as an Enum in numeric order, as R's as.factor; a plain
+        # numbers as an Enum in numeric order; a plain
         # string cast would sort 10 before 2
         frame = frame.with_columns(
             frame[c]
@@ -609,8 +607,7 @@ def feature_plot(
     palette: ContinuousPalette = "sequential",
     ncol: int | None = None,
 ) -> Figure:
-    """Feature expression over an embedding, one panel per feature, as R's
-    `feature_plot_sc`.
+    """Feature expression over an embedding, one panel per feature.
 
     With `scale_mode="free"` every panel gets its own colour bar, so a weak
     gene is not flattened by the loudest one; `"shared"` uses one colour bar
@@ -813,7 +810,7 @@ def dot_plot(
     ax: Axes | None = None,
 ) -> Axes:
     """Marker expression across groups, colour the scaled mean and size the
-    percent expressing, as R's `dot_plot_sc`.
+    percent expressing.
 
     The first feature sits at the top. With `feature_grouping` the features
     are blocked by group (groups in order of first appearance) and the
@@ -886,7 +883,7 @@ def dot_plot(
     lo, hi = float(pct.min()), float(pct.max())
 
     def area(v: np.ndarray) -> np.ndarray:
-        # ggplot's area palette over c(0, 3) mm
+        # area scale over 0 to 3 mm
         r = (v - lo) / (hi - lo) if hi > lo else np.ones_like(v)
         return (3 * np.sqrt(np.clip(r, 0, 1)) * _PT_PER_MM) ** 2
 
@@ -925,7 +922,7 @@ def dot_plot(
 
 @beartype
 def _bw_nrd0(x: np.ndarray) -> float:
-    """R's `bw.nrd0`, the default bandwidth of `density` and ggplot."""
+    """Gaussian KDE bandwidth by Silverman's rule of thumb."""
     hi = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
     q75, q25 = np.percentile(x, [75, 25])
     lo = min(hi, float(q75 - q25) / 1.34)
@@ -937,9 +934,8 @@ def _bw_nrd0(x: np.ndarray) -> float:
 def _kde(
     x: np.ndarray, a: float, b: float, m: int = 512
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Gaussian KDE on `m` points over `[a, b]` with R's bandwidth, by linear
-    binning and a discrete convolution (R's `density` does the same with an
-    FFT)."""
+    """Gaussian KDE on `m` points over `[a, b]` with Silverman's bandwidth, by
+    linear binning and a discrete convolution."""
     grid = np.linspace(a, b, m)
     if b <= a:
         return grid, np.zeros(m)
@@ -1000,8 +996,7 @@ def stacked_violin_plot(
     layer: Layer = "norm",
     palette: Palette = "main",
 ) -> Figure:
-    """Expression across groups, one row of violins per feature, as R's
-    `stacked_violin_plot_sc`.
+    """Expression across groups, one row of violins per feature.
 
     Args:
         x: The object, or `extract_gene_violin_data` output.
@@ -1091,8 +1086,8 @@ def heatmap_plot(
     palette: ContinuousPalette = "diverging",
     ax: Axes | None = None,
 ) -> Axes:
-    """Genes x cells, cells blocked by group with a colour strip per group,
-    as R's `heatmap_plot_sc`. Every block is one image.
+    """Genes x cells, cells blocked by group with a colour strip per group.
+    Every block is one image.
 
     Args:
         x: The object, or `extract_gene_expression` output holding
@@ -1285,9 +1280,8 @@ def heatmap_plot(
 
 @beartype
 def _point_density(x: np.ndarray, y: np.ndarray, smoothness: float) -> np.ndarray:
-    """2D KDE at every point, R's `.compute_point_density`: `MASS::kde2d`
-    (bandwidths `sd * smoothness`, 100 x 100 grid) read off bilinearly, as
-    `fields::interp.surface`."""
+    """2D KDE at every point: Gaussian kernel (bandwidths `sd * smoothness`,
+    100 x 100 grid) read off bilinearly."""
     n = 100
     gx, gy = np.linspace(x.min(), x.max(), n), np.linspace(y.min(), y.max(), n)
     hx = (np.std(x, ddof=1) * smoothness / 4) or 1.0
@@ -1334,7 +1328,7 @@ def feature_scatter_plot(
     ax: Axes | None = None,
 ) -> Axes:
     """Two features against each other, coloured by point density or binned
-    into hexagons, as R's `feature_scatter_plot_sc`.
+    into hexagons.
 
     Args:
         x: The object, or `extract_feature_pair` output.
@@ -1377,7 +1371,6 @@ def feature_scatter_plot(
             yv,
             c=dens,
             cmap=cmap,
-            # R draws these with `stroke = 0`
             s=_area(point_size, stroke=0.0),
             alpha=point_alpha,
             linewidths=0,
@@ -1417,7 +1410,7 @@ def _violin_panel(
     palette: Palette,
     seed: int = 42,
 ) -> None:
-    """R's `.plot_violin`: violins per group with the cells jittered on top,
+    """Violins per group with the cells jittered on top,
     outliers in orange."""
     codes, groups = _factor(df[grouping_column])
     v = df[variable].cast(pl.Float64).to_numpy()
@@ -1464,7 +1457,7 @@ def violin_plot(
     palette: Palette = "main",
     ax: Axes | None = None,
 ) -> Figure:
-    """QC violins, as R's `violin_plot_sc`.
+    """QC violins.
 
     For a `CellQc` one panel per metric, cells coloured by its final outlier
     call, grouped by the QC groups. For a frame one panel of `variable`
@@ -1479,7 +1472,7 @@ def violin_plot(
         group_name: x-axis label.
         var_name: y-axis label.
         log_scale: log10 y-axis; `False` for a `CellQc`, `True` for a frame
-            when `None`, as in R.
+            when `None`.
         show_outlier: Colour the cells by outlier call; otherwise by group.
         raster: Rasterise the cells; `None` does above 100,000.
         palette: Discrete palette for the groups without `show_outlier`.
@@ -1566,7 +1559,7 @@ def _density_panel(
     adjust_position_label: float,
     palette: Palette,
 ) -> None:
-    """R's `.plot_density`: one density per group, outlier groups named at
+    """One density per group, outlier groups named at
     their median."""
     codes, groups = _factor(df[grouping_column])
     colours = bx_colors(palette, n=max(len(groups), 1))
@@ -1618,8 +1611,7 @@ def density_plot(
     palette: Palette = "main",
     ax: Axes | None = None,
 ) -> Figure:
-    """QC densities per group with the outlier groups named, as R's
-    `density_plot_sc`.
+    """QC densities per group with the outlier groups named.
 
     For a `CellQc` (grouped, so `per_group_stats` exists) one panel per
     metric with the group calls it holds. For a frame one panel, outlier
@@ -1633,7 +1625,7 @@ def density_plot(
         threshold: Frame only: MADs for an outlier.
         var_name: x-axis label.
         log_scale: log10 x-axis (densities on the log scale); `False` for a
-            `CellQc`, `True` for a frame when `None`, as in R.
+            `CellQc`, `True` for a frame when `None`.
         adjust_position_label: x offset of the labels.
         palette: Discrete palette for the groups and labels.
         ax: Frame only: axes to draw on.
@@ -1718,7 +1710,7 @@ def joint_plot(
     palette: ContinuousPalette = "sequential",
 ) -> Figure:
     """Genes per cell against UMIs per cell, hexbinned with marginal
-    histograms, as R's `joint_plot_sc`.
+    histograms.
 
     Args:
         x: A `CellQc`, or a frame with both columns.
@@ -1877,7 +1869,7 @@ def paga_plot(
     ax: Axes | None = None,
 ) -> Axes:
     """The PAGA graph over an embedding, every cluster at the centroid of
-    its cells, as R's `paga_plot_sc`.
+    its cells.
 
     Node area tracks the cell count, edge width the connectivity.
 
@@ -2023,8 +2015,7 @@ def milo_nhood_plot(
     palette: Palette | None = None,
     ax: Axes | None = None,
 ) -> Axes:
-    """The Milo neighbourhood graph over an embedding, as R's
-    `milo_nhood_plot_sc` and Milo's `plotNhoodGraphDA`.
+    """The Milo neighbourhood graph over an embedding.
 
     With `colour_by="logFC"` the significant neighbourhoods are filled by
     logFC on a range centred on zero, drawn on top with the strongest last;
@@ -2089,7 +2080,7 @@ def milo_nhood_plot(
     lo, hi = float(np.min(size)), float(np.max(size))
 
     def area(v: np.ndarray) -> np.ndarray:
-        # ggplot's scale_size: area palette over `size_range`
+        # area scale over `size_range`
         r = (v - lo) / (hi - lo) if hi > lo else np.ones_like(v)
         d = size_range[0] + np.sqrt(np.clip(r, 0, 1)) * (size_range[1] - size_range[0])
         return (d * _PT_PER_MM) ** 2

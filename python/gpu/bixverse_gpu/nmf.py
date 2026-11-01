@@ -1,9 +1,8 @@
 """GPU HALS NMF: one run, stabilised restarts, consensus NMF and the k sweep.
 
-The port of R's `nmf_gpu_sc`, `stabilised_nmf_gpu_sc`, `consensus_nmf_gpu_sc`
-and `nmf_k_sweep_gpu_sc`. Same inputs and result classes as `bixverse.nmf`;
-only the HALS solver runs on the GPU, which caps the rank at
-`NMF_GPU_MAX_RANK`. The consensus step stays on the CPU.
+Same inputs and result classes as `bixverse.nmf`; only the HALS solver runs on
+the GPU, which caps the rank at `NMF_GPU_MAX_RANK`. The consensus step stays on
+the CPU.
 """
 
 from __future__ import annotations
@@ -38,13 +37,13 @@ __all__ = [
 # Globals #
 ###########
 
-#: R's `NMF_GPU_MAX_RANK`: the largest k the GPU HALS solver takes.
+#: The largest k the GPU HALS solver takes.
 NMF_GPU_MAX_RANK: int = 128
 
 
 @beartype
 def _check_rank(k: int) -> None:
-    """R's `.assert_nmf_gpu_rank`.
+    """Check that the rank fits the GPU solver.
 
     Raises:
         ValueError: Above `NMF_GPU_MAX_RANK`.
@@ -70,7 +69,7 @@ def nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> NmfResult:
-    """One HALS NMF run on the GPU, as R's `nmf_gpu_sc`.
+    """One HALS NMF run on the GPU.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -119,8 +118,7 @@ def stabilised_nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> StabilisedNmfResult:
-    """Randomly initialised HALS NMF restarts on the GPU, as R's
-    `stabilised_nmf_gpu_sc`.
+    """Randomly initialised HALS NMF restarts on the GPU.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -172,8 +170,7 @@ def consensus_nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> ConsensusNmfResult:
-    """Consensus HALS NMF (cNMF) with the restarts on the GPU, as R's
-    `consensus_nmf_gpu_sc`.
+    """Consensus HALS NMF (cNMF) with the restarts on the GPU.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -231,8 +228,7 @@ def nmf_k_sweep(
     seed: int = 42,
     verbose: bool = False,
 ) -> NmfKSweepResult:
-    """Consensus NMF over a range of k with the restarts on the GPU, as R's
-    `nmf_k_sweep_gpu_sc`.
+    """Consensus NMF over a range of k with the restarts on the GPU.
 
     Args:
         sc: The experiment, a subset or meta cells.

@@ -1,4 +1,4 @@
-"""GPU NEBULA, the port of R's `nebula_gpu_sc`.
+"""GPU NEBULA.
 
 Returns the `bixverse.de.ScNebula` the CPU `nebula` returns. Only stage two,
 the per-gene penalised fits, runs on the GPU, in `f32`, so the estimates sit
@@ -40,7 +40,7 @@ def nebula(
     nebula_params: NebulaGpuParams | None = None,
     verbose: bool = False,
 ) -> ScNebula:
-    """NEBULA with the per-gene fits on the GPU, as R's `nebula_gpu_sc`.
+    """NEBULA with the per-gene fits on the GPU.
 
     Inputs and the result are those of `bixverse.de.nebula`.
 

@@ -1,10 +1,8 @@
 """GPU kNN, neighbour graphs and clustering.
 
-The port of R's `generate_gpu_knn_sc`, `find_neighbours_gpu_sc`,
-`find_clusters_gpu_sc` and `fast_cluster_gpu_sc`. They write what their
-`bixverse.graph` twins write: the kNN and the neighbour graph to the cache,
-stamped, the cluster labels to obs. The kNN runs on the GPU; the graph built
-from it is the CPU one, as in R.
+The functions write what their `bixverse.graph` twins write: the kNN and the
+neighbour graph to the cache, stamped, the cluster labels to obs. The kNN runs
+on the GPU; the graph built from it is the CPU one.
 
     >>> find_neighbours(sc)
     >>> find_clusters(sc, res=1.0)
@@ -94,8 +92,7 @@ def generate_knn(
     seed: int = 42,
     verbose: bool = False,
 ) -> KnnGraph | None:
-    """A GPU kNN over an embedding, without touching the experiment, as R's
-    `generate_gpu_knn_sc`.
+    """A GPU kNN over an embedding, without touching the experiment.
 
     Methods: `"exhaustive"` (exact, the default), `"ivf"` and `"nndescent"`
     (the descent graph, handed back without a search). Euclidean distances
@@ -143,8 +140,7 @@ def find_neighbours(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """The GPU kNN and its neighbour graph over an embedding, as R's
-    `find_neighbours_gpu_sc`.
+    """The GPU kNN and its neighbour graph over an embedding.
 
     The kNN goes to the modality's cache, stamped as derived from the
     embedding, and its symmetrisation (`knn_sym`) to its `connectivities`,
@@ -216,7 +212,7 @@ def find_clusters(
     local_moving: LocalMoving = "queue",
 ) -> None:
     """Leiden or Louvain on the neighbour graph, level-0 local moving on the
-    GPU, as R's `find_clusters_gpu_sc`.
+    GPU.
 
     Writes what `bixverse.graph.find_clusters` writes. Graphs below 50,000
     nodes, or with a node of very high degree, run fully on the CPU with
@@ -275,7 +271,7 @@ def fast_cluster(
     verbose: bool = False,
 ) -> FastClusters:
     """k-means coarsening on the GPU, a centroid graph and Louvain / Leiden
-    on it, as R's `fast_cluster_gpu_sc`.
+    on it.
 
     Returns what `bixverse.graph.fast_cluster` returns. Only the k-means (and
     the cell-mediated top-m search) run on the GPU; it is full-batch Lloyd's,

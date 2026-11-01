@@ -1,8 +1,7 @@
 # Parameters
 
-One frozen dataclass per R `params_*()` constructor, flattened the way R flattens
-them before Rust sees the list. Grouped by the module that takes them; `Shared`
-goes to more than one.
+One frozen dataclass per parameter set, flat, the way Rust sees it. Grouped by the
+module that takes them; `Shared` goes to more than one.
 
 ## Shared
 

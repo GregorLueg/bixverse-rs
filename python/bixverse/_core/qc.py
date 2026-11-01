@@ -1,12 +1,10 @@
 """Cell QC: per-cell metrics, MAD and hard-threshold outlier calls.
 
-The port of R's QC helpers. The metric passes (`gene_set_proportions`,
-`top_genes_perc`) read the cell store in Rust and write their columns to obs
-under R's names, so an R session opening the directory sees the same table.
-The outlier calls (`run_cell_qc`, `flag_cells`, `rescue_cells`) work on plain
-vectors, as in R: they return a `CellQc` record, `get_data` turns it into an
-obs frame for `SingleCells.add_obs`, and the cell filter stays with the
-caller.
+The metric passes (`gene_set_proportions`, `top_genes_perc`) read the cell
+store in Rust and write their columns to obs. The outlier calls
+(`run_cell_qc`, `flag_cells`, `rescue_cells`) work on plain vectors: they
+return a `CellQc` record, `get_data` turns it into an obs frame for
+`SingleCells.add_obs`, and the cell filter stays with the caller.
 
     >>> obs = sc.obs(filtered=True)
     >>> qc = run_cell_qc(
@@ -38,8 +36,7 @@ from bixverse._core.single_cells import SingleCells
 # Globals #
 ###########
 
-# Above this many kept cells the metric passes stream by default; R's
-# `.N_CELLS_STREAMING_THRESHOLD`.
+# Above this many kept cells the metric passes stream by default.
 N_CELLS_STREAMING_THRESHOLD: int = 100_000
 
 Direction = Literal["twosided", "below", "above"]
@@ -54,7 +51,7 @@ Vector = np.ndarray | pl.Series | Sequence[float] | Sequence[int]
 
 @beartype
 def _auto_streaming(n_cells: int, streaming: bool | None) -> bool:
-    """R's `auto_streaming`: the given flag, else stream above the threshold."""
+    """The given flag, else stream above the threshold."""
     return n_cells > N_CELLS_STREAMING_THRESHOLD if streaming is None else streaming
 
 
@@ -110,7 +107,7 @@ def _check_bounds_direction(bounds: Bounds, direction: Direction, name: str) -> 
 
 @beartype
 def _first_seen(groups: np.ndarray) -> list[str]:
-    """Distinct group labels in order of first appearance, as R's `unique`."""
+    """Distinct group labels in order of first appearance."""
     return list(dict.fromkeys(groups.tolist()))
 
 
@@ -145,13 +142,13 @@ def per_cell_qc_outlier(
     direction: Direction = "twosided",
     r_standard: bool = True,
 ) -> MadOutlier:
-    """MAD outlier detection on a per-cell QC metric, as R's version.
+    """MAD outlier detection on a per-cell QC metric.
 
     Args:
         metric: The metric.
         threshold: MADs from the median beyond which a value is an outlier.
         direction: Which tail(s) to flag.
-        r_standard: Scale the MAD by 1.4826 like R's `mad()`, so `threshold`
+        r_standard: Scale the MAD by 1.4826, so `threshold`
             counts standard deviations under normality. `False` uses the raw
             MAD.
 
@@ -181,7 +178,7 @@ def _per_group_qc_outlier(
     threshold: float,
     r_standard: bool,
 ) -> pl.DataFrame:
-    """MAD calls on per-group medians, flagging whole groups, as R's version.
+    """MAD calls on per-group medians, flagging whole groups.
 
     Returns:
         One row per metric and group: `metric`, `group`, `group_median`,
@@ -224,7 +221,7 @@ def _per_group_qc_outlier(
 @beartype
 @dataclass(frozen=True)
 class CellQc:
-    """Outlier calls over several per-cell metrics, R's `CellQc`.
+    """Outlier calls over several per-cell metrics.
 
     The per-metric flag dicts all share the metric order of `metrics`. A cell
     is an outlier on a metric if MAD flagged it and it was not rescued, or a
@@ -236,7 +233,7 @@ class CellQc:
         groups: Group label per cell (`"all"` without groups).
         thresholds: The MAD thresholds per metric and group (`metric`,
             `group`, `median`, `upper_threshold`, `lower_threshold`), `None`
-            when MAD was skipped. R's `per_metric`.
+            when MAD was skipped.
         outlier_mat: MAD flags per metric.
         hard_mat: Hard-threshold flags per metric.
         rescued_mat: Rescued MAD flags per metric.
@@ -289,7 +286,7 @@ def run_cell_qc(
     mad: bool = True,
     r_standard: bool = True,
 ) -> CellQc:
-    """Outlier detection over several per-cell QC metrics, as R's version.
+    """Outlier detection over several per-cell QC metrics.
 
     MAD runs per group when `groups` is given; hard thresholds ignore groups.
 
@@ -485,7 +482,7 @@ def _check_metric_names(qc: CellQc, names: Mapping[str, Bounds], arg: str) -> No
 
 @beartype
 def rescue_cells(qc: CellQc, rescue_thresholds: Mapping[str, Bounds]) -> CellQc:
-    """Un-flag MAD outliers that fall within safe bounds, as R's version.
+    """Un-flag MAD outliers that fall within safe bounds.
 
     For each metric named, MAD-flagged cells within `[lower, upper]` are
     rescued; this replaces any earlier rescue of that metric. Hard flags are
@@ -530,7 +527,7 @@ def rescue_cells(qc: CellQc, rescue_thresholds: Mapping[str, Bounds]) -> CellQc:
 def flag_cells(
     qc: CellQc, hard_thresholds: Mapping[str, Bounds], *, reset: bool = False
 ) -> CellQc:
-    """Add hard-threshold flags, as R's version.
+    """Add hard-threshold flags.
 
     New flags are unioned with the existing ones per metric, and the bounds
     replace any earlier bounds of the same metric.
@@ -573,9 +570,9 @@ def flag_cells(
 
 @beartype
 def get_data(qc: CellQc) -> pl.DataFrame:
-    """The calls as an obs frame for `SingleCells.add_obs`, R's `get_data`.
+    """The calls as an obs frame for `SingleCells.add_obs`.
 
-    Columns are R's: the metrics, `cell_idx` (0-based here), `grp`,
+    Columns: the metrics, `cell_idx` (0-based), `grp`,
     `global_outlier`, then per metric `<m>_is_outlier`, `<m>_mad_outlier`,
     `<m>_hard_outlier` and `<m>_rescued`.
 
@@ -619,8 +616,7 @@ def gene_set_proportions(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> None:
-    """Share of each kept cell's reads in each gene set, as R's
-    `gene_set_proportions_sc`.
+    """Share of each kept cell's reads in each gene set.
 
     The mitochondrial percentage pattern. One obs column per set, named by
     its key, as a fraction in `[0, 1]`.
@@ -662,8 +658,7 @@ def top_genes_perc(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> None:
-    """Share of each kept cell's reads in its top N genes, as R's
-    `top_genes_perc_sc`.
+    """Share of each kept cell's reads in its top N genes.
 
     High values flag low-complexity cells. One obs column per N, named
     `top_<N>_genes_percentage`, as a fraction in `[0, 1]`.
@@ -700,7 +695,7 @@ def top_genes_perc(
 
 @beartype
 def get_available_features(sc: SingleCells) -> pl.DataFrame:
-    """Every obs column and gene id, as R's `get_sc_available_features`.
+    """Every obs column and gene id.
 
     Args:
         sc: The experiment.

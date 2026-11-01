@@ -1,16 +1,13 @@
 """Persisting the in-memory state of a `SingleCells` directory.
 
-R saves its map and cache as `memory.qs2` / `memory.rds`, which Python cannot
-read; Python saves its own as `memory_py.npz` (the arrays) plus
-`memory_py.json` (everything else), and neither side touches the other's
-files. The ids are not saved: they always come from the DuckDB. Without a
-Python memory file `load_existing` rebuilds the map from the DuckDB, as R
-does without its own.
+The map and cache are saved as `memory_py.npz` (the arrays) plus
+`memory_py.json` (everything else). The ids are not saved: they always come
+from the DuckDB. Without a memory file `load_existing` rebuilds the map from
+the DuckDB.
 
-The DuckDB is the one state both front ends write, and its `obs.to_keep` is
-the cell filter: a memory file whose saved filter differs from it is
-overruled with a warning, so a filter set on the other side after the save is
-honoured and its stale cache reported.
+The DuckDB's `obs.to_keep` is the cell filter: a memory file whose saved
+filter differs from it is overruled with a warning, so a filter changed in
+the DuckDB after the save is honoured and its stale cache reported.
 """
 
 from __future__ import annotations
@@ -96,7 +93,7 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
     """Open an experiment directory and restore any state Python saved.
 
     Args:
-        directory: Written by R or by Python.
+        directory: The experiment directory.
         multi_modal: Open it as a `SingleCellsMultiModal`. A memory file a
             multi-modal experiment saved does so regardless.
 
@@ -104,11 +101,10 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
         The experiment. With `memory_py.*` present, the cell filter, HVGs and
         cache come from there (and for a multi-modal one the ADT counts, ADT
         cache and WNN slot); otherwise the map is rebuilt from the DuckDB and
-        the cache is empty. R keeps its ADT counts in its own memory file, so
-        they do not carry over from R.
+        the cache is empty.
 
     Restores the stores from `counts.bxa` when only the archive is there,
-    and warns about a store in the v3 format, as R does.
+    and warns about a store in the v3 format.
 
     Raises:
         FileNotFoundError: If a store, the DuckDB, or one half of the memory

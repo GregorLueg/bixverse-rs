@@ -1,15 +1,13 @@
 """`SingleCellsMultiModal`: RNA in the store, ADT counts in memory, a WNN slot.
 
-The port of R's `SingleCellsMultiModal` and `ADTCounts`. The RNA side is a
-`SingleCells` in every respect, so every RNA method takes one unchanged. On
-top of it sit three things, mirroring R's `adt_counts`, `adt_cache` and
-`other_data$wnn`:
+The RNA side is a `SingleCells` in every respect, so every RNA method takes
+one unchanged. On top of it sit three things:
 
 - `adt`: the ADT counts of the cells kept when they were added, raw and
-  normalised (CLR or DSB), keyed by barcode. They are not in the store and,
-  as in R, never written to it; `bixverse.io.save` keeps them in Python's own
-  memory file. Their feature table is the `var_adt` table in the DuckDB and
-  their per-cell totals land in obs, both as R writes them.
+  normalised (CLR or DSB), keyed by barcode. They are not in the store and
+  never written to it; `bixverse.io.save` keeps them in Python's own memory
+  file. Their feature table is the `var_adt` table in the DuckDB and their
+  per-cell totals land in obs.
 - `adt_cache`: PCA, embeddings, kNN and graph over the ADT counts.
 - `wnn`: the fused kNN, its graph, the per-cell modality weights and any
   embeddings laid out on it.
@@ -66,7 +64,7 @@ MODALITY_ONLY_MM = "modality = '{}' is only supported for SingleCellsMultiModal.
 @beartype
 @dataclass(frozen=True)
 class DsbInfo:
-    """What a DSB normalisation estimated on the way, R's `other_data`.
+    """What a DSB normalisation estimated on the way.
 
     Attributes:
         protein_background_mean: Per-protein background mean.
@@ -93,7 +91,7 @@ class DsbInfo:
 @beartype
 @dataclass(frozen=True)
 class AdtCounts:
-    """ADT counts with their normalisation, R's `ADTCounts`.
+    """ADT counts with their normalisation.
 
     Attributes:
         raw_counts: `(n_cells, n_features)` `float64` raw counts.
@@ -134,7 +132,7 @@ class AdtCounts:
 @beartype
 @dataclass
 class WnnSlot:
-    """The weighted nearest neighbour integration, R's `other_data$wnn`.
+    """The weighted nearest neighbour integration.
 
     Attributes:
         cache: The fused kNN, its graph and embeddings laid out on it. Its
@@ -157,8 +155,7 @@ class WnnSlot:
 
 
 class SingleCellsMultiModal(SingleCells):
-    """A single cell experiment with RNA and ADT, as R's
-    `SingleCellsMultiModal`.
+    """A single cell experiment with RNA and ADT.
 
         >>> import bixverse as bv
         >>> mm = bv.SingleCellsMultiModal("my_experiment")
@@ -344,7 +341,7 @@ class SingleCellsMultiModal(SingleCells):
 
 @beartype
 def _qualify(label: str, modality: str) -> str:
-    """A label qualified by modality, as R's `.stamp_ids_from`."""
+    """A label qualified by modality."""
     return label if ":" in label else f"{modality}:{label}"
 
 
@@ -355,7 +352,7 @@ def _new_id() -> str:
 
 @beartype
 def check_modality(sc: object, modality: str) -> None:
-    """R's `.assert_modality_available`: non-RNA needs a multi-modal object.
+    """Non-RNA modalities need a multi-modal object.
 
     Raises:
         ValueError: On a non-RNA modality of anything else.
@@ -399,7 +396,7 @@ def stamp(
 
 @beartype
 def require_fresh(sc: ScOrMc, labels: Sequence[str], modality: Modality) -> None:
-    """R's hard state tier: raise unless the artefacts are fresh.
+    """Hard state tier: raise unless the artefacts are fresh.
 
     Raises:
         ValueError: If one is stale.
@@ -438,7 +435,7 @@ def adt_rows(
     cells: np.ndarray | Sequence[int] | Sequence[str] | None,
     use_cells_to_keep: bool,
 ) -> np.ndarray:
-    """Rows of the ADT matrix for a cell selection, as R's ADT `get_sc_counts`.
+    """Rows of the ADT matrix for a cell selection.
 
     The ADT matrix is keyed by barcode and frozen at add time, so the cells
     resolve to barcodes first. Cells it does not hold warn and drop.

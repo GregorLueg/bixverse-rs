@@ -32,5 +32,5 @@ bvg.graph.find_clusters(sc, res=1.0, name="leiden_clusters")
 ```
 
 `bvg.gpu_available()` probes for an adapter. Without one the twins raise
-`bixverse.BixverseError`. Where R names the GPU result differently
-(`harmony_gpu`, `mnn_gpu`) so does this.
+`bixverse.BixverseError`. A few results get their own name in the cache
+(`harmony_gpu`, `mnn_gpu`).

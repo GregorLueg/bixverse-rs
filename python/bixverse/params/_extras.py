@@ -1,8 +1,7 @@
 """Cross-field rules for the generated param bundles.
 
-devforge carries these as R code in `extra_ctor`, which the generator cannot
-translate, so they are ported here by hand and keyed by class name. Each takes
-the bundle after its per-field checks have passed.
+The generator cannot express these, so they are written here by hand and keyed
+by class name. Each takes the bundle after its per-field checks have passed.
 """
 
 from __future__ import annotations

@@ -60,8 +60,7 @@ is the per cell call, null where the cell is Unknown. Labels are stored in a
 reference in `cells_to_keep` order, so `add_symphony_labels` needs the cell set
 the reference was built on. `transfer_labels_symphony` raises on a query that
 has no current `"symphony"` embedding: map again after the cell filter moves.
-`save_symphony_ref` and `load_symphony_ref` use one `.npz` file; a reference
-saved by the R package does not load here.
+`save_symphony_ref` and `load_symphony_ref` use one `.npz` file.
 """
 
 from bixverse._core.annotate import (

@@ -1,7 +1,6 @@
 """Cross-field rules for the generated GPU param bundles.
 
-The bixverse.gpu specs carry these as R code (`extra_ctor`, `extra_check`),
-which the generator cannot translate, so they are ported here by hand and keyed
+The generator cannot express these, so they are written here by hand and keyed
 by class name, as `bixverse.params._extras` does for the CPU bundles.
 """
 

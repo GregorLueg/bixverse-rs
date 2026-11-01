@@ -1,6 +1,6 @@
 """Cell type annotation (ScType) and reference mapping (Symphony).
 
-The port of R's `prepare_cell_markers`, `calc_sc_type_scores`,
+ScType: `prepare_cell_markers`, `calc_sc_type_scores`,
 `score_clusters`, `assign_sc_type`, `build_symphony_ref`,
 `add_symphony_labels`, `map_symphony_query` and `transfer_labels_symphony`.
 The work runs in Rust.
@@ -12,19 +12,16 @@ The work runs in Rust.
     >>> map_symphony_query(ref, query)
     >>> transfer_labels_symphony(ref, query, "cell_type")
 
-The ScType results are frozen records with R's getters and nothing is written
-to obs, as in R. The Symphony query embeddings go to `query.cache.embeddings`
-under R's names (`"symphony"`, `"symphony_pca"`, `"symphony_r"`); transferred
-labels go to the query's obs as `predicted_<column>` and
-`confidence_<column>`, the columns R returns.
+The ScType results are frozen records and nothing is written to obs. The
+Symphony query embeddings go to `query.cache.embeddings` under the names
+`"symphony"`, `"symphony_pca"` and `"symphony_r"`; transferred labels go to
+the query's obs as `predicted_<column>` and `confidence_<column>`.
 
-A `SymphonyReference` is immutable, as R's S7 value is: `add_symphony_labels`
-hands back a new one. `save_symphony_ref` / `load_symphony_ref` persist it to
-a single `.npz` without pickling. R has no portable format for its reference
-(an `.rds` at best), so R-built references do not load here.
+A `SymphonyReference` is immutable: `add_symphony_labels` hands back a new
+one. `save_symphony_ref` / `load_symphony_ref` persist it to a single `.npz`
+without pickling.
 
-Every index is 0-based: marker genes, HVGs and cluster ids. R's `hvg` is
-1-based.
+Every index is 0-based: marker genes, HVGs and cluster ids.
 """
 
 from __future__ import annotations
@@ -95,8 +92,8 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True)
 class CellMarkers:
-    """The marker genes of one cell type, one entry of R's
-    `prepare_cell_markers()` list.
+    """The marker genes of one cell type, one entry of the
+    `prepare_cell_markers()` dict.
 
     Attributes:
         positive: 0-based indices of the positive markers.
@@ -112,7 +109,7 @@ class CellMarkers:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScTypeResults:
-    """Per-cell ScType scores, R's `ScTypeResults`.
+    """Per-cell ScType scores.
 
     Attributes:
         cell_types: The cell types, in score column order.
@@ -134,7 +131,7 @@ class ScTypeResults:
         return self.scores.shape[1]
 
     def __repr__(self) -> str:
-        """R's `print.ScTypeResults`."""
+        """Summary of the scored cells and cell types."""
         return "\n".join(
             [
                 f"ScTypeResults: {self.n_cells} cells, {self.n_cell_types} cell types",
@@ -146,7 +143,7 @@ class ScTypeResults:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScTypeCellResults:
-    """Per-cell ScType calls, R's `ScTypeCellResults`.
+    """Per-cell ScType calls.
 
     Attributes:
         cell_types: The scored cell types.
@@ -173,7 +170,7 @@ class ScTypeCellResults:
     counts: pl.DataFrame | None
 
     def __repr__(self) -> str:
-        """R's `print.ScTypeCellResults`."""
+        """Summary of the calls and the Unknown cells."""
         lines = [
             f"ScTypeCellResults: {self.assignments.len()} cells, "
             f"{len(self.cell_types)} cell types",
@@ -193,7 +190,7 @@ class ScTypeCellResults:
 @beartype
 @dataclass(frozen=True, repr=False)
 class SymphonyReference:
-    """A Symphony reference, R's `SymphonyReference`.
+    """A Symphony reference.
 
     Holds the PCA loadings, the per-HVG scaling statistics, the soft cluster
     centroids and the cached compression terms (`nr`, `c_cache`) that map a
@@ -238,7 +235,7 @@ class SymphonyReference:
     labels: pl.DataFrame | None = None
 
     def __repr__(self) -> str:
-        """R's `print.SymphonyReference`."""
+        """Summary of the reference."""
         labels = "none" if self.labels is None else ", ".join(self.labels.columns)
         return "\n".join(
             [
@@ -261,7 +258,7 @@ class SymphonyReference:
 
 @beartype
 def _sc_type_labels(idx: np.ndarray, cell_types: Sequence[str]) -> pl.Series:
-    """R's `.sc_type_labels`: 0-based codes to names, `-1` to null."""
+    """0-based codes to names, `-1` to null."""
     return pl.Series(
         [cell_types[i] if i >= 0 else None for i in idx.tolist()], dtype=pl.String
     )
@@ -269,7 +266,7 @@ def _sc_type_labels(idx: np.ndarray, cell_types: Sequence[str]) -> pl.Series:
 
 @beartype
 def _label_frame(sc: SingleCells, columns: Sequence[str]) -> pl.DataFrame:
-    """R's `.read_label_columns`: obs columns in `cells_to_keep` order.
+    """The obs columns in `cells_to_keep` order.
 
     Raises:
         ValueError: If a column is missing.
@@ -283,7 +280,7 @@ def _label_frame(sc: SingleCells, columns: Sequence[str]) -> pl.DataFrame:
 
 @beartype
 def _label_codes(values: pl.Series, name: str) -> tuple[np.ndarray, list[str | None]]:
-    """0-based codes of R's `factor(x, exclude = NULL)`.
+    """0-based factor codes, with null as a level of its own.
 
     The levels follow `_factor_codes`; a missing value is its own level,
     last.
@@ -306,7 +303,7 @@ def _label_codes(values: pl.Series, name: str) -> tuple[np.ndarray, list[str | N
 def prepare_cell_markers(
     sc: SingleCells, marker_df: pl.DataFrame
 ) -> dict[str, CellMarkers]:
-    """Marker genes per cell type, as R's `prepare_cell_markers`.
+    """Marker genes per cell type.
 
     Genes the experiment does not hold are dropped. Cell types keep their
     order of first appearance.
@@ -350,13 +347,12 @@ def calc_sc_type_scores(
     weight_floor: float | None = None,
     verbose: bool = False,
 ) -> ScTypeResults:
-    """ScType scores per cell, as R's `calc_sc_type_scores`.
+    """ScType scores per cell.
 
     Args:
         sc: The experiment.
         cell_marker_list: Cell type to markers, see `prepare_cell_markers`.
-        sensitivity: Downweight markers shared between cell types, as the
-            original does.
+        sensitivity: Downweight markers shared between cell types.
         weight_floor: In `[0, 1]`, the floor of those weights; `None` is 0.1.
         verbose: Controls verbosity.
 
@@ -402,7 +398,7 @@ def calc_sc_type_scores(
 
 @beartype
 def get_scores(x: ScTypeResults | ScTypeCellResults) -> pl.DataFrame | np.ndarray:
-    """The scores, R's `get_scores`.
+    """The scores of ScType results.
 
     Args:
         x: ScType results.
@@ -420,10 +416,10 @@ def get_scores(x: ScTypeResults | ScTypeCellResults) -> pl.DataFrame | np.ndarra
 def score_clusters(
     x: ScTypeResults, cluster_labels: np.ndarray | Sequence[int]
 ) -> pl.DataFrame:
-    """One ScType call per cluster, as R's `score_clusters`.
+    """One ScType call per cluster.
 
     A cluster whose best summed score falls below a quarter of its size is
-    `"Unknown"`, as in the original.
+    `"Unknown"`.
 
     Args:
         x: The scores.
@@ -472,7 +468,7 @@ def assign_sc_type(
     sctype_cell_params: SctypeCellsParams | None = None,
     verbose: bool = False,
 ) -> ScTypeCellResults:
-    """Per-cell ScType calls, as R's `assign_sc_type`.
+    """Per-cell ScType calls.
 
     The score matrix is smoothed over the neighbour graph by label spreading
     (Zhou et al.), then each cell takes its argmax; cells whose best score
@@ -603,7 +599,7 @@ def build_symphony_ref(
     seed: int = 42,
     verbose: bool = False,
 ) -> SymphonyReference:
-    """Build a Symphony reference, as R's `build_symphony_ref`.
+    """Build a Symphony reference.
 
     Runs sparse PCA over the HVGs and Harmony over the batches, and
     compresses the result into the terms a query is mapped with. The Harmony
@@ -614,7 +610,7 @@ def build_symphony_ref(
         sc: The reference experiment.
         batch_column: obs column with the primary batch.
         hvg: 0-based HVG indices into the experiment's genes, e.g.
-            `sc.map.hvg`. R's are 1-based.
+            `sc.map.hvg`.
         additional_batch_columns: Further obs columns to correct for.
         harmony_params: `HarmonyParams` (v1) or `HarmonyV2Params` (v2).
             `None` is v1 with the defaults; a `None` `k` becomes
@@ -708,7 +704,7 @@ def add_symphony_labels(
     *,
     overwrite: bool = False,
 ) -> SymphonyReference:
-    """Attach obs columns to a reference, as R's `add_symphony_labels`.
+    """Attach obs columns to a reference.
 
     `sc` has to keep the cells the reference was built on, in the same
     order; only the count is checked.
@@ -751,7 +747,7 @@ def add_symphony_labels(
 
 @beartype
 def get_symphony_loadings(reference: SymphonyReference) -> np.ndarray:
-    """The PCA gene loadings, `(n_hvgs, d)`, R's `get_symphony_loadings`.
+    """The PCA gene loadings, `(n_hvgs, d)`.
 
     Args:
         reference: The Symphony reference.
@@ -764,8 +760,7 @@ def get_symphony_loadings(reference: SymphonyReference) -> np.ndarray:
 
 @beartype
 def get_symphony_z_corr(reference: SymphonyReference) -> np.ndarray:
-    """The corrected reference embedding, `(N, d)`, R's
-    `get_symphony_z_corr`.
+    """The corrected reference embedding, `(N, d)`.
 
     Args:
         reference: The Symphony reference.
@@ -778,7 +773,7 @@ def get_symphony_z_corr(reference: SymphonyReference) -> np.ndarray:
 
 @beartype
 def get_symphony_hvg_names(reference: SymphonyReference) -> list[str]:
-    """The HVG gene ids in loading order, R's `get_symphony_hvg_names`.
+    """The HVG gene ids in loading order.
 
     Args:
         reference: The Symphony reference.
@@ -791,7 +786,7 @@ def get_symphony_hvg_names(reference: SymphonyReference) -> list[str]:
 
 @beartype
 def get_symphony_labels(reference: SymphonyReference) -> pl.DataFrame | None:
-    """The stored labels in `z_corr` row order, R's `get_symphony_labels`.
+    """The stored labels in `z_corr` row order.
 
     Args:
         reference: The Symphony reference.
@@ -812,7 +807,7 @@ def map_symphony_query(
     params: SymphonyMapParams | None = None,
     verbose: bool = False,
 ) -> None:
-    """Map a query onto a reference, as R's `map_symphony_query`.
+    """Map a query onto a reference.
 
     Projects the query through the reference loadings and applies the cached
     mixture-of-experts correction. Genes match by id against the reference
@@ -891,13 +886,12 @@ def transfer_labels_symphony(
     seed: int = 42,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """kNN majority vote of reference labels onto a mapped query, as R's
-    `transfer_labels_symphony`.
+    """kNN majority vote of reference labels onto a mapped query.
 
     The reference `z_corr` is indexed, the query's `"symphony"` embedding
     searched. A missing reference label is its own class, so a query cell
     can come back null. Ties go to the label sorting last (the crate's
-    `max_by_key`), as in R. The two columns are also written to the
+    `max_by_key`). The two columns are also written to the
     query's obs.
 
     Args:

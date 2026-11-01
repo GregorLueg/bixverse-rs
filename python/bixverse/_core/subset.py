@@ -1,6 +1,6 @@
 """`SingleCellsSubset`: a view onto one level of an obs column.
 
-The port of R's `SingleCellsSubset`. The subset reads the parent's stores (no
+The subset reads the parent's stores (no
 data is copied) and holds its obs and var in memory, so nothing it does
 touches the parent's DuckDB. The map stays in the parent's index space: cell
 indices are 0-based store positions, `cells_to_keep` is the parent's filter
@@ -16,7 +16,7 @@ embeddings live in the subset alone.
     >>> bv.graph.find_clusters(t_cells, name="t_subcluster")
     >>> bv.merge_subset_obs(sc, t_cells, cols=["t_subcluster"])
 
-As in R a subset is not persisted: `bixverse.io.save` takes a `SingleCells`
+A subset is not persisted: `bixverse.io.save` takes a `SingleCells`
 only. Results go back to the parent through `merge_subset_obs`.
 """
 
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class SingleCellsSubset(ScBase):
-    """The cells of one level of an obs column, as R's `SingleCellsSubset`.
+    """The cells of one level of an obs column.
 
     Integer cell selections are 0-based store indices, as on the parent, and
     must belong to the subset; cell ids are matched against the subset's
@@ -71,7 +71,7 @@ class SingleCellsSubset(ScBase):
         Args:
             sc: The parent experiment.
             grouping_column: obs column defining the groups.
-            group: The level to keep, cast to the column's type as R does.
+            group: The level to keep, cast to the column's type.
 
         Raises:
             KeyError: If `grouping_column` is not in obs.
@@ -124,7 +124,7 @@ class SingleCellsSubset(ScBase):
     @beartype
     def cell_indices(self, cell_ids: Sequence[str]) -> np.ndarray:
         """0-based store indices of subset cells by id. Ids outside the
-        subset warn and drop, as R's `get_cell_indices`."""
+        subset warn and drop."""
         pos = _lookup(self._obs["cell_id"].to_numpy(), cell_ids, "cell")
         return self.subset_to_original[pos]
 
@@ -155,8 +155,7 @@ class SingleCellsSubset(ScBase):
         """The subset's obs, `cell_idx` the 0-based store index.
 
         Args:
-            indices: Optional 0-based row positions within the subset, as R's
-                `get_sc_obs` on a subset.
+            indices: Optional 0-based row positions within the subset.
             cols: Optional columns.
             filtered: Accepted for parity with `SingleCells`; a subset is
                 filtered by construction.
@@ -208,7 +207,7 @@ class SingleCellsSubset(ScBase):
 
     @beartype
     def add_obs(self, frame: pl.DataFrame) -> None:
-        """Add or replace columns of the in-memory obs, as R's `[[<-`.
+        """Add or replace columns of the in-memory obs.
 
         With a 0-based `cell_idx` column the frame joins on it. Without one
         it must hold one row per obs row, in obs (ascending cell) order.
@@ -278,8 +277,7 @@ def merge_subset_obs(
     overwrite: bool = False,
     verbose: bool = False,
 ) -> None:
-    """Write obs columns of one or more subsets into the parent's obs, as R's
-    `merge_subset_obs`.
+    """Write obs columns of one or more subsets into the parent's obs.
 
     One join on `cell_idx` for all subsets; parent cells in none of them get
     NULL.

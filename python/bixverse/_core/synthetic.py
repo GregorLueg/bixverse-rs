@@ -1,8 +1,7 @@
 """Synthetic single cell data for tests and examples.
 
-Ports of R's `generate_*_test_data()`. The generators are the crate's, so a
-seed gives the same counts in R and Python; this layer only names cells and
-genes and builds the obs / var tables the way R does.
+The generators are the crate's; this layer only names cells and genes and
+builds the obs / var tables.
 """
 
 from __future__ import annotations
@@ -124,7 +123,7 @@ def _var(n_genes: int) -> pl.DataFrame:
 
 @beartype
 def _cell_configs(marker_genes: dict[str, dict[str, list[int]]]) -> list[dict]:
-    """The marker gene configs in list order, as R hands them to Rust."""
+    """The marker gene configs in list order."""
     return [dict(v) for v in marker_genes.values()]
 
 
@@ -168,7 +167,7 @@ def generate_single_cell_test_data(
             "cell_grp": [
                 f"cell_type_{i + 1}" for i in res["cell_type_indices"].tolist()
             ],
-            # R adds a double one to the 0-based integer batch
+            # 1-based batch index, as float64
             "batch_index": res["batch_indices"].astype(np.float64) + 1.0,
         }
     )

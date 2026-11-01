@@ -1,13 +1,9 @@
 """Processing: HVGs, PCA, residual models and MAGIC.
 
-The port of R's `find_hvg_sc`, `get_hvg_data_sc`, `find_hvg_batch_aware_sc`,
-`calculate_pca_sc`, `fit_residuals_sc`, `sct_corrected_counts_sc` and
-`run_magic_sc`, plus the `MetaCells` methods of the first four. The work
-runs in Rust over the binary stores, or the in-memory meta cell counts; this
-layer
-resolves the inputs, writes what R writes (the HVG statistics to var, the
-HVG set to `sc.map.hvg`, the PCA, residual model and MAGIC layer to
-`sc.cache`) and stamps the cached artefacts as R stamps them.
+The work runs in Rust over the binary stores, or the in-memory meta cell
+counts; this layer resolves the inputs, writes the results (the HVG
+statistics to var, the HVG set to `sc.map.hvg`, the PCA, residual model and
+MAGIC layer to `sc.cache`) and stamps the cached artefacts.
 
     >>> find_hvg(sc, hvg_no=2000)
     >>> calculate_pca(sc, 30)
@@ -60,7 +56,7 @@ from bixverse.params import (
 N_CELLS_DENSE_PCA_LIMIT: int = 500_000
 
 # Cells held in memory per phase and genes per batch when transposing a
-# corrected store; R's `.CORRECTED_CELLS_PER_PHASE` / `.CORRECTED_GENE_BATCH`.
+# corrected store.
 CORRECTED_CELLS_PER_PHASE: int = 50_000
 CORRECTED_GENE_BATCH: int = 1000
 
@@ -89,7 +85,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True)
 class ResidualFit:
-    """A fitted residual model, R's `ScResidualFit`.
+    """A fitted residual model.
 
     Attributes:
         model: The fitted model, held in Rust.
@@ -124,7 +120,7 @@ class ResidualFit:
 @beartype
 @dataclass(frozen=True)
 class BatchHvg:
-    """Batch-aware HVGs, R's `find_hvg_batch_aware_sc` result.
+    """Batch-aware HVGs.
 
     Attributes:
         hvg_genes: Gene ids of the HVGs.
@@ -163,8 +159,8 @@ class CorrectedCounts:
 
 @beartype
 def _top(score: np.ndarray, n: int) -> np.ndarray:
-    """0-based positions of the `n` highest scores, as R's
-    `order(score, decreasing = TRUE)[1:n]`: ties keep their order, NaN last.
+    """0-based positions of the `n` highest scores: ties keep their order,
+    NaN last.
 
     Raises:
         ValueError: If `n` is not in `[1, len(score)]`.
@@ -176,12 +172,11 @@ def _top(score: np.ndarray, n: int) -> np.ndarray:
 
 @beartype
 def _factor_codes(values: pl.Series, name: str) -> tuple[np.ndarray, list[str]]:
-    """0-based codes of `as.integer(factor(x)) - 1`, with the levels.
+    """0-based factor codes of the values, with the levels.
 
     An Enum keeps its level order, minus unused levels; anything else is
-    sorted. R sorts strings in the locale's collation, here by code point.
-    Float levels print as R's `as.character` does (15 significant digits, so
-    `1` rather than `1.0`).
+    sorted, strings by code point. Float levels print with 15 significant
+    digits, so `1` rather than `1.0`.
 
     Raises:
         ValueError: On a missing value.
@@ -204,8 +199,7 @@ def _factor_codes(values: pl.Series, name: str) -> tuple[np.ndarray, list[str]]:
 
 @beartype
 def _obs_aligned(sc: ScOrScSubset, cols: Sequence[str] | None = None) -> pl.DataFrame:
-    """obs rows of the kept cells in `cells_to_keep` order, R's
-    `.residual_obs`.
+    """obs rows of the kept cells in `cells_to_keep` order.
 
     Labels and covariates go to Rust by position, so the rows have to follow
     the kept cell order. `cols` that are not in obs are left out, so callers
@@ -230,8 +224,7 @@ def _obs_aligned(sc: ScOrScSubset, cols: Sequence[str] | None = None) -> pl.Data
 
 @beartype
 def _fit_usable(sc: ScOrScSubset) -> ResidualFit:
-    """The cached residual model, if it is safe to compute with, R's
-    `.assert_fit_usable`.
+    """The cached residual model, if it is safe to compute with.
 
     Raises:
         ValueError: If nothing was fitted, or the cell filter moved since.
@@ -252,7 +245,7 @@ def _fit_usable(sc: ScOrScSubset) -> ResidualFit:
 
 @beartype
 def _fit_usable_mc(mc: MetaCells) -> ResidualFit:
-    """The cached residual model of meta cells, R's `.assert_fit_usable_mc`.
+    """The cached residual model of meta cells.
 
     Meta cells have no cell filter to drift, so this is the presence check.
 
@@ -291,7 +284,7 @@ def _hvg_stats(
     streaming: bool | None,
     verbose: bool,
 ) -> dict[str, np.ndarray]:
-    """`rs_sc_hvg` over a cell selection."""
+    """HVG statistics over a cell selection."""
     return _bixverse.hvg(
         str(sc.genes_path),
         str(sc.cells_path),
@@ -304,7 +297,7 @@ def _hvg_stats(
 
 @beartype
 def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
-    """Residual variance HVGs, R's `.find_hvg_residual`.
+    """Residual variance HVGs.
 
     Writes `residual_variance` (the mean over groups, NULL for genes the
     model does not cover) to var and the union of the per-group top `hvg_no`
@@ -320,7 +313,7 @@ def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
         None,
         verbose,
     )
-    # a subset leaves var alone, as R's `write_var = FALSE`
+    # a subset leaves var alone
     if isinstance(sc, SingleCells):
         full = np.full(sc.n_genes, np.nan)
         full[genes.astype(np.int64)] = variance.mean(axis=1)
@@ -338,10 +331,10 @@ def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
 
 @beartype
 def _find_hvg_mc(mc: MetaCells, hvg_no: int, params: HvgParams, verbose: bool) -> None:
-    """`find_hvg` on meta cells, R's `find_hvg_sc` MetaCells method.
+    """`find_hvg` on meta cells.
 
     The statistics go to the meta cell var, the selection to `mc.hvg`. The
-    residual method writes no statistics, as in R.
+    residual method writes no statistics.
     """
     if params.method == "residual":
         fit = _fit_usable_mc(mc)
@@ -371,15 +364,14 @@ def find_hvg(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> None:
-    """Select highly variable genes over the kept cells, as R's `find_hvg_sc`.
+    """Select highly variable genes over the kept cells.
 
-    The per-gene statistics go to var under R's column names (`mean`, `var`,
+    The per-gene statistics go to var (`mean`, `var`,
     `var_exp`, `var_std` for `"vst"`; `mean`, `dispersion`,
     `dispersion_scaled`, `bin` for `"meanvarbin"` / `"dispersion"`;
     `scran_mean`, `scran_var`, `scran_fitted`, `scran_residual` for
     `"scran"`), the top `hvg_no` genes on the ranking statistic to
-    `sc.map.hvg`. On a `SingleCellsSubset` only the selection is stored, as
-    in R.
+    `sc.map.hvg`. On a `SingleCellsSubset` only the selection is stored.
 
     `method = "residual"` ranks on the residual variance of the model from
     `fit_residuals`, writes `residual_variance` instead, and treats `hvg_no`
@@ -430,8 +422,7 @@ def get_hvg_data(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """HVG statistics without touching the experiment, as R's
-    `get_hvg_data_sc`.
+    """HVG statistics without touching the experiment.
 
     Args:
         sc: The experiment, or meta cells.
@@ -486,8 +477,8 @@ def get_hvg_data(
 def _combine_batches(
     data: pl.DataFrame, score: str, hvg_no: int, how: GeneCombMethod
 ) -> np.ndarray:
-    """Combine per-batch rankings into one gene set, as R does with
-    data.table: batches and genes in first-appearance order, ties stable.
+    """Combine per-batch rankings into one gene set: batches and genes in
+    first-appearance order, ties stable.
     """
 
     def top_genes(frame: pl.DataFrame, col: str) -> list[int]:
@@ -526,8 +517,7 @@ def find_hvg_batch_aware(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> BatchHvg:
-    """HVGs per batch, combined across batches, as R's
-    `find_hvg_batch_aware_sc`.
+    """HVGs per batch, combined across batches.
 
     Does not touch the experiment: pass `hvg_gene_idx` to `calculate_pca`.
 
@@ -592,8 +582,7 @@ def find_hvg_batch_aware(
 
 @beartype
 def _check_residual_pca_params(params: PcaParams) -> None:
-    """Refuse PCA settings the residual path cannot honour, R's
-    `.assert_residual_pca_params`.
+    """Refuse PCA settings the residual path cannot honour.
 
     Raises:
         ValueError: On `clr` or `normalise_variance`.
@@ -622,7 +611,7 @@ def _calculate_pca_residual(
     seed: int,
     verbose: bool,
 ) -> None:
-    """PCA on residuals, R's `.calculate_pca_residual`."""
+    """PCA on residuals."""
     if sparse_svd:
         raise ValueError(
             "Residual PCA has no sparse solver: a residual column is dense even "
@@ -676,7 +665,7 @@ def _set_pca(
     *,
     parents: tuple[str, ...] = (),
 ) -> None:
-    """Cache a PCA and stamp it, as R's `set_pca_*` chain."""
+    """Cache a PCA and stamp it."""
     sc.cache.pca_factors = scores
     sc.cache.pca_loadings = loadings
     sc.cache.pca_singular_vals = singular_vals
@@ -692,7 +681,7 @@ def _calculate_pca_mc(
     seed: int,
     verbose: bool,
 ) -> None:
-    """`calculate_pca` on meta cells, R's `calculate_pca_sc` MetaCells method.
+    """`calculate_pca` on meta cells.
 
     Dense, in memory; the CLR offsets come off the full raw panel.
     """
@@ -732,7 +721,7 @@ def _calculate_pca_mc(
 @beartype
 def _clr_offsets(mc: MetaCells) -> np.ndarray:
     """Per meta cell `mean(log1p(x / rowSum(x)))` over every gene of the raw
-    counts, R's `mc_get_clr_offsets`."""
+    counts."""
     m = mc.raw
     n_rows, n_genes = m.shape
     lengths = np.diff(m.indptr.astype(np.int64))
@@ -755,7 +744,7 @@ def calculate_pca(
     residuals: bool = False,
     verbose: bool = False,
 ) -> None:
-    """PCA over the kept cells and the HVGs, as R's `calculate_pca_sc`.
+    """PCA over the kept cells and the HVGs.
 
     Scores, loadings and the first `no_pcs` singular values go to `sc.cache`,
     stamped `"pca"` (derived from `"residuals"` on the residual path).
@@ -776,7 +765,7 @@ def calculate_pca(
         verbose: Controls verbosity.
 
     On `MetaCells` the PCA is dense over the in-memory normalised counts
-    (raw for the residual path) and `sparse_svd` is ignored, as in R.
+    (raw for the residual path) and `sparse_svd` is ignored.
 
     Raises:
         ValueError: On a residual run that cannot be honoured, or a missing
@@ -859,7 +848,7 @@ def calculate_pca(
 def _covariates(
     obs: pl.DataFrame, columns: Sequence[str], method: ResidualMethod
 ) -> list[tuple[str, np.ndarray]]:
-    """Numeric covariate columns, R's `.residual_covariates`.
+    """Numeric covariate columns.
 
     Raises:
         ValueError: For analytic Pearson, a missing, non-numeric or
@@ -904,8 +893,8 @@ def _fit_residuals_mc(
     seed: int,
     verbose: bool,
 ) -> None:
-    """`fit_residuals` on meta cells, R's `fit_residuals_sc` MetaCells
-    method: the in-memory raw counts, obs in row order."""
+    """`fit_residuals` on meta cells: the in-memory raw counts, obs in row
+    order."""
     obs = mc.obs()
     groups = None
     if group_column is not None:
@@ -951,7 +940,7 @@ def fit_residuals(
     verbose: bool = False,
 ) -> None:
     """Fit a scTransform (v2) or analytic Pearson residual model over the
-    kept cells, as R's `fit_residuals_sc`.
+    kept cells.
 
     The model goes to `sc.cache.residual_fit`, stamped `"residuals"`, and is
     what `find_hvg(method="residual")`, `calculate_pca(residuals=True)` and
@@ -1079,8 +1068,7 @@ def sct_corrected_counts(
     gene_batch_size: int | None = None,
     verbose: bool = False,
 ) -> SingleCells | CorrectedCounts:
-    """scTransform corrected counts as a new experiment, as R's
-    `sct_corrected_counts_sc`.
+    """scTransform corrected counts as a new experiment.
 
     The counts each kept cell would have at the median library size under
     the fitted model, written to a fresh directory. The gene axis is the
@@ -1170,8 +1158,7 @@ def run_magic(
     magic_params: MagicParams | None = None,
     verbose: bool = False,
 ) -> None:
-    """Impute genes with MAGIC over the cached kNN graph, as R's
-    `run_magic_sc`.
+    """Impute genes with MAGIC over the cached kNN graph.
 
     The imputed layer is RNA whichever graph smoothed it, so it goes to
     `sc.cache.magic`, stamped as derived from the modality's `"knn"`. Do not

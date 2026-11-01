@@ -1,9 +1,8 @@
 """DIALOGUE: multicellular programmes, genes that are cell type specific but
 whose activity covaries across the samples the cell types share.
 
-The port of R's `dialogue_sc` over `SingleCells`, `SingleCellsSubset`
-(`R/methods_sc_dialogue.R`) and `MetaCells` (`R/methods_mc_analysis.R`), and
-the `DialogueResult` class. The work runs in Rust.
+DIALOGUE over `SingleCells`, `SingleCellsSubset` and `MetaCells`, and the
+`DialogueResult` class. The work runs in Rust.
 
     >>> res = dialogue(sc, "cell_type", "sample_id", features)
     >>> res.programmes
@@ -55,7 +54,7 @@ DIALOGUE_MIN_SHARED_SAMPLES: int = 5
 @beartype
 @dataclass(frozen=True, repr=False)
 class DialogueResult:
-    """A DIALOGUE run, R's `DialogueResult`.
+    """A DIALOGUE run.
 
     Attributes:
         programmes: One row per programme and cell type pair: `programme`,
@@ -96,7 +95,7 @@ class DialogueResult:
     params: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.DialogueResult`. The worst pair decides whether a
+        """Summary of the run. The worst pair decides whether a
         programme is really multicellular, so it reports the largest p."""
         k = len(self.mcp_cell_types)
         worst = (
@@ -127,7 +126,7 @@ class DialogueResult:
 
 @beartype
 def get_params(x: DialogueResult) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`.
+    """The parameters of the run.
 
     Args:
         x: The DIALOGUE result.
@@ -137,7 +136,7 @@ def get_params(x: DialogueResult) -> dict[str, object]:
 
 @beartype
 def get_results(x: DialogueResult) -> pl.DataFrame:
-    """The programme table, R's `get_results`.
+    """The programme table.
 
     Args:
         x: The DIALOGUE result.
@@ -177,8 +176,8 @@ class _Prepped:
 
 @beartype
 def _r_scale(x: np.ndarray) -> np.ndarray:
-    """R's `scale()` of one column. The sums run left to right as R's do
-    (`cumsum`; numpy's `sum` is pairwise, Python's compensated): the stage
+    """Centre and scale one column by its sample SD. The sums run left to
+    right (`cumsum`; numpy's `sum` is pairwise, Python's compensated): the stage
     two mixed models amplify last-ulp differences in the covariate."""
     centred = x - np.cumsum(x)[-1] / x.size
     return centred / np.sqrt(np.cumsum(centred * centred)[-1] / max(1, x.size - 1))
@@ -200,7 +199,7 @@ def _labels(obs: pl.DataFrame, col: str) -> list[str | None]:
 def _check_features(
     feature: pl.DataFrame, cell_ids: list[str], cell_type: str, id_col: str
 ) -> tuple[np.ndarray, list[str]]:
-    """R's `.assert_dialogue_features`: one cell type's features, rows put in
+    """One cell type's features, rows put in
     `cell_ids` order.
 
     Returns:
@@ -249,7 +248,7 @@ def _prep_dialogue_inputs(
     cell_id_col: str,
     default_quality: np.ndarray,
 ) -> _Prepped:
-    """R's `.prep_dialogue_inputs`: the flat 0-based vectors Rust takes.
+    """The flat 0-based vectors Rust takes.
 
     The cell types are `features`' keys, in that order; any other label is
     ignored. `sample_ids` and `cell_quality` are indexed by global position
@@ -327,7 +326,7 @@ def _prep_dialogue_inputs(
 
 @beartype
 def _resolve_dialogue_genes(sc: ScOrMc, gene_ids: Sequence[str] | None) -> np.ndarray:
-    """R's `.resolve_dialogue_genes`: the given genes, else the HVGs.
+    """The given genes, else the HVGs.
 
     Raises:
         ValueError: If that leaves no gene.
@@ -360,7 +359,7 @@ def _named_rows(
 def _signature_frame(
     sigs: list, cell_types: list[str], genes: np.ndarray, list_name: str
 ) -> pl.DataFrame:
-    """R's `.dialogue_signature_dt`: the `[cell_type][programme]` lists flat.
+    """The `[cell_type][programme]` lists flat.
 
     `sigs` is a plain list because it is nested FFI output.
     """
@@ -398,14 +397,14 @@ def _dialogue_result(
     source_class: str,
     params: dict[str, object],
 ) -> DialogueResult:
-    """R's `new_dialogue_result`: every index mapped back to its name.
+    """Every index mapped back to its name.
 
     `res` is a plain dict because it is heterogeneous FFI output.
     """
     cell_types = prepped.cell_types
     k = res["emp_p"].shape[0]
     mcp = [f"mcp_{i:02d}" for i in range(k)]
-    # Rust orders the pair columns as R's `combn(.., 2)` does
+    # Rust orders the pair columns as `combinations(.., 2)` does
     pairs = list(itertools.combinations(cell_types, 2))
     programmes = pl.DataFrame(
         {
@@ -507,7 +506,7 @@ def dialogue(
     refine_params: DialogueRefineParams | None = None,
     verbose: bool = False,
 ) -> DialogueResult:
-    """Multicellular programmes, as R's `dialogue_sc`.
+    """Multicellular programmes.
 
     Three stages. Each cell type's features are collapsed to one row per
     sample and put through a sparse multi-CCA, giving every programme a

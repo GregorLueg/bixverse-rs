@@ -1,4 +1,4 @@
-"""GPU Scrublet, the port of R's `scrublet_gpu_sc`.
+"""GPU Scrublet.
 
 Returns the `bixverse.doublets.ScrubletRes` the CPU `scrublet` returns, so
 `call_doublets_manual` and `get_data` work unchanged, `group_by` included.
@@ -33,7 +33,7 @@ def scrublet(
     verbose: bool = False,
 ) -> ScrubletRes:
     """Scrublet doublet detection with the SVD, the doublet projection and
-    (by default) the kNN on the GPU, as R's `scrublet_gpu_sc`.
+    (by default) the kNN on the GPU.
 
     HVG selection, doublet simulation, the kNN classifier and the Otsu
     threshold are the CPU steps of `bixverse.doublets.scrublet`.

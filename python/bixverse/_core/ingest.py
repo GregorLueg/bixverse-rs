@@ -1,13 +1,11 @@
 """Loading counts into a `SingleCells` directory, and maintaining the store.
 
-Ports of R's `methods_sc_io.R` loaders. Each one writes the cell-based store
-in Rust (applying the cell and gene QC), converts it to the gene-based
-store, loads obs / var into the DuckDB, then adds the per-cell `nnz` and
-`lib_size` and the per-gene `no_cells_exp` columns, as R does. The result is
-a directory R's `load_existing()` opens.
+Each loader writes the cell-based store in Rust (applying the cell and gene
+QC), converts it to the gene-based store, loads obs / var into the DuckDB,
+then adds the per-cell `nnz` and `lib_size` and the per-gene `no_cells_exp`
+columns. The result is a directory `load_existing` opens.
 
-Where R takes a `SingleCells` object pointing at an empty directory, these
-take the directory and return the opened `SingleCells`.
+The loaders take the directory and return the opened `SingleCells`.
 """
 
 from __future__ import annotations
@@ -102,7 +100,7 @@ def csr_buffers(counts: CsrLike) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 @beartype
 def _make_unique(names: list[str]) -> list[str]:
-    """R's `make.unique()`: repeats get `.1`, `.2`, ... until unique."""
+    """Make names unique: repeats get `.1`, `.2`, ... until unique."""
     seen = set(names)
     out: list[str] = []
     counts: dict[str, int] = {}
@@ -154,7 +152,7 @@ def _finish(
     """The shared tail of every loader.
 
     Builds the gene-based store, lets `populate` write obs / var, then adds
-    the QC columns and `to_keep`, as R's loaders do.
+    the QC columns and `to_keep`.
 
     Args:
         directory: The experiment directory.
@@ -274,11 +272,11 @@ def load_csr(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load an in-memory cells x genes count matrix, as R's `load_r_data()`.
+    """Load an in-memory cells x genes count matrix.
 
-    obs and var go in as R's `populate_*_from_data.table` writes them: every
-    column name snake_cased, the first column renamed to `cell_id` /
-    `gene_id` (obs names then made unique), only the rows that survive QC.
+    obs and var go in with every column name snake_cased, the first column
+    renamed to `cell_id` / `gene_id` (obs names then made unique), only the
+    rows that survive QC.
 
     Args:
         directory: The experiment directory, created if missing.
@@ -358,7 +356,7 @@ def load_h5ad(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load an h5ad file, as R's `load_h5ad()`.
+    """Load an h5ad file.
 
     Args:
         directory: The experiment directory, created if missing.
@@ -427,7 +425,7 @@ def stream_h5ad(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """`load_h5ad(h5ad_streaming=True)`, kept as R keeps it.
+    """`load_h5ad` with `h5ad_streaming=True`.
 
     Args:
         directory: The experiment directory, created if missing.
@@ -464,7 +462,7 @@ def load_h5ad_norm(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load an h5ad file holding only normalised counts, as R's `load_h5ad_norm()`.
+    """Load an h5ad file holding only normalised counts.
 
     Raw counts are reconstructed assuming `X = log1p(x / lib_size *
     target_size)`, with the library sizes read from an obs column.
@@ -522,7 +520,7 @@ def load_multi_h5ad(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load several h5ad files into one experiment, as R's `load_multi_h5ad()`.
+    """Load several h5ad files into one experiment.
 
     Gene QC is global across files and cells are indexed file after file.
     obs gains `exp_id` and `cell_id` is prefixed with it; var holds only
@@ -636,7 +634,7 @@ def load_mtx(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load an mtx file with its barcodes and features, as R's `load_mtx()`.
+    """Load an mtx file with its barcodes and features.
 
     The `.mtx` (plain or gzipped) is read in one pass with its entries
     spilled next to the store. obs and var come from the plain text files,
@@ -699,7 +697,7 @@ def load_multi_mtx(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load several mtx directories into one experiment, as R's `load_multi_mtx()`.
+    """Load several mtx directories into one experiment.
 
     Args:
         directory: The experiment directory, created if missing.
@@ -765,7 +763,7 @@ def load_tenx_h5(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load a 10x CellRanger h5 file, as R's `load_tenx_h5()`.
+    """Load a 10x CellRanger h5 file.
 
     Only the `feature_type` modality is loaded (v3); v2 is single modality.
 
@@ -818,7 +816,7 @@ def load_multi_tenx_h5(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Load several 10x h5 files into one experiment, as R's `load_multi_tenx_h5()`.
+    """Load several 10x h5 files into one experiment.
 
     Args:
         directory: The experiment directory, created if missing.
@@ -886,7 +884,7 @@ def merge_sc_experiments(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Merge several experiments into a new one, as R's `merge_sc_experiments()`.
+    """Merge several experiments into a new one.
 
     The genes are the intersection of the inputs' genes, in the order of the
     first input. Only each input's kept cells are carried over. obs gains
@@ -975,7 +973,7 @@ def archive_sc_exp(
     remove_bins: bool = True,
     verbose: bool = False,
 ) -> dict[str, int]:
-    """Archive the counts for cold storage, as R's `archive_sc_exp()`.
+    """Archive the counts for cold storage.
 
     Writes `counts.bxa`, a zstd archive of the cell-based store; the
     gene-based store is rebuilt on restore. `load_existing` restores the
@@ -1017,7 +1015,7 @@ def upgrade_sc_store(
     keep_backup: bool = True,
     verbose: bool = False,
 ) -> SingleCells:
-    """Convert a v3 store to the v4 format in place, as R's `upgrade_sc_store()`.
+    """Convert a v3 store to the v4 format in place.
 
     Converts into temporary files, checks them and swaps them in, so a
     failure leaves the store untouched. Nothing else may hold the files open

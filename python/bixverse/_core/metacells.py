@@ -1,24 +1,21 @@
 """`MetaCells`: aggregated cells held in memory.
 
-The port of R's `MetaCells`. The meta cell generators aggregate a
-`SingleCells` or `SingleCellsSubset` into far fewer meta cells, so the data
-lives in memory: obs and var as polars frames, the summed raw counts and the
-re-normalised counts as two CSR matrices sharing one index structure, and a
-`ScCache` for the PCA, kNN, neighbour graph and embeddings, exactly as on
-the on-disk classes.
+The meta cell generators aggregate a `SingleCells` or `SingleCellsSubset`
+into far fewer meta cells, so the data lives in memory: obs and var as polars
+frames, the summed raw counts and the re-normalised counts as two CSR matrices
+sharing one index structure, and a `ScCache` for the PCA, kNN, neighbour graph
+and embeddings, exactly as on the on-disk classes.
 
 Indices are 0-based throughout. `obs["meta_cell_idx"]` is the row,
 `obs["original_cell_idx"]` lists the store cells of the source each meta cell
 aggregates, and gene indices into `var` are positions in the source's gene
-space. The cache is stamped against the meta cell ids, as R does: a meta cell
-set is fixed at construction, so only a renaming (`merge_meta_cells`) moves
-it.
+space. The cache is stamped against the meta cell ids: a meta cell set is
+fixed at construction, so only a renaming (`merge_meta_cells`) moves it.
 
-R keeps a `MetaCells` in the session and saves it with `saveRDS`; nothing in
-the package writes one to disk. Here `save_metacells` / `load_metacells`
-write a directory of Parquet (obs, var, the frames in `other_data`), one npz
-(counts, cache, the arrays) and one JSON (everything else), no pickle. The
-residual model is not persisted, as for `SingleCells`.
+`save_metacells` / `load_metacells` write a directory of Parquet (obs, var,
+the frames in `other_data`), one npz (counts, cache, the arrays) and one JSON
+(everything else), no pickle. The residual model is not persisted, as for
+`SingleCells`.
 """
 
 from __future__ import annotations
@@ -69,10 +66,10 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass
 class MetaCellAssignment:
-    """Where the meta cells came from, R's `original_assignment`.
+    """Where the meta cells came from.
 
-    The per-cell assignments R also keeps are derived from the memberships in
-    obs on demand, see `MetaCells.cell_assignments`.
+    The per-cell assignments are derived from the memberships in obs on
+    demand, see `MetaCells.cell_assignments`.
 
     Attributes:
         n_cells: Cells (obs rows) in the source store.
@@ -98,7 +95,7 @@ class MetaCellAssignment:
 
 
 class MetaCells:
-    """Meta cells in memory, as R's `MetaCells`.
+    """Meta cells in memory.
 
     Built by the generators in `bixverse.metacells` and by
     `merge_meta_cells`, not by hand.
@@ -186,7 +183,7 @@ class MetaCells:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """`(meta cells, genes)`, R's `dims`."""
+        """`(meta cells, genes)`."""
         return (self.n_cells, self.n_genes)
 
     ##############
@@ -256,12 +253,12 @@ class MetaCells:
         cols: list[str] | None = None,
         filtered: bool = False,
     ) -> pl.DataFrame:
-        """The meta cell obs table, as R's `get_sc_obs`.
+        """The meta cell obs table.
 
         Args:
             indices: Optional 0-based rows.
             cols: Optional columns.
-            filtered: Accepted for parity; meta cells have no cell filter.
+            filtered: Ignored; meta cells have no cell filter.
 
         Raises:
             KeyError: If a column is not in obs.
@@ -280,7 +277,7 @@ class MetaCells:
         indices: np.ndarray | Sequence[int] | None = None,
         cols: list[str] | None = None,
     ) -> pl.DataFrame:
-        """The var table, as R's `get_sc_var`.
+        """The var table.
 
         Raises:
             KeyError: If a column is not in var.
@@ -289,7 +286,7 @@ class MetaCells:
 
     @beartype
     def add_obs(self, frame: pl.DataFrame) -> None:
-        """Add or replace obs columns, as R's `[[<-`.
+        """Add or replace obs columns.
 
         With a 0-based `meta_cell_idx` column the frame joins on it, other
         meta cells get NULL. Without one it must hold one row per meta cell,
@@ -350,7 +347,7 @@ class MetaCells:
         genes: np.ndarray | Sequence[int] | Sequence[str] | None = None,
         layer: str = "raw",
     ) -> CsrMatrix:
-        """The counts, optionally restricted, as R's `get_sc_counts`.
+        """The counts, optionally restricted.
 
         Args:
             cells: 0-based rows or meta cell ids, in the row order wanted.
@@ -403,8 +400,7 @@ class MetaCells:
     ################
 
     def cell_assignments(self) -> pl.DataFrame:
-        """One row per (source cell, meta cell) membership, R's per-cell
-        `assignments` in long form.
+        """One row per (source cell, meta cell) membership, in long form.
 
         Columns `cell_idx` (0-based store index in the source) and
         `meta_cell_idx`. Bootstrapped meta cells overlap, so a cell can
@@ -422,7 +418,7 @@ class MetaCells:
 
     @beartype
     def _artefact_rows(self, n_rows: int) -> list[np.ndarray]:
-        """Memberships as rows of a source artefact, R's `.mc_artefact_rows`.
+        """Memberships as rows of a source artefact.
 
         `original_cell_idx` holds store indices; embeddings, kNN graphs and
         diffusion maps have one row per kept cell, in the source's
@@ -573,7 +569,7 @@ def csr_subset(
 
 @beartype
 def meta_cell_ids(n: int) -> list[str]:
-    """R's default ids, `meta_cell_<zero padded 1-based number>`."""
+    """Default ids, `meta_cell_<zero padded 1-based number>`."""
     width = len(str(n))
     return [f"meta_cell_{i:0{width}d}" for i in range(1, n + 1)]
 
@@ -588,7 +584,7 @@ def build_metacells(
     obs_ids: Sequence[str] | None = None,
     other_data: dict[str, object] | None = None,
 ) -> MetaCells:
-    """A `MetaCells` from a generator's Rust result, R's constructor.
+    """A `MetaCells` from a generator's Rust result.
 
     Args:
         res: `metacells` (store cells per meta cell), the CSR parts `indptr`,
@@ -596,7 +592,7 @@ def build_metacells(
         var: `gene_idx` and `gene_id` of the source.
         meta_cell_method: The generator.
         cells_to_keep: The source's `cells_to_keep`.
-        obs_ids: Meta cell ids; `None` for R's default.
+        obs_ids: Meta cell ids; `None` for the default ids.
         other_data: Method-specific extras.
     """
     members: list[np.ndarray] = list(res["metacells"])
@@ -645,8 +641,7 @@ def build_metacells(
 
 @beartype
 def _gene_space(gene_lists: list[list[str]], feature_space: str) -> list[str]:
-    """The merged gene space, ordered by the first input, R's
-    `.resolve_mc_gene_space`.
+    """The merged gene space, ordered by the first input.
 
     Raises:
         ValueError: On an unknown `feature_space` or an empty intersection.
@@ -694,7 +689,7 @@ def merge_meta_cells(
     prefix_ids: bool = True,
     verbose: bool = False,
 ) -> MetaCells:
-    """Row-bind several `MetaCells` into one, as R's `merge_meta_cells`.
+    """Row-bind several `MetaCells` into one.
 
     The typical case is sample-pure meta cells, generated per patient and
     merged so that downstream methods run across the full set. The normalised
@@ -919,8 +914,7 @@ def _rbind(mats: list[CsrMatrix], n_cols: int) -> CsrMatrix:
 def save_metacells(mc: MetaCells, directory: Path | str) -> None:
     """Write a `MetaCells` to a directory: Parquet, npz and JSON, no pickle.
 
-    R has no on-disk format for meta cells (it uses `saveRDS`), so this one is
-    Python's own. The residual model is not written; a warning says so.
+    The residual model is not written; a warning says so.
 
     Args:
         mc: The meta cells.

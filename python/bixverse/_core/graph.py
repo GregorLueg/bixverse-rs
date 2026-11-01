@@ -1,19 +1,18 @@
 """kNN searches, neighbour graphs and clustering.
 
-The port of R's `generate_knn_sc`, `find_neighbours_sc`, `find_clusters_sc`,
-`fast_cluster_sc` and `calc_knn_metrics`. The work runs in Rust on an
-embedding from `sc.cache`; this layer resolves the inputs, writes what R
-writes (the kNN and the neighbour graph to `sc.cache`, stamped as derived
-from the embedding and the kNN, cluster labels to obs) and returns the rest.
+The work runs in Rust on an embedding from `sc.cache`; this layer resolves
+the inputs, writes the kNN and the neighbour graph to `sc.cache` (stamped as
+derived from the embedding and the kNN) and the cluster labels to obs, and
+returns the rest.
 `find_neighbours`, `find_clusters` and `get_connectivities` also take
 `MetaCells`, whose labels go to its obs in row order.
 
     >>> find_neighbours(sc)
     >>> find_clusters(sc, res=1.0)
 
-R holds the neighbour graph behind a Rust pointer. Here it is the symmetric
-CSR in `sc.cache.connectivities`, handed back to Rust for clustering; use
-`CsrMatrix.scipy_csr()` to take it elsewhere.
+The neighbour graph is the symmetric CSR in `sc.cache.connectivities`,
+handed back to Rust for clustering; use `CsrMatrix.scipy_csr()` to take it
+elsewhere.
 """
 
 from __future__ import annotations
@@ -53,7 +52,6 @@ from bixverse.params import (
 # Globals #
 ###########
 
-# R's `.default_community_iters`.
 DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 5, "louvain": 2}
 
 ClusterAlgorithm = Literal["leiden", "louvain"]
@@ -70,7 +68,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True)
 class KnnMetrics:
-    """A kNN compared against a reference, R's `calc_knn_metrics` result.
+    """A kNN compared against a reference.
 
     Attributes:
         all_matches: Neighbours shared with the reference, per cell.
@@ -89,7 +87,7 @@ class KnnMetrics:
 @beartype
 @dataclass(frozen=True)
 class FastClusters:
-    """Fast clustering result, R's `SingleCellFastClusters`.
+    """Fast clustering result.
 
     Attributes:
         memberships: `cell_idx` (0-based) and one community column per
@@ -149,7 +147,7 @@ def _knn(
     validate_index: bool,
     verbose: bool,
 ) -> KnnGraph:
-    """`rs_sc_knn_w_dist` over an embedding, as R's `generate_sc_knn`."""
+    """A kNN with distances over an embedding."""
     indices, distances = _bixverse.knn_with_dist(
         embd, _knn_params(params), validate_index, seed, verbose
     )
@@ -169,7 +167,7 @@ def _leiden(
     seed: int,
     run: Callable[..., np.ndarray] = _bixverse.leiden,
 ) -> np.ndarray:
-    """Leiden or Louvain on a neighbour graph, as R's `leiden_clustering`.
+    """Leiden or Louvain on a neighbour graph.
 
     `run` is the extension call, `leiden` of `bixverse._bixverse` or of its
     GPU twin.
@@ -228,8 +226,7 @@ def generate_knn(
     validate_index: bool = True,
     verbose: bool = False,
 ) -> KnnGraph | None:
-    """A kNN over an embedding, without touching the experiment, as R's
-    `generate_knn_sc`.
+    """A kNN over an embedding, without touching the experiment.
 
     Exact methods: `"kmknn"` (the default) and `"exhaustive"`. Approximate:
     `"hnsw"`, `"nndescent"` (the descent graph, handed back without a query
@@ -275,8 +272,7 @@ def generate_knn(
 
 @beartype
 def calc_knn_metrics(ref_knn: KnnGraph, query_knn: KnnGraph) -> KnnMetrics:
-    """Recall at k and distance ratio of a kNN against a reference, as R's
-    `calc_knn_metrics`.
+    """Recall at k and distance ratio of a kNN against a reference.
 
     Args:
         ref_knn: The reference, e.g. an exhaustive search.
@@ -320,8 +316,7 @@ def find_neighbours(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """The kNN and the neighbour graph over an embedding, as R's
-    `find_neighbours_sc`.
+    """The kNN and the neighbour graph over an embedding.
 
     The kNN goes to the modality's cache (`sc.cache` for RNA), stamped as
     derived from the embedding, and its symmetrisation (`knn_sym`: sNN, UMAP
@@ -380,7 +375,7 @@ def find_neighbours(
 
 @beartype
 def get_connectivities(sc: ScOrMc, *, modality: Modality = "rna") -> CsrMatrix | None:
-    """The neighbour graph, R's `get_connectivities` / `as_igraph`.
+    """The neighbour graph.
 
     The undirected graph as its symmetric CSR, rows sorted, every edge
     stored in both directions. No graph library is pulled in: hand
@@ -420,7 +415,7 @@ def find_clusters(
     min_gain: float = 0.0,
     local_moving: LocalMoving = "queue",
 ) -> None:
-    """Leiden or Louvain on the neighbour graph, as R's `find_clusters_sc`.
+    """Leiden or Louvain on the neighbour graph.
 
     The communities go to obs column `name` as 0-based integers, 0 the
     largest. Depends on `seed` only, not on the thread count.
@@ -530,8 +525,7 @@ def fast_cluster(
     seed: int = 42,
     verbose: bool = False,
 ) -> FastClusters:
-    """k-means coarsening, a centroid graph and Louvain / Leiden on it, as R's
-    `fast_cluster_sc`.
+    """k-means coarsening, a centroid graph and Louvain / Leiden on it.
 
     Each cell inherits the community of its centroid. With `n_seeds > 1`
     every resolution runs once per seed; the labels come from the seed with

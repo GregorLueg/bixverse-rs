@@ -1,14 +1,12 @@
 """In-memory state of a single cell experiment: the index map and the cache.
 
-`ScMap` and `ScCache` port the bixverse R S3 lists of the same names. Every
-index in here is 0-based.
+Every index in here is 0-based.
 
-Provenance follows R's `functions_sc_cache_state.R`: each cached artefact can
-carry a stamp recording the cell set it was computed on (a hash of
-`cells_to_keep`, order sensitive) and the stamp ids of the artefacts it was
-derived from. In R the stamp is an attribute on the payload, so replacing the
-payload drops it. Here the stamps live in `ScCache.stamps` and the same holds:
-assigning a slot (`cache.pca_factors = ...`) drops its stamp, and an
+Provenance: each cached artefact can carry a stamp recording the cell set it
+was computed on (a hash of `cells_to_keep`, order sensitive) and the stamp ids
+of the artefacts it was derived from. The stamps live in `ScCache.stamps`, and
+replacing a payload drops its stamp: assigning a slot
+(`cache.pca_factors = ...`) drops its stamp, and an
 embedding's stamp only counts while it still belongs to the very array it was
 minted for.
 """
@@ -90,7 +88,7 @@ def _as_index(arr: np.ndarray | Sequence[int], name: str) -> np.ndarray:
 
 @beartype
 def _lookup(ids: np.ndarray, wanted: Sequence[str], what: str) -> np.ndarray:
-    """0-based positions of `wanted` in `ids`, as R's `get_*_indices`.
+    """0-based positions of `wanted` in `ids`.
 
     Unmatched ids warn and are dropped.
 
@@ -361,7 +359,7 @@ class ScCache:
     def artefacts(self) -> dict[str, Stamp | None]:
         """Every present artefact and its stamp, `None` when unstamped.
 
-        In R's order: the PCA, the embeddings, kNN, graph, MAGIC, residuals.
+        In the order: the PCA, the embeddings, kNN, graph, MAGIC, residuals.
 
         Raises:
             ValueError: If an embedding uses a reserved name.
@@ -398,7 +396,7 @@ class ScCache:
 
     @beartype
     def stamp(self, label: str, cells: str, parents: Sequence[str] = ()) -> Stamp:
-        """Mint and attach a stamp, as R's `.stamp_artefact`.
+        """Mint and attach a stamp.
 
         Args:
             label: The artefact, e.g. `"pca"` or an embedding name.
@@ -572,7 +570,7 @@ def _present(src: Artefacts) -> dict[str, Stamp | None]:
 
 @beartype
 def state_report(cache: Artefacts, cells: str) -> pl.DataFrame:
-    """One row per cached artefact, as R's `get_sc_cache_status()`.
+    """One row per cached artefact.
 
     Args:
         cache: The cache, or an artefact dict.
@@ -615,7 +613,7 @@ def stale_artefacts(cache: Artefacts, cells: str) -> list[str]:
 
 @beartype
 def check_state(cache: Artefacts, cells: str, labels: Sequence[str]) -> bool | str:
-    """Whether the given artefacts are fresh, as R's `check_sc_state`.
+    """Whether the given artefacts are fresh.
 
     Absent and unstamped artefacts pass.
 

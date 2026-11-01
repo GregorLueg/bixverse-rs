@@ -1,9 +1,8 @@
 """GPU Scrublet parameters, written by hand.
 
-R's `params_scrublet_gpu()` is a hand-written constructor, not a devforge
-spec: the kNN block is the GPU or the CPU one depending on `knn_backend`. Both
-blocks share five key names, so the block has to match the backend; a CPU-only
-knob would otherwise do nothing on the GPU arm.
+The kNN block is the GPU or the CPU one depending on `knn_backend`, so the
+bundle is not generated. Both blocks share five key names, so the block has to
+match the backend; a CPU-only knob would otherwise do nothing on the GPU arm.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ _CONF = BeartypeConf(is_pep484_tower=True)
 @beartype(conf=_CONF)
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ScrubletGpuParams:
-    """GPU Scrublet doublet detection parameters, R's `params_scrublet_gpu()`.
+    """GPU Scrublet doublet detection parameters.
 
     The randomised SVD and the projection of the simulated doublets always run
     on the GPU; `knn_backend` picks where the kNN runs. There is no

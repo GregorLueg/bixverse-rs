@@ -10,8 +10,7 @@ the CPU functions, so a pipeline swaps one import for the other:
     >>> pp.find_hvg(sc, hvg_no=2000)
     >>> pp_gpu.calculate_pca(sc, 30)
 
-Where R names the GPU result differently (`harmony_gpu`, `mnn_gpu`) so does
-this. The GPU-specific knobs live in `bixverse_gpu.params`; everything else
+The GPU-specific knobs live in `bixverse_gpu.params`; everything else
 takes the `bixverse.params` bundles. Probe the device with `gpu_available()`;
 the twins raise `bixverse.BixverseError` without one.
 """

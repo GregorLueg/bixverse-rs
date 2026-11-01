@@ -1,15 +1,14 @@
 """GPU batch correction: Harmony v2, BBKNN and fastMNN.
 
-The port of R's `harmony_v2_gpu_sc`, `bbknn_gpu_sc` and `fast_mnn_gpu_sc`.
-Harmony and fastMNN write their corrected embedding under R's names,
-`"harmony_gpu"` and `"mnn_gpu"`, stamped as derived from `"pca"`; BBKNN writes
+Harmony and fastMNN write their corrected embedding as `"harmony_gpu"` and
+`"mnn_gpu"`, stamped as derived from `"pca"`; BBKNN writes
 the kNN and the connectivities as `bixverse.integrate.bbknn` does.
 
     >>> harmony_v2(sc, "batch")
     >>> bixverse_gpu.graph.find_neighbours(sc, embd_to_use="harmony_gpu")
 
 Unlike `bixverse.integrate.fast_mnn`, the GPU fastMNN corrects the PCA in the
-object rather than computing one on batch-aware HVGs, as in R.
+object rather than computing one on batch-aware HVGs.
 """
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ def harmony_v2(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Harmony v2 on the PCA on the GPU, as R's `harmony_v2_gpu_sc`.
+    """Harmony v2 on the PCA on the GPU.
 
     One batch covariate only. The corrected embedding goes to the modality's
     `embeddings["harmony_gpu"]`, stamped as derived from `"pca"`.
@@ -93,8 +92,7 @@ def bbknn(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Batch-balanced kNN with the per-batch searches on the GPU, as R's
-    `bbknn_gpu_sc`.
+    """Batch-balanced kNN with the per-batch searches on the GPU.
 
     Writes what `bixverse.integrate.bbknn` writes: the kNN (the first
     `no_neighbours_to_keep` entries per row of the BBKNN distance matrix) to
@@ -142,8 +140,7 @@ def fast_mnn(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """fastMNN on the PCA in the object, neighbour searches on the GPU, as
-    R's `fast_mnn_gpu_sc`.
+    """fastMNN on the PCA in the object, neighbour searches on the GPU.
 
     The corrected embedding goes to `sc.cache.embeddings["mnn_gpu"]`, stamped
     as derived from `"pca"`. Run the PCA on batch-aware HVGs first if that is

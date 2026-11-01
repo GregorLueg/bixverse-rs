@@ -1,19 +1,18 @@
 """Ligand-receptor analysis: the NicheNet-style ligand to target influence,
 ligand activities and interaction prioritisation, and CellPhoneDB.
 
-The port of R's `R/functions_sc_lr.R`: `generate_ligand_target_influence`,
-`as_ligand_target_influence`, `ligand_activity_scores`,
-`compute_expression_info_sc`, `prioritise_interactions`,
-`get_cellphonedb_db` and `cellphonedb_sc`, and the `LigandTargetInfluence`
-class. The numerics run in Rust; the table logic R does in data.table is
-polars here.
+Covers `generate_ligand_target_influence`, `as_ligand_target_influence`,
+`ligand_activity_scores`, `compute_expression_info`,
+`prioritise_interactions`, `get_cellphonedb_db` and `cellphonedb`, and the
+`LigandTargetInfluence` class. The numerics run in Rust; the table logic is
+polars.
 
     >>> inf = generate_ligand_target_influence(seeds, ppi, grn)
     >>> act = ligand_activity_scores(inf, {"degs": degs}, background=expressed)
     >>> lr_db = get_cellphonedb_db()
     >>> res = cellphonedb(sc, "cell_type", lr_db, method="simple")
 
-Like R, the expression statistics and CellPhoneDB take a `SingleCells`.
+The expression statistics and CellPhoneDB take a `SingleCells`.
 Every index is 0-based.
 """
 
@@ -57,7 +56,7 @@ COND_KEYS: tuple[str, ...] = (
     "receptor_condition_specificity",
 )
 
-# R's `.Machine$double.xmin`, the floor on a p-value before the log.
+# The floor on a p-value before the log.
 DOUBLE_XMIN: float = sys.float_info.min
 
 CELLPHONEDB_URL: str = (
@@ -94,7 +93,7 @@ _CONF = BeartypeConf(is_pep484_tower=True)
 @beartype
 @dataclass(frozen=True, repr=False)
 class LigandTargetInfluence:
-    """The ligands x genes influence matrix, R's `LigandTargetInfluence`.
+    """The ligands x genes influence matrix.
 
     Attributes:
         influence: `(n_ligands, n_genes)` `float64` regulatory potential.
@@ -112,11 +111,11 @@ class LigandTargetInfluence:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """`(n_ligands, n_genes)`, R's `dim()`."""
+        """`(n_ligands, n_genes)`."""
         return (self.influence.shape[0], self.influence.shape[1])
 
     def __repr__(self) -> str:
-        """R's `print.LigandTargetInfluence`."""
+        """A short summary of the ligand seeds and genes."""
         n, m = self.shape
         lines = [
             "LigandTargetInfluence",
@@ -140,7 +139,7 @@ class LigandTargetInfluence:
 
 @beartype
 def _check_columns(df: pl.DataFrame, required: Sequence[str], name: str) -> None:
-    """R's `checkmate::assertNames(must.include = ...)`.
+    """Check that the required columns are present.
 
     Raises:
         ValueError: On a missing column.
@@ -152,7 +151,7 @@ def _check_columns(df: pl.DataFrame, required: Sequence[str], name: str) -> None
 
 @beartype
 def _string_col(df: pl.DataFrame, col: str, name: str) -> pl.DataFrame:
-    """A text column as `String`, no nulls, as `checkmate::assertCharacter`.
+    """A text column as `String`, no nulls.
 
     Raises:
         ValueError: If it is not text or holds nulls.
@@ -196,7 +195,7 @@ def _numeric_col(
 def _check_deg_table(
     x: pl.DataFrame, name: str, *, needs_cluster: bool = True
 ) -> pl.DataFrame:
-    """R's `assertDegTable`: `gene`, `lfc`, `pval` (and `cluster_id`).
+    """Check a DEG table: `gene`, `lfc`, `pval` (and `cluster_id`).
 
     Returns:
         The table with the text columns as `String` and the numbers as
@@ -220,7 +219,7 @@ def _check_deg_table(
 
 @beartype
 def _check_exp_table(x: pl.DataFrame, name: str) -> pl.DataFrame:
-    """R's `assertExpTable`: `cluster_id`, `gene`, `avg_expr`.
+    """Check an expression table: `cluster_id`, `gene`, `avg_expr`.
 
     Raises:
         ValueError: On a missing column or a wrong type.
@@ -233,7 +232,7 @@ def _check_exp_table(x: pl.DataFrame, name: str) -> pl.DataFrame:
 
 @beartype
 def _rank_scale(x: np.ndarray) -> np.ndarray:
-    """R's `.rank_scale`: average ranks over their maximum."""
+    """Average ranks over their maximum."""
     # numpy, not polars: polars divides by a scalar through its reciprocal,
     # which is off by an ulp and reorders near-tied prioritisation scores
     r: np.ndarray = pl.Series(x).rank("average").cast(pl.Float64).to_numpy()
@@ -242,7 +241,7 @@ def _rank_scale(x: np.ndarray) -> np.ndarray:
 
 @beartype
 def _scaling_zscore(x: np.ndarray) -> np.ndarray:
-    """R's `.scaling_zscore`: zeros when the standard deviation is zero or
+    """Z-score, zeros when the standard deviation is zero or
     undefined. `NaN` entries are left out of the moments and stay `NaN`."""
     ok = x[~np.isnan(x)]
     s = float(np.std(ok, ddof=1)) if ok.size > 1 else float("nan")
@@ -253,7 +252,7 @@ def _scaling_zscore(x: np.ndarray) -> np.ndarray:
 
 @beartype
 def _quantile7(x: np.ndarray, p: float) -> float:
-    """R's default `quantile(type = 7)`, interpolating as R does."""
+    """Quantile with linear interpolation (type 7)."""
     s = np.sort(x)
     idx = (s.size - 1) * p
     lo = int(np.floor(idx))
@@ -267,7 +266,7 @@ def _quantile7(x: np.ndarray, p: float) -> float:
 
 @beartype
 def _scale_quantile_adapted(x: np.ndarray, outlier_cutoff: float = 0.05) -> np.ndarray:
-    """R's `.scale_quantile_adapted`: clip to the `[cutoff, 1 - cutoff]`
+    """Clip to the `[cutoff, 1 - cutoff]`
     quantiles, map to `[0, 1]`, 0.5 everywhere if they coincide. `NaN`
     entries are left out of the quantiles and stay `NaN`."""
     ok = x[~np.isnan(x)]
@@ -302,8 +301,8 @@ def _with_rank_scaled(df: pl.DataFrame, src: str, out: str) -> pl.DataFrame:
 
 @beartype
 def _join_into(x: pl.DataFrame, out: pl.DataFrame, on: list[str]) -> pl.DataFrame:
-    """data.table's `x[out, on = on, nomatch = NULL]`: the rows of `out`
-    that match, in its order, `x`'s columns first."""
+    """The rows of `out` that match `x` on `on`, in its order, `x`'s columns
+    first."""
     res = out.join(x, on=on, how="inner", maintain_order="left")
     return res.select([*x.columns, *[c for c in out.columns if c not in x.columns]])
 
@@ -322,18 +321,17 @@ def as_ligand_target_influence(
     ligands_as_cols: bool = False,
     params: LigandTargetParams | None = None,
 ) -> LigandTargetInfluence:
-    """Wrap an existing ligand-target matrix, as R's
-    `as_ligand_target_influence`.
+    """Wrap an existing ligand-target matrix.
 
     For a regulatory potential matrix built elsewhere, for example with
-    nichenetr's `construct_ligand_target_matrix()`, so it can be scored with
+    NicheNet's ligand-target matrix, so it can be scored with
     `ligand_activity_scores`.
 
     Args:
         x: Numeric matrix.
         row_names: Unique row names.
         col_names: Unique column names.
-        ligands_as_cols: `x` is genes x ligands, the nichenetr layout.
+        ligands_as_cols: `x` is genes x ligands, the NicheNet layout.
         params: Parameters used to build `x`, kept for the record.
 
     Returns:
@@ -370,7 +368,7 @@ def as_ligand_target_influence(
 
 @beartype
 def get_influence(x: LigandTargetInfluence) -> np.ndarray:
-    """The ligands x genes influence, R's `get_influence`; the names are
+    """The ligands x genes influence; the names are
     `x.ligand_names` and `x.gene_ids`.
 
     Args:
@@ -401,11 +399,10 @@ def generate_ligand_target_influence(
     grn_network: pl.DataFrame,
     params: LigandTargetParams | None = None,
 ) -> LigandTargetInfluence:
-    """The NicheNet-style ligand to target influence matrix, as R's
-    `generate_ligand_target_influence`.
+    """The NicheNet-style ligand to target influence matrix.
 
     The gene universe is the union of the nodes of both networks, in order
-    of first appearance (`ppi$from`, `ppi$to`, `grn$from`, `grn$to`).
+    of first appearance (`ppi["from"]`, `ppi["to"]`, `grn["from"]`, `grn["to"]`).
 
     Args:
         ligand_seeds: One ligand symbol or a group treated as one complex per
@@ -486,7 +483,7 @@ def ligand_activity_scores(
     *,
     background: Sequence[str] | None = None,
 ) -> pl.DataFrame:
-    """Ligand activities against gene sets, as R's `ligand_activity_scores`.
+    """Ligand activities against gene sets.
 
     The influence is restricted to the `background` columns first, so the
     metrics rank within the background (NicheNet practice: the genes
@@ -497,7 +494,7 @@ def ligand_activity_scores(
         gene_sets: One gene set, a list of them, or a mapping naming them.
             Unnamed sets are called `"1"`, `"2"`, ...
         background: Genes to score against. `None` uses every column.
-            Genes not in the influence are dropped silently, as in R.
+            Genes not in the influence are dropped silently.
 
     Returns:
         One row per gene set and ligand: `gene_set`, `ligand`, `auroc`,
@@ -568,7 +565,7 @@ def resolve_weights(
     scenario: Scenario,
     has_condition_de: bool,
 ) -> dict[str, float]:
-    """The prioritisation weights, R's `resolve_weights`.
+    """The prioritisation weights.
 
     Args:
         weights: One non-negative weight per name in `WEIGHT_NAMES`; extra
@@ -613,8 +610,7 @@ def compute_expression_info(
     condition_colname: str | None = None,
     condition_oi: str | None = None,
 ) -> pl.DataFrame:
-    """Per-cluster mean expression and expressing fraction, as R's
-    `compute_expression_info_sc`.
+    """Per-cluster mean expression and expressing fraction.
 
     Streams the genes off the gene-major store and aggregates over the kept
     cells per cluster; cells with a missing label are ignored. With a
@@ -711,8 +707,7 @@ def prioritise_interactions(
     weights: Mapping[str, float] | None = None,
     scenario: Scenario = "case_control",
 ) -> pl.DataFrame:
-    """Prioritise sender-ligand-receiver-receptor interactions, as R's
-    `prioritise_interactions`.
+    """Prioritise sender-ligand-receiver-receptor interactions.
 
     Each (sender, ligand, receiver, receptor) from the L/R network gets a
     weighted score over ligand DE in the sender, receptor DE in the
@@ -720,7 +715,7 @@ def prioritise_interactions(
     specificity across senders (receivers) and the condition specificity of
     both. A component with weight zero is skipped, its join included; every
     other one is an inner join, so a tuple missing from it drops out. DE and
-    expression terms count half, as nichenetr's.
+    expression terms count half, as in NicheNet.
 
     Args:
         celltype_de: `cluster_id`, `gene`, `lfc`, `pval`, one row per
@@ -880,7 +875,7 @@ def prioritise_interactions(
                 "scaled_p_val_adapted_receptor_group",
             )
 
-    # 7. base table: data.table's CJ sorts each side, the L/R pairs keep order
+    # 7. base table: senders and receivers are sorted, the L/R pairs keep order
     sr = pl.DataFrame({"sender": sorted(senders)}).join(
         pl.DataFrame({"receiver": sorted(receivers)}), how="cross"
     )
@@ -1061,8 +1056,7 @@ def _flatten_cellphonedb(tables: Mapping[str, pl.DataFrame]) -> pl.DataFrame:
 def get_cellphonedb_db(
     cache_dir: Path | str | None = None, *, verbose: bool = True
 ) -> pl.DataFrame:
-    """The CellPhoneDB v5.0.0 ligand-receptor database, as R's
-    `get_cellphonedb_db`.
+    """The CellPhoneDB v5.0.0 ligand-receptor database.
 
     Fetches `cellphonedb.zip` from the
     [cellphonedb-data](https://github.com/ventolab/cellphonedb-data)
@@ -1095,7 +1089,7 @@ def get_cellphonedb_db(
 
 @beartype
 def _check_lr_db(lr_db: pl.DataFrame) -> None:
-    """R's `checkLrDb`.
+    """Check a ligand-receptor database.
 
     Raises:
         ValueError: On a missing column, missing or duplicated interaction
@@ -1135,7 +1129,7 @@ def cellphonedb(
     params: CellphonedbParams | None = None,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """CellPhoneDB ligand-receptor analysis, as R's `cellphonedb_sc`.
+    """CellPhoneDB ligand-receptor analysis.
 
     For every interaction and ordered (sender, receiver) cluster pair,
     partner a is measured in the sender and partner b in the receiver. The
@@ -1283,7 +1277,7 @@ def cellphonedb(
         int(verbose),
     )
 
-    # the matrices are (interactions, pairs); R flattens them column-major
+    # the matrices are (interactions, pairs); the output is flattened column-major
     n_inter = lr_db.height
     n_pairs = len(res["pair_a"])
     n = n_inter * n_pairs

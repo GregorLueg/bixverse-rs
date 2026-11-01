@@ -1,6 +1,6 @@
 """Single cell pipelines: steps chained with `>>` and applied in order.
 
-The port of R's `pipelines_sc.R`. A `Step` is a function, the keyword
+A `Step` is a function, the keyword
 arguments it gets at apply time and the classes it accepts; a `Pipeline` is a
 tuple of steps. `apply_pipeline` checks the chain against the class of the
 object first (a meta cell step turns a `SingleCells` into a `MetaCells`),
@@ -61,12 +61,11 @@ from bixverse.params import (
 # Globals #
 ###########
 
-# R's `SC_STEP_CLASSES`.
 STEP_CLASSES: tuple[type, ...] = (SingleCells, SingleCellsSubset, MetaCells)
 
 MetacellMethod = Literal["bootstrapped", "seacells", "supercells"]
 
-# R's `.sc_metacell_generator`; MetaCells2 is not one of its choices.
+# MetaCells2 is not one of the choices.
 METACELL_GENERATORS: dict[str, Callable[..., MetaCells | None]] = {
     "bootstrapped": generate_bt_meta_cells,
     "seacells": generate_seacells,
@@ -83,8 +82,7 @@ logger = logging.getLogger(__name__)
 
 @beartype
 def _format_value(v: object) -> str:
-    """Scalars and short sequences of scalars verbatim, the rest as `<type>`,
-    as R's `format_step_args`."""
+    """Scalars and short sequences of scalars verbatim, the rest as `<type>`."""
     scalar = (type(None), bool, int, float, str)
     if isinstance(v, scalar):
         return repr(v)
@@ -105,8 +103,8 @@ def _format_kwargs(kwargs: Mapping[str, object]) -> str:
 
 @beartype
 def _object_class(obj: SingleCells | SingleCellsSubset | MetaCells) -> type:
-    """The step class of `obj`, R's `.sc_object_class`. A
-    `SingleCellsMultiModal` counts as a `SingleCells`."""
+    """The step class of `obj`. A `SingleCellsMultiModal` counts as a
+    `SingleCells`."""
     return next(c for c in STEP_CLASSES if isinstance(obj, c))
 
 
@@ -123,7 +121,7 @@ def _groups(sc: SingleCells, group_col: str, groups: Sequence[str] | None) -> li
     if groups is not None:
         return list(groups)
     values = sc.obs(cols=[group_col], filtered=True)[group_col]
-    # whole doubles are "1", not "1.0", as R's as.character
+    # whole doubles are "1", not "1.0"
     if values.dtype.is_float() and (values == values.floor()).all():
         values = values.cast(pl.Int64)
     return values.cast(pl.String).unique(maintain_order=True).to_list()
@@ -137,7 +135,7 @@ def _groups(sc: SingleCells, group_col: str, groups: Sequence[str] | None) -> li
 @beartype
 @dataclass(frozen=True, repr=False)
 class Step:
-    """One pipeline step, R's `ScStep`.
+    """One pipeline step.
 
     The keyword arguments are bound against the function's signature, the
     object standing in first, so a misspelt or missing argument fails here
@@ -186,7 +184,7 @@ class Step:
 @beartype
 @dataclass(frozen=True, repr=False)
 class Pipeline:
-    """A linear chain of steps, R's `ScPipeline`. Inert until applied.
+    """A linear chain of steps. Inert until applied.
 
     Build it from a list of steps, `Pipeline([step_hvg(), step_pca(30)])`,
     or chain steps with `>>` as shorthand: `step_hvg() >> step_pca(30)`.
@@ -270,7 +268,7 @@ def validate_pipeline(pipeline: Pipeline, cls: type) -> type:
 def apply_pipeline(
     pipeline: Pipeline, obj: SingleCells | SingleCellsSubset | MetaCells
 ) -> SingleCells | SingleCellsSubset | MetaCells:
-    """Run each step in order, as R's `apply_pipeline`.
+    """Run each step in order.
 
     The chain is validated against the class of `obj` before anything runs.
     Steps modify the object in place; a meta cell step's result replaces it
@@ -316,8 +314,7 @@ def apply_pipeline_per_group(
     groups: Sequence[str] | None = None,
     progress: bool = False,
 ) -> dict[str, SingleCells | SingleCellsSubset | MetaCells]:
-    """Run a pipeline independently on each group, as R's
-    `apply_pipeline_per_group`.
+    """Run a pipeline independently on each group.
 
     Each group is cut as a `SingleCellsSubset` over the kept cells, so the
     parent is left alone. A pipeline ending on `step_metacells` gives
@@ -366,8 +363,7 @@ def meta_cells_per_group(
     feature_space: str = "intersect",
     verbose: bool = False,
 ) -> MetaCells:
-    """Source-pure meta cells: one generator run per group, merged, as R's
-    `meta_cells_per_group`.
+    """Source-pure meta cells: one generator run per group, merged.
 
     Meta cells never mix two groups (patients, samples), yet end up in one
     object. The generators need an embedding and usually a kNN, so `pipeline`
@@ -724,7 +720,7 @@ def step_fast_mnn(
 
 @beartype
 def step_metacells(method: MetacellMethod = "bootstrapped", **kwargs: object) -> Step:
-    """Pipeline step for a meta cell generator, as R's `step_metacells_sc`.
+    """Pipeline step for a meta cell generator.
 
     Unlike the other steps it changes the class of the object: it takes a
     `SingleCells` or `SingleCellsSubset` and returns a `MetaCells`, which the

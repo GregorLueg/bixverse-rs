@@ -1,10 +1,8 @@
 """Meta cell quality: label purity, diffusion density, compactness and
 separation.
 
-The port of R's `calc_meta_cell_purity`, `get_meta_cell_purity`,
-`calc_diffusion_coordinates`, `calc_manifold_metrics`,
-`calc_meta_cell_compactness` and `calc_meta_cell_separation`. The diffusion
-map and the two manifold scores run in Rust; purity is a tabulation.
+The diffusion map and the two manifold scores run in Rust; purity is a
+tabulation.
 
     >>> calc_meta_cell_purity(mc, sc.obs()["cell_type"].to_list())
     >>> calc_diffusion_coordinates(mc, sc.cache.knn)
@@ -46,7 +44,7 @@ def _purity_cols(
     add_additional_info: PurityInfo,
     add_entropy: bool,
 ) -> dict[str, pl.Series]:
-    """The purity columns in obs row order, R's `.mc_purity_cols`.
+    """The purity columns in obs row order.
 
     Raises:
         ValueError: If the labels match neither the source's obs rows nor its
@@ -128,15 +126,13 @@ def calc_meta_cell_purity(
     add_additional_info: PurityInfo = "none",
     add_entropy: bool = False,
 ) -> None:
-    """Label purity of each meta cell, written to obs, as R's
-    `calc_meta_cell_purity`.
+    """Label purity of each meta cell, written to obs.
 
     Adds `mc_purity` (fraction of the meta cell's cells carrying its most
     common label), and on request `mc_top_label`, `mc_second_label` (null for
     a pure meta cell), `mc_second_frac` and `mc_entropy` (Shannon entropy of
     the labels over `log(number of distinct labels)`, 0 with a single label).
-    Ties resolve to the label that sorts first, by code point; R sorts in the
-    locale's collation.
+    Ties resolve to the label that sorts first, by code point.
 
     Args:
         mc: The meta cells.
@@ -166,8 +162,7 @@ def get_meta_cell_purity(
     add_additional_info: PurityInfo = "none",
     add_entropy: bool = False,
 ) -> pl.DataFrame:
-    """`calc_meta_cell_purity` without touching the object, as R's
-    `get_meta_cell_purity`.
+    """`calc_meta_cell_purity` without touching the object.
 
     Args:
         mc: The meta cells.
@@ -198,15 +193,14 @@ def calc_diffusion_coordinates(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Diffusion map of the source cells and a density region per meta cell,
-    as R's `calc_diffusion_coordinates`.
+    """Diffusion map of the source cells and a density region per meta cell.
 
     Builds multiscale diffusion components off the source kNN, takes the
     distance to the `k_density`-th neighbour in that space as a density
     proxy and tags its lower quartile `"high"`, upper quartile `"low"`, the
     rest `"mid"`. Each meta cell gets the most common region of its cells in
-    obs `density_region` (ties to the name that sorts first, as R's
-    `table()`); `other_data` gains `dcs`, `density_dist` and `regions`.
+    obs `density_region` (ties to the name that sorts first); `other_data`
+    gains `dcs`, `density_dist` and `regions`.
 
     A merged object warns and is left alone: its memberships live in several
     index spaces.
@@ -269,8 +263,7 @@ def _most_common(values: np.ndarray) -> str:
 
 @beartype
 def calc_manifold_metrics(mc: MetaCells) -> None:
-    """Compactness and separation of each meta cell in the diffusion map, as
-    R's `calc_manifold_metrics`.
+    """Compactness and separation of each meta cell in the diffusion map.
 
     Compactness is the mean variance over the diffusion components of a meta
     cell's cells, lower is better; separation the distance from its centroid
@@ -320,8 +313,7 @@ def calc_manifold_metrics(mc: MetaCells) -> None:
 def _split_rows(
     assignment: Sequence[object], n_rows: int
 ) -> tuple[list[str], list[np.ndarray]]:
-    """Rows per meta cell as R's `split(seq_along(x), x)`: levels sorted,
-    missing values dropped.
+    """Rows per meta cell: levels sorted, missing values dropped.
 
     Raises:
         ValueError: If the assignment does not have one entry per row.
@@ -340,8 +332,7 @@ def _split_rows(
 def calc_meta_cell_compactness(
     dcs: np.ndarray, assignment: Sequence[object]
 ) -> pl.DataFrame:
-    """Compactness of any meta cell assignment in a diffusion map, as R's
-    `calc_meta_cell_compactness`.
+    """Compactness of any meta cell assignment in a diffusion map.
 
     Args:
         dcs: `(n_cells, n_dcs)` diffusion coordinates, e.g.
@@ -351,8 +342,7 @@ def calc_meta_cell_compactness(
             `calc_manifold_metrics` for those.
 
     Returns:
-        `meta_cell` and `compactness`, ordered as R's `split()` orders the
-        levels.
+        `meta_cell` and `compactness`, ordered by sorted level.
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
@@ -373,16 +363,15 @@ def calc_meta_cell_compactness(
 def calc_meta_cell_separation(
     dcs: np.ndarray, assignment: Sequence[object]
 ) -> pl.DataFrame:
-    """Separation of any meta cell assignment in a diffusion map, as R's
-    `calc_meta_cell_separation`. A single meta cell yields `inf`.
+    """Separation of any meta cell assignment in a diffusion map. A single
+    meta cell yields `inf`.
 
     Args:
         dcs: `(n_cells, n_dcs)` diffusion coordinates.
         assignment: Meta cell of each row of `dcs`, `None` for none.
 
     Returns:
-        `meta_cell` and `separation`, ordered as R's `split()` orders the
-        levels.
+        `meta_cell` and `separation`, ordered by sorted level.
 
     References:
         Persad, et al., Nat Biotechnol, 2023.

@@ -1,19 +1,16 @@
 """Batch correction and integration metrics.
 
-The port of R's `harmony_sc`, `harmony_v2_sc`, `bbknn_sc`, `fast_mnn_sc`,
-`seurat_cca_sc`, `seurat_rpca_sc` and the `calculate_*_sc` metrics. The work
-runs in Rust; this layer reads the batch labels from obs by name and writes
-what R writes: the corrected embeddings to `sc.cache.embeddings` under R's
-names (`"harmony"`, `"harmony_v2"`, `"mnn"`, `"cca"`, `"rpca"`), BBKNN's kNN
-and neighbour graph to `sc.cache.knn` and `sc.cache.connectivities`, each
-stamped with R's parents. The metrics return records and leave the
-experiment alone.
+The work runs in Rust; this layer reads the batch labels from obs by name
+and writes the corrected embeddings to `sc.cache.embeddings` (`"harmony"`,
+`"harmony_v2"`, `"mnn"`, `"cca"`, `"rpca"`), BBKNN's kNN and neighbour graph
+to `sc.cache.knn` and `sc.cache.connectivities`, each stamped with its
+parents. The metrics return records and leave the experiment alone.
 
     >>> harmony(sc, "batch")
     >>> find_neighbours(sc, embd_to_use="harmony")
     >>> calculate_integration_metrics(sc, "batch", embd_to_use="harmony")
 
-Labels follow R's `factor()`: sorted levels (an Enum keeps its own order).
+Labels are coded by sorted level (an Enum keeps its own order).
 """
 
 from __future__ import annotations
@@ -54,7 +51,7 @@ from bixverse.params import (
 # Globals #
 ###########
 
-# R's automatic Harmony cluster number: min(round(n / 30), 100).
+# Automatic Harmony cluster number: min(round(n / 30), 100).
 HARMONY_CELLS_PER_CLUSTER: int = 30
 HARMONY_MAX_CLUSTERS: int = 100
 
@@ -71,7 +68,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True)
 class KbetScores:
-    """kBET result, R's `KbetScores`.
+    """kBET result.
 
     Attributes:
         kbet_score: Share of cells whose test is significant; 0 is perfect
@@ -99,7 +96,7 @@ class KbetScores:
 @beartype
 @dataclass(frozen=True)
 class BatchSilhouetteScores:
-    """Batch silhouette width, R's `BatchSilhouetteScores`.
+    """Batch silhouette width.
 
     Attributes:
         per_cell: Per-cell silhouettes in `[-1, 1]`; near 0 is mixed, near 1
@@ -120,7 +117,7 @@ class BatchSilhouetteScores:
 @beartype
 @dataclass(frozen=True)
 class LisiScores:
-    """iLISI or cLISI, R's `LisiScores`.
+    """iLISI or cLISI.
 
     Attributes:
         per_cell: Per-cell LISI in `[1, n_labels]`.
@@ -142,7 +139,7 @@ class LisiScores:
 @beartype
 @dataclass(frozen=True)
 class PcrScores:
-    """Principal component regression on batch, R's `PcrScores`.
+    """Principal component regression on batch.
 
     Attributes:
         pcr: Variance-weighted R-squared of batch on the embedding.
@@ -164,8 +161,7 @@ class PcrScores:
 @beartype
 @dataclass(frozen=True)
 class CellTypeAswScores:
-    """Cell type silhouette width rescaled to `[0, 1]`, R's
-    `CellTypeAswScores`.
+    """Cell type silhouette width rescaled to `[0, 1]`.
 
     Attributes:
         per_cell: Per-cell rescaled silhouettes.
@@ -185,12 +181,12 @@ class CellTypeAswScores:
 @beartype
 @dataclass(frozen=True)
 class GraphConnectivityScores:
-    """Graph connectivity per cell type, R's `GraphConnectivityScores`.
+    """Graph connectivity per cell type.
 
     Attributes:
         per_cell_type: `cell_type` and `connectivity`, the share of the cell
             type's cells in its largest connected component; in order of
-            first appearance, as R names its vector.
+            first appearance.
         mean_connectivity: Mean over cell types.
         median_connectivity: Median over cell types.
     """
@@ -220,7 +216,7 @@ def _labels(sc: ScOrScSubset, column: str) -> tuple[np.ndarray, list[str]]:
 
 @beartype
 def _hard_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
-    """R's `assert_sc_state`: refuse stale inputs.
+    """Refuse stale inputs.
 
     Raises:
         ValueError: If one of the artefacts is stale.
@@ -232,7 +228,7 @@ def _hard_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
 
 @beartype
 def _soft_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
-    """R's `.warn_sc_state`: warn on stale inputs."""
+    """Warn on stale inputs."""
     state = sc.check_state(labels)
     if isinstance(state, str):
         warnings.warn(state, stacklevel=3)
@@ -243,7 +239,7 @@ def _pca_keys(
     params: FastmnnParams | SeuratCcaParams | SeuratRpcaParams,
 ) -> dict[str, object]:
     """`to_rust(params)` with the deprecated `randomised` mapped onto
-    `svd_solver`, as R's `params_sc_pca()` does."""
+    `svd_solver`."""
     d = to_rust(params)
     randomised = d.pop("randomised")
     if randomised is not None:
@@ -308,9 +304,8 @@ def _harmony(
     seed: int,
     verbose: bool,
 ) -> None:
-    """Shared body of Harmony v1, v2 and the GPU twin, R's `harmony_sc` /
-    `harmony_v2_sc`. `params` is any Harmony bundle; `run` the extension
-    call."""
+    """Shared body of Harmony v1, v2 and the GPU twin. `params` is any Harmony
+    bundle; `run` the extension call."""
     cache = modality_cache(sc, modality)
     require_fresh(sc, ["pca"], modality)
     pca = cache.pca_factors
@@ -349,7 +344,7 @@ def harmony(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Harmony on the PCA, as R's `harmony_sc`.
+    """Harmony on the PCA.
 
     The corrected embedding goes to the modality's `embeddings["harmony"]`,
     stamped as derived from `"pca"`.
@@ -404,7 +399,7 @@ def harmony_v2(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Harmony v2 on the PCA, as R's `harmony_v2_sc`.
+    """Harmony v2 on the PCA.
 
     The corrected embedding goes to the modality's `embeddings["harmony_v2"]`,
     stamped as derived from `"pca"`.
@@ -457,7 +452,7 @@ def bbknn(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Batch-balanced kNN, as R's `bbknn_sc`.
+    """Batch-balanced kNN.
 
     The kNN goes to `sc.cache.knn`, stamped as derived from the embedding,
     and the max-symmetrised BBKNN connectivities to
@@ -470,7 +465,7 @@ def bbknn(
         batch_column: obs column with the batch.
         no_neighbours_to_keep: Neighbours per cell in the stored kNN; capped
             at `n_batches * neighbours_within_batch`.
-        embd_to_use: The embedding; only `"pca"`, as in R.
+        embd_to_use: The embedding; only `"pca"`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
         bbknn_params: The parameters. `None` uses the defaults.
         seed: Seed.
@@ -626,7 +621,7 @@ def fast_mnn(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """fastMNN on a PCA of the batch-aware HVGs, as R's `fast_mnn_sc`.
+    """fastMNN on a PCA of the batch-aware HVGs.
 
     The corrected embedding goes to `sc.cache.embeddings["mnn"]`, stamped as
     derived from `"pca"` when the cached PCA was used, else unparented.
@@ -679,7 +674,7 @@ def seurat_cca(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Seurat CCA anchor integration, as R's `seurat_cca_sc`.
+    """Seurat CCA anchor integration.
 
     The corrected embedding goes to `sc.cache.embeddings["cca"]`, stamped as
     derived from `"pca"` when the cached PCA was used, else unparented. One
@@ -733,7 +728,7 @@ def seurat_rpca(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Seurat reciprocal PCA anchor integration, as R's `seurat_rpca_sc`.
+    """Seurat reciprocal PCA anchor integration.
 
     The corrected embedding goes to `sc.cache.embeddings["rpca"]`, stamped
     as derived from `"pca"` when the cached PCA was used, else unparented.
@@ -788,7 +783,7 @@ def calculate_kbet(
     threshold: float = 0.05,
     verbose: bool = False,
 ) -> KbetScores | None:
-    """kBET on the cached kNN, as R's `calculate_kbet_sc`.
+    """kBET on the cached kNN.
 
     Args:
         sc: The experiment, with a kNN.
@@ -845,7 +840,7 @@ def calculate_lisi(
     perplexity: float = 30.0,
     verbose: bool = False,
 ) -> LisiScores | None:
-    """LISI on the cached kNN, as R's `calculate_lisi_sc`.
+    """LISI on the cached kNN.
 
     iLISI on batch labels, cLISI on cell type labels; `lisi_norm` is the
     scIB rescaling for the chosen `type`.
@@ -912,8 +907,7 @@ def calculate_batch_asw(
     seed: int = 42,
     verbose: bool = False,
 ) -> BatchSilhouetteScores | None:
-    """Batch average silhouette width on an embedding, as R's
-    `calculate_batch_asw_sc`.
+    """Batch average silhouette width on an embedding.
 
     Args:
         sc: The experiment.
@@ -966,7 +960,7 @@ def calculate_pcr(
     *,
     embd_to_use: str = "pca",
 ) -> PcrScores | None:
-    """Principal component regression on batch, as R's `calculate_pcr_sc`.
+    """Principal component regression on batch.
 
     On a corrected embedding it also runs on the PCA and reports the scIB
     comparison `(pre - post) / pre`: 1 means the batch variance is gone.
@@ -1005,7 +999,7 @@ def calculate_pcr(
         return None
     _soft_state(sc, ["pca", embd_to_use])
 
-    # R hands the embedding over as float64
+    # The extension takes float64
     pca_res = _bixverse.pcr(np.ascontiguousarray(pca, dtype=np.float64), codes + 1)
     res = pca_res
     comparison = None
@@ -1032,8 +1026,7 @@ def calculate_cell_type_asw(
     seed: int = 42,
     verbose: bool = False,
 ) -> CellTypeAswScores | None:
-    """Cell type silhouette width on an embedding, rescaled to `[0, 1]`, as
-    R's `calculate_cell_type_asw_sc`.
+    """Cell type silhouette width on an embedding, rescaled to `[0, 1]`.
 
     Args:
         sc: The experiment.
@@ -1088,8 +1081,7 @@ def calculate_cell_type_asw(
 def calculate_graph_connectivity(
     sc: ScOrScSubset, cell_type_column: str
 ) -> GraphConnectivityScores | None:
-    """Graph connectivity per cell type on the cached kNN, as R's
-    `calculate_graph_connectivity_sc`.
+    """Graph connectivity per cell type on the cached kNN.
 
     Args:
         sc: The experiment, with a kNN.
@@ -1138,8 +1130,7 @@ def calculate_integration_metrics(
     max_cells: int | None = 5000,
     seed: int = 42,
 ) -> pl.DataFrame:
-    """The batch mixing and biological conservation metrics in one row, as
-    R's `calculate_integration_metrics_sc`.
+    """The batch mixing and biological conservation metrics in one row.
 
     Every column is on `[0, 1]` (the PCR comparison can go negative), higher
     is better: `kbet_accept` (1 - rejection rate), `batch_asw`

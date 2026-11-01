@@ -1,11 +1,9 @@
 """Multi-modal methods: ADT counts, their PCA, and the WNN graph.
 
-The port of R's `new_adt_counts_clr`, `new_adt_counts_dsb`,
-`add_adt_counts_sc`, the `ADTCounts` getters, `calculate_pca_adt_sc` and
-`generate_wnn_graph_sc` (`R/classes_single_cell_multimodal.R`,
-`R/methods_sc_multimodal.R`). The normalisations, the PCA and WNN run in
-Rust; this layer aligns the ADT rows to the cells, writes what R writes and
-returns the rest.
+CLR and DSB normalisation of ADT counts, adding them to an experiment, the
+ADT getters, the ADT PCA and the WNN graph. The normalisations, the PCA and
+WNN run in Rust; this layer aligns the ADT rows to the cells, writes the
+per-protein and per-cell summaries to the DuckDB and returns the rest.
 
     >>> add_adt_counts(mm, adt.counts, adt.obs["cell_id"], proteins)
     >>> calculate_pca_adt(mm, no_pcs=10)
@@ -63,8 +61,7 @@ def _cell_info(
     feature_ids: Sequence[str] | np.ndarray | pl.Series,
     cell_info: pl.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """The raw counts reordered to `cell_info`, as R's
-    `raw_counts[names(cell_info), ]`.
+    """The raw counts reordered to the rows of `cell_info`.
 
     Returns:
         `(raw_counts, cell_ids, cell_idx, feature_ids)`.
@@ -118,7 +115,7 @@ def new_adt_counts_clr(
     clean_clr_counts: bool = True,
     percentile: float = 0.01,
 ) -> AdtCounts:
-    """CLR-normalised ADT counts, as R's `new_adt_counts_clr`.
+    """CLR-normalised ADT counts.
 
     The CLR runs per cell: `log1p(x) - mean(log1p(x))`, or Seurat's
     non-negative `log1p(x / g)`. With `clean_clr_counts` each protein's
@@ -129,7 +126,7 @@ def new_adt_counts_clr(
         barcodes: Barcode of each row.
         feature_ids: Id of each column.
         cell_info: The cells to keep, in order: `cell_id` and the 0-based
-            store index `cell_idx`, as R's `get_cell_info()`.
+            store index `cell_idx`.
         seurat_clr: Seurat-style CLR.
         clean_clr_counts: Subtract the per-protein `percentile` quantile.
         percentile: The quantile, in `(0, 1)`.
@@ -150,7 +147,7 @@ def new_adt_counts_clr(
     raw, cells, idx, features = _cell_info(raw_counts, barcodes, feature_ids, cell_info)
     norm = _bixverse.adt_clr(raw, seurat_clr)
     if clean_clr_counts:
-        # R's quantile() default is type 7, numpy's "linear"
+        # type 7 quantile, numpy's "linear"
         norm = norm - np.quantile(norm, percentile, axis=0)
     return AdtCounts(
         raw_counts=raw,
@@ -176,7 +173,7 @@ def new_adt_counts_dsb(
     seed: int = 42,
     verbose: bool = False,
 ) -> AdtCounts:
-    """DSB-normalised ADT counts, as R's `new_adt_counts_dsb`.
+    """DSB-normalised ADT counts.
 
     With `empty_drops` the per-protein background comes from the empty
     droplets; without, from a two-component k-means on the log counts
@@ -265,14 +262,14 @@ def new_adt_counts_dsb(
 
 @beartype
 def get_adt_feature_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
-    """Cells expressing each protein, as R's `get_adt_feature_info`.
+    """Cells expressing each protein.
 
     Args:
         adt: The ADT counts, or a multi-modal experiment holding them.
 
     Returns:
         `feature_idx` (0-based), `feature_id` and `nnz`. `nnz` is `Float64`
-        because R writes it as a double to `var_adt`.
+        because it is written as a double to `var_adt`.
     """
     a = adt if isinstance(adt, AdtCounts) else require_adt(adt)
     return pl.DataFrame(
@@ -286,14 +283,14 @@ def get_adt_feature_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame
 
 @beartype
 def get_adt_sample_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
-    """ADT capture per cell, as R's `get_adt_sample_info`.
+    """ADT capture per cell.
 
     Args:
         adt: The ADT counts, or a multi-modal experiment holding them.
 
     Returns:
         `cell_idx` (0-based), `adt_nnz` and `adt_lib_size`, both `Float64` as
-        R writes them to obs.
+        they are written to obs.
     """
     a = adt if isinstance(adt, AdtCounts) else require_adt(adt)
     return pl.DataFrame(
@@ -307,7 +304,7 @@ def get_adt_sample_info(adt: AdtCounts | SingleCellsMultiModal) -> pl.DataFrame:
 
 @beartype
 def get_adt_names(adt: AdtCounts | SingleCellsMultiModal) -> list[str] | None:
-    """The ADT feature ids, as R's `get_adt_names`.
+    """The ADT feature ids.
 
     Args:
         adt: The ADT counts, or a multi-modal experiment.
@@ -341,11 +338,11 @@ def add_adt_counts(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Add ADT counts for the kept cells, as R's `add_adt_counts_sc`.
+    """Add ADT counts for the kept cells.
 
     The counts are cut to the kept cells (in their order) and normalised,
     `var_adt` is (re)written to the DuckDB and obs gains `adt_nnz` and
-    `adt_lib_size`, as in R. The counts land in `mm.adt`.
+    `adt_lib_size`. The counts land in `mm.adt`.
 
     Args:
         mm: The experiment, its RNA already loaded.
@@ -414,7 +411,7 @@ def get_adt_counts(
     features: np.ndarray | Sequence[int] | Sequence[str] | None = None,
     use_cells_to_keep: bool = True,
 ) -> np.ndarray:
-    """The dense ADT counts, as R's `get_sc_counts(modality = "adt")`.
+    """The dense ADT counts.
 
     The ADT matrix is keyed by barcode and frozen at add time; requested
     cells it does not hold warn and drop, so check `len()` against what you
@@ -457,8 +454,7 @@ def calculate_pca_adt(
     randomised_svd: bool = False,
     seed: int = 42,
 ) -> None:
-    """PCA over the scaled, normalised ADT counts, as R's
-    `calculate_pca_adt_sc`.
+    """PCA over the scaled, normalised ADT counts.
 
     Scores, loadings and singular values go to `mm.adt_cache`, stamped
     `"adt:pca"`.
@@ -517,8 +513,7 @@ def _wnn_embedding(
     name: str,
     no_dims: int | None,
 ) -> np.ndarray:
-    """An embedding of one modality, as R's `get_embedding` with its soft
-    state check.
+    """An embedding of one modality, with a soft state check.
 
     Raises:
         ValueError: If it is absent.
@@ -548,8 +543,7 @@ def generate_wnn_graph(
     seed: int = 42,
     verbose: bool = False,
 ) -> None:
-    """Weighted nearest neighbour graph over two modalities, as R's
-    `generate_wnn_graph_sc`.
+    """Weighted nearest neighbour graph over two modalities.
 
     Per-cell modality weights come from comparing within- and cross-modality
     neighbourhood distances; they fuse the two into one kNN. The

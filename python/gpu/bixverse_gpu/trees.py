@@ -1,4 +1,4 @@
-"""GPU Bonsai, the port of R's `bonsai_gpu_sc`.
+"""GPU Bonsai.
 
 Returns the `bixverse.trees.BonsaiTree` the CPU `bonsai` returns. Only Sanity
 moves to the GPU, gene chunk by gene chunk; the tree search and the layout
@@ -31,8 +31,7 @@ def bonsai(
     bonsai_params: BonsaiParams | None = None,
     verbose: bool = False,
 ) -> BonsaiTree:
-    """A Bonsai tree over the cells or meta cells with Sanity on the GPU, as
-    R's `bonsai_gpu_sc`.
+    """A Bonsai tree over the cells or meta cells with Sanity on the GPU.
 
     Args:
         sc: The experiment or meta cells.

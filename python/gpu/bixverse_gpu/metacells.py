@@ -1,4 +1,4 @@
-"""GPU SEACells, the port of R's `generate_seacells_gpu_sc`.
+"""GPU SEACells.
 
 Returns the `bixverse.metacells.MetaCells` the CPU `generate_seacells`
 returns. Both Frank-Wolfe solves run on the GPU; kernel construction,
@@ -35,7 +35,7 @@ def generate_seacells(
     seed: int = 42,
     verbose: bool = False,
 ) -> MetaCells:
-    """SEACells with the fit on the GPU, as R's `generate_seacells_gpu_sc`.
+    """SEACells with the fit on the GPU.
 
     Inputs, kNN reuse and the result are those of
     `bixverse.metacells.generate_seacells`.

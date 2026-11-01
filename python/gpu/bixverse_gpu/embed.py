@@ -1,10 +1,9 @@
-"""GPU UMAP and t-SNE, the port of R's `umap_gpu_sc` and `tsne_gpu_sc`.
+"""GPU UMAP and t-SNE.
 
 The work runs in the `manifolds_rs` GPU estimators (`UMAPGpu`, `TSNEGpu`);
 inputs, slots and stamps are handled exactly as in `bixverse.embed`, which
 runs the same code with the CPU estimators. The `*_defaults()` builders return
-an estimator set to R's defaults (`umap_gpu_sc` plus `params_umap_gpu()`,
-`tsne_gpu_sc` plus `params_tsne_gpu()`).
+an estimator set to the defaults the `umap` and `tsne` functions here use.
 
     >>> bixverse_gpu.graph.find_neighbours(sc)
     >>> umap(sc)
@@ -33,16 +32,16 @@ __all__ = [
 
 @beartype
 def _nn_defaults() -> mf.NeighbourParamsGpu:
-    """R's `params_nn_gpu()`: everything left to Rust but `delta`."""
+    """GPU neighbour parameters: everything left to Rust but `delta`."""
     return mf.NeighbourParamsGpu(delta=0.001, extract_knn=False)
 
 
 @beartype
 def umap_defaults() -> mf.UMAPGpu:
-    """GPU UMAP set to R's `umap_gpu_sc` and `params_umap_gpu()` defaults.
+    """GPU UMAP set to the defaults of `umap`.
 
-    R picks `n_epochs` from the optimiser when it is `NULL`; with its default
-    `"adam_gpu"` that is always 500.
+    `n_epochs` follows the optimiser; with the default `"adam_gpu"` that is
+    always 500.
     """
     return mf.UMAPGpu(
         n_components=2,
@@ -66,8 +65,8 @@ def umap_defaults() -> mf.UMAPGpu:
 
 @beartype
 def tsne_defaults() -> mf.TSNEGpu:
-    """GPU t-SNE set to R's `tsne_gpu_sc` and `params_tsne_gpu()` defaults:
-    perplexity 20, the GPU three-kernel FFT optimiser and an IVF kNN."""
+    """GPU t-SNE set to the defaults of `tsne`: perplexity 20, the GPU
+    three-kernel FFT optimiser and an IVF kNN."""
     return mf.TSNEGpu(
         n_components=2,
         perplexity=20.0,
@@ -105,7 +104,7 @@ def umap(
     modality: Modality = "rna",
     params: mf.UMAPGpu | None = None,
 ) -> None:
-    """GPU UMAP, as R's `umap_gpu_sc`.
+    """GPU UMAP.
 
     With `use_knn` the cached kNN is reused and only the optimisation runs
     on the GPU; without one cached, a warning and a GPU search.
@@ -147,7 +146,7 @@ def tsne(
     modality: Modality = "rna",
     params: mf.TSNEGpu | None = None,
 ) -> None:
-    """GPU t-SNE, as R's `tsne_gpu_sc`.
+    """GPU t-SNE.
 
     `approx="fft_3k_gpu"` (the default) runs the optimiser on the GPU in
     fp32; the CPU approximations keep it on the CPU with only the kNN on the

@@ -1,20 +1,19 @@
 """Doublet detection, empty droplets and CellSweep.
 
-The port of R's `scrublet_sc`, `doublet_detection_boost_sc`,
-`scdblfinder_sc`, `call_doublets_manual`, `cellsweep_sc` and the empty
-droplet inference behind it. The work runs in Rust.
+Scrublet, boosted doublet detection, scDblFinder, manual doublet calls,
+CellSweep and the empty droplet inference behind it. The work runs in Rust.
 
-The doublet callers leave the experiment alone and return a record, as R's
-S3 results; `get_data` turns one into an obs frame for `SingleCells.add_obs`:
+The doublet callers leave the experiment alone and return a record;
+`get_data` turns one into an obs frame for `SingleCells.add_obs`:
 
     >>> res = scrublet(sc, group_by="sample_id")
     >>> sc.add_obs(get_data(res))
 
-`cellsweep` writes a new experiment holding the denoised counts, as R's.
+`cellsweep` writes a new experiment holding the denoised counts.
 
 With `group_by`, every method runs once per group (labels sorted) on the
 group's kept cells, and the per-cell vectors come back in ascending cell
-order; per-group scalars become `{group: value}` dicts, as R's named vectors.
+order; per-group scalars become `{group: value}` dicts.
 """
 
 from __future__ import annotations
@@ -51,20 +50,19 @@ from bixverse.params import (
 # Globals #
 ###########
 
-# R's `.validate_group_sizes`: below the first a group errors, below the
-# second it warns.
+# Below the first a group errors, below the second it warns.
 GROUP_MIN_CELLS: int = 50
 GROUP_WARN_CELLS: int = 500
 
-# R's fast clustering default: `as.integer(sqrt(n_cells) * 4)` centroids.
+# Fast clustering default: `int(sqrt(n_cells) * 4)` centroids.
 FAST_CLUSTER_CENTROIDS_PER_ROOT: float = 4.0
 
-# R's `CELLSWEEP_MAX_MIN_LIB_SIZE`: a smallest library size above this means
-# the empty droplets were filtered out at ingest.
+# A smallest library size above this means the empty droplets were
+# filtered out at ingest.
 CELLSWEEP_MAX_MIN_LIB_SIZE: int = 100
 
 # Below this share of simulated doublets above the threshold, the overall
-# doublet rate is reported as 0, as R's `.update_scrublet_threshold`.
+# doublet rate is reported as 0.
 MIN_DETECTABLE_FRACTION: float = 0.01
 
 ScoreType = Literal["weighted", "cxds_scores"]
@@ -80,7 +78,7 @@ logger = logging.getLogger(__name__)
 
 @beartype
 def _rate_line(n_cells: int, n_doublets: int) -> str:
-    """`N cells, M doublets (P%)`, as R's print methods."""
+    """`N cells, M doublets (P%)`."""
     return f"{n_cells} cells, {n_doublets} doublets ({100 * n_doublets / n_cells:.1f}%)"
 
 
@@ -100,7 +98,7 @@ def _group_header(name: str, group_by: str, n_groups: int, rest: str) -> str:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScrubletRes:
-    """Scrublet result, R's `ScrubletRes`.
+    """Scrublet result.
 
     Grouped results hold the per-group scalars and simulated scores as
     `{group: value}` dicts.
@@ -142,7 +140,7 @@ class ScrubletRes:
     group_by: str | None = None
 
     def __repr__(self) -> str:
-        """R's `print.ScrubletRes`."""
+        """Summary of the calls, per group when grouped."""
         n = len(self.predicted_doublets)
         d = int(self.predicted_doublets.sum())
         if self.group_by is not None:
@@ -189,7 +187,7 @@ class ScrubletRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class BoostRes:
-    """Boosted doublet classification result, R's `BoostRes`.
+    """Boosted doublet classification result.
 
     Attributes:
         doublet: Per cell, whether it is called a doublet.
@@ -208,7 +206,7 @@ class BoostRes:
     group_by: str | None = None
 
     def __repr__(self) -> str:
-        """R's `print.BoostRes`."""
+        """Summary of the calls, per group when grouped."""
         n, d = len(self.doublet), int(self.doublet.sum())
         if self.group_by is not None:
             assert self.cell_groups is not None
@@ -236,7 +234,7 @@ class BoostRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScDblFinderRes:
-    """scDblFinder result, R's `ScDblFinderRes`.
+    """scDblFinder result.
 
     Attributes:
         predicted_doublets: Per cell, whether it is called a doublet.
@@ -267,7 +265,7 @@ class ScDblFinderRes:
     group_by: str | None = None
 
     def __repr__(self) -> str:
-        """R's `print.ScDblFinderRes`."""
+        """Summary of the calls, per group when grouped."""
         n = len(self.predicted_doublets)
         d = int(self.predicted_doublets.sum())
         n_clusters = len(np.unique(self.cluster_labels))
@@ -314,7 +312,7 @@ class ScDblFinderRes:
 
 @beartype
 def _as_character(values: pl.Series) -> list[str | None]:
-    """R's `as.character`: floats at 15 significant digits, nulls kept."""
+    """Values as strings: floats at 15 significant digits, nulls kept."""
     if values.dtype.is_float():
         return [None if v is None else f"{v:.15g}" for v in values.to_list()]
     return [None if v is None else str(v) for v in values.cast(pl.String).to_list()]
@@ -332,7 +330,7 @@ def _cells(sc: SingleCells, cells_to_use: Selection | None) -> np.ndarray:
 def _split_by_group(
     sc: SingleCells, group_by: str, cells: np.ndarray
 ) -> dict[str, np.ndarray]:
-    """R's `.split_cells_by_group`: the kept cells among `cells`, split by
+    """The kept cells among `cells`, split by
     the group label, groups sorted, cells ascending.
 
     Raises:
@@ -363,7 +361,7 @@ def _split_by_group(
 
 @beartype
 def _validate_group_sizes(groups: dict[str, np.ndarray]) -> None:
-    """R's `.validate_group_sizes`.
+    """Check the group sizes against the minimum and the warning level.
 
     Raises:
         ValueError: If a group has fewer than `GROUP_MIN_CELLS` cells.
@@ -386,7 +384,7 @@ def _validate_group_sizes(groups: dict[str, np.ndarray]) -> None:
 
 @beartype
 def _streaming(n_cells: int, streaming: bool | None, verbose: bool) -> bool:
-    """R's `auto_streaming`, with its message."""
+    """Resolve streaming from the cell count, logging when it is on."""
     res = _auto_streaming(n_cells, streaming)
     if res and verbose:
         logger.info("Setting streaming for large data to TRUE.")
@@ -397,7 +395,7 @@ def _streaming(n_cells: int, streaming: bool | None, verbose: bool) -> bool:
 def _with_centroids(
     params: BoostParams | ScdblfinderParams, n_cells: int
 ) -> dict[str, object]:
-    """`to_rust(params)`, with the fast clustering centroids R fills in."""
+    """`to_rust(params)`, with the fast clustering centroids filled in."""
     d = to_rust(params)
     if params.fast_cluster and params.n_centroids is None:
         d["n_centroids"] = int(math.sqrt(n_cells) * FAST_CLUSTER_CENTROIDS_PER_ROOT)
@@ -417,7 +415,7 @@ def _run_grouped(
     run: Callable[[np.ndarray], dict[str, Any]],
     verbose: bool,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, np.ndarray], np.ndarray, np.ndarray]:
-    """Split, validate and run per group, as R's `.run_per_group`.
+    """Split, validate and run per group.
 
     Returns:
         Per group the Rust result and the cells, the order that puts the
@@ -470,7 +468,7 @@ def scrublet(
     return_pairs: bool = False,
     verbose: bool = False,
 ) -> ScrubletRes:
-    """Scrublet doublet detection, as R's `scrublet_sc`.
+    """Scrublet doublet detection.
 
     Simulates doublets from random pairs of observed cells, embeds both in
     one PCA on the HVGs and scores each observed cell by the share of
@@ -596,8 +594,7 @@ def call_doublets_manual(
     for_sample: str | None = None,
     verbose: bool = False,
 ) -> ScrubletRes:
-    """Re-call Scrublet doublets at a hand-picked threshold, as R's
-    `call_doublets_manual`.
+    """Re-call Scrublet doublets at a hand-picked threshold.
 
     Recomputes the calls, the z-scores and the three rates, for the whole
     result or, when grouped, for one group.
@@ -691,7 +688,7 @@ def doublet_detection_boost(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> BoostRes:
-    """Boosted doublet classification, as R's `doublet_detection_boost_sc`.
+    """Boosted doublet classification.
 
     Each iteration simulates doublets, clusters observed and simulated cells
     together with Louvain and tests every cluster for doublet enrichment; a
@@ -788,7 +785,7 @@ def scdblfinder(
     seed: int = 42,
     verbose: bool = False,
 ) -> ScDblFinderRes:
-    """Cluster-aware doublet detection, as R's `scdblfinder_sc`.
+    """Cluster-aware doublet detection.
 
     Simulates doublets with a bias towards heterotypic pairs, engineers kNN
     and cxds features and trains a gradient-boosted classifier, iterating to
@@ -887,10 +884,9 @@ def scdblfinder(
 
 @beartype
 def get_data(res: ScrubletRes | BoostRes | ScDblFinderRes) -> pl.DataFrame:
-    """The per-cell calls as an obs frame for `SingleCells.add_obs`, R's
-    `get_data`.
+    """The per-cell calls as an obs frame for `SingleCells.add_obs`.
 
-    Columns are R's, with `cell_idx` 0-based: `doublet` and `doublet_score`
+    Columns, with `cell_idx` 0-based: `doublet` and `doublet_score`
     for Scrublet; every per-cell field for Boost (plus `cell_groups` when
     grouped); `predicted_doublets`, `doublet_score`, `cxds_scores`,
     `weighted` and `cluster_labels` for scDblFinder.
@@ -938,7 +934,7 @@ def get_data(res: ScrubletRes | BoostRes | ScDblFinderRes) -> pl.DataFrame:
 
 @beartype
 def get_feature_mat(res: ScDblFinderRes) -> pl.DataFrame | None:
-    """The scDblFinder classifier features, R's `get_feature_mat`.
+    """The scDblFinder classifier features.
 
     Warns and returns `None` if they were not asked for.
 
@@ -959,7 +955,7 @@ def get_feature_mat(res: ScDblFinderRes) -> pl.DataFrame | None:
 
 @beartype
 def get_scores(res: ScDblFinderRes, score_type: ScoreType = "weighted") -> np.ndarray:
-    """The weighted or cxds scores, R's `get_scores` on a `ScDblFinderRes`.
+    """The weighted or cxds scores.
 
     Args:
         res: The scDblFinder result.
@@ -981,10 +977,9 @@ def infer_empty_droplets(
     lib_size: np.ndarray | pl.Series | Sequence[int] | Sequence[float],
     empty_params: EmptyDropletsParams,
 ) -> np.ndarray:
-    """Call empty droplets from the library sizes, R's
-    `rs_sc_infer_empty_droplets`.
+    """Call empty droplets from the library sizes.
 
-    Library sizes are truncated to integers as R's `as.integer`; missing and
+    Library sizes are truncated to integers; missing and
     negative ones count as zero.
 
     Args:
@@ -1016,7 +1011,7 @@ def infer_empty_droplets(
 def _resolve_empty_droplets(
     obs: pl.DataFrame, empty_params: EmptyDropletsParams, verbose: bool
 ) -> np.ndarray:
-    """R's `.resolve_empty_droplets`: the mask from obs or inferred.
+    """The empty droplet mask, from obs or inferred.
 
     Raises:
         ValueError: If the supplied column is missing, not boolean or holds
@@ -1050,7 +1045,7 @@ def _resolve_empty_droplets(
 
 @beartype
 def _celltype_codes(values: pl.Series) -> tuple[np.ndarray, list[str]]:
-    """R's `as.factor` with NA: 0-based codes (-1 for null) and the levels.
+    """0-based codes (-1 for null) and the levels.
 
     An Enum keeps all its levels, unused ones too; anything else takes the
     sorted distinct values.
@@ -1081,8 +1076,7 @@ def cellsweep(
     csc_mem_gb: float | None = None,
     verbose: bool = False,
 ) -> SingleCells:
-    """Remove ambient and bulk contamination with CellSweep, as R's
-    `cellsweep_sc`.
+    """Remove ambient and bulk contamination with CellSweep.
 
     One EM fit per sample splits every count three ways (ambient, bulk,
     true expression); the denoised counts go to a new experiment. It runs
@@ -1093,7 +1087,7 @@ def cellsweep(
     Barcodes split three ways: empty droplets, annotated barcodes that passed
     QC, and the rest, which is left out of the fit and the output. The raw
     layer takes the stochastically rounded counts, the normalised layer the
-    float magnitudes. As in R, obs is the input's with `nnz` and `lib_size`
+    float magnitudes. Obs is the input's with `nnz` and `lib_size`
     replaced by the denoised counts' statistics, plus `cellsweep_alpha`,
     `cellsweep_z`, `cellsweep_beta`, `cellsweep_ll` and
     `cellsweep_converged`; var gains a

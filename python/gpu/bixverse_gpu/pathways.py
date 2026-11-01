@@ -1,4 +1,4 @@
-"""GPU SCENIC GRN inference, the port of R's `scenic_grn_sc_gpu`.
+"""GPU SCENIC GRN inference.
 
 Returns the `bixverse.pathways.ScenicGrn` the CPU `scenic_grn` returns. The
 tree ensembles run on the GPU; the target gene filter is the CPU one. Only
@@ -26,7 +26,7 @@ __all__ = [
 # Globals #
 ###########
 
-#: R's default VRAM budget per wave of trees, 4 GiB.
+#: Default VRAM budget per wave of trees, 4 GiB.
 WAVE_BYTE_BUDGET: int = 4 * 1024**3
 
 
@@ -43,8 +43,7 @@ def scenic_grn(
     seed: int = 42,
     verbose: bool = False,
 ) -> ScenicGrn:
-    """GRN inference with the tree ensembles on the GPU, as R's
-    `scenic_grn_sc_gpu`.
+    """GRN inference with the tree ensembles on the GPU.
 
     Args:
         sc: The experiment, a subset or meta cells.

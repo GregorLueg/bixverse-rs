@@ -1,11 +1,7 @@
 """SCENIC: gene filter, GRN inference, TF to gene links, CisTarget motif
 enrichment, regulons and their binarisation.
 
-The port of R's `scenic_gene_filter_sc` and `scenic_grn_sc`
-(`R/methods_sc_pathways.R`, `R/methods_mc_analysis.R`), the `ScenicGrn`
-class and its methods (`R/classes_single_cell_others.R`), and
-`run_cistarget` and `binarise_regulon_activity`
-(`R/functions_cis_target.R`). The work runs in Rust.
+The work runs in Rust.
 
     >>> grn = scenic_grn(sc, tf_ids=tfs)
     >>> grn = identify_tf_to_genes(grn)
@@ -15,9 +11,8 @@ class and its methods (`R/classes_single_cell_others.R`), and
     >>> auc = aucell(sc, regulons)
     >>> on_off = binarise_regulon_activity(auc)
 
-`ScenicGrn` is frozen; each step returns an updated copy, as R's S3 methods
-return the modified list. The motif ranking database is the caller's: R's
-vignette downloads one, nothing here does.
+`ScenicGrn` is frozen; each step returns an updated copy. The motif ranking
+database is the caller's: nothing here downloads one.
 """
 
 from __future__ import annotations
@@ -50,7 +45,7 @@ from bixverse.params import (
 ###########
 
 # meta cells aggregate tens of cells each, so a leaf of 20 or more meta cells
-# starves the trees; R lowers it to this
+# starves the trees, so it is lowered to this
 MC_MIN_SAMPLES_LEAF_CAP: int = 20
 MC_MIN_SAMPLES_LEAF: int = 10
 
@@ -74,7 +69,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScenicGrn:
-    """SCENIC GRN inference results, R's `ScenicGrn`.
+    """SCENIC GRN inference results.
 
     Attributes:
         importance_matrix: `(n_genes, n_tfs)` `float64` importances.
@@ -96,7 +91,7 @@ class ScenicGrn:
     cis_targets_results: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     def __repr__(self) -> str:
-        """R's `print.ScenicGrn`."""
+        """A short summary of the results."""
         return "\n".join(
             [
                 "ScenicGrn (GRN results)",
@@ -109,8 +104,7 @@ class ScenicGrn:
         )
 
     def frame(self) -> pl.DataFrame:
-        """The importances as `gene_id` and one column per TF, R's
-        `as.matrix`."""
+        """The importances as `gene_id` and one column per TF."""
         return pl.DataFrame(
             {
                 "gene_id": list(self.gene_ids),
@@ -122,7 +116,7 @@ class ScenicGrn:
 @beartype
 @dataclass(frozen=True, repr=False)
 class RegulonBinarisation:
-    """On/off regulon calls, R's `binarise_regulon_activity` list.
+    """On/off regulon calls.
 
     Attributes:
         binary: `cell_id` and one boolean column per regulon, `True` where the
@@ -159,7 +153,7 @@ def _cells(sc: ScOrMc, cells_to_take: Sequence[str] | None) -> np.ndarray:
 
 @beartype
 def _mc_params(params: ScenicParams, verbose: bool) -> ScenicParams:
-    """R's meta cell cap on `min_samples_leaf`."""
+    """Cap `min_samples_leaf` for meta cells."""
     # by design: with the single cell leaf sizes on the far fewer meta cells, the
     # trees are not very informative
     lp = params.learner
@@ -185,12 +179,11 @@ def scenic_gene_filter(
     cells_to_take: Sequence[str] | None = None,
     verbose: bool = False,
 ) -> list[str]:
-    """Genes with enough counts and enough expressing cells, as R's
-    `scenic_gene_filter_sc`.
+    """Genes with enough counts and enough expressing cells.
 
     A gene passes with at least `min_counts` total counts and a share of at
     least `min_cells` expressing cells. Meta cells are filtered on their raw
-    counts in memory, as R does.
+    counts in memory.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -235,7 +228,7 @@ def scenic_gene_filter(
 
 @beartype
 def _match_features(features: Sequence[str], available: Sequence[str]) -> list[str]:
-    """R's `.match_features`: unknown features warn and drop.
+    """Unknown features warn and drop.
 
     Raises:
         ValueError: If none match.
@@ -266,12 +259,11 @@ def scenic_grn(
     seed: int = 42,
     verbose: bool = False,
 ) -> ScenicGrn:
-    """GRN inference, the GENIE3 / GRNBoost2 step of SCENIC, as R's
-    `scenic_grn_sc`.
+    """GRN inference, the GENIE3 / GRNBoost2 step of SCENIC.
 
     Regresses every target gene on the TFs with tree ensembles and keeps the
     feature importances. TFs must also pass as targets. On meta cells a
-    `min_samples_leaf` of 20 or more is lowered to 10, as R does.
+    `min_samples_leaf` of 20 or more is lowered to 10.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -396,7 +388,7 @@ def _scenic_grn(
 
 @beartype
 def get_params(x: ScenicGrn | Hotspot) -> ScenicParams | dict[str, object]:
-    """The parameters of the run, R's `get_params`.
+    """The parameters of the run.
 
     Args:
         x: A SCENIC GRN result or a HotSpot result.
@@ -409,7 +401,7 @@ def get_params(x: ScenicGrn | Hotspot) -> ScenicParams | dict[str, object]:
 
 @beartype
 def get_tf_to_gene(x: ScenicGrn) -> pl.DataFrame:
-    """The TF to gene links, R's `get_tf_to_gene`; empty with a warning
+    """The TF to gene links; empty with a warning
     before `identify_tf_to_genes`.
 
     Args:
@@ -426,7 +418,7 @@ def get_tf_to_gene(x: ScenicGrn) -> pl.DataFrame:
 
 @beartype
 def get_cistarget_res(x: ScenicGrn) -> pl.DataFrame:
-    """The motif enrichment, R's `get_cistarget_res`; empty with a warning
+    """The motif enrichment; empty with a warning
     before `tf_to_genes_motif_enrichment`.
 
     Args:
@@ -472,7 +464,7 @@ def identify_tf_to_genes(
     min_importance: float | None = None,
     verbose: bool = False,
 ) -> ScenicGrn:
-    """TF to gene links from the importances, R's `identify_tf_to_genes`.
+    """TF to gene links from the importances.
 
     `"threshold"` keeps, per target gene, the TFs at or above `mean + n_sd *
     sd` of its importances. `"top_k"` keeps the `k_tfs` strongest regulators
@@ -554,13 +546,12 @@ def tf_to_genes_correlations(
     spearman: bool = True,
     verbose: bool = False,
 ) -> ScenicGrn:
-    """Sign the TF to gene links by correlation, R's
-    `tf_to_genes_correlations`.
+    """Sign the TF to gene links by correlation.
 
     Correlates each TF with its target over the kept cells (the normalised
     counts on meta cells), signs the link `+1` above `rho_threshold`, `-1`
     below its negative and `0` between, and keeps the signs `mode` asks
-    for. R's deprecated `cor_filter` is not ported.
+    for.
 
     Args:
         x: The result with TF to gene links.
@@ -637,7 +628,7 @@ def run_cistarget(
     cis_target_params: CistargetParams | None = None,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """RcisTarget motif enrichment of gene sets, as R's `run_cistarget`.
+    """CisTarget motif enrichment of gene sets.
 
     Args:
         gs_list: Gene set name to gene ids.
@@ -653,7 +644,7 @@ def run_cistarget(
         `motif`, `gs_name`, `nes`, `auc`, `rank_at_max`, `n_enriched`,
         `leading_edge_genes` (`;` separated), `TF_highConf` and `TF_lowConf`,
         sorted by gene set and descending NES. The TF lists are sorted in C
-        order, where R sorts in the session locale.
+        order.
 
     Raises:
         ValueError: On a malformed ranking or annotation.
@@ -752,7 +743,7 @@ def _leading_edge_links(
     cis: pl.DataFrame, tf_col: str, symbol_to_id: Mapping[str, str] | None
 ) -> pl.DataFrame:
     """Leading edge genes of the motifs annotated back to their own gene
-    set's TF, R's `explode_leading_edge`."""
+    set's TF."""
     empty = pl.DataFrame(schema={"tf": pl.String, "le_gene": pl.String})
     dt = cis.filter(pl.col(tf_col).is_not_null())
     if dt.height == 0:
@@ -790,8 +781,7 @@ def tf_to_genes_motif_enrichment(
     only_high_conf_tf: bool = True,
     verbose: bool = False,
 ) -> ScenicGrn:
-    """Motif support for the TF to gene links, R's
-    `tf_to_genes_motif_enrichment`.
+    """Motif support for the TF to gene links.
 
     Runs `run_cistarget` on each TF's targets and flags a link
     `in_leading_edge` when a motif annotated to that TF (high confidence, or
@@ -885,7 +875,7 @@ def build_regulons(
     mode: Mode = "activating",
     verbose: bool = False,
 ) -> dict[str, list[str]] | None:
-    """Regulons from the TF to gene links, R's `build_regulons`.
+    """Regulons from the TF to gene links.
 
     Args:
         x: The result with TF to gene links.
@@ -982,7 +972,7 @@ def binarise_regulon_activity(
     binarise_params: ScenicBinariseParams | None = None,
     verbose: bool = False,
 ) -> RegulonBinarisation:
-    """On/off calls per regulon, R's `binarise_regulon_activity`.
+    """On/off calls per regulon.
 
     Per regulon a two-component Gaussian mixture is compared against one
     Gaussian by BIC; if the mixture wins the threshold is the density trough

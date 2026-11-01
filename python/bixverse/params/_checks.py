@@ -7,7 +7,7 @@ from beartype import beartype
 
 @beartype
 def check_len(name: str, value: tuple[object, ...] | None) -> None:
-    """Reject an empty vector where R demands at least one element.
+    """Reject an empty vector where at least one element is needed.
 
     Args:
         name: Field name, for the message.
@@ -29,7 +29,7 @@ def check_range(
     lo_open: bool,
     hi_open: bool,
 ) -> None:
-    """Check a scalar, or every element of a vector, against a checkmate range.
+    """Check a scalar, or every element of a vector, against a range.
 
     Args:
         name: Field name, for the message.

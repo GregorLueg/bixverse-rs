@@ -1,19 +1,17 @@
 """HALS NMF over single cells and meta cells: one run, stabilised restarts,
 consensus NMF and the consensus k sweep.
 
-The port of R's `nmf_sc`, `stabilised_nmf_sc`, `consensus_nmf_sc` and
-`nmf_k_sweep_sc` (`R/methods_sc_pathways.R`, `R/methods_mc_analysis.R`) and
-the `NmfResult`, `StabilisedNmfResult`, `ConsensusNmfResult` and
-`NmfKSweepResult` classes. The work runs in Rust.
+The work runs in Rust; the result classes are `NmfResult`,
+`StabilisedNmfResult`, `ConsensusNmfResult` and `NmfKSweepResult`.
 
     >>> sweep = nmf_k_sweep(sc, k_range=range(3, 9))
     >>> res = consensus_nmf(sc, k=5)
     >>> sc.add_obs(get_data(res))
 
 The factorisation is genes x cells: `w` holds the gene loadings (genes x k),
-`h` the cell usages (k x cells), as in R. Genes default to the HVGs. Every
+`h` the cell usages (k x cells). Genes default to the HVGs. Every
 index is 0-based, the run and component numbers of the consensus clusters
-included; the `component_id` strings keep R's 1-based names.
+included; the `component_id` strings are 1-based (`run_01.comp_01`).
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
 Preprocessing = Literal["none", "sd", "sqrt_sd"]
 
 # above this many cells `consensus_target = "w"` clusters a dense
-# `(k * n_runs) x n_cells` matrix, so R warns
+# `(k * n_runs) x n_cells` matrix, so it warns
 CELL_SPACE_CUTOFF: int = 20000
 
 CONSENSUS_ADVICE: str = (
@@ -61,7 +59,7 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True, repr=False)
 class NmfResult:
-    """A single HALS NMF run, R's `NmfResult`.
+    """A single HALS NMF run.
 
     Attributes:
         w: `(n_genes, k)` gene loadings.
@@ -89,11 +87,11 @@ class NmfResult:
 
     @property
     def shape(self) -> tuple[int, int, int]:
-        """`(n_genes, n_cells, k)`, R's `dim()`."""
+        """`(n_genes, n_cells, k)`."""
         return (self.w.shape[0], self.h.shape[1], self.w.shape[1])
 
     def __repr__(self) -> str:
-        """R's `print.NmfResult`."""
+        """A summary of the run."""
         n_iter = "NA" if self.n_iter is None else str(self.n_iter)
         return "\n".join(
             [
@@ -113,12 +111,12 @@ class NmfResult:
 @beartype
 @dataclass(frozen=True, repr=False)
 class StabilisedNmfResult:
-    """Randomly initialised HALS NMF restarts, R's `StabilisedNmfResult`.
+    """Randomly initialised HALS NMF restarts.
 
     Attributes:
         w_all: `(n_genes, k * n_runs)` gene loadings, run blocks side by side,
             columns named in `w_all_columns`.
-        w_all_columns: `run_01.comp_01`, ..., as R names them.
+        w_all_columns: `run_01.comp_01`, ...
         h_per_run: One `(k, n_cells)` usage matrix per run.
         gene_ids: The genes.
         cell_ids: The cells (meta cells).
@@ -143,7 +141,7 @@ class StabilisedNmfResult:
     params: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.StabilisedNmfResult`, the best run 0-based."""
+        """A summary of the restarts, the best run 0-based."""
         n_runs = len(self.h_per_run)
         return "\n".join(
             [
@@ -166,7 +164,7 @@ class StabilisedNmfResult:
 @beartype
 @dataclass(frozen=True, repr=False)
 class ConsensusNmfResult:
-    """Consensus HALS NMF, R's `ConsensusNmfResult`.
+    """Consensus HALS NMF.
 
     Attributes:
         w: `(n_genes, k)` consensus gene loadings.
@@ -204,11 +202,11 @@ class ConsensusNmfResult:
 
     @property
     def shape(self) -> tuple[int, int, int]:
-        """`(n_genes, n_cells, k)`, R's `dim()`."""
+        """`(n_genes, n_cells, k)`."""
         return (self.w.shape[0], self.h.shape[1], self.w.shape[1])
 
     def __repr__(self) -> str:
-        """R's `print.ConsensusNmfResult`."""
+        """A summary of the consensus fit."""
         return "\n".join(
             [
                 "ConsensusNmfResult (consensus HALS NMF)",
@@ -229,7 +227,7 @@ class ConsensusNmfResult:
 @beartype
 @dataclass(frozen=True, repr=False)
 class NmfKSweepResult:
-    """A consensus NMF k sweep, R's `NmfKSweepResult`.
+    """A consensus NMF k sweep.
 
     Attributes:
         frame: One row per k: `k`, `stability` (null where the consensus step
@@ -244,7 +242,7 @@ class NmfKSweepResult:
     params: dict[str, object]
 
     def __repr__(self) -> str:
-        """R's `print.NmfKSweepResult`."""
+        """A summary of the sweep."""
         f = self.frame
         usable = f.filter(pl.col("stability").is_not_null())
         lines = [
@@ -274,8 +272,7 @@ class NmfKSweepResult:
 def _selection(
     sc: ScOrMc, cell_ids: Sequence[str] | None, gene_ids: Sequence[str] | None
 ) -> tuple[np.ndarray, np.ndarray, tuple[str, ...], tuple[str, ...]]:
-    """R's `.resolve_sc_nmf_selection` / `.resolve_mc_nmf_selection`: the
-    cells (kept ones by default) and the genes (the HVGs by default).
+    """The cells (kept ones by default) and the genes (the HVGs by default).
 
     Returns:
         `(cell_indices, gene_indices, cell_ids, gene_ids)`, 0-based store
@@ -321,14 +318,14 @@ def _mc_matrix(
     sc: MetaCells, cells: np.ndarray, genes: np.ndarray, use_second_layer: bool
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """The selected meta cell counts as CSR parts: the normalised layer with
-    `use_second_layer`, else the raw counts, as R picks the assay."""
+    `use_second_layer`, else the raw counts."""
     layer = "norm" if use_second_layer else "raw"
     return csr_args(sc.counts(cells=cells, genes=genes, layer=layer))
 
 
 @beartype
 def _source(sc: ScOrMc) -> str:
-    """R's `source_class`."""
+    """The class name of `sc`, as stored on the result."""
     return "MetaCells" if isinstance(sc, MetaCells) else "SingleCells"
 
 
@@ -344,7 +341,7 @@ def _check_k(k: int, lo: int) -> None:
 def _warn_target_w(
     params: NmfConsensusParams, n_samples: int, k: int, n_runs: int
 ) -> None:
-    """R's `.warn_consensus_target_w`."""
+    """Warn when `consensus_target = "w"` runs over many cells."""
     if params.consensus_target == "w" and n_samples > CELL_SPACE_CUTOFF:
         warnings.warn(
             f"consensus_target = 'w' clusters in cell space over {n_samples} cells, "
@@ -363,7 +360,7 @@ def _base_params(
     use_second_layer: bool,
     seed: int,
 ) -> dict[str, object]:
-    """The `params` R stores: the HALS keys plus the call arguments."""
+    """The `params` stored on a result: the HALS keys plus the call arguments."""
     return {
         **to_rust(hals),
         "k": k,
@@ -391,7 +388,7 @@ def nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> NmfResult:
-    """One HALS NMF run, as R's `nmf_sc`.
+    """One HALS NMF run.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -498,7 +495,7 @@ def stabilised_nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> StabilisedNmfResult:
-    """Randomly initialised HALS NMF restarts, as R's `stabilised_nmf_sc`.
+    """Randomly initialised HALS NMF restarts.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -611,7 +608,7 @@ def _stabilised_nmf(
 
 @beartype
 def _clusters_frame(res: dict, k: int, n_runs: int) -> pl.DataFrame:
-    """R's `.nmf_cluster_dt`, 0-based."""
+    """The pooled components with their cluster labels, 0-based."""
     n = k * n_runs
     run = np.repeat(np.arange(n_runs), k)
     comp = np.tile(np.arange(k), n_runs)
@@ -652,12 +649,12 @@ def consensus_nmf(
     seed: int = 42,
     verbose: bool = False,
 ) -> ConsensusNmfResult:
-    """Consensus HALS NMF (cNMF), as R's `consensus_nmf_sc`.
+    """Consensus HALS NMF (cNMF).
 
     Pools the components of `n_runs` random restarts, drops the ones in
     sparse neighbourhoods, clusters the rest into `k` programmes and takes
     each cluster's median; the usages are refit against it. The k-means of
-    the consensus step is seeded from `seed`, as R injects it.
+    the consensus step is seeded from `seed`.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -797,7 +794,7 @@ def nmf_k_sweep(
     seed: int = 42,
     verbose: bool = False,
 ) -> NmfKSweepResult:
-    """Consensus NMF over a range of k, as R's `nmf_k_sweep_sc`.
+    """Consensus NMF over a range of k.
 
     High stability while the error is still falling is the sweet spot. A k
     whose consensus step fails gets a null stability and a warning.
@@ -948,7 +945,7 @@ def _nmf_k_sweep(
 
 @beartype
 def get_w(x: NmfResult | StabilisedNmfResult | ConsensusNmfResult) -> pl.DataFrame:
-    """The gene loadings, R's `get_w`: `gene_id` and one column per
+    """The gene loadings: `gene_id` and one column per
     component (`comp_01`, ..., or `run_01.comp_01`, ... for restarts).
 
     Args:
@@ -967,7 +964,7 @@ def get_w(x: NmfResult | StabilisedNmfResult | ConsensusNmfResult) -> pl.DataFra
 def get_h(
     x: NmfResult | StabilisedNmfResult | ConsensusNmfResult,
 ) -> np.ndarray | tuple[np.ndarray, ...]:
-    """The cell usages, R's `get_h`: `(k, n_cells)`, one per run for
+    """The cell usages: `(k, n_cells)`, one per run for
     restarts.
 
     Args:
@@ -980,7 +977,7 @@ def get_h(
 
 @beartype
 def get_best_run(x: StabilisedNmfResult) -> NmfResult:
-    """The lowest loss run as an `NmfResult`, R's `get_best_run`.
+    """The lowest loss run as an `NmfResult`.
 
     Args:
         x: The stabilised NMF result.
@@ -1004,7 +1001,7 @@ def get_best_run(x: StabilisedNmfResult) -> NmfResult:
 
 @beartype
 def get_stability(x: ConsensusNmfResult) -> dict[str, object]:
-    """The consensus diagnostics, R's `get_stability`.
+    """The consensus diagnostics.
 
     Args:
         x: The consensus NMF result.
@@ -1024,7 +1021,7 @@ def get_stability(x: ConsensusNmfResult) -> dict[str, object]:
 def get_params(
     x: NmfResult | StabilisedNmfResult | ConsensusNmfResult | NmfKSweepResult,
 ) -> dict[str, object]:
-    """The parameters of the run, R's `get_params`.
+    """The parameters of the run.
 
     Args:
         x: Any NMF result, including a k sweep.
@@ -1034,7 +1031,7 @@ def get_params(
 
 @beartype
 def get_data(x: NmfResult | ConsensusNmfResult) -> pl.DataFrame:
-    """The cell usages as an obs frame for `add_obs`, R's `get_data`: one
+    """The cell usages as an obs frame for `add_obs`: one
     `comp_XX` column per component and the 0-based `cell_idx`
     (`meta_cell_idx` for meta cells).
 

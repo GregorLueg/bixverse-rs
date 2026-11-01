@@ -1,16 +1,12 @@
 """Pathway activity and HotSpot: module scores, AUCell, VISION, ULM / MLM
 and HotSpot gene autocorrelation and modules.
 
-The port of R's `module_scores_sc`, `aucell_sc`, `vision_sc`,
-`vision_w_autocor_sc`, `lm_activity_sc`, `hotspot_autocor_sc` and
-`hotspot_gene_cor_sc` (`R/methods_sc_pathways.R`), their `MetaCells` methods
-(`R/methods_mc_analysis.R`), and the `ScMatrixRes` and `Hotspot` classes. The
-work runs in Rust.
+The work runs in Rust; results come back as `ScMatrixRes`, `LmActivityRes`,
+`VisionAutocorRes` and `Hotspot` records.
 
-Every function takes a `SingleCells`, a `SingleCellsSubset` or a `MetaCells`
-where R dispatches on them; module scores are `SingleCells` only, as in R.
-Nothing is written to obs, as in R; `get_data` turns a score matrix into an
-obs frame:
+Every function takes a `SingleCells`, a `SingleCellsSubset` or a `MetaCells`;
+module scores are `SingleCells` only. Nothing is written to obs;
+`get_data` turns a score matrix into an obs frame:
 
     >>> res = aucell(sc, {"t_cells": ["CD3E", "CD3D"]})
     >>> sc.add_obs(get_data(res))
@@ -18,7 +14,7 @@ obs frame:
     >>> hs = generate_hotspot_membership(hs)
 
 Meta cells read their counts from memory: AUCell and HotSpot the raw counts,
-VISION and ULM / MLM the normalised ones, as R hands them over. Every index is
+VISION and ULM / MLM the normalised ones. Every index is
 0-based.
 """
 
@@ -67,10 +63,9 @@ logger = logging.getLogger(__name__)
 @beartype
 @dataclass(frozen=True, repr=False)
 class ScMatrixRes:
-    """Cells x gene sets scores, R's `ScMatrixRes`.
+    """Cells x gene sets scores, for cells and meta cells alike.
 
-    R returns a bare matrix for meta cells; here both are this record, the
-    row index naming which obs it joins onto.
+    The row index names which obs it joins onto.
 
     Attributes:
         values: `(n_cells, n_sets)` `float64` scores.
@@ -88,7 +83,7 @@ class ScMatrixRes:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """`(n_cells, n_sets)`, R's `dim()`."""
+        """`(n_cells, n_sets)`."""
         return (self.values.shape[0], self.values.shape[1])
 
     def frame(self) -> pl.DataFrame:
@@ -108,7 +103,7 @@ class ScMatrixRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class LmActivityRes:
-    """ULM / MLM scores with p-values, R's `list(es, pvals, fdr)`.
+    """ULM / MLM scores with p-values.
 
     Attributes:
         es: The activity scores.
@@ -129,8 +124,7 @@ class LmActivityRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class VisionAutocorRes:
-    """VISION scores with their autocorrelation, R's
-    `list(vision_matrix, auto_cor_dt)`.
+    """VISION scores with their autocorrelation.
 
     Attributes:
         vision_matrix: The scores.
@@ -150,7 +144,7 @@ class VisionAutocorRes:
 @beartype
 @dataclass(frozen=True, repr=False)
 class Hotspot:
-    """HotSpot gene-gene local correlations, R's `Hotspot`.
+    """HotSpot gene-gene local correlations.
 
     Attributes:
         z: `(n_genes, n_genes)` `float64` pair Z-scores, rows and columns in
@@ -169,7 +163,7 @@ class Hotspot:
     module_membership: pl.DataFrame | None = None
 
     def __repr__(self) -> str:
-        """R's `print.Hotspot`."""
+        """A summary of the genes, cells and modules."""
         n_genes = len(self.genes)
         used = self.params["used_cells"]
         assert isinstance(used, tuple)
@@ -199,9 +193,9 @@ class Hotspot:
 
 @beartype
 def _gene_idx(sc: ScOrMc, ids: Sequence[str]) -> np.ndarray:
-    """0-based gene indices, unknown ids dropped with a warning; R's
-    `get_gene_indices`, which hands back an empty vector rather than
-    failing when nothing matches."""
+    """0-based gene indices, unknown ids dropped with a warning.
+
+    Returns an empty vector rather than failing when nothing matches."""
     pos = {g: i for i, g in enumerate(sc.gene_ids().tolist())}
     hits = [pos[g] for g in ids if g in pos]
     if len(hits) < len(ids):
@@ -242,7 +236,7 @@ def _matrix_res(sc: ScOrMc, values: np.ndarray, columns: Sequence[str]) -> ScMat
 
 @beartype
 def _streaming(n_cells: int, streaming: bool | None, verbose: bool) -> bool:
-    """R's `auto_streaming`, with its message."""
+    """Resolve `streaming` by size, logging when it switches on."""
     res = _auto_streaming(n_cells, streaming)
     if res and verbose:
         logger.info("Setting streaming for large data to TRUE.")
@@ -260,7 +254,7 @@ def _signatures(sc: ScOrMc, gs_list: Signatures) -> list[tuple[np.ndarray, np.nd
 
 @beartype
 def _check_named(gs_list: Mapping[str, object]) -> None:
-    """R's `checkmate::assertList(names = "named")`: a non-empty mapping.
+    """Check for a non-empty mapping of gene sets.
 
     Raises:
         ValueError: If it is empty.
@@ -271,7 +265,7 @@ def _check_named(gs_list: Mapping[str, object]) -> None:
 
 @beartype
 def bh_adjust(p: np.ndarray) -> np.ndarray:
-    """R's `p.adjust(method = "BH")` over a vector."""
+    """Benjamini-Hochberg adjustment of a vector of p-values."""
     n = p.size
     if n == 0:
         return p.astype(np.float64)
@@ -285,8 +279,7 @@ def bh_adjust(p: np.ndarray) -> np.ndarray:
 
 @beartype
 def lm_padj_per_obs(p_values: np.ndarray) -> np.ndarray:
-    """R's `lm_padj_per_obs`: Benjamini-Hochberg per row across the
-    sources, decoupler's scheme."""
+    """Benjamini-Hochberg per row across the sources, decoupler's scheme."""
     return (
         np.vstack([bh_adjust(row) for row in p_values]) if p_values.size else p_values
     )
@@ -308,7 +301,7 @@ def module_scores(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> ScMatrixRes:
-    """Module activity scores, as R's `module_scores_sc`.
+    """Module activity scores.
 
     Seurat's `AddModuleScore`: per gene set the mean expression of its genes
     minus that of control genes drawn from the same expression bins.
@@ -362,11 +355,11 @@ def aucell(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> ScMatrixRes:
-    """AUCell scores, as R's `aucell_sc`.
+    """AUCell scores.
 
     Ranks the genes within each cell and scores how high a gene set sits;
     see `AucellParams` for the three statistics. Meta cells rank their raw
-    counts, as R's.
+    counts.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -405,7 +398,7 @@ def aucell(
 
 @beartype
 def get_data(res: ScMatrixRes, *, columns: Sequence[str] | None = None) -> pl.DataFrame:
-    """The scores as an obs frame for `add_obs`, R's `get_data`.
+    """The scores as an obs frame for `add_obs`.
 
     One column per gene set plus the 0-based `cell_idx` (`meta_cell_idx` for
     meta cells).
@@ -443,7 +436,7 @@ def vision(
     streaming: bool | None = None,
     verbose: bool = False,
 ) -> ScMatrixRes:
-    """VISION signature scores, as R's `vision_sc`.
+    """VISION signature scores.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -481,9 +474,8 @@ def vision(
 def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
     """Lloyd's k-means with ten random starts, the lowest inertia kept.
 
-    R's `.generate_null_perm_gs` runs `stats::kmeans` here (Hartigan-Wong,
-    unseeded); the clusters only group signatures of similar size and
-    balance, so the algorithm is not R's.
+    The clusters only group signatures of similar size and balance, so the
+    exact algorithm matters little.
 
     Returns:
         0-based cluster per row, every cluster populated.
@@ -516,8 +508,7 @@ def generate_null_perm_gs(
     n_comp: int = 5,
     seed: int = 42,
 ) -> tuple[list[list[dict[str, list[str]]]], np.ndarray]:
-    """Random signatures for the VISION autocorrelation null, R's
-    `.generate_null_perm_gs`.
+    """Random signatures for the VISION autocorrelation null.
 
     Signatures are clustered by `log10` size and share of positive genes;
     per cluster centre `n_perm` random signatures of that size and balance
@@ -574,7 +565,7 @@ def _knn_for(
     sc: ScOrMc, use_knn: bool, n_rows: int
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """The cached kNN when asked for and present, else `None` so Rust
-    searches the embedding, as R's `get_knn_obj` hands over `NULL`.
+    searches the embedding.
 
     Raises:
         ValueError: If the cached kNN is stale or does not cover the rows.
@@ -693,15 +684,13 @@ def vision_w_autocor(
     seed: int = 42,
     verbose: bool = False,
 ) -> VisionAutocorRes:
-    """VISION scores with their local autocorrelation, as R's
-    `vision_w_autocor_sc`.
+    """VISION scores with their local autocorrelation.
 
     Scores the signatures, then tests each for spatial structure: Geary's C
     over the kNN graph, against random signatures of similar size and
     balance (`generate_null_perm_gs`).
 
-    The random signatures come from numpy's generator, not R's, so the
-    p-values follow the same null but not R's draws.
+    The random signatures come from numpy's generator.
 
     Args:
         sc: The experiment, a subset or meta cells, with the embedding.
@@ -769,7 +758,7 @@ def vision_w_autocor(
 def prep_lm_network(
     net: pl.DataFrame, features: Sequence[str], tmin: int
 ) -> dict[str, tuple[np.ndarray, np.ndarray]] | None:
-    """A source-target network as weighted gene sets, R's `prep_lm_network`.
+    """A source-target network as weighted gene sets.
 
     Targets outside `features` are dropped, then sources with fewer than
     `tmin` targets; duplicated source-target pairs keep the first with a
@@ -842,7 +831,7 @@ def lm_activity(
     lm_params: LmActivityParams | None = None,
     verbose: bool = False,
 ) -> ScMatrixRes | LmActivityRes | None:
-    """ULM / MLM activity scores (decoupler style), as R's `lm_activity_sc`.
+    """ULM / MLM activity scores (decoupler style).
 
     Per cell the normalised expression of every gene is regressed on the
     weights of each source's targets (ULM: one model per source, MLM: all
@@ -917,11 +906,9 @@ def _hotspot_inputs(
     np.ndarray | None,
     np.ndarray | None,
 ]:
-    """R's HotSpot preamble (and `.prep_mc_embd_knn`): the embedding rows,
-    the cells, the genes and the kNN.
+    """The HotSpot inputs: the embedding rows, the cells, the genes and the kNN.
 
-    Choosing cells drops the cached kNN, as R does, since its rows no longer
-    match.
+    Choosing cells drops the cached kNN, since its rows no longer match.
 
     Returns:
         `(embd, cell_indices, cell_ids, gene_indices, gene_ids, knn_indices,
@@ -978,7 +965,7 @@ def hotspot_autocor(
     seed: int = 42,
     verbose: bool = False,
 ) -> pl.DataFrame:
-    """HotSpot gene autocorrelation, as R's `hotspot_autocor_sc`.
+    """HotSpot gene autocorrelation.
 
     How much each gene's expression varies smoothly over the kNN graph of
     the embedding. Meta cells model their raw counts.
@@ -1066,7 +1053,7 @@ def hotspot_gene_cor(
     seed: int = 42,
     verbose: bool = False,
 ) -> Hotspot:
-    """HotSpot gene-gene local correlations, as R's `hotspot_gene_cor_sc`.
+    """HotSpot gene-gene local correlations.
 
     Args:
         sc: The experiment, a subset or meta cells, with the embedding.
@@ -1140,7 +1127,7 @@ def hotspot_gene_cor(
 def generate_hotspot_membership(
     x: Hotspot, *, fdr_threshold: float = 0.05, min_size: int = 10
 ) -> Hotspot:
-    """Gene modules from the pair Z-scores, R's `generate_hotspot_membership`.
+    """Gene modules from the pair Z-scores.
 
     Average-linkage clustering of the Z-scores, cut as HotSpot's
     `compute_modules` does.
@@ -1175,7 +1162,7 @@ def generate_hotspot_membership(
 
 @beartype
 def get_hotspot_membership(x: Hotspot) -> pl.DataFrame | None:
-    """The module membership, R's `get_hotspot_membership`.
+    """The module membership.
 
     Args:
         x: The HotSpot result.

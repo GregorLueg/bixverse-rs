@@ -1,9 +1,9 @@
 """SCENIC parameters, written by hand.
 
-R's `params_scenic()` picks its learner block at call time, so its spec was
-left out of the generator. `ScenicParams` holds the learner as one of the
-three generated learner bundles and `to_rust` splices its fields in after the
-top-level ones, which is the flat list R builds.
+The learner block is picked at call time, so the spec was left out of the
+generator. `ScenicParams` holds the learner as one of the three generated
+learner bundles and `to_rust` splices its fields in after the top-level ones,
+giving the flat list Rust reads.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ _CONF = BeartypeConf(is_pep484_tower=True)
 
 @beartype
 def _check_learner(learner_type: str, lp: LearnerParams) -> None:
-    """The learner checks of R's `checkScenicParams`.
+    """Range checks on the learner block.
 
     Raises:
         ValueError: On a value outside its range.
@@ -79,7 +79,7 @@ def _check_learner(learner_type: str, lp: LearnerParams) -> None:
 @beartype(conf=_CONF)
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ScenicParams:
-    """Constructor for SCENIC parameters, R's `params_scenic()`.
+    """Constructor for SCENIC parameters.
 
     Attributes:
         min_counts: Minimum total counts a gene needs to be included.
@@ -94,7 +94,7 @@ class ScenicParams:
         n_subsample: Cell subsampling threshold of the correlated strategy: at or
             above it, that many cells are drawn before the randomised SVD.
         learner_params: The learner block, of the class `learner_type` names.
-            `None` takes that class's defaults, as R's `learner_params = list()`.
+            `None` takes that class's defaults.
     """
 
     min_counts: int = 50

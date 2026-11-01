@@ -1,10 +1,8 @@
 """2D embeddings: UMAP, densMAP, t-SNE, den-SNE, PHATE and ForceAtlas2.
 
-The port of R's `umap_sc`, `densmap_sc`, `tsne_sc`, `densne_sc`, `phate_sc`
-and `forceatlas2_sc`. The work runs in the `manifolds-rs` wheel; this layer
-resolves the inputs the way R's `.manifold_inputs` does (an embedding from
-`sc.cache`, optionally the cached kNN), writes the result to
-`sc.cache.embeddings` under R's slot name and stamps it with R's parents:
+The work runs in the `manifolds-rs` wheel; this layer resolves the inputs
+(an embedding from `sc.cache`, optionally the cached kNN), writes the result
+to `sc.cache.embeddings` under a slot name and stamps it with its parents:
 the input embedding, plus `"knn"` when the cached kNN fed it.
 
     >>> find_neighbours(sc)
@@ -12,9 +10,8 @@ the input embedding, plus `"knn"` when the cached kNN fed it.
     >>> tsne(sc, params=tsne_defaults().set_params(perplexity=20.0))
 
 Parameters are the `manifolds_rs` estimators themselves. The `*_defaults()`
-builders return one set to R's defaults (`umap_sc` plus
-`manifoldsR::params_umap()` and so on), which differ from the estimators' own
-in places, e.g. t-SNE perplexity 10 rather than 30.
+builders return one set to the package defaults, which differ from the
+estimators' own in places, e.g. t-SNE perplexity 10 rather than 30.
 """
 
 from __future__ import annotations
@@ -41,7 +38,7 @@ from bixverse._core.subset import ScOrMc
 
 @beartype
 def _nn_defaults() -> mf.NeighbourParams:
-    """R's `manifoldsR::params_nn()`."""
+    """Default neighbour search parameters."""
     return mf.NeighbourParams(
         n_tree=50,
         m=16,
@@ -56,11 +53,7 @@ def _nn_defaults() -> mf.NeighbourParams:
 
 @beartype
 def umap_defaults() -> mf.UMAP:
-    """UMAP set to R's `umap_sc` and `manifoldsR::params_umap()` defaults.
-
-    R picks `n_epochs` from the optimiser and the cell count when it is
-    `NULL`; with its default `"adam_parallel"` that is always 500.
-    """
+    """UMAP set to the package defaults."""
     return mf.UMAP(
         n_components=2,
         n_neighbors=15,
@@ -83,8 +76,7 @@ def umap_defaults() -> mf.UMAP:
 
 @beartype
 def densmap_defaults() -> mf.DensMAP:
-    """densMAP set to R's `densmap_sc` and `manifoldsR::params_densmap()`
-    defaults."""
+    """densMAP set to the package defaults."""
     u = umap_defaults().get_params()
     return mf.DensMAP(
         **u, lambda_=2.0, dens_params=mf.DensParams(frac=0.3, var_shift=0.1)
@@ -93,7 +85,7 @@ def densmap_defaults() -> mf.DensMAP:
 
 @beartype
 def tsne_defaults() -> mf.TSNE:
-    """t-SNE set to R's `tsne_sc` and `manifoldsR::params_tsne()` defaults."""
+    """t-SNE set to the package defaults."""
     return mf.TSNE(
         n_components=2,
         perplexity=10.0,
@@ -117,8 +109,7 @@ def tsne_defaults() -> mf.TSNE:
 
 @beartype
 def densne_defaults() -> mf.DensNE:
-    """den-SNE set to R's `densne_sc` and `manifoldsR::params_densne()`
-    defaults."""
+    """den-SNE set to the package defaults."""
     t = tsne_defaults().get_params()
     return mf.DensNE(
         **t, lambda_=0.5, dens_params=mf.DensParams(frac=0.3, var_shift=0.1)
@@ -127,10 +118,9 @@ def densne_defaults() -> mf.DensNE:
 
 @beartype
 def phate_defaults() -> mf.PHATE:
-    """PHATE set to R's `phate_sc` and `manifoldsR::params_phate()` defaults.
+    """PHATE set to the package defaults.
 
-    `randomised` and `mds_iter` are not in R's bundle; the estimator's own
-    apply.
+    `randomised` and `mds_iter` are not set here; the estimator's own apply.
     """
     return mf.PHATE(
         n_components=2,
@@ -153,8 +143,7 @@ def phate_defaults() -> mf.PHATE:
 
 @beartype
 def forceatlas2_defaults() -> mf.ForceAtlas2:
-    """ForceAtlas2 set to R's `forceatlas2_sc` and `manifoldsR::params_fa2()`
-    defaults."""
+    """ForceAtlas2 set to the package defaults."""
     return mf.ForceAtlas2(
         n_neighbors=15,
         n_epochs=500,
@@ -193,10 +182,10 @@ def _embed(
     no_embd_to_use: int | None,
     modality: Modality,
 ) -> None:
-    """Resolve the inputs as R's `.manifold_inputs`, fit, store and stamp.
+    """Resolve the inputs, fit, store and stamp.
 
     With `"wnn"` the embedding comes from the RNA cache, the kNN (always
-    used) and the result live in the WNN slot, as in R.
+    used) and the result live in the WNN slot.
 
     Raises:
         ValueError: On a reserved `slot_name`, a stale input, an absent
@@ -258,7 +247,7 @@ def umap(
     modality: Modality = "rna",
     params: mf.UMAP | None = None,
 ) -> None:
-    """UMAP, as R's `umap_sc`.
+    """UMAP.
 
     With `use_knn` the cached kNN (`find_neighbours`) is reused and the
     neighbour search knobs in `params` do not apply; without one cached, a
@@ -307,7 +296,7 @@ def densmap(
     modality: Modality = "rna",
     params: mf.DensMAP | None = None,
 ) -> None:
-    """densMAP, UMAP with a density-preserving term, as R's `densmap_sc`.
+    """densMAP, UMAP with a density-preserving term.
 
     Inputs are handled as in `umap`; `lambda_=0` gives back plain UMAP.
 
@@ -350,7 +339,7 @@ def tsne(
     modality: Modality = "rna",
     params: mf.TSNE | None = None,
 ) -> None:
-    """t-SNE, as R's `tsne_sc`.
+    """t-SNE.
 
     Off by default, `use_knn` reuses the cached kNN; perplexity then only
     shapes the affinities over it, so keep its k near `3 * perplexity`.
@@ -395,7 +384,7 @@ def densne(
     modality: Modality = "rna",
     params: mf.DensNE | None = None,
 ) -> None:
-    """den-SNE, t-SNE with a density-preserving term, as R's `densne_sc`.
+    """den-SNE, t-SNE with a density-preserving term.
 
     Inputs are handled as in `tsne`; `lambda_=0` gives back plain t-SNE.
 
@@ -438,7 +427,7 @@ def phate(
     modality: Modality = "rna",
     params: mf.PHATE | None = None,
 ) -> None:
-    """PHATE, as R's `phate_sc`.
+    """PHATE.
 
     Inputs are handled as in `umap`.
 
@@ -484,12 +473,11 @@ def forceatlas2(
     modality: Modality = "rna",
     params: mf.ForceAtlas2 | None = None,
 ) -> None:
-    """ForceAtlas2 on the fuzzy kNN graph, as R's `forceatlas2_sc` with
-    `graph = "knn"`.
+    """ForceAtlas2 on the fuzzy kNN graph.
 
     The kNN (cached with `use_knn`, else searched) becomes UMAP's fuzzy union
-    graph first, as in scanpy's `draw_graph`. R's `graph = "connectivities"`
-    is not here: the `manifolds-rs` wheel cannot lay out a given graph.
+    graph first, as in scanpy's `draw_graph`. Laying
+    out a given graph is not supported: the `manifolds-rs` wheel cannot do it.
 
     Args:
         sc: The experiment.

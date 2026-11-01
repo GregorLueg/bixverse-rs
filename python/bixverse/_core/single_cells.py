@@ -1,10 +1,9 @@
-"""The `SingleCells` handle: a directory shared with the bixverse R package.
+"""The `SingleCells` handle: a directory of binary stores and an obs / var DuckDB.
 
 A directory holds the binary stores (`counts_cells.bin`, `counts_genes.bin`)
-and the obs / var DuckDB (`sc_duckdb.db`), in exactly the layout R writes, so
-either front end opens what the other wrote. Analysis state lives in memory
-(`map`, `cache`) and is persisted by `bixverse.io.save` next to R's own
-memory file, never in it.
+and the obs / var DuckDB (`sc_duckdb.db`). Analysis state lives in memory
+(`map`, `cache`) and is persisted by `bixverse.io.save` in its own memory
+file, never in the stores or the DuckDB.
 
 Only state access lives here, no analysis.
 """
@@ -105,7 +104,7 @@ class ScBase:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """`(kept cells, genes)`, as R's `dim()`."""
+        """`(kept cells, genes)`."""
         return (self.n_cells, self.n_genes)
 
     @property
@@ -208,7 +207,7 @@ class SingleCells(ScBase):
     """A single cell experiment on disk.
 
     The constructor rebuilds the map from the DuckDB (ids from `obs` / `var`,
-    the cell filter from `to_keep`) with an empty cache, which is what R's
+    the cell filter from `to_keep`) with an empty cache, which is what
     `load_existing()` does when no memory file is present. Use
     `bixverse.io.load_existing` to also restore a saved cache.
 
@@ -317,8 +316,8 @@ class SingleCells(ScBase):
         """Add or replace obs columns.
 
         With a 0-based `cell_idx` column the frame joins on it. Without one it
-        must hold one row per kept cell, in ascending cell order, as R's
-        `set_sc_new_obs_col()`. Cells the frame does not cover get NULL.
+        must hold one row per kept cell, in ascending cell order. Cells the
+        frame does not cover get NULL.
         """
         if "cell_idx" not in frame.columns:
             if frame.height != self.n_cells:
@@ -398,8 +397,8 @@ class SingleCells(ScBase):
         """Restore every cell, clearing the HVG selection and the cache.
 
         A PCA or kNN computed on a subset does not describe the full cell
-        set, so nothing cached survives. R asks interactively; here a
-        populated cache needs `force=True`.
+        set, so nothing cached survives. A populated cache
+        needs `force=True`.
 
         Raises:
             ValueError: If something would be dropped and `force` is false.
@@ -496,7 +495,7 @@ def get_counts(
     assay: Literal["rna", "adt"] = "rna",
     use_cells_to_keep: bool = True,
 ) -> Counts:
-    """Read counts for a selection of cells and genes, as R's `get_sc_counts`.
+    """Read counts for a selection of cells and genes.
 
     With `use_cells_to_keep` the rows are the kept cells, or the given cells
     that are kept, in the order given. The decode runs in Rust with the GIL
@@ -508,7 +507,7 @@ def get_counts(
         genes: 0-based store indices or ids, in the column order wanted.
             `None` for every gene. ADT feature indices or ids for `"adt"`.
         layer: `"raw"` counts or the `"norm"` layer.
-        assay: R's `modality`: `"rna"`, or `"adt"` on a
+        assay: The modality: `"rna"`, or `"adt"` on a
             `SingleCellsMultiModal`. The ADT counts come from memory,
             narrowed to `float32`; cells the ADT matrix does not hold warn and
             drop. `bixverse.mm.get_adt_counts` returns them dense.
