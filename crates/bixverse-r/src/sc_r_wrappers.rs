@@ -824,7 +824,7 @@ impl FromRList for ScDblFinderParams {
                 .unwrap_or(defaults.n_iterations as i32) as usize,
             // Classification
             gbm_n_trees: map
-                .get("n_trees")
+                .get("gbm_n_trees")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.gbm_n_trees as i32) as usize,
             max_depth: map
