@@ -160,6 +160,8 @@ def _cells(sc: ScOrMc, cells_to_take: Sequence[str] | None) -> np.ndarray:
 @beartype
 def _mc_params(params: ScenicParams, verbose: bool) -> ScenicParams:
     """R's meta cell cap on `min_samples_leaf`."""
+    # by design: with the single cell leaf sizes on the far fewer meta cells, the
+    # trees are not very informative
     lp = params.learner
     if lp.min_samples_leaf < MC_MIN_SAMPLES_LEAF_CAP:
         return params
