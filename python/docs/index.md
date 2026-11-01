@@ -1,12 +1,14 @@
 # bixverse
 
-A single cell suite for Python, with the numerics in Rust. Same engine as the
-[R package](https://github.com/GregorLueg/bixverse) and the
+A single cell suite for Python, with the numerics in the
 [Rust crates](https://github.com/GregorLueg/bixverse-rs) underneath it:
 `import bixverse as bv` and you get QC, highly variable genes, PCA,
 neighbours, clustering, embeddings, differential expression, doublet
 detection, batch correction, metacells, annotation, ligand-receptor analysis,
 trajectories and multi-modal (WNN) workflows.
+
+It's a port of the single cell suite of the
+[bixverse R package](https://github.com/GregorLueg/bixverse).
 
 ## How it fits together
 

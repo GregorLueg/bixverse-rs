@@ -1,10 +1,7 @@
 # bixverse
 
-The single cell suite of the [bixverse R package](https://github.com/GregorLueg/bixverse)
-in Python, with the numerics in Rust ([`bixverse-rs`](https://github.com/GregorLueg/bixverse-rs)).
-Same engine, same parameters, same on-disk format: an experiment written from R
-opens in Python and the other way round, and the results are tested against R
-function by function.
+A single cell suite for Python, with the numerics in Rust
+([`bixverse-rs`](https://github.com/GregorLueg/bixverse-rs)).
 
 It works on the store, not in memory, so it scales past what fits in RAM. On top
 sit a minibatch loader and a barebone scVI that train straight off that store,
@@ -53,8 +50,7 @@ compressed binary files, cell-major and gene-major, memory-mapped on read, so
 each method pulls what it needs from the right one. obs and var live in a DuckDB
 next to them and come back as polars frames. QC doesn't delete anything:
 `sc.set_cells_to_keep()` decides which cells every later step sees. Functions take
-the experiment first and write into it, as the R generics do, and the cache
-tracks what has gone stale.
+the experiment first and write into it, and the cache tracks what has gone stale.
 
 ## What's in it
 
@@ -76,7 +72,7 @@ tracks what has gone stale.
 | `bv.lr`, `bv.dialogue` | CellPhoneDB, NicheNet-style ligand-receptor; DIALOGUE |
 | `bv.pl` | matplotlib plots (`plots` extra) and the `extract_*` frames behind them |
 | `bv.pipeline` | chained steps with `>>`, per-group pipelines |
-| `bv.params` | every parameter set as a frozen dataclass, generated from the R specs |
+| `bv.params` | every parameter set as a frozen dataclass |
 
 `SingleCellsSubset` handles sub-clustering, `MetaCells` and `SingleCellsMultiModal`
 go through the same functions.
@@ -138,8 +134,7 @@ The docs have the [validation against scvi-tools](https://gregorlueg.github.io/b
 
 ## Vignettes
 
-The single cell vignettes of the R package, ported to notebooks. Start with
-"Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
+22 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
 `docs/vignettes/` with its executed `.ipynb` next to it, and the data sets download
 themselves on first use.
 
