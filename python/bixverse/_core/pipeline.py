@@ -155,6 +155,10 @@ class Step:
     Raises:
         TypeError: If `kwargs` do not bind to `fn`.
         ValueError: If `accepts` or `returns` is not a step class.
+
+    Examples:
+        >>> fit = {"method": "analytic_pearson"}
+        >>> step = bv.pipeline.Step("residuals", bv.pp.fit_residuals, fit)
     """
 
     name: str
@@ -241,6 +245,9 @@ def validate_pipeline(pipeline: Pipeline, cls: type) -> type:
     Raises:
         TypeError: If a step cannot take what the step before hands it.
         ValueError: If `cls` is not a step class.
+
+    Examples:
+        >>> end = bv.pipeline.validate_pipeline(mc_pipe, bv.SingleCellsSubset)
     """
     if cls not in STEP_CLASSES:
         names = ", ".join(c.__name__ for c in STEP_CLASSES)
@@ -280,6 +287,10 @@ def apply_pipeline(
         TypeError: If the chain cannot run on `obj`, or a class-changing step
             returns something else, e.g. `None` from a generator without an
             embedding.
+
+    Examples:
+        >>> sc = bv.pipeline.apply_pipeline(pipe, sc)
+        >>> mc = bv.pipeline.apply_pipeline(mc_pipe, sc)
     """
     if len(pipeline) == 0:
         return obj
@@ -326,6 +337,12 @@ def apply_pipeline_per_group(
     Raises:
         TypeError: If the chain cannot run on a `SingleCellsSubset`.
         ValueError: If `group_col` is not in obs.
+
+    Examples:
+        >>> per_group = bv.pipeline.apply_pipeline_per_group(pipe, sc, "sample_id")
+        >>> per_group = bv.pipeline.apply_pipeline_per_group(
+        ...     pipe, sc, "sample_id", groups=["sample_1", "sample_2"]
+        ... )
     """
     validate_pipeline(pipeline, SingleCellsSubset)
     levels = _groups(sc, group_col, groups)
@@ -376,6 +393,11 @@ def meta_cells_per_group(
         TypeError: If `pipeline` cannot run on, or does not return, a
             `SingleCellsSubset`, or `mc_params` do not bind to the generator.
         ValueError: On a missing column, or a group without meta cells.
+
+    Examples:
+        >>> pipeline = bv.pipeline.step_hvg(hvg_no=500) >> bv.pipeline.step_pca(20)
+        >>> pipeline = pipeline >> bv.pipeline.step_neighbours()
+        >>> mc = bv.metacells.meta_cells_per_group(sc, "batch_index", pipeline=pipeline)
     """
     fn = METACELL_GENERATORS[method]
     kwargs = dict(mc_params or {})
@@ -421,6 +443,9 @@ def step_hvg(
         hvg_params: The HVG parameters, forwarded.
         streaming: Read the genes in batches, forwarded.
         verbose: Controls verbosity, forwarded.
+
+    Examples:
+        >>> step = bv.pipeline.step_hvg(hvg_no=500)
     """
     return Step(
         "hvg",
@@ -456,6 +481,9 @@ def step_pca(
         seed: Seed, forwarded.
         residuals: PCA on the residuals of `fit_residuals`, forwarded.
         verbose: Controls verbosity, forwarded.
+
+    Examples:
+        >>> step = bv.pipeline.step_pca(20, sparse_svd=False)
     """
     return Step(
         "pca",
@@ -714,6 +742,10 @@ def step_metacells(method: MetacellMethod = "bootstrapped", **kwargs: object) ->
 
     Raises:
         TypeError: If `kwargs` do not bind to the generator.
+
+    Examples:
+        >>> params = bv.params.BtMetacellsParams(target_no_metacells=50)
+        >>> step = bv.pipeline.step_metacells("bootstrapped", params=params)
     """
     return Step(
         f"metacells ({method})",

@@ -279,6 +279,11 @@ def umap(
     Raises:
         ValueError: If the embedding or the kNN is stale, the embedding is
             absent, or `slot_name` is reserved.
+
+    Examples:
+        >>> bv.embed.umap(sc)
+        >>> umap_params = bv.embed.umap_defaults().set_params(n_neighbors=30)
+        >>> bv.embed.umap(sc, slot_name="umap_30", params=umap_params)
     """
     _embed(
         sc,
@@ -363,6 +368,10 @@ def tsne(
 
     Raises:
         ValueError: As `umap`.
+
+    Examples:
+        >>> tsne_params = bv.embed.tsne_defaults().set_params(perplexity=20.0)
+        >>> bv.embed.tsne(sc, params=tsne_params)
     """
     _embed(
         sc,
@@ -449,6 +458,9 @@ def phate(
 
     References:
         Moon, et al., Nat Biotechnol, 2019.
+
+    Examples:
+        >>> bv.embed.phate(sc, slot_name="phate")
     """
     _embed(
         sc,
@@ -495,6 +507,9 @@ def forceatlas2(
 
     References:
         Jacomy, et al., PLoS ONE, 2014.
+
+    Examples:
+        >>> bv.embed.forceatlas2(sc, slot_name="fa2")
     """
     _embed(
         sc,

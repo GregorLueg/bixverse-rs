@@ -150,6 +150,9 @@ def bx_colors(
 
     Returns:
         Hex colours.
+
+    Examples:
+        >>> colours = bv.pl.bx_colors("sequential", n=5)
     """
     if n < 1:
         raise ValueError("n must be positive")
@@ -530,6 +533,12 @@ def embedding_plot(
 
     Returns:
         The axes.
+
+    Examples:
+        >>> ax = bv.pl.embedding_plot(
+        ...     sc, "umap", "leiden", label_by="leiden", discrete=True
+        ... )
+        >>> ax = bv.pl.embedding_plot(sc, "umap", "lib_size", point_alpha=0.2)
     """
     cols = [c for c in (colour_by, label_by) if c is not None]
     if isinstance(x, pl.DataFrame):
@@ -637,6 +646,9 @@ def feature_plot(
 
     Raises:
         ValueError: Without `features` and `embedding` for an object.
+
+    Examples:
+        >>> fig = bv.pl.feature_plot(sc, genes, "umap", highlight_features=True, ncol=2)
     """
     if isinstance(x, pl.DataFrame):
         frame = x
@@ -823,6 +835,9 @@ def dot_plot(
 
     Returns:
         The axes.
+
+    Examples:
+        >>> ax = bv.pl.dot_plot(sc, genes, "cell_grp", cluster_groups=False)
     """
     if isinstance(x, pl.DataFrame):
         frame = x
@@ -1001,6 +1016,9 @@ def stacked_violin_plot(
 
     Returns:
         The figure, one axes per feature, the first on top.
+
+    Examples:
+        >>> fig = bv.pl.stacked_violin_plot(sc, genes, "cell_grp", scale=True, clip=3.0)
     """
     if isinstance(x, pl.DataFrame):
         frame = x
@@ -1101,6 +1119,9 @@ def heatmap_plot(
 
     Raises:
         ValueError: Without `grouping_variable`, or an out of range gap.
+
+    Examples:
+        >>> ax = bv.pl.heatmap_plot(sc, genes, "cell_grp", max_cells_per_group=200)
     """
     if grouping_variable is None:
         raise ValueError("grouping_variable is needed")
@@ -1333,6 +1354,9 @@ def feature_scatter_plot(
 
     Returns:
         The axes.
+
+    Examples:
+        >>> ax = bv.pl.feature_scatter_plot(sc, genes[0], genes[1], geom="hex")
     """
     if isinstance(x, pl.DataFrame):
         frame = x
@@ -1467,6 +1491,10 @@ def violin_plot(
     Raises:
         ValueError: For a frame without `grouping_column` and `variable`, or
             `ax` with a `CellQc`.
+
+    Examples:
+        >>> fig = bv.pl.violin_plot(qc, group_name="sample")
+        >>> ax = bv.pl.violin_plot(obs, "sample_id", "lib_size")
     """
     df = _qc_frame(x)
     raster = df.height > RASTER_CELLS if raster is None else raster
@@ -1616,6 +1644,9 @@ def density_plot(
     Raises:
         ValueError: On an ungrouped `CellQc`, or a frame without
             `grouping_column` and `variable`.
+
+    Examples:
+        >>> fig = bv.pl.density_plot(qc)
     """
     df = _qc_frame(x)
     if isinstance(x, CellQc):
@@ -1699,6 +1730,9 @@ def joint_plot(
 
     Returns:
         The figure: the hexbin and the two marginal histograms.
+
+    Examples:
+        >>> fig = bv.pl.joint_plot(qc)
     """
     df = _qc_frame(x)
     is_qc = isinstance(x, CellQc)
@@ -1875,6 +1909,9 @@ def paga_plot(
 
     Returns:
         The axes.
+
+    Examples:
+        >>> ax = bv.pl.paga_plot(sc, paga, embedding="umap", threshold=0.05)
     """
     data = extract_paga_plot_data(
         sc,
@@ -2019,6 +2056,9 @@ def milo_nhood_plot(
 
     Raises:
         ValueError: On `"majority_celltype"` before `add_nhoods_info`.
+
+    Examples:
+        >>> ax = bv.pl.milo_nhood_plot(sc, milo, embedding="umap", alpha=0.1)
     """
     data = extract_milo_plot_data(
         sc,

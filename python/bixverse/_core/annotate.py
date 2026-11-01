@@ -322,6 +322,9 @@ def prepare_cell_markers(
 
     Raises:
         ValueError: If a column is missing.
+
+    Examples:
+        >>> markers = bv.annotate.prepare_cell_markers(sc, marker_df)
     """
     missing = {"cell_type", "gene_id"} - set(marker_df.columns)
     if missing:
@@ -366,6 +369,9 @@ def calc_sc_type_scores(
 
     References:
         Ianevski, et al., Nat Commun, 2022.
+
+    Examples:
+        >>> scores = bv.annotate.calc_sc_type_scores(sc, markers, sensitivity=False)
     """
     check_range("weight_floor", weight_floor, 0, 1, False, False)
     if not cell_marker_list:
@@ -430,6 +436,10 @@ def score_clusters(
     Raises:
         ValueError: If the labels do not cover the scored cells or are
             negative.
+
+    Examples:
+        >>> labels = sc.obs(filtered=True)["leiden_clustering"].to_numpy()
+        >>> per_cluster = bv.annotate.score_clusters(scores, labels)
     """
     labels = np.asarray(cluster_labels)
     if labels.shape != (x.n_cells,):
@@ -489,6 +499,11 @@ def assign_sc_type(
 
     References:
         Ianevski, et al., Nat Commun, 2022; Zhou, et al., NIPS, 2004.
+
+    Examples:
+        >>> col = "leiden_clustering"
+        >>> calls = bv.annotate.assign_sc_type(sc, scores, cluster_col=col)
+        >>> composition = calls.composition
     """
     params = sctype_cell_params or SctypeCellsParams()
     graph = sc.cache.connectivities
@@ -618,6 +633,12 @@ def build_symphony_ref(
         ValueError: If an HVG index is out of range, or a batch or label
             column is missing or incomplete.
 
+    Examples:
+        >>> bv.pp.find_hvg(sc, hvg_no=2000)
+        >>> ref = bv.annotate.build_symphony_ref(
+        ...     sc, "sample_id", sc.map.hvg, no_pcs=20, label_columns=["cell_grp"]
+        ... )
+
     References:
         Kang, et al., Nat Commun, 2021.
     """
@@ -705,6 +726,9 @@ def add_symphony_labels(
     Raises:
         ValueError: If the cell count disagrees with `z_corr`, a column is
             missing, or a name collides without `overwrite`.
+
+    Examples:
+        >>> ref = bv.annotate.add_symphony_labels(ref, sc, ["cell_grp"], overwrite=True)
     """
     new = _label_frame(sc, columns)
     n_ref = reference.z_corr.shape[0]
@@ -810,6 +834,10 @@ def map_symphony_query(
 
     References:
         Kang, et al., Nat Commun, 2021.
+
+    Examples:
+        >>> bv.annotate.map_symphony_query(ref, query, batch_column="sample_id")
+        >>> embedding = query.cache.embeddings["symphony"]
     """
     lookup: dict[str, int] = {}
     for i, g in enumerate(query.gene_ids().tolist()):
@@ -888,6 +916,9 @@ def transfer_labels_symphony(
     Raises:
         ValueError: If the reference has no such labels, or the query has no
             current `"symphony"` embedding.
+
+    Examples:
+        >>> pred = bv.annotate.transfer_labels_symphony(ref, query, "cell_grp")
     """
     labels = reference.labels
     if labels is None:
@@ -949,6 +980,9 @@ def save_symphony_ref(reference: SymphonyReference, path: Path | str) -> None:
     Args:
         reference: The reference.
         path: The target file.
+
+    Examples:
+        >>> bv.annotate.save_symphony_ref(ref, "reference.npz")
     """
     arrays = {
         name: arr
@@ -984,6 +1018,9 @@ def load_symphony_ref(path: Path | str) -> SymphonyReference:
 
     Raises:
         ValueError: If the file is not a saved reference of this format.
+
+    Examples:
+        >>> ref = bv.annotate.load_symphony_ref("reference.npz")
     """
     with np.load(Path(path), allow_pickle=False) as fh:
         if "meta" not in fh:

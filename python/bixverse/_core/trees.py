@@ -239,7 +239,7 @@ def bonsai(
 
     Args:
         sc: The experiment or meta cells.
-        hvg: 0-based candidate genes, e.g. `sc.hvg`. `None` takes every gene.
+        hvg: 0-based candidate genes, e.g. `sc.map.hvg`. `None` takes every gene.
         bonsai_params: The parameters. `None` uses the defaults.
         verbose: Controls verbosity.
 
@@ -253,6 +253,11 @@ def bonsai(
     References:
         de Groot, et al., Nat. Biotechnol., 2026; Breda, et al., Nat.
         Biotechnol., 2021.
+
+    Examples:
+        >>> tree = bv.trees.bonsai(sc)
+        >>> bv.pp.find_hvg(sc, hvg_no=500)
+        >>> tree = bv.trees.bonsai(sc, hvg=sc.map.hvg)
     """
     return _bonsai(
         sc, hvg=hvg, bonsai_params=bonsai_params, verbose=verbose, ext=_bixverse
@@ -330,6 +335,10 @@ def relayout_bonsai(
 
     Returns:
         A new `BonsaiTree` with the new node table and layout.
+
+    Examples:
+        >>> tree = bv.trees.relayout_bonsai(tree, layout="dendrogram")
+        >>> tree = bv.trees.relayout_bonsai(tree, hyperbolic=True)
     """
     nodes = x.nodes
     parent = nodes["parent"].fill_null(-1).cast(pl.Int64).to_numpy()
@@ -366,6 +375,10 @@ def set_bonsai_embedding(
 
     Raises:
         ValueError: If the tree was not built over the object's current cells.
+
+    Examples:
+        >>> bv.trees.set_bonsai_embedding(sc, tree)
+        >>> xy = sc.cache.embeddings["bonsai"]
     """
     expected = (
         np.arange(sc.n_cells, dtype=np.uint32)

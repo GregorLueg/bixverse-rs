@@ -442,6 +442,12 @@ def find_markers(
     Returns:
         `gene_id`, `lfc`, `prop1`, `prop2`, `z_scores`, `p_values` and `fdr`,
         one row per tested gene in gene order.
+
+    Examples:
+        >>> obs = sc.obs(filtered=True)
+        >>> ct1 = obs.filter(obs["cell_grp"] == "cell_type_1")["cell_id"].to_list()
+        >>> ct2 = obs.filter(obs["cell_grp"] == "cell_type_2")["cell_id"].to_list()
+        >>> res = bv.de.find_markers(sc, ct1, ct2, alternative="greater")
     """
     check_range("min_prop", min_prop, 0, 1, False, False)
     res = _bixverse.dge_mann_whitney(
@@ -491,6 +497,10 @@ def find_all_markers(
     Returns:
         `grp`, `gene_id`, `lfc`, `prop1`, `prop2`, `z_scores`, `p_values` and
         `fdr`; groups in order of first appearance, genes in gene order.
+
+    Examples:
+        >>> markers = bv.de.find_all_markers(sc, "cell_grp")
+        >>> top = markers.filter(markers["fdr"] < 0.05)
     """
     check_range("min_prop", min_prop, 0, 1, False, False)
     _require_columns(sc, [column_of_interest])
@@ -564,6 +574,11 @@ def find_specific_markers(
     References:
         Soneson and Robinson, Nat Methods, 2018; Lun, et al., F1000Research,
         2016.
+
+    Examples:
+        >>> res = bv.de.find_specific_markers(sc, "cell_grp")
+        >>> summary = bv.de.get_marker_summary(res)
+        >>> ranked = summary.sort("min_auroc", descending=True)
     """
     check_range("min_prop", min_prop, 0, 1, False, False)
     _require_columns(sc, [column_of_interest])
@@ -725,6 +740,14 @@ def get_pseudobulked(
 
     Raises:
         ValueError: If a group matches no cell.
+
+    Examples:
+        >>> obs = sc.obs(filtered=True)
+        >>> cell_list = {
+        ...     s: obs.filter(obs["sample_id"] == s)["cell_id"].to_list()
+        ...     for s in obs["sample_id"].unique().sort()
+        ... }
+        >>> pb = bv.de.get_pseudobulked(sc, cell_list, return_format="sparse")
     """
     groups = [sc._resolve_cells(cells) for cells in cell_list.values()]
     if any(len(g) == 0 for g in groups):
@@ -783,6 +806,10 @@ def run_edger_ql(
 
     References:
         Chen, Lun and Smyth, F1000Research, 2016.
+
+    Examples:
+        >>> pb = bv.de.get_pseudobulked(sc, cell_list)
+        >>> res = bv.de.run_edger_ql(pb.counts.T, design, pb.gene_ids, coef="stim")
     """
     params = edger_params or EdgerQlParams()
     mm, names = _design_array(design)
@@ -858,6 +885,10 @@ def pseudobulk_dge(
     References:
         Squair, et al., Nat Commun, 2021; Chen, Lun and Smyth, F1000Research,
         2016.
+
+    Examples:
+        >>> res = bv.de.pseudobulk_dge(sc, cell_list, design, coef="stim")
+        >>> sig = res.filter(res["fdr"] < 0.05)
     """
     n_rows = design.height if isinstance(design, pl.DataFrame) else design.shape[0]
     if n_rows != len(cell_list):
@@ -928,6 +959,12 @@ def nebula(
 
     References:
         He, et al., Commun Biol, 2021.
+
+    Examples:
+        >>> bv.pp.find_hvg(sc, hvg_no=200)
+        >>> hvgs = sc.gene_ids(sc.map.hvg)
+        >>> res = bv.de.nebula(sc, "sample_id", "~ condition", genes_to_use=hvgs)
+        >>> top = res.results.sort("p_value").head()
     """
     return _nebula(
         sc,
@@ -1145,6 +1182,10 @@ def get_milor_abundances(
 
     References:
         Dann, et al., Nat Biotechnol, 2022.
+
+    Examples:
+        >>> params = bv.de.MiloRParams(prop=0.1)
+        >>> milo = bv.de.get_milor_abundances(sc, "sample_id", milor_params=params)
     """
     params = milor_params or MiloRParams()
     _hard_state(sc, [embd_to_use, "knn"])
@@ -1245,6 +1286,11 @@ def test_nhoods(
     References:
         Dann, et al., Nat Biotechnol, 2022; Chen, Lun and Smyth,
         F1000Research, 2016.
+
+    Examples:
+        >>> cols = sc.obs().select("sample_id", "condition")
+        >>> design_df = cols.unique().sort("sample_id")
+        >>> milo = bv.de.test_nhoods(milo, "~ condition", design_df)
     """
     check_range("min_mean", min_mean, 0, None, False, True)
     mm, names = _model_matrix(design_df, design)
@@ -1330,6 +1376,9 @@ def add_nhoods_info(
 
     Raises:
         ValueError: If `cell_info` does not have one label per cell.
+
+    Examples:
+        >>> milo = bv.de.add_nhoods_info(milo, sc.obs(filtered=True)["cell_grp"])
     """
     if x.nhoods_info is None:
         warnings.warn(
@@ -1459,6 +1508,10 @@ def meld(
 
     References:
         Burkhardt, et al., Nat Biotechnol, 2021.
+
+    Examples:
+        >>> meld_res = bv.de.meld(sc, "condition")
+        >>> scores = meld_res.norm_scores
     """
     params = meld_params or MeldParams()
     _hard_state(sc, [embd_to_use, "knn"])

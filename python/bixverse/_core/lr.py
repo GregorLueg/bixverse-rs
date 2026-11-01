@@ -341,6 +341,12 @@ def as_ligand_target_influence(
 
     Raises:
         ValueError: On a non-numeric matrix or names that do not fit it.
+
+    Examples:
+        >>> potential = np.random.default_rng(1).random((len(genes), 3))
+        >>> wrapped = bv.lr.as_ligand_target_influence(
+        ...     potential, genes, ["lig_1", "lig_2", "lig_3"], ligands_as_cols=True
+        ... )
     """
     m = np.asarray(x)
     if m.ndim != 2 or m.dtype.kind not in "iuf":
@@ -415,6 +421,15 @@ def generate_ligand_target_influence(
     Raises:
         ValueError: On no seeds, a missing column or a seed in neither
             network.
+
+    Examples:
+        >>> influence = bv.lr.generate_ligand_target_influence(ligands, ppi, grn)
+        >>> influence = bv.lr.generate_ligand_target_influence(
+        ...     {"complex_ab": ligands[:2], "single": [ligands[2]]},
+        ...     ppi,
+        ...     grn,
+        ...     bv.params.LigandTargetParams(damping_factor=0.7),
+        ... )
     """
     params = params or LigandTargetParams()
     if isinstance(ligand_seeds, Mapping):
@@ -492,6 +507,13 @@ def ligand_activity_scores(
     Raises:
         ValueError: If there are no gene sets or the background misses the
             influence entirely.
+
+    Examples:
+        >>> activity = bv.lr.ligand_activity_scores(
+        ...     influence, {"degs": targets[:20]}, background=genes[:300]
+        ... )
+        >>> sets = [targets[:10], targets[5:20]]
+        >>> activity = bv.lr.ligand_activity_scores(influence, sets)
     """
     if isinstance(gene_sets, Mapping):
         set_names = list(gene_sets)
@@ -561,6 +583,9 @@ def resolve_weights(
     Raises:
         ValueError: On a missing name, a negative or non-finite weight, or
             non-zero condition weights without a condition DE table.
+
+    Examples:
+        >>> weights = bv.lr.resolve_weights(None, "one_condition", False)
     """
     if weights is None:
         off = COND_KEYS if scenario == "one_condition" else ()
@@ -608,6 +633,16 @@ def compute_expression_info(
 
     Raises:
         ValueError: On half a condition, no known gene or no cells left.
+
+    Examples:
+        >>> expr = bv.lr.compute_expression_info(sc, "cell_grp", ligands + receptors)
+        >>> expr_b1 = bv.lr.compute_expression_info(
+        ...     sc,
+        ...     "cell_grp",
+        ...     ligands,
+        ...     condition_colname="batch_index",
+        ...     condition_oi="1",
+        ... )
     """
     if (condition_colname is None) != (condition_oi is None):
         raise ValueError(
@@ -714,6 +749,17 @@ def prioritise_interactions(
     Raises:
         ValueError: On malformed tables or more than one row per ligand in
             `ligand_activities`.
+
+    Examples:
+        >>> prio = bv.lr.prioritise_interactions(
+        ...     celltype_de,
+        ...     expr,
+        ...     activity,
+        ...     lr_network,
+        ...     senders_oi=["cell_type_1"],
+        ...     receivers_oi=["cell_type_2", "cell_type_3"],
+        ...     scenario="one_condition",
+        ... )
     """
     celltype_de = _check_deg_table(celltype_de, "celltype_de")
     expression_info = _check_exp_table(expression_info, "expression_info")
@@ -1035,6 +1081,9 @@ def get_cellphonedb_db(
         (the subunit symbols, sorted), `is_complex_a` / `is_complex_b`,
         `directionality` and `classification`, by `interaction_id`.
 
+    Examples:
+        >>> cpdb_db = bv.lr.get_cellphonedb_db()
+
     References:
         Troulé, et al., Nat. Protoc., 2025.
     """
@@ -1127,6 +1176,16 @@ def cellphonedb(
     Raises:
         ValueError: On a malformed database, no testable interaction, an
             unknown sender or receiver, or `"degs"` without `deg_table`.
+
+    Examples:
+        >>> cpdb = bv.lr.cellphonedb(sc, "cell_grp", lr_db, method="simple")
+        >>> cpdb = bv.lr.cellphonedb(
+        ...     sc,
+        ...     "cell_grp",
+        ...     lr_db,
+        ...     senders=["cell_type_1"],
+        ...     params=bv.params.CellphonedbParams(n_perm=200, threshold=0.05),
+        ... )
 
     References:
         Efremova, et al., Nat. Protoc., 2020; Troulé, et al., Nat. Protoc.,

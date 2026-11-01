@@ -157,6 +157,10 @@ def per_cell_qc_outlier(
 
     Returns:
         The flags and the applied thresholds.
+
+    Examples:
+        >>> lib_size = sc.obs(filtered=True)["lib_size"]
+        >>> res = bv.qc.per_cell_qc_outlier(lib_size, threshold=4.0, direction="below")
     """
     x = np.ascontiguousarray(_vector(metric, "metric"), dtype=np.float64)
     outlier, margin = _bixverse.mad_outlier(x, threshold, direction, r_standard)
@@ -308,6 +312,13 @@ def run_cell_qc(
     Raises:
         ValueError: On mismatched lengths, unknown metric names, malformed
             bounds, bounds that contradict a direction, or nothing to do.
+
+    Examples:
+        >>> obs = sc.obs(filtered=True)
+        >>> metrics = {"lib_size": obs["lib_size"].to_numpy()}
+        >>> qc = bv.qc.run_cell_qc(metrics, obs["cell_idx"].to_numpy(), threshold=4.0)
+        >>> sc.add_obs(bv.qc.get_data(qc))
+        >>> sc.set_cells_to_keep(qc.cell_idx[~qc.combined])
     """
     if not mad and hard_thresholds is None:
         raise ValueError(
@@ -442,6 +453,12 @@ def run_cell_qc_fixed(
 
     Returns:
         The calls.
+
+    Examples:
+        >>> obs = sc.obs(filtered=True)
+        >>> metrics = {"lib_size": obs["lib_size"].to_numpy()}
+        >>> bounds = {"lib_size": {"lower": 500}}
+        >>> qc = bv.qc.run_cell_qc_fixed(metrics, obs["cell_idx"].to_numpy(), bounds)
     """
     return run_cell_qc(
         metrics,
@@ -484,6 +501,9 @@ def rescue_cells(qc: CellQc, rescue_thresholds: Mapping[str, Bounds]) -> CellQc:
     Raises:
         ValueError: On unknown metrics or malformed bounds, or if MAD was
             skipped.
+
+    Examples:
+        >>> qc = bv.qc.rescue_cells(qc, {"lib_size": {"lower": 1000}})
     """
     _check_metric_names(qc, rescue_thresholds, "rescue_thresholds")
     if qc.thresholds is None:
@@ -525,6 +545,9 @@ def flag_cells(
 
     Raises:
         ValueError: On unknown metrics or malformed bounds.
+
+    Examples:
+        >>> qc = bv.qc.flag_cells(qc, {"lib_size": {"upper": 50000}})
     """
     _check_metric_names(qc, hard_thresholds, "hard_thresholds")
     n = qc.cell_idx.shape[0]
@@ -612,6 +635,10 @@ def gene_set_proportions(
 
     Raises:
         ValueError: If no id of a set matches.
+
+    Examples:
+        >>> bv.qc.gene_set_proportions(sc, {"mito": mito_genes})
+        >>> bv.qc.gene_set_proportions(sc, {"mito": mito_genes}, streaming=True)
     """
     if not gene_set_list:
         raise ValueError("gene_set_list must not be empty")
@@ -650,6 +677,9 @@ def top_genes_perc(
 
     Raises:
         ValueError: If `top_n_vals` is empty or holds a value below 1.
+
+    Examples:
+        >>> bv.qc.top_genes_perc(sc, top_n_vals=(50, 100))
     """
     if not top_n_vals or min(top_n_vals) < 1:
         raise ValueError("top_n_vals must hold positive integers")

@@ -146,6 +146,10 @@ def generate_single_cell_test_data(
     Returns:
         Counts, obs (`cell_id`, `cell_grp`, `batch_index`, plus `sample_id`
         with sample membership) and var (`gene_id`, `ensembl_id`).
+
+    Examples:
+        >>> params = bv.params.SyntheticDataParams(n_cells=2000, n_genes=500)
+        >>> sim = bv.io.generate_single_cell_test_data(params, seed=1)
     """
     p = params or SyntheticDataParams()
     res = _bixverse.synthetic_sc_data(
@@ -190,6 +194,10 @@ def generate_single_cell_test_data_adt(
     Returns:
         Dense counts, obs (`cell_id`, `cell_grp`, `batch_index`) and var
         (`protein_id`, `is_isotype`).
+
+    Examples:
+        >>> adt_params = bv.params.SyntheticDataAdtParams(n_cells=2000, n_proteins=15)
+        >>> adt = bv.io.generate_single_cell_test_data_adt(adt_params, seed=1)
     """
     p = params or SyntheticDataAdtParams()
     res = _bixverse.synthetic_adt_data(
@@ -237,6 +245,10 @@ def generate_cellsweep_test_data(
     Returns:
         Counts, obs (`cell_id`, `cell_grp` null for empties, `sample_id`,
         `is_empty`, `alpha_true` null for empties), var and the ground truth.
+
+    Examples:
+        >>> sweep_params = bv.params.SyntheticCellsweepParams(n_real=300, n_empty=1000)
+        >>> sweep = bv.io.generate_cellsweep_test_data(sweep_params)
     """
     p = params or SyntheticCellsweepParams()
     res = _bixverse.synthetic_cellsweep_data(to_rust(p), seed)
@@ -282,6 +294,10 @@ def generate_dialogue_test_data(
         Counts, obs (`cell_id`, `cell_grp`, `sample_id`, `cell_quality`, the
         last pure noise), var, the per cell type features, the latent and the
         planted genes.
+
+    Examples:
+        >>> dlg_params = bv.params.SyntheticDialogueParams(n_samples=10)
+        >>> dialogue = bv.io.generate_dialogue_test_data(dlg_params)
     """
     p = params or SyntheticDialogueParams()
     res = _bixverse.synthetic_dialogue_data(to_rust(p), seed)

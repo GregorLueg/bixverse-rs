@@ -148,6 +148,11 @@ def calc_meta_cell_purity(
 
     Raises:
         ValueError: If the labels fit neither cell space.
+
+    Examples:
+        >>> labels = sc.obs()["cell_grp"].to_list()
+        >>> bv.metacells.calc_meta_cell_purity(mc, labels, add_entropy=True)
+        >>> mc.obs(cols=["meta_cell_id", "mc_purity", "mc_entropy"])
     """
     cols = _purity_cols(mc, original_cell_type, add_additional_info, add_entropy)
     mc.add_obs(pl.DataFrame(cols))
@@ -220,6 +225,10 @@ def calc_diffusion_coordinates(
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
+
+    Examples:
+        >>> bv.metacells.calc_diffusion_coordinates(mc, sc.cache.knn, n_dcs=10)
+        >>> dcs = mc.other_data["dcs"]
     """
     if mc.is_merged:
         warnings.warn(
@@ -274,6 +283,10 @@ def calc_manifold_metrics(mc: MetaCells) -> None:
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
+
+    Examples:
+        >>> bv.metacells.calc_diffusion_coordinates(mc, sc.cache.knn)
+        >>> bv.metacells.calc_manifold_metrics(mc)
     """
     if mc.is_merged:
         warnings.warn(
@@ -343,6 +356,11 @@ def calc_meta_cell_compactness(
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
+
+    Examples:
+        >>> dcs = mc.other_data["dcs"]
+        >>> assignment = [str(x) for x in sc.obs()["cell_grp"].to_list()]
+        >>> compactness = bv.metacells.calc_meta_cell_compactness(dcs, assignment)
     """
     levels, rows = _split_rows(assignment, dcs.shape[0])
     values = _bixverse.metacell_compactness(
@@ -368,6 +386,11 @@ def calc_meta_cell_separation(
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
+
+    Examples:
+        >>> dcs = mc.other_data["dcs"]
+        >>> assignment = [str(x) for x in sc.obs()["cell_grp"].to_list()]
+        >>> separation = bv.metacells.calc_meta_cell_separation(dcs, assignment)
     """
     levels, rows = _split_rows(assignment, dcs.shape[0])
     values = _bixverse.metacell_separation(

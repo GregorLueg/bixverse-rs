@@ -137,6 +137,13 @@ def new_adt_counts_clr(
     Raises:
         ValueError: On a percentile outside `(0, 1)`, or the inputs not lining
             up.
+
+    Examples:
+        >>> cell_info = mm.obs(cols=["cell_id", "cell_idx"], filtered=True)
+        >>> clr = bv.mm.new_adt_counts_clr(adt_counts, barcodes, proteins, cell_info)
+        >>> clr = bv.mm.new_adt_counts_clr(
+        ...     adt_counts, barcodes, proteins, cell_info, seurat_clr=True
+        ... )
     """
     if not 0 < percentile < 1:
         raise ValueError("percentile must be in (0, 1)")
@@ -197,6 +204,12 @@ def new_adt_counts_dsb(
 
     References:
         Mulè, et al., Nat Commun, 2022.
+
+    Examples:
+        >>> dsb = bv.mm.new_adt_counts_dsb(
+        ...     adt_counts, barcodes, proteins, cell_info, isotype_names=isotypes
+        ... )
+        >>> dsb.dsb
     """
     params = dsb_params or DsbParams()
     raw, cells, idx, features = _cell_info(raw_counts, barcodes, feature_ids, cell_info)
@@ -352,6 +365,13 @@ def add_adt_counts(
 
     Raises:
         ValueError: If a kept cell is not among the barcodes.
+
+    Examples:
+        >>> bv.mm.add_adt_counts(mm, adt_counts, barcodes, proteins)
+        >>> bv.mm.add_adt_counts(
+        ...     mm, adt_counts, barcodes, proteins,
+        ...     method="dsb", isotype_names=isotypes
+        ... )
     """
     info = pl.DataFrame(
         {"cell_id": mm.cell_ids(filtered=True), "cell_idx": mm.cells_to_keep}
@@ -454,6 +474,12 @@ def calculate_pca_adt(
     Raises:
         ValueError: If a kept cell has no ADT counts, or `no_pcs` is out of
             range.
+
+    Examples:
+        >>> bv.mm.calculate_pca_adt(mm, no_pcs=10)
+        >>> bv.mm.calculate_pca_adt(
+        ...     mm, no_pcs=10, features=[p for p in proteins if p not in isotypes]
+        ... )
     """
     adt = require_adt(mm)
     rows = adt_rows(mm, None, True)
@@ -553,6 +579,11 @@ def generate_wnn_graph(
 
     References:
         Hao, et al., Cell, 2021.
+
+    Examples:
+        >>> bv.mm.generate_wnn_graph(mm)
+        >>> bv.mm.generate_wnn_graph(mm, no_embd_to_use_1=15, no_embd_to_use_2=8)
+        >>> bv.graph.find_clusters(mm, modality="wnn")
     """
     params = wnn_params or WnnParams()
     gparams = graph_params or KnnGraphDefaults()

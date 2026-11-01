@@ -312,6 +312,9 @@ def extract_embedding_data(
 
     Raises:
         ValueError: If the embedding is missing.
+
+    Examples:
+        >>> frame = bv.pl.extract_embedding_data(sc, "umap", obs_cols=["leiden"])
     """
     embd = _get_embedding(sc, embedding, modality)
     frame = pl.DataFrame(
@@ -360,6 +363,11 @@ def extract_gene_expression(
     Raises:
         ValueError: If nothing matched, on ADT without a multi-modal object
             or ADT counts, or a missing MAGIC layer.
+
+    Examples:
+        >>> expr = bv.pl.extract_gene_expression(
+        ...     sc, genes, obs_cols=["leiden"], scale=True, clip=3.0
+        ... )
     """
     if clip is not None and clip <= 0:
         raise ValueError("clip must be positive")
@@ -444,6 +452,9 @@ def extract_dot_plot_data(
 
     Raises:
         ValueError: If nothing matched or the grouping is entirely missing.
+
+    Examples:
+        >>> dots = bv.pl.extract_dot_plot_data(sc, genes, "leiden")
     """
     check_modality(sc, modality)
     codes, levels = _groups_for(sc, _expr_ids(sc, modality), grouping_variable)
@@ -541,6 +552,9 @@ def extract_feature_plot_data(
 
     Returns:
         `cell_id`, `dim_*`, the obs columns, `gene` (Enum) and `expression`.
+
+    Examples:
+        >>> long = bv.pl.extract_feature_plot_data(sc, genes, "umap", scale=True)
     """
     expr = extract_gene_expression(
         sc, features, scale=scale, clip=clip, modality=expr_modality, layer=layer
@@ -579,6 +593,9 @@ def extract_gene_violin_data(
     Returns:
         `cell_id`, `group` (Enum in level order), `gene` (Enum in feature
         order) and `expression`, gene-major.
+
+    Examples:
+        >>> violin = bv.pl.extract_gene_violin_data(sc, genes, "leiden")
     """
     expr = extract_gene_expression(
         sc, features, scale=scale, clip=clip, modality=modality, layer=layer
@@ -635,6 +652,9 @@ def extract_feature_pair(
     Returns:
         `cell_id`, `feature_1`, `feature_2` and the obs columns, over the
         cells both features cover.
+
+    Examples:
+        >>> pair = bv.pl.extract_feature_pair(sc, genes[0], genes[1])
     """
     id_1, mod_1 = _parse_feature_modality(feature_1, modality)
     id_2, mod_2 = _parse_feature_modality(feature_2, modality)
@@ -729,6 +749,9 @@ def extract_paga_plot_data(
     Raises:
         ValueError: On a different `cluster_col`, cells whose cluster PAGA
             does not know, or a non-numeric `node_stat_col`.
+
+    Examples:
+        >>> graph = bv.pl.extract_paga_plot_data(sc, paga, threshold=0.05)
     """
     if threshold < 0:
         raise ValueError("threshold must be non-negative")
@@ -840,6 +863,9 @@ def extract_milo_plot_data(
 
     Raises:
         ValueError: If untested, or the cell count moved since.
+
+    Examples:
+        >>> milo_graph = bv.pl.extract_milo_plot_data(sc, milo, alpha=0.1)
     """
     if not 0 <= alpha <= 1:
         raise ValueError("alpha must be in [0, 1]")

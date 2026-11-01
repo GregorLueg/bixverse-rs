@@ -204,6 +204,9 @@ def detect_raw_count_slot(
 
     Returns:
         The slot, or `None` if none qualifies.
+
+    Examples:
+        >>> slot = bv.io.detect_raw_count_slot("path/to/file.h5ad")
     """
     path = Path(f_path).expanduser()
     if not path.is_file():
@@ -250,6 +253,9 @@ def read_h5ad_metadata(f_path: Path | str) -> dict[str, object]:
 
     Returns:
         `obs` and `var` (polars), `dims` (`(n_obs, n_var)`) and `type`.
+
+    Examples:
+        >>> meta = bv.io.read_h5ad_metadata("path/to/file.h5ad")
     """
     path = Path(f_path).expanduser()
     dims = get_h5ad_dimensions(path)
@@ -283,6 +289,10 @@ def prescan_h5ad_files(
         The universe (sorted) and one task per file with `exp_id`,
         `h5_path`, `cs_type`, `no_cells`, `no_genes`, `raw_slot` and
         `gene_local_to_universe`.
+
+    Examples:
+        >>> files = {"b1": "path/to/b1.h5ad", "b2": "path/to/b2.h5ad"}
+        >>> prescan = bv.io.prescan_h5ad_files(files, gene_universe="union")
     """
     ids, files = _exp_ids(h5_paths)
     metas = []
@@ -350,6 +360,9 @@ def read_tenx_h5_metadata(f_path: Path | str) -> dict[str, object]:
         `obs` (`.id`), `var` (`.id`, `name`, plus `feature_type` for v3),
         `dims` (`(n_cells, n_genes)`), `version` and `feature_types` (counts
         per type, v3 only, else `None`).
+
+    Examples:
+        >>> meta = bv.io.read_tenx_h5_metadata("path/to/file.h5")
     """
     path = Path(f_path).expanduser()
     meta = get_tenx_h5_metadata(path)
@@ -416,6 +429,10 @@ def prescan_tenx_h5_files(
     Raises:
         ValueError: If a v3 file has no feature of the type, or the universe
             is empty.
+
+    Examples:
+        >>> files = ["path/to/t1.h5", "path/to/t2.h5"]
+        >>> prescan = bv.io.prescan_tenx_h5_files(files)
     """
     ids, files = _exp_ids(h5_paths)
     metas = []
@@ -510,6 +527,10 @@ def prescan_mtx_dirs(
     Raises:
         ValueError: On fewer than two inputs, mismatched or repeated ids, or
             an empty intersection.
+
+    Examples:
+        >>> dirs = ["path/to/mtx_a", "path/to/mtx_b"]
+        >>> prescan = bv.io.prescan_mtx_dirs(dirs, ["a", "b"], has_hdr=True)
     """
     paths = [Path(d).expanduser() for d in dirs]
     if len(paths) < 2:

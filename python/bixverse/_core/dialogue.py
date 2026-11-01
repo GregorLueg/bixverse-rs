@@ -547,6 +547,18 @@ def dialogue(
         ValueError: On a design DIALOGUE cannot run on, malformed features,
             or no genes.
 
+    Examples:
+        >>> res = bv.dialogue.dialogue(
+        ...     sc,
+        ...     "cell_grp",
+        ...     "sample_id",
+        ...     features,
+        ...     pmd_params=bv.params.DialoguePmdParams(k=2, n_permutations=100),
+        ... )
+        >>> res = bv.dialogue.dialogue(
+        ...     sc, "cell_grp", "sample_id", features, quality_col="cell_quality"
+        ... )
+
     References:
         Jerby-Arnon & Regev, Nat. Biotechnol., 2022.
     """

@@ -353,6 +353,14 @@ def run_palantir(
 
     References:
         Setty, et al., Nat. Biotechnol., 2019.
+
+    Examples:
+        >>> early_cell = "cell_0001"
+        >>> res = bv.traj.run_palantir(sc, early_cell)
+        >>> params = bv.params.PalantirParams(n_eigs=10, knn=30)
+        >>> res = bv.traj.run_palantir(sc, early_cell, palantir_params=params)
+        >>> ends = {"branch_a": "cell_0100", "branch_b": "cell_0200"}
+        >>> res = bv.traj.run_palantir(sc, early_cell, terminal_states=ends)
     """
     params = palantir_params or PalantirParams()
     used = _cell_names(sc)
@@ -463,6 +471,11 @@ def run_paga(
 
     References:
         Wolf, et al., Genome Biol., 2019.
+
+    Examples:
+        >>> bv.graph.find_clusters(sc, res=0.5, name="leiden_clusters")
+        >>> paga = bv.traj.run_paga(sc, "leiden_clusters")
+        >>> tree = paga.connectivities_tree
     """
     n = len(_cell_names(sc))
     knn = _knn_or_warn(sc, n, modality)
@@ -598,6 +611,13 @@ def run_gene_trends(
 
     References:
         Setty, et al., Nat. Biotechnol., 2019.
+
+    Examples:
+        >>> genes = ["gene_0001", "gene_0002"]
+        >>> res = bv.traj.run_palantir(sc, "cell_0001")
+        >>> trends = bv.traj.run_gene_trends(sc, res, features=genes)
+        >>> bv.pp.run_magic(sc, genes)
+        >>> trends = bv.traj.run_gene_trends(sc, res, use_magic=True)
     """
     branch_params = branch_params or BranchSelectionParams()
     gene_trend_params = gene_trend_params or GeneTrendsParams()

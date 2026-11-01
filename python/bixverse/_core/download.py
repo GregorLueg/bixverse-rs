@@ -172,6 +172,11 @@ def download_pbmc3k(
 
     Returns:
         The extracted `filtered_gene_bc_matrices/hg19` directory.
+
+    Examples:
+        >>> pbmc_dir = bv.io.download_pbmc3k()
+        >>> mtx_params = bv.io.get_cell_ranger_params(pbmc_dir)
+        >>> sc = bv.io.load_mtx("experiments/pbmc3k", mtx_params)
     """
     return _fetch_tar(
         "pbmc3k.tar.gz",

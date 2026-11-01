@@ -296,6 +296,11 @@ def load_csr(
     Raises:
         ValueError: If obs / var do not match the matrix or the counts are
             not integral.
+
+    Examples:
+        >>> sc = bv.io.load_csr("experiments/demo", sim.counts, sim.obs, sim.var)
+        >>> qc = bv.params.MinQualityParams(min_lib_size=500)
+        >>> sc = bv.io.load_csr("experiments/lax", sim.counts, sim.obs, sim.var, qc=qc)
     """
     qc = qc or MinQualityParams()
     n_cells, n_genes = (int(x) for x in counts.shape)
@@ -373,6 +378,11 @@ def load_h5ad(
 
     Raises:
         ValueError: If `"auto"` finds no slot with raw counts.
+
+    Examples:
+        >>> sc = bv.io.load_h5ad("experiments/h5ad", "path/to/file.h5ad")
+        >>> qc = bv.params.MinQualityParams(min_cells=5)
+        >>> sc = bv.io.load_h5ad("experiments/h5ad", "path/to/file.h5ad", qc=qc)
     """
     qc = qc or MinQualityParams()
     h5 = Path(h5_path).expanduser()
@@ -471,6 +481,9 @@ def load_h5ad_norm(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> sc = bv.io.load_h5ad_norm("exp/norm", "path/to/norm.h5ad", "lib_size", 1e4)
     """
     qc = qc or MinQualityParams()
     h5 = Path(h5_path).expanduser()
@@ -525,6 +538,11 @@ def load_multi_h5ad(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> files = {"b1": "path/to/b1.h5ad", "b2": "path/to/b2.h5ad"}
+        >>> prescan = bv.io.prescan_h5ad_files(files)
+        >>> sc = bv.io.load_multi_h5ad("experiments/multi", prescan)
     """
     qc = qc or MinQualityParams()
     _check_tasks(prescan)
@@ -583,6 +601,9 @@ def get_cell_ranger_params(
 
     Raises:
         FileNotFoundError: If one of the three files is missing.
+
+    Examples:
+        >>> mtx_params = bv.io.get_cell_ranger_params("path/to/mtx_dir", has_hdr=True)
     """
     directory = Path(directory).expanduser()
 
@@ -630,6 +651,10 @@ def load_mtx(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> mtx_params = bv.io.get_cell_ranger_params("path/to/mtx_dir", has_hdr=True)
+        >>> sc = bv.io.load_mtx("experiments/mtx", mtx_params)
     """
     qc = qc or MinQualityParams()
     path = _prepare(directory)
@@ -685,6 +710,11 @@ def load_multi_mtx(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> dirs = ["path/to/mtx_a", "path/to/mtx_b"]
+        >>> prescan = bv.io.prescan_mtx_dirs(dirs, ["a", "b"], has_hdr=True)
+        >>> sc = bv.io.load_multi_mtx("experiments/multi_mtx", prescan)
     """
     qc = qc or MinQualityParams()
     _check_tasks(prescan)
@@ -749,6 +779,9 @@ def load_tenx_h5(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> sc = bv.io.load_tenx_h5("experiments/tenx", "path/to/file.h5")
     """
     qc = qc or MinQualityParams()
     h5 = Path(h5_path).expanduser()
@@ -796,6 +829,11 @@ def load_multi_tenx_h5(
 
     Returns:
         The experiment.
+
+    Examples:
+        >>> files = ["path/to/t1.h5", "path/to/t2.h5"]
+        >>> prescan = bv.io.prescan_tenx_h5_files(files)
+        >>> sc = bv.io.load_multi_tenx_h5("experiments/multi_tenx", prescan)
     """
     qc = qc or MinQualityParams()
     _check_tasks(prescan)
@@ -872,6 +910,10 @@ def merge_sc_experiments(
     Raises:
         ValueError: On fewer than two inputs, mismatched or repeated ids, an
             input that was itself merged, or an empty intersection.
+
+    Examples:
+        >>> exp_ids = ["a", "b"]
+        >>> merged = bv.io.merge_sc_experiments("exp/merged", [sc_a, sc_b], exp_ids)
     """
     qc = qc or MinQualityParams()
     if len(inputs) < 2:
@@ -951,6 +993,10 @@ def archive_sc_exp(
 
     Raises:
         ValueError: If `level` is outside 1 to 22.
+
+    Examples:
+        >>> stats = bv.io.archive_sc_exp(sc, level=10)
+        >>> sc = bv.io.load_existing("experiments/demo")
     """
     if not 1 <= level <= 22:
         raise ValueError(f"level must lie in 1..22, got {level}")
@@ -985,6 +1031,9 @@ def upgrade_sc_store(
 
     Returns:
         The experiment, reading the converted store.
+
+    Examples:
+        >>> sc = bv.io.upgrade_sc_store(sc, codec="zstd")
     """
     versions = [_bixverse.file_version(p) for p in (sc.cells_path, sc.genes_path)]
     if min(versions) >= 4:

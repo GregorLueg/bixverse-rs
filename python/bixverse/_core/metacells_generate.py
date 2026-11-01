@@ -140,6 +140,11 @@ def generate_bt_meta_cells(
 
     References:
         Morabito, et al., Cell Rep Methods, 2023.
+
+    Examples:
+        >>> params = bv.params.BtMetacellsParams(target_no_metacells=100, k=25)
+        >>> mc = bv.metacells.generate_bt_meta_cells(sc, params=params)
+        >>> mc = bv.metacells.generate_bt_meta_cells(sc, regenerate_knn=True)
     """
     p = params or BtMetacellsParams()
     _require_fresh(sc, [embd_to_use] if regenerate_knn else ["knn"])
@@ -223,6 +228,10 @@ def generate_seacells(
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
+
+    Examples:
+        >>> params = bv.params.SeacellsParams(n_sea_cells=100)
+        >>> mc = bv.metacells.generate_seacells(sc, params)
     """
     return _generate_seacells(
         sc,
@@ -318,6 +327,10 @@ def generate_supercells(
 
     References:
         Bilous, et al., BMC Bioinform, 2022.
+
+    Examples:
+        >>> params = bv.params.SupercellParams(graining_factor=20)
+        >>> mc = bv.metacells.generate_supercells(sc, params=params)
     """
     p = params or SupercellParams()
     _require_fresh(sc, [embd_to_use] if regenerate_knn else ["knn"])
@@ -395,6 +408,11 @@ def generate_metacells2(
 
     References:
         Ben-Kiki, et al., Genome Biol, 2022.
+
+    Examples:
+        >>> mc = bv.metacells.generate_metacells2(sc)
+        >>> ids = sc.obs()["cell_id"].head(1500).to_list()
+        >>> mc = bv.metacells.generate_metacells2(sc, cells_to_use=ids)
     """
     cells = sc.cells_to_keep
     if cells_to_use is not None:

@@ -269,6 +269,9 @@ def save_h5ad(
     Raises:
         FileExistsError: If the file exists and `overwrite` is false.
         ValueError: If `chunk_size` is not positive.
+
+    Examples:
+        >>> bv.io.save_h5ad(sc, "path/to/out.h5ad", assay="norm")
     """
     if chunk_size < 1:
         raise ValueError("chunk_size must be positive")
@@ -337,6 +340,9 @@ def write_h5ad_sc(
 
     Raises:
         ValueError: If obs / var do not match the matrix.
+
+    Examples:
+        >>> bv.io.write_h5ad_sc("path/to/file.h5ad", sim.counts, sim.obs, sim.var)
     """
     n_cells, n_genes = (int(x) for x in counts.shape)
     if obs.height != n_cells or var.height != n_genes:
@@ -381,6 +387,11 @@ def write_tenx_h5_sc(
 
     Raises:
         ValueError: If the inputs do not match the matrix.
+
+    Examples:
+        >>> barcodes = sim.obs["cell_id"].to_list()
+        >>> features = sim.var.select(id="gene_id", name="gene_id")
+        >>> bv.io.write_tenx_h5_sc("path/to/file.h5", sim.counts, barcodes, features)
     """
     n_cells, n_features = (int(x) for x in counts.shape)
     if len(barcodes) != n_cells or features.height != n_features:
@@ -436,6 +447,12 @@ def write_cellranger_output(
 
     Raises:
         FileExistsError: If a file exists and `overwrite` is false.
+
+    Examples:
+        >>> out = "path/to/mtx_dir"
+        >>> bv.io.write_cellranger_output(
+        ...     out, sim.counts, sim.obs, sim.var, rows="genes"
+        ... )
     """
     n_cells, n_genes = (int(x) for x in counts.shape)
     if obs.height != n_cells or var.height != n_genes:

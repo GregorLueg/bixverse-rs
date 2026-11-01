@@ -500,6 +500,10 @@ def scrublet(
 
     References:
         Wolock, et al., Cell Syst, 2019.
+
+    Examples:
+        >>> res = bv.doublets.scrublet(sc)
+        >>> res = bv.doublets.scrublet(sc, group_by="sample_id", return_pairs=True)
     """
     return _scrublet(
         sc,
@@ -611,6 +615,10 @@ def call_doublets_manual(
     Raises:
         ValueError: If `threshold` is outside `[0, 1]` or `for_sample` is not
             a group.
+
+    Examples:
+        >>> res = bv.doublets.scrublet(sc)
+        >>> res = bv.doublets.call_doublets_manual(res, 0.35)
     """
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"threshold must be in [0, 1], got {threshold}")
@@ -708,6 +716,10 @@ def doublet_detection_boost(
     Raises:
         ValueError: If `group_by` is missing or incomplete, or a group has
             fewer than `GROUP_MIN_CELLS` cells.
+
+    Examples:
+        >>> boost = bv.doublets.doublet_detection_boost(sc, group_by="sample_id")
+        >>> sc.add_obs(bv.doublets.get_data(boost))
     """
     params = boost_params or BoostParams()
     cells = _cells(sc, cells_to_use)
@@ -805,6 +817,10 @@ def scdblfinder(
 
     References:
         Germain, et al., F1000Research, 2022.
+
+    Examples:
+        >>> dbl = bv.doublets.scdblfinder(sc, return_features=True)
+        >>> sc.add_obs(bv.doublets.get_data(dbl))
     """
     params = scdblfinder_params or ScdblfinderParams()
     cells = _cells(sc, cells_to_use)
@@ -887,6 +903,10 @@ def get_data(res: ScrubletRes | BoostRes | ScDblFinderRes) -> pl.DataFrame:
 
     Raises:
         TypeError: For any other result type.
+
+    Examples:
+        >>> res = bv.doublets.scrublet(sc, group_by="sample_id")
+        >>> sc.add_obs(bv.doublets.get_data(res))
     """
     match res:
         case ScrubletRes():
@@ -977,6 +997,11 @@ def infer_empty_droplets(
 
     Raises:
         ValueError: With `method = "supplied"`, which has nothing to infer.
+
+    Examples:
+        >>> lib_size = sc.obs()["lib_size"].to_numpy()
+        >>> umi = bv.params.EmptyDropletsParams(method="umi_cutoff", umi_cutoff=12000)
+        >>> is_empty = bv.doublets.infer_empty_droplets(lib_size, umi)
     """
     if empty_params.method == "supplied":
         raise ValueError(
@@ -1097,6 +1122,11 @@ def cellsweep(
 
     References:
         Sullivan, et al., CellSweep, 2025.
+
+    Examples:
+        >>> empty = bv.params.EmptyDropletsParams(method="umi_cutoff", umi_cutoff=1000)
+        >>> clean = bv.doublets.cellsweep("clean", raw, "cell_grp", "sample_id", empty)
+        >>> alpha = clean.obs(filtered=False)["cellsweep_alpha"]
     """
     params = cellsweep_params or CellsweepParams()
     qc = qc or MinQualityParams()

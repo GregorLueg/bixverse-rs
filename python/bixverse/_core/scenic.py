@@ -200,6 +200,11 @@ def scenic_gene_filter(
 
     Returns:
         The passing gene ids, in gene order.
+
+    Examples:
+        >>> keep = bv.pathways.scenic_gene_filter(
+        ...     sc, scenic_params=bv.params.ScenicParams(min_counts=50)
+        ... )
     """
     params = scenic_params or ScenicParams()
     cells = _cells(sc, cells_to_take)
@@ -270,7 +275,8 @@ def scenic_grn(
 
     Args:
         sc: The experiment, a subset or meta cells.
-        tf_ids: The TF gene ids; ids not in the object warn and drop.
+        tf_ids: The TF gene ids; ids not in the object drop, with a warning
+            when `verbose` is on.
         scenic_params: The parameters. `None` uses the defaults.
         genes_to_take: Target gene ids. `None` runs `scenic_gene_filter`.
         cells_to_take: Cell (meta cell) ids. `None` for the kept cells.
@@ -288,6 +294,9 @@ def scenic_grn(
     References:
         Aibar, et al., Nat. Methods, 2017; Moerman, et al., Bioinformatics,
         2019.
+
+    Examples:
+        >>> grn = bv.pathways.scenic_grn(sc, tf_ids, genes_to_take=keep)
     """
     return _scenic_grn(
         sc,
@@ -485,6 +494,10 @@ def identify_tf_to_genes(
     Raises:
         ValueError: On `"top_k"` without `k_tfs` or `k_genes`, or a value out
             of range.
+
+    Examples:
+        >>> grn = bv.pathways.identify_tf_to_genes(grn, n_sd=1.5)
+        >>> grn_topk = bv.pathways.identify_tf_to_genes(grn, method="top_k", k_tfs=3)
     """
     if n_sd <= 0:
         raise ValueError("n_sd must be positive.")
@@ -564,6 +577,10 @@ def tf_to_genes_correlations(
 
     Raises:
         ValueError: If `rho_threshold` is outside `[0, 1]`.
+
+    Examples:
+        >>> grn = bv.pathways.tf_to_genes_correlations(grn, sc)
+        >>> grn_both = bv.pathways.tf_to_genes_correlations(grn, sc, mode="both")
     """
     if not 0 <= rho_threshold <= 1:
         raise ValueError("rho_threshold must be in [0, 1].")
@@ -643,6 +660,11 @@ def run_cistarget(
 
     References:
         Aibar, et al., Nat. Methods, 2017.
+
+    Examples:
+        >>> cis = bv.pathways.run_cistarget(
+        ...     tf_targets, rankings, rank_genes, rank_motifs, annot
+        ... )
     """
     p = cis_target_params or CistargetParams()
     ranks = np.ascontiguousarray(rankings, dtype=np.int32)
@@ -791,6 +813,12 @@ def tf_to_genes_motif_enrichment(
     Returns:
         A copy with `cis_targets_results` set and the links gaining
         `in_leading_edge`, sorted by TF.
+
+    Examples:
+        >>> grn = bv.pathways.tf_to_genes_motif_enrichment(
+        ...     grn, rankings, rank_genes, rank_motifs, annot
+        ... )
+        >>> motif_hits = bv.pathways.get_cistarget_res(grn)
     """
     links = get_tf_to_gene(x)
     symbol_to_id = None
@@ -875,6 +903,12 @@ def build_regulons(
 
     Raises:
         ValueError: If `min_genes` is below 1.
+
+    Examples:
+        >>> regulons = bv.pathways.build_regulons(grn, min_genes=3)
+        >>> regulons = bv.pathways.build_regulons(
+        ...     grn, use_leading_edge=False, min_genes=5
+        ... )
     """
     if min_genes < 1:
         raise ValueError("min_genes must be at least 1.")
@@ -967,6 +1001,10 @@ def binarise_regulon_activity(
 
     References:
         Aibar, et al., Nat. Methods, 2017.
+
+    Examples:
+        >>> auc = bv.pathways.aucell(sc, regulons)
+        >>> on_off = bv.pathways.binarise_regulon_activity(auc)
     """
     if auc.values.shape[0] < 2 or auc.values.shape[1] < 1:
         raise ValueError("auc needs at least two cells and one regulon.")

@@ -327,6 +327,9 @@ def module_scores(
 
     References:
         Tirosh, et al., Science, 2016.
+
+    Examples:
+        >>> res = bv.pathways.module_scores(sc, gene_sets, n_ctrl=50)
     """
     _check_named(gs_list)
     streaming = _streaming(sc.n_cells, streaming, verbose)
@@ -378,6 +381,10 @@ def aucell(
 
     References:
         Aibar, et al., Nat. Methods, 2017.
+
+    Examples:
+        >>> res = bv.pathways.aucell(sc, gene_sets)
+        >>> sc.add_obs(bv.pathways.get_data(res))
     """
     _check_named(gs_list)
     params = to_rust(aucell_params or AucellParams())
@@ -451,6 +458,9 @@ def vision(
 
     References:
         DeTomaso, et al., Nat. Commun., 2019.
+
+    Examples:
+        >>> res = bv.pathways.vision(sc, signatures)
     """
     _check_named(gs_list)
     sigs = _signatures(sc, gs_list)
@@ -525,6 +535,11 @@ def generate_null_perm_gs(
         `(random_signatures, clusters)`: per cluster a list of
         `{"pos": [...], "neg": [...]}`, and the 0-based cluster of each
         signature.
+
+    Examples:
+        >>> random_sigs, clusters = bv.pathways.generate_null_perm_gs(
+        ...     signatures, genes, n_perm=100
+        ... )
     """
     sizes, balance = [], []
     for gs in gs_list.values():
@@ -708,6 +723,12 @@ def vision_w_autocor(
 
     References:
         DeTomaso, et al., Nat. Commun., 2019.
+
+    Examples:
+        >>> res = bv.pathways.vision_w_autocor(
+        ...     sc, signatures, "pca", no_embd_to_use=15
+        ... )
+        >>> res.auto_cor
     """
     _check_named(gs_list)
     params = vision_params or VisionParams()
@@ -765,6 +786,9 @@ def prep_lm_network(
 
     Raises:
         ValueError: On missing columns or non-finite weights.
+
+    Examples:
+        >>> sets = bv.pathways.prep_lm_network(net, genes, tmin=5)
     """
     if net.height == 0 or not {"source", "target"} <= set(net.columns):
         raise ValueError("net needs rows and the columns 'source' and 'target'.")
@@ -838,6 +862,10 @@ def lm_activity(
 
     References:
         Badia-i-Mompel, et al., Bioinform. Adv., 2022.
+
+    Examples:
+        >>> res = bv.pathways.lm_activity(sc, net)
+        >>> sc.add_obs(bv.pathways.get_data(res))
     """
     params = lm_params or LmActivityParams()
     gs = prep_lm_network(net, sc.gene_ids().tolist(), params.tmin)
@@ -977,6 +1005,10 @@ def hotspot_autocor(
 
     References:
         DeTomaso, et al., Cell Syst., 2021.
+
+    Examples:
+        >>> autocor = bv.pathways.hotspot_autocor(sc)
+        >>> autocor = bv.pathways.hotspot_autocor(sc, genes_to_take=genes[:200])
     """
     params = to_rust(hotspot_params or HotspotParams())
     embd, cells, _, genes, _, knn_idx, knn_dist = _hotspot_inputs(
@@ -1061,6 +1093,9 @@ def hotspot_gene_cor(
 
     References:
         DeTomaso, et al., Cell Syst., 2021.
+
+    Examples:
+        >>> hs = bv.pathways.hotspot_gene_cor(sc, genes_to_take=top)
     """
     params = to_rust(hotspot_params or HotspotParams())
     embd, cells, cell_ids, genes, gene_ids, knn_idx, knn_dist = _hotspot_inputs(
@@ -1120,6 +1155,9 @@ def generate_hotspot_membership(
 
     Raises:
         ValueError: If `fdr_threshold` is outside `[0, 1]`.
+
+    Examples:
+        >>> hs = bv.pathways.generate_hotspot_membership(hs, min_size=5)
     """
     if not 0 <= fdr_threshold <= 1:
         raise ValueError("fdr_threshold must be in [0, 1].")

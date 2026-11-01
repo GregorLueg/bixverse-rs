@@ -62,6 +62,9 @@ def save(sc: SingleCells) -> None:
 
     Args:
         sc: The experiment.
+
+    Examples:
+        >>> bv.io.save(sc)
     """
     arrays: dict[str, np.ndarray] = {"map/cells_to_keep": sc.map.cells_to_keep}
     if sc.map.hvg is not None:
@@ -112,6 +115,10 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
             file pair is missing.
         ValueError: If the memory file is of an unknown format or does not
             fit the store.
+
+    Examples:
+        >>> sc = bv.io.load_existing("experiments/demo")
+        >>> mm = bv.io.load_existing("experiments/demo", multi_modal=True)
     """
     directory = Path(directory).expanduser()
     cells, genes = directory / CELLS_BIN, directory / GENES_BIN

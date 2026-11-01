@@ -1,15 +1,48 @@
-"""Plotting: the plot data extractors of the bixverse R package and the
-matplotlib port of the bixverse.plots single cell plots.
+"""Plot data extractors and matplotlib plots for single cell results.
 
-The `extract_*` functions return polars frames and need nothing beyond the
-core package. The plots need matplotlib, the `plots` extra
-(`pip install bixverse[plots]`), which is imported on first use of a plot,
-not with this module. See `bixverse._core.plot_data` and
-`bixverse._core.plots`.
+Two layers. The `extract_*` functions pull what one plot needs out of an
+experiment into a polars frame and need nothing beyond the core package. The
+plots draw from the same data, take the object or the frame its extractor
+returns, and need matplotlib, the `plots` extra (`pip install
+bixverse[plots]`). matplotlib is imported on first use of a plot, not with this
+module. Hand a plot the frame when you want to restyle it, or draw the same data
+with another library.
 
-    >>> import bixverse as bv
-    >>> frame = bv.pl.extract_embedding_data(sc, "umap", obs_cols=["leiden"])
-    >>> ax = bv.pl.embedding_plot(sc, "umap", "leiden", label_by="leiden")
+**Where to start.** `embedding_plot` for an obs column on an embedding,
+`feature_plot` for genes on an embedding, `dot_plot`, `stacked_violin_plot` and
+`heatmap_plot` for markers across groups, `feature_scatter_plot` for two genes
+against each other. The QC plots (`violin_plot`, `density_plot`, `joint_plot`)
+take the `CellQc` from `bv.qc.run_cell_qc` or a frame. `paga_plot` and
+`milo_nhood_plot` take the result of `bv.traj.run_paga` and the tested `MiloR`
+from `bv.de`.
+
+**What lands where.** Nothing here writes to the experiment. Every plot reads
+the kept cells of a `SingleCells`, `SingleCellsSubset`, `MetaCells` or
+`SingleCellsMultiModal` and returns a matplotlib object: the single panel plots
+take an optional `ax` and return it, the multi-panel ones return the `Figure`.
+The extractors return one row per kept cell (per meta cell for `MetaCells`),
+long over genes where the plot needs it. Gene arguments are var ids.
+
+```python
+import matplotlib.pyplot as plt
+
+genes = sc.gene_ids()[:4].tolist()
+bv.pl.embedding_plot(sc, "umap", "cell_grp", label_by="cell_grp")
+bv.pl.feature_plot(sc, genes, "umap", ncol=2)
+bv.pl.dot_plot(sc, genes, "cell_grp")
+
+frame = bv.pl.extract_embedding_data(sc, "umap", obs_cols=["cell_grp"])
+plt.show()
+```
+
+**Gotchas.** The embedding has to exist (`bv.embed.umap` and friends; `"pca"`
+works after `bv.pp.calculate_pca`). Numeric obs columns get a colour bar, and
+`label_by` refuses them: cluster ids stored as numbers need `discrete=True`.
+Point and label sizes are in mm and `point_size=None` picks a size from the
+cell count; above 100,000 cells the points are rasterised. `density_plot` needs a
+`CellQc` run with `groups`. `violin_plot` and `density_plot` take a plain frame
+too, with `grouping_column` and `variable`; the outliers are then recomputed by
+MAD per group.
 """
 
 from importlib import import_module

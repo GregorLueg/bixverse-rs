@@ -722,6 +722,11 @@ def merge_meta_cells(
     Raises:
         ValueError: On no inputs, mismatched methods or ids, or an empty gene
             intersection.
+
+    Examples:
+        >>> mc_a = bv.metacells.generate_supercells(sc)
+        >>> mc_b = bv.metacells.generate_supercells(sc, seed=1)
+        >>> merged = bv.metacells.merge_meta_cells({"a": mc_a, "b": mc_b})
     """
     if isinstance(inputs, dict):
         if source_ids is None:
@@ -925,6 +930,9 @@ def save_metacells(mc: MetaCells, directory: Path | str) -> None:
     Raises:
         TypeError: On an `other_data` entry that is not an array, a frame, a
             list of strings or a number.
+
+    Examples:
+        >>> bv.metacells.save_metacells(mc, "meta_cells")
     """
     out = Path(directory).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -995,6 +1003,9 @@ def load_metacells(directory: Path | str) -> MetaCells:
     Raises:
         FileNotFoundError: If a file of the format is missing.
         ValueError: On an unknown format version.
+
+    Examples:
+        >>> mc = bv.metacells.load_metacells("meta_cells")
     """
     src = Path(directory).expanduser()
     for name in (MC_OBS, MC_VAR, MC_NPZ, MC_JSON):

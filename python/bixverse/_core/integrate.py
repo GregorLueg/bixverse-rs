@@ -371,6 +371,14 @@ def harmony(
 
     References:
         Korsunsky, et al., Nat Methods, 2019.
+
+    Examples:
+        >>> bv.integrate.harmony(sc, "batch_index")
+        >>> bv.integrate.harmony(
+        ...     sc,
+        ...     "batch_index",
+        ...     harmony_params=bv.params.HarmonyParams(theta=(4.0,)),
+        ... )
     """
     _harmony(
         sc,
@@ -474,6 +482,13 @@ def bbknn(
 
     References:
         Polański, et al., Bioinformatics, 2020.
+
+    Examples:
+        >>> bv.integrate.bbknn(
+        ...     sc,
+        ...     "batch_index",
+        ...     bbknn_params=bv.params.BbknnParams(neighbours_within_batch=5),
+        ... )
     """
     _bbknn(
         sc,
@@ -634,6 +649,10 @@ def fast_mnn(
 
     References:
         Haghverdi, et al., Nat Biotechnol, 2018.
+
+    Examples:
+        >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
+        >>> bv.integrate.fast_mnn(sc, "batch_index", batch_hvg.hvg_gene_idx)
     """
     _anchor_correction(
         sc,
@@ -684,6 +703,10 @@ def seurat_cca(
 
     References:
         Stuart, et al., Cell, 2019.
+
+    Examples:
+        >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
+        >>> bv.integrate.seurat_cca(sc, "batch_index", batch_hvg.hvg_gene_idx)
     """
     _anchor_correction(
         sc,
@@ -733,6 +756,10 @@ def seurat_rpca(
 
     References:
         Stuart, et al., Cell, 2019.
+
+    Examples:
+        >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
+        >>> bv.integrate.seurat_rpca(sc, "batch_index", batch_hvg.hvg_gene_idx)
     """
     _anchor_correction(
         sc,
@@ -778,6 +805,10 @@ def calculate_kbet(
 
     References:
         Büttner, et al., Nat Methods, 2019.
+
+    Examples:
+        >>> bv.graph.find_neighbours(sc, embd_to_use="mnn")
+        >>> kbet = bv.integrate.calculate_kbet(sc, "batch_index")
     """
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be in [0, 1]")
@@ -838,6 +869,10 @@ def calculate_lisi(
     References:
         Korsunsky, et al., Nat Methods, 2019; Luecken, et al., Nat Methods,
         2022.
+
+    Examples:
+        >>> ilisi = bv.integrate.calculate_lisi(sc, "batch_index")
+        >>> clisi = bv.integrate.calculate_lisi(sc, "cell_grp", type="cell_type")
     """
     if perplexity <= 0:
         raise ValueError("perplexity must be positive")
@@ -895,6 +930,9 @@ def calculate_batch_asw(
 
     Raises:
         ValueError: If the batch column is missing or incomplete.
+
+    Examples:
+        >>> asw = bv.integrate.calculate_batch_asw(sc, "batch_index", embd_to_use="mnn")
     """
     codes, levels = _labels(sc, batch_column)
     if len(levels) < 2:
@@ -948,6 +986,9 @@ def calculate_pcr(
     References:
         Büttner, et al., Nat Methods, 2019; Luecken, et al., Nat Methods,
         2022.
+
+    Examples:
+        >>> pcr = bv.integrate.calculate_pcr(sc, "batch_index", embd_to_use="mnn")
     """
     codes, levels = _labels(sc, batch_column)
     if len(levels) < 2:
@@ -1011,6 +1052,11 @@ def calculate_cell_type_asw(
 
     References:
         Luecken, et al., Nat Methods, 2022.
+
+    Examples:
+        >>> ct_asw = bv.integrate.calculate_cell_type_asw(
+        ...     sc, "cell_grp", embd_to_use="mnn"
+        ... )
     """
     codes, levels = _labels(sc, cell_type_column)
     if len(levels) < 2:
@@ -1058,6 +1104,9 @@ def calculate_graph_connectivity(
 
     References:
         Luecken, et al., Nat Methods, 2022.
+
+    Examples:
+        >>> conn = bv.integrate.calculate_graph_connectivity(sc, "cell_grp")
     """
     codes, levels = _labels(sc, cell_type_column)
     knn = _knn_for_metric(sc, len(codes), "connectivity")
@@ -1116,6 +1165,11 @@ def calculate_integration_metrics(
 
     References:
         Luecken, et al., Nat Methods, 2022.
+
+    Examples:
+        >>> metrics = bv.integrate.calculate_integration_metrics(
+        ...     sc, "batch_index", cell_type_column="cell_grp", embd_to_use="mnn"
+        ... )
     """
     kbet = calculate_kbet(sc, batch_column)
     ilisi = calculate_lisi(sc, batch_column, type="batch")

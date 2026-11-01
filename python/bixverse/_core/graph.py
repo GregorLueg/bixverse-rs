@@ -250,6 +250,12 @@ def generate_knn(
     Returns:
         The kNN, indices into the rows used; `None` (with a warning) if the
         embedding is absent.
+
+    Examples:
+        >>> knn = bv.graph.generate_knn(sc)
+        >>> knn_hnsw = bv.graph.generate_knn(
+        ...     sc, neighbours_params=bv.params.NeighboursParams(knn_method="hnsw")
+        ... )
     """
     params = neighbours_params or NeighboursParams()
     embd = _embedding(sc, embd_to_use)
@@ -278,6 +284,15 @@ def calc_knn_metrics(ref_knn: KnnGraph, query_knn: KnnGraph) -> KnnMetrics:
 
     Raises:
         ValueError: If the two differ in cells or k.
+
+    Examples:
+        >>> ref_knn = bv.graph.generate_knn(sc, no_embd_to_use=20)
+        >>> query_knn = bv.graph.generate_knn(
+        ...     sc,
+        ...     no_embd_to_use=20,
+        ...     neighbours_params=bv.params.NeighboursParams(knn_method="annoy"),
+        ... )
+        >>> metrics = bv.graph.calc_knn_metrics(ref_knn, query_knn)
     """
     if ref_knn.indices.shape[0] != query_knn.indices.shape[0]:
         raise ValueError("The two kNN data sets have different number of samples")
@@ -326,6 +341,12 @@ def find_neighbours(
     Raises:
         ValueError: If the embedding is stale, or on `"adt"` without a
             multi-modal object.
+
+    Examples:
+        >>> bv.graph.find_neighbours(sc, no_embd_to_use=20)
+        >>> bv.graph.find_neighbours(
+        ...     sc, neighbours_params=bv.params.NeighboursParams(k=30, knn_sym="umap")
+        ... )
     """
     params = neighbours_params or NeighboursParams()
     cache = modality_cache(sc, modality)
@@ -427,6 +448,10 @@ def find_clusters(
     References:
         Traag, Waltman & van Eck, Sci Rep, 2019; Blondel, et al., J Stat
         Mech, 2008.
+
+    Examples:
+        >>> bv.graph.find_clusters(sc, res=0.5, name="leiden_05")
+        >>> bv.graph.find_clusters(sc, cluster_algorithm="louvain", name="louvain")
     """
     _find_clusters(
         sc,
@@ -532,6 +557,11 @@ def fast_cluster(
 
     References:
         Wei, et al., PLoS Comput Biol, 2022.
+
+    Examples:
+        >>> fast = bv.graph.fast_cluster(sc, resolutions=(1.0, 0.5))
+        >>> memberships = fast.memberships
+        >>> fast = bv.graph.fast_cluster(sc, n_seeds=3, return_kmeans=True)
     """
     return _fast_cluster(
         sc,

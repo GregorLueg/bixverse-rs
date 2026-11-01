@@ -401,6 +401,10 @@ def find_hvg(
     Raises:
         ValueError: If `hvg_no` exceeds the gene count, or the residual model
             is missing or stale.
+
+    Examples:
+        >>> bv.pp.find_hvg(sc, hvg_no=2000)
+        >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="meanvarbin"))
     """
     params = hvg_params or HvgParams()
     if isinstance(sc, MetaCells):
@@ -447,6 +451,9 @@ def get_hvg_data(
     Raises:
         ValueError: On method `"residual"` or an `hvg_no` past the gene
             count.
+
+    Examples:
+        >>> hvg_stats = bv.pp.get_hvg_data(sc, hvg_no=500)
     """
     params = hvg_params or HvgParams()
     _check_not_residual(
@@ -544,6 +551,10 @@ def find_hvg_batch_aware(
     Raises:
         ValueError: On method `"residual"`, or a missing or incomplete batch
             column.
+
+    Examples:
+        >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
+        >>> bv.pp.calculate_pca(sc, 20, hvg=batch_hvg.hvg_gene_idx)
     """
     params = hvg_params or HvgParams()
     _check_not_residual(
@@ -770,6 +781,10 @@ def calculate_pca(
     Raises:
         ValueError: On a residual run that cannot be honoured, or a missing
             or stale residual model.
+
+    Examples:
+        >>> bv.pp.calculate_pca(sc, no_pcs=30)
+        >>> bv.pp.calculate_pca(sc, no_pcs=30, sparse_svd=False, seed=1)
     """
     params = pca_params or PcaParams()
     if isinstance(sc, MetaCells):
@@ -964,6 +979,11 @@ def fit_residuals(
     Raises:
         TypeError: If `residual_params` does not match `method`.
         ValueError: On a missing group column or unusable covariates.
+
+    Examples:
+        >>> bv.pp.fit_residuals(sc, method="analytic_pearson")
+        >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="residual"))
+        >>> bv.pp.fit_residuals(sc, group_column="batch_index")
     """
     if isinstance(sc, MetaCells):
         if gene_batch_size is not None:
@@ -1085,6 +1105,10 @@ def sct_corrected_counts(
         FileExistsError: If a store exists at `dir_out` and `overwrite` is
             false.
         ValueError: Without a usable scTransform fit.
+
+    Examples:
+        >>> bv.pp.fit_residuals(sc)
+        >>> corrected = bv.pp.sct_corrected_counts(sc, dir_out="corrected")
     """
     fit = _fit_usable(sc)
     if fit.method != "sctransform":
@@ -1168,6 +1192,11 @@ def run_magic(
 
     References:
         van Dijk, et al., Cell, 2018.
+
+    Examples:
+        >>> bv.graph.find_neighbours(sc)
+        >>> magic = bv.params.MagicParams(n_steps=2)
+        >>> bv.pp.run_magic(sc, ["gene_0001", "gene_0002"], magic_params=magic)
     """
     params = magic_params or MagicParams()
     require_fresh(sc, ["knn"], modality)

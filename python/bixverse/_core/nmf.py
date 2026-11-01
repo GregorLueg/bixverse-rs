@@ -409,6 +409,11 @@ def nmf(
 
     Raises:
         ValueError: On `k` below 1 or without genes.
+
+    Examples:
+        >>> res = bv.nmf.nmf(sc, k=5)
+        >>> res = bv.nmf.nmf(sc, k=5, preprocessing="sd")
+        >>> sc.add_obs(bv.nmf.get_data(res))
     """
     return _nmf(
         sc,
@@ -513,6 +518,10 @@ def stabilised_nmf(
 
     Raises:
         ValueError: On `k` or `n_runs` below 1, or without genes.
+
+    Examples:
+        >>> stab = bv.nmf.stabilised_nmf(sc, k=5, n_runs=10)
+        >>> best = bv.nmf.get_best_run(stab)
     """
     return _stabilised_nmf(
         sc,
@@ -672,6 +681,11 @@ def consensus_nmf(
 
     References:
         Kotliar, et al., eLife, 2019.
+
+    Examples:
+        >>> res = bv.nmf.consensus_nmf(sc, k=5, n_runs=10)
+        >>> sc.add_obs(bv.nmf.get_data(res))
+        >>> stability = bv.nmf.get_stability(res)
     """
     return _consensus_nmf(
         sc,
@@ -809,6 +823,10 @@ def nmf_k_sweep(
 
     References:
         Kotliar, et al., eLife, 2019.
+
+    Examples:
+        >>> sweep = bv.nmf.nmf_k_sweep(sc, k_range=range(3, 8), n_runs=10)
+        >>> sweep.frame
     """
     return _nmf_k_sweep(
         sc,
