@@ -14,6 +14,7 @@ import polars as pl
 from beartype import beartype
 
 from bixverse import _bixverse
+from bixverse._core.repr import compact_repr
 from bixverse._core.state import CsrMatrix
 from bixverse.params import (
     SyntheticCellsweepParams,
@@ -28,7 +29,7 @@ from bixverse.params import (
 ###########
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class SyntheticData:
     """Synthetic counts with their obs and var tables.
 
@@ -42,8 +43,16 @@ class SyntheticData:
     obs: pl.DataFrame
     var: pl.DataFrame
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "SyntheticData",
+            n_cells=self.counts.shape[0],
+            n_genes=self.counts.shape[1],
+            obs_columns=self.obs.columns,
+        )
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class SyntheticAdtData:
     """Synthetic ADT counts.
 
@@ -57,8 +66,16 @@ class SyntheticAdtData:
     obs: pl.DataFrame
     var: pl.DataFrame
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "SyntheticAdtData",
+            n_cells=self.counts.shape[0],
+            n_proteins=self.counts.shape[1],
+            obs_columns=self.obs.columns,
+        )
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class SyntheticCellsweepData(SyntheticData):
     """Synthetic counts with a planted ambient profile.
 
@@ -70,8 +87,16 @@ class SyntheticCellsweepData(SyntheticData):
     ambient_true: np.ndarray = field(kw_only=True)
     celltype_profiles_true: np.ndarray = field(kw_only=True)
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "SyntheticCellsweepData",
+            n_cells=self.counts.shape[0],
+            n_genes=self.counts.shape[1],
+            n_celltypes=self.celltype_profiles_true.shape[0],
+        )
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class SyntheticDialogueData(SyntheticData):
     """Synthetic counts with a planted multicellular programme.
 
@@ -85,6 +110,14 @@ class SyntheticDialogueData(SyntheticData):
     features: dict[str, pl.DataFrame] = field(kw_only=True)
     latent: dict[str, float] = field(kw_only=True)
     planted: dict[str, list[str]] = field(kw_only=True)
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "SyntheticDialogueData",
+            n_cells=self.counts.shape[0],
+            n_genes=self.counts.shape[1],
+            cell_types=list(self.features),
+        )
 
 
 ###########

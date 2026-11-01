@@ -75,7 +75,8 @@ def test_scrublet_record_and_obs_frame(sc):
     assert isinstance(res.threshold, float)
     np.testing.assert_array_equal(res.cell_indices, sc.cells_to_keep)
     assert res.pca is None and res.pair_1 is None and res.group_by is None
-    assert repr(res).startswith(f"ScrubletRes: {n} cells")
+    n_doublets = int(res.predicted_doublets.sum())
+    assert f"n_cells={n}" in repr(res) and f"n_doublets={n_doublets}" in repr(res)
 
     frame = doublets.get_data(res)
     assert frame.columns == ["doublet", "doublet_score", "cell_idx"]
@@ -93,7 +94,7 @@ def test_scrublet_optional_outputs(sc):
     assert res.pca.shape == (sc.n_cells + n_sim, SCRUBLET.no_pcs)
     assert res.pair_1.shape == res.pair_2.shape == (n_sim,)
     assert res.pair_1.max() < sc.n_cells
-    assert "Optional data:          PCA, doublet pairs" in repr(res)
+    assert "pca=True" in repr(res) and "pairs=True" in repr(res)
 
 
 def test_scrublet_is_seeded(sc):
@@ -120,7 +121,8 @@ def test_scrublet_grouped_orders_by_cell(sc):
     obs = sc.obs(cols=["cell_idx", "sample_id"], filtered=True)
     assert res.cell_groups is not None
     assert res.cell_groups.tolist() == obs["sample_id"].to_list()
-    assert "grouped by 'sample_id', 2 groups" in repr(res)
+    assert "group_by='sample_id'" in repr(res)
+    assert "'sample_1'" in repr(res) and "'sample_2'" in repr(res)
 
 
 #####################
@@ -214,7 +216,7 @@ def test_boost_record(sc):
         "voting_avg",
         "cell_idx",
     ]
-    assert repr(res).startswith("BoostRes:")
+    assert repr(res).startswith("BoostRes(") and f"n_cells={sc.n_cells}" in repr(res)
 
 
 def test_fast_cluster_centroids_resolved():
@@ -238,7 +240,7 @@ def test_scdblfinder_record_and_getters(sc):
     assert res.features["cell_id"].to_list() == sc.cell_ids(filtered=True).tolist()
     assert doublets.get_scores(res) is res.weighted
     assert doublets.get_scores(res, "cxds_scores") is res.cxds_scores
-    assert "Features available: TRUE" in repr(res)
+    assert "features=True" in repr(res)
 
     plain = doublets.scdblfinder(sc, scdblfinder_params=params)
     with pytest.warns(UserWarning, match="did not extract"):

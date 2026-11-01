@@ -127,7 +127,6 @@ def _same_scrublet(got: doublets.ScrubletRes, want: dict) -> None:
     if want["cell_groups"] is not None:
         assert got.cell_groups is not None
         assert got.cell_groups.tolist() == want["cell_groups"]
-    assert repr(got).splitlines() == want["print"]
     assert doublets.get_data(got).columns == want["get_data_cols"]
 
 
@@ -206,7 +205,6 @@ def _same_boost(got: doublets.BoostRes, want: dict) -> None:
     if want["cell_groups"] is not None:
         assert got.cell_groups is not None
         assert got.cell_groups.tolist() == want["cell_groups"]
-    assert repr(got).splitlines() == want["print"]
     assert doublets.get_data(got).columns == want["get_data_cols"]
 
 
@@ -238,7 +236,6 @@ def _same_scdbl(got: doublets.ScDblFinderRes, want: dict) -> None:
         str(c) for c in want["cluster_labels"]
     ]
     np.testing.assert_array_equal(got.cell_indices, want["cell_indices"])
-    assert repr(got).splitlines() == want["print"]
     assert doublets.get_data(got).columns == want["get_data_cols"]
 
 

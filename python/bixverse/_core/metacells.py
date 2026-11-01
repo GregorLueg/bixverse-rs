@@ -33,6 +33,7 @@ import numpy as np
 import polars as pl
 from beartype import beartype
 
+from bixverse._core.repr import compact_repr
 from bixverse._core.state import (
     CsrMatrix,
     ScCache,
@@ -64,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-@dataclass
+@dataclass(repr=False)
 class MetaCellAssignment:
     """Where the meta cells came from.
 
@@ -87,6 +88,15 @@ class MetaCellAssignment:
     n_unassigned: int
     cells_to_keep: np.ndarray | None = None
     per_source: dict[str, dict[str, int]] | None = None
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "MetaCellAssignment",
+            n_cells=self.n_cells,
+            n_metacells=self.n_metacells,
+            n_unassigned=self.n_unassigned,
+            sources=None if self.per_source is None else list(self.per_source),
+        )
 
 
 #############

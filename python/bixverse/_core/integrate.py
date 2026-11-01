@@ -34,6 +34,7 @@ from bixverse._core.multimodal import (
     stamp,
 )
 from bixverse._core.pp import _factor_codes, _obs_aligned
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrScSubset
@@ -66,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class KbetScores:
     """kBET result.
 
@@ -92,9 +93,19 @@ class KbetScores:
     threshold: float
     n_batches: int
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "KbetScores",
+            n_cells=len(self.p_values),
+            n_batches=self.n_batches,
+            kbet_score=round(self.kbet_score, 4),
+            mean_chi_square=round(self.mean_chi_square, 4),
+            threshold=self.threshold,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class BatchSilhouetteScores:
     """Batch silhouette width.
 
@@ -113,9 +124,19 @@ class BatchSilhouetteScores:
     n_batches: int
     embedding_used: str
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "BatchSilhouetteScores",
+            n_cells=len(self.per_cell),
+            n_batches=self.n_batches,
+            mean_asw=round(self.mean_asw, 4),
+            median_asw=round(self.median_asw, 4),
+            embedding=self.embedding_used,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class LisiScores:
     """iLISI or cLISI.
 
@@ -135,9 +156,19 @@ class LisiScores:
     n_labels: int
     type: LisiType
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "LisiScores",
+            type=self.type,
+            n_cells=len(self.per_cell),
+            n_labels=self.n_labels,
+            mean_lisi=round(self.mean_lisi, 4),
+            lisi_norm=round(self.lisi_norm, 4),
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class PcrScores:
     """Principal component regression on batch.
 
@@ -157,9 +188,20 @@ class PcrScores:
     r_squared: np.ndarray
     embedding_used: str
 
+    def __repr__(self) -> str:
+        comparison = self.pcr_comparison
+        return compact_repr(
+            "PcrScores",
+            n_dims=len(self.r_squared),
+            pcr=round(self.pcr, 4),
+            pcr_pca=round(self.pcr_pca, 4),
+            pcr_comparison=None if comparison is None else round(comparison, 4),
+            embedding=self.embedding_used,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CellTypeAswScores:
     """Cell type silhouette width rescaled to `[0, 1]`.
 
@@ -177,9 +219,19 @@ class CellTypeAswScores:
     n_cell_types: int
     embedding_used: str
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "CellTypeAswScores",
+            n_cells=len(self.per_cell),
+            n_cell_types=self.n_cell_types,
+            mean_asw=round(self.mean_asw, 4),
+            median_asw=round(self.median_asw, 4),
+            embedding=self.embedding_used,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class GraphConnectivityScores:
     """Graph connectivity per cell type.
 
@@ -194,6 +246,14 @@ class GraphConnectivityScores:
     per_cell_type: pl.DataFrame
     mean_connectivity: float
     median_connectivity: float
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "GraphConnectivityScores",
+            n_cell_types=self.per_cell_type.height,
+            mean_connectivity=round(self.mean_connectivity, 4),
+            median_connectivity=round(self.median_connectivity, 4),
+        )
 
 
 ###########

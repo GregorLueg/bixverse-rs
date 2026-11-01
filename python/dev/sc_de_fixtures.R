@@ -128,8 +128,7 @@ ref$all_markers_twosided <- find_all_markers_sc(
 specific_out <- function(res) {
   list(
     summary = res$summary,
-    per_comparison = res$per_comparison,
-    print = capture.output(print(res))
+    per_comparison = res$per_comparison
   )
 }
 ref$specific <- specific_out(find_specific_markers_sc(
@@ -188,8 +187,7 @@ nebula_out <- function(res) {
     coefficients = unname(res$coefficients),
     se = unname(res$se),
     coef_names = colnames(res$coefficients),
-    tested = res$params$tested,
-    print = capture.output(print(res))
+    tested = res$params$tested
   )
 }
 ref$nebula_genes <- get_gene_names(sc)[1:60]

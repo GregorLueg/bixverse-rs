@@ -22,6 +22,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.repr import compact_repr
 from bixverse._core.state import (
     CsrMatrix,
     ScCache,
@@ -466,7 +467,7 @@ def _check_range(indices: np.ndarray | Sequence[int], n: int, name: str) -> np.n
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Counts:
     """A cells x genes count matrix in CSR, with what its rows and columns are.
 
@@ -479,6 +480,11 @@ class Counts:
     matrix: CsrMatrix
     cells: np.ndarray
     genes: np.ndarray
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "Counts", shape=self.matrix.shape, nnz=len(self.matrix.data)
+        )
 
     def scipy_csr(self) -> object:
         """The matrix as a `scipy.sparse.csr_matrix`. Needs scipy."""

@@ -345,12 +345,12 @@ def test_hotspot_round_trip(sc):
     hs = pathways.hotspot_gene_cor(sc, hotspot_params=HS, genes_to_take=genes)
     assert hs.z.shape == (20, 20)
     np.testing.assert_allclose(hs.z, hs.z.T, atol=1e-6)
-    assert "not yet computed" in repr(hs)
+    assert "n_modules=None" in repr(hs)
     assert pathways.get_hotspot_membership(hs) is None
     hs = pathways.generate_hotspot_membership(hs, min_size=3)
     m = pathways.get_hotspot_membership(hs)
     assert m is not None and m.height == 20
-    assert "Modules:" in repr(hs)
+    assert "n_modules=None" not in repr(hs)
     assert pathways.get_params(hs)["used_cells"] == tuple(sc.cell_ids(filtered=True))
 
 
@@ -373,7 +373,7 @@ def test_scenic_chain(sc):
         pathways.scenic_grn(sc, ["not_a_gene"], scenic_params=p)
     grn = pathways.scenic_grn(sc, ["gene_01", "gene_11", "nope"], scenic_params=p)
     assert grn.importance_matrix.shape == (len(grn.gene_ids), 2)
-    assert "No TFs:                   2" in repr(grn)
+    assert "n_tfs=2" in repr(grn)
     with pytest.warns(UserWarning, match="identify_tf_to_genes"):
         assert pathways.build_regulons(grn) is None
     grn = pathways.identify_tf_to_genes(grn, method="top_k", k_genes=5)

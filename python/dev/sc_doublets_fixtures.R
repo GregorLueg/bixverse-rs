@@ -107,7 +107,6 @@ scrublet_out <- function(res) {
     doublet_scores_sim = res$doublet_scores_sim,
     cell_indices = attr(res, "cell_indices"),
     cell_groups = res$cell_groups,
-    print = capture.output(print(res)),
     get_data_cols = names(get_data(res))
   )
 }
@@ -156,7 +155,6 @@ boost_out <- function(res) {
     voting_avg = res$voting_avg,
     cell_indices = attr(res, "cell_indices"),
     cell_groups = res$cell_groups,
-    print = capture.output(print(res)),
     get_data_cols = names(get_data(res))
   )
 }
@@ -190,7 +188,6 @@ scdbl_out <- function(res) {
     cell_groups = res$cell_groups,
     features = if (is.null(res$features)) NULL else unname(res$features),
     feature_names = colnames(res$features),
-    print = capture.output(print(res)),
     get_data_cols = names(get_data(res))
   )
 }

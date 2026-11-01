@@ -119,7 +119,6 @@ out$sctype_floor <- sc_type_out(calc_sc_type_scores(
   weight_floor = 0.4,
   .verbose = FALSE
 ))
-out$sctype_print <- capture.output(print(scores))
 
 out$score_clusters <- score_clusters(scores, cluster_labels = out$leiden)
 
@@ -132,8 +131,7 @@ cell_out <- function(res) {
     agreement = res$agreement,
     hybrid = res$hybrid,
     composition = res$composition,
-    counts = if (is.null(res$counts)) NULL else unname(res$counts),
-    print = capture.output(print(res))
+    counts = if (is.null(res$counts)) NULL else unname(res$counts)
   )
 }
 out$assign <- cell_out(assign_sc_type(sc, scores, .verbose = FALSE))
@@ -172,8 +170,7 @@ ref_out <- function(r) {
     centroids = S7::prop(r, "centroids"),
     nr = S7::prop(r, "nr"),
     c_cache = S7::prop(r, "c_cache"),
-    labels = get_symphony_labels(r),
-    print = capture.output(print(r))
+    labels = get_symphony_labels(r)
   )
 }
 symphony_ref <- build_symphony_ref(

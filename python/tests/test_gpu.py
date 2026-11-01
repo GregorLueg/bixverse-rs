@@ -516,7 +516,7 @@ def test_nebula_matches_cpu(sc):
         rtol=1e-2,
         atol=1e-6,
     )
-    assert "Method:   ln" in repr(got)
+    assert "method='ln'" in repr(got)
 
 
 def test_nebula_params_differ_only_in_reml():

@@ -34,6 +34,7 @@ from beartype import BeartypeConf, beartype
 from bixverse import _bixverse
 from bixverse._core.doublets import _as_character
 from bixverse._core.download import _cache, _download
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse.params import CellphonedbParams, LigandTargetParams, to_rust
 
@@ -116,20 +117,15 @@ class LigandTargetInfluence:
 
     def __repr__(self) -> str:
         """A short summary of the ligand seeds and genes."""
-        n, m = self.shape
-        lines = [
+        p = self.params
+        return compact_repr(
             "LigandTargetInfluence",
-            f"  No ligand seeds:    {n}",
-            f"  No genes:           {m}",
-        ]
-        if self.params is not None:
-            p = self.params
-            lines += [
-                f"  Damping factor:     {p.damping_factor:.3f}",
-                f"  Max iter:           {p.max_iter}",
-                f"  Secondary targets:  {str(p.secondary_targets).upper()}",
-            ]
-        return "\n".join(lines)
+            n_ligands=self.shape[0],
+            n_genes=self.shape[1],
+            damping_factor=None if p is None else round(p.damping_factor, 4),
+            max_iter=None if p is None else p.max_iter,
+            secondary_targets=None if p is None else p.secondary_targets,
+        )
 
 
 ###########

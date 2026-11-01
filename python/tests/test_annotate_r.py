@@ -160,10 +160,6 @@ def test_sc_type_scores_match_r(ref, sc, markers, key, kwargs):
     assert got.columns == want["cell_types"]
 
 
-def test_sc_type_print_matches_r(ref, scores):
-    assert repr(scores).splitlines() == ref["sctype_print"]
-
-
 def test_score_clusters_matches_r(ref, scores):
     got = annotate.score_clusters(scores, np.asarray(ref["leiden"]))
     want = ref["score_clusters"]
@@ -202,7 +198,6 @@ def test_assign_sc_type_matches_r(ref, sc, scores, key, kwargs):
     _close(res.margins, want["margins"])
     assert res.agreement is not None
     _close(res.agreement, want["agreement"])
-    assert repr(res).splitlines() == want["print"]
     if want["composition"] is None:
         assert res.composition is None and res.hybrid is None and res.counts is None
         return
@@ -243,7 +238,6 @@ def test_symphony_reference_matches_r(ref, symphony):
     _close(symphony.r, want["r"])
     assert symphony.labels is not None
     assert symphony.labels["cell_grp"].to_list() == want["labels"]["cell_grp"]
-    assert repr(symphony).splitlines() == want["print"]
 
 
 def test_symphony_v2_slim_matches_r(ref, sc):
@@ -259,7 +253,6 @@ def test_symphony_v2_slim_matches_r(ref, sc):
     want = ref["symphony_v2"]
     assert got.z_orig is None and got.r is None and got.labels is None
     _same_reference(got, want)
-    assert repr(got).splitlines() == want["print"]
 
 
 @pytest.mark.parametrize(

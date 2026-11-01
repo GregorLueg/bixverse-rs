@@ -160,7 +160,6 @@ def test_find_specific_markers_matches_r(ref, sc, key, kwargs):
         exact=("ref_grp", "rival_grp", "gene_id"),
         calls=("fdr",),
     )
-    assert repr(got).splitlines() == want["print"]
 
 
 ##############
@@ -219,7 +218,6 @@ def _same_nebula(got: de.ScNebula, want: dict) -> None:
     _close(got.coefficients.drop("gene_id").to_numpy(), want["coefficients"])
     _close(got.se.drop("gene_id").to_numpy(), want["se"])
     assert got.params["tested"] == want["tested"]
-    assert repr(got).splitlines() == want["print"]
 
 
 def test_nebula_matches_r(ref, sc):

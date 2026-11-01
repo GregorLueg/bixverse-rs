@@ -47,6 +47,7 @@ from bixverse._core.integrate import (
     _soft_state,
 )
 from bixverse._core.pp import _factor_codes, _obs_aligned
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse.params import (
     HarmonyParams,
@@ -89,7 +90,7 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CellMarkers:
     """The marker genes of one cell type, one entry of the
     `prepare_cell_markers()` dict.
@@ -103,6 +104,11 @@ class CellMarkers:
     negative: np.ndarray = dataclasses.field(
         default_factory=lambda: np.zeros(0, dtype=np.uint32)
     )
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "CellMarkers", n_positive=len(self.positive), n_negative=len(self.negative)
+        )
 
 
 @beartype
@@ -131,11 +137,11 @@ class ScTypeResults:
 
     def __repr__(self) -> str:
         """Summary of the scored cells and cell types."""
-        return "\n".join(
-            [
-                f"ScTypeResults: {self.n_cells} cells, {self.n_cell_types} cell types",
-                f"  Cell types: {', '.join(self.cell_types)}",
-            ]
+        return compact_repr(
+            "ScTypeResults",
+            n_cells=self.n_cells,
+            n_cell_types=self.n_cell_types,
+            cell_types=self.cell_types,
         )
 
 
@@ -170,20 +176,16 @@ class ScTypeCellResults:
 
     def __repr__(self) -> str:
         """Summary of the calls and the Unknown cells."""
-        lines = [
-            f"ScTypeCellResults: {self.assignments.len()} cells, "
-            f"{len(self.cell_types)} cell types",
-            f"  Unknown cells:  {self.assignments.null_count()}",
-            f"  Smoothing used: {'TRUE' if self.agreement is not None else 'FALSE'}",
-        ]
-        if self.composition is None:
-            lines.append("  Cluster composition: not calculated")
-        else:
-            lines.append(
-                f"  Mixed clusters: {int(self.composition['cluster_mixed'].sum())} out "
-                f"of {self.composition.height}"
-            )
-        return "\n".join(lines)
+        comp = self.composition
+        return compact_repr(
+            "ScTypeCellResults",
+            n_cells=self.assignments.len(),
+            n_cell_types=len(self.cell_types),
+            n_unknown=self.assignments.null_count(),
+            smoothed=self.agreement is not None,
+            n_mixed_clusters=None if comp is None else int(comp["cluster_mixed"].sum()),
+            n_clusters=None if comp is None else comp.height,
+        )
 
 
 @beartype
@@ -235,18 +237,16 @@ class SymphonyReference:
 
     def __repr__(self) -> str:
         """Summary of the reference."""
-        labels = "none" if self.labels is None else ", ".join(self.labels.columns)
-        return "\n".join(
-            [
-                "Symphony reference",
-                f"  Harmony backend: {self.harmony_backend}",
-                f"  No HVGs: {self.loadings.shape[0]}",
-                f"  No PCs: {self.loadings.shape[1]}",
-                f"  No clusters: {self.centroids.shape[0]}",
-                f"  Batch variables: {', '.join(self.batch_vars)}",
-                f"  Slim: {'TRUE' if self.slim else 'FALSE'}",
-                f"  Labels: {labels}",
-            ]
+        return compact_repr(
+            "SymphonyReference",
+            n_hvgs=self.loadings.shape[0],
+            n_pcs=self.loadings.shape[1],
+            n_clusters=self.centroids.shape[0],
+            n_cells=self.z_corr.shape[0],
+            harmony_backend=self.harmony_backend,
+            batch_vars=self.batch_vars,
+            slim=self.slim,
+            labels=None if self.labels is None else self.labels.columns,
         )
 
 

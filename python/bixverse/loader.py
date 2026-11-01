@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 import numpy as np
 from beartype import beartype
 
+from bixverse._core.repr import compact_repr
+
 from . import _bixverse
 from ._validate import check_indices
 
@@ -31,6 +33,15 @@ class Batch(NamedTuple):
     indptr: np.ndarray | None
     shape: tuple[int, int]
     cell_ids: np.ndarray
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "Batch",
+            n_cells=len(self.cell_ids),
+            shape=self.shape,
+            sparse=self.is_sparse,
+            layers=[n for n in ("raw", "norm") if getattr(self, n) is not None],
+        )
 
     @property
     def is_sparse(self) -> bool:
@@ -187,4 +198,6 @@ class CellLoader:
             yield Batch(raw, norm, indices, indptr, shape, cell_ids)
 
     def __repr__(self) -> str:
-        return f"CellLoader(n_cells={len(self._indices)}, n_batches={len(self)})"
+        return compact_repr(
+            "CellLoader", n_cells=len(self._indices), n_batches=len(self)
+        )

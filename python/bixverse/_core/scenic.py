@@ -32,6 +32,7 @@ from beartype import BeartypeConf, beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args, csr_subset
 from bixverse._core.pathways import Hotspot, ScMatrixRes, _gene_idx, _streaming
+from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc
 from bixverse.params import (
     CistargetParams,
@@ -92,15 +93,13 @@ class ScenicGrn:
 
     def __repr__(self) -> str:
         """A short summary of the results."""
-        return "\n".join(
-            [
-                "ScenicGrn (GRN results)",
-                f"  No genes:                 {len(self.gene_ids)}",
-                f"  No TFs:                   {len(self.tf_ids)}",
-                f"  Applied learner:          {self.params.learner_type}",
-                f"  TF to gene generated:     {self.tf_to_gene_results.height > 0}",
-                f"  CisTarget res generated:  {self.cis_targets_results.height > 0}",
-            ]
+        return compact_repr(
+            "ScenicGrn",
+            n_genes=len(self.gene_ids),
+            n_tfs=len(self.tf_ids),
+            learner=self.params.learner_type,
+            tf_to_gene=self.tf_to_gene_results.height > 0,
+            cis_targets=self.cis_targets_results.height > 0,
         )
 
     def frame(self) -> pl.DataFrame:
@@ -128,10 +127,11 @@ class RegulonBinarisation:
     thresholds: pl.DataFrame
 
     def __repr__(self) -> str:
-        n_bi = int(self.thresholds["bimodal"].sum())
-        return (
-            f"RegulonBinarisation: {self.binary.height} cells, "
-            f"{self.thresholds.height} regulons ({n_bi} bimodal)"
+        return compact_repr(
+            "RegulonBinarisation",
+            n_cells=self.binary.height,
+            n_regulons=self.thresholds.height,
+            n_bimodal=int(self.thresholds["bimodal"].sum()),
         )
 
 

@@ -29,6 +29,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
+from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc
 from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
 
@@ -92,19 +93,16 @@ class NmfResult:
 
     def __repr__(self) -> str:
         """A summary of the run."""
-        n_iter = "NA" if self.n_iter is None else str(self.n_iter)
-        return "\n".join(
-            [
-                "NmfResult (single-run HALS NMF)",
-                f"  Source class:     {self.source_class}",
-                f"  No genes:         {self.w.shape[0]}",
-                f"  No cells:         {self.h.shape[1]}",
-                f"  No components:    {self.w.shape[1]}",
-                f"  Final loss:       {self.final_loss:.4g}",
-                f"  Iterations:       {n_iter}",
-                f"  Converged:        {self.converged}",
-                f"  Preprocessing:    {self.params['preprocessing']}",
-            ]
+        return compact_repr(
+            "NmfResult",
+            source_class=self.source_class,
+            n_genes=self.w.shape[0],
+            n_cells=self.h.shape[1],
+            k=self.w.shape[1],
+            final_loss=round(self.final_loss, 4),
+            n_iter=self.n_iter,
+            converged=self.converged,
+            preprocessing=self.params.get("preprocessing"),
         )
 
 
@@ -142,22 +140,18 @@ class StabilisedNmfResult:
 
     def __repr__(self) -> str:
         """A summary of the restarts, the best run 0-based."""
-        n_runs = len(self.h_per_run)
-        return "\n".join(
-            [
-                "StabilisedNmfResult (multi-run HALS NMF)",
-                f"  Source class:     {self.source_class}",
-                f"  No genes:         {self.w_all.shape[0]}",
-                f"  No cells:         {self.h_per_run[0].shape[1]}",
-                f"  No components:    {self.params['k']}",
-                f"  No runs:          {n_runs}",
-                f"  No converged:     {sum(self.converged)} / {n_runs}",
-                f"  Loss range:       [{self.losses.min():.4g}, "
-                f"{self.losses.max():.4g}]",
-                f"  Best run:         {self.best_idx} (loss = "
-                f"{self.losses[self.best_idx]:.4g})",
-                f"  Preprocessing:    {self.params['preprocessing']}",
-            ]
+        has_runs = len(self.losses) > 0
+        return compact_repr(
+            "StabilisedNmfResult",
+            source_class=self.source_class,
+            n_genes=self.w_all.shape[0],
+            n_cells=self.h_per_run[0].shape[1] if self.h_per_run else 0,
+            k=self.params.get("k"),
+            n_runs=len(self.h_per_run),
+            n_converged=sum(self.converged),
+            best_run=self.best_idx,
+            best_loss=round(float(self.losses[self.best_idx]), 4) if has_runs else None,
+            preprocessing=self.params.get("preprocessing"),
         )
 
 
@@ -207,20 +201,18 @@ class ConsensusNmfResult:
 
     def __repr__(self) -> str:
         """A summary of the consensus fit."""
-        return "\n".join(
-            [
-                "ConsensusNmfResult (consensus HALS NMF)",
-                f"  Source class:     {self.source_class}",
-                f"  No genes:         {self.w.shape[0]}",
-                f"  No cells:         {self.h.shape[1]}",
-                f"  No components:    {self.w.shape[1]}",
-                f"  No runs:          {len(self.rel_run_errors)}",
-                f"  Stability:        {self.stability:.4g}",
-                f"  Relative error:   {self.rel_error:.4g}",
-                f"  Dropped:          {self.n_dropped} / {self.clusters.height} "
-                "components",
-                f"  Preprocessing:    {self.params['preprocessing']}",
-            ]
+        return compact_repr(
+            "ConsensusNmfResult",
+            source_class=self.source_class,
+            n_genes=self.w.shape[0],
+            n_cells=self.h.shape[1],
+            k=self.w.shape[1],
+            n_runs=len(self.rel_run_errors),
+            stability=round(self.stability, 4),
+            rel_error=round(self.rel_error, 4),
+            n_dropped=self.n_dropped,
+            n_components=self.clusters.height,
+            preprocessing=self.params.get("preprocessing"),
         )
 
 
@@ -245,22 +237,21 @@ class NmfKSweepResult:
         """A summary of the sweep."""
         f = self.frame
         usable = f.filter(pl.col("stability").is_not_null())
-        lines = [
-            "NmfKSweepResult (consensus NMF k sweep)",
-            f"  Source class:     {self.source_class}",
-            f"  k range:          {f['k'].min()} to {f['k'].max()}",
-            f"  No runs per k:    {self.params['n_runs']}",
-        ]
-        if usable.height:
-            best = usable.sort("stability", descending=True, maintain_order=True).row(
+        best = (
+            usable.sort("stability", descending=True, maintain_order=True).row(
                 0, named=True
             )
-            lines.append(
-                f"  Most stable k:    {best['k']} (stability = {best['stability']:.4g})"
-            )
-        else:
-            lines.append("  Most stable k:    none, every k failed the consensus step")
-        return "\n".join([*lines, "", str(f)])
+            if usable.height
+            else None
+        )
+        return compact_repr(
+            "NmfKSweepResult",
+            source_class=self.source_class,
+            k_range=[f["k"].min(), f["k"].max()],
+            n_runs=self.params.get("n_runs"),
+            best_k=None if best is None else best["k"],
+            best_stability=None if best is None else round(best["stability"], 4),
+        )
 
 
 ###########

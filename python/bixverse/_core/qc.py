@@ -30,6 +30,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 
 ###########
@@ -117,7 +118,7 @@ def _first_seen(groups: np.ndarray) -> list[str]:
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class MadOutlier:
     """MAD outlier calls on one metric.
 
@@ -132,6 +133,17 @@ class MadOutlier:
     median: float
     upper_threshold: float | None
     lower_threshold: float | None
+
+    def __repr__(self) -> str:
+        upper, lower = self.upper_threshold, self.lower_threshold
+        return compact_repr(
+            "MadOutlier",
+            n_values=len(self.outlier),
+            n_outliers=int(self.outlier.sum()),
+            median=round(self.median, 4),
+            lower_threshold=None if lower is None else round(lower, 4),
+            upper_threshold=None if upper is None else round(upper, 4),
+        )
 
 
 @beartype
@@ -219,7 +231,7 @@ def _per_group_qc_outlier(
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CellQc:
     """Outlier calls over several per-cell metrics.
 
@@ -253,6 +265,14 @@ class CellQc:
     hard_thresholds: dict[str, dict[str, float]] | None
     combined: np.ndarray
     per_group_stats: pl.DataFrame | None
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "CellQc",
+            n_cells=len(self.cell_idx),
+            n_flagged=int(self.combined.sum()),
+            metrics=list(self.metrics),
+        )
 
     @beartype
     def final(self, metric: str) -> np.ndarray:

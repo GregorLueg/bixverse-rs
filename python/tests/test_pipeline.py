@@ -117,26 +117,27 @@ def test_step_defaults_match_their_functions(step, fn, skip):
             assert p.default == want[name].default, name
 
 
-def test_repr_matches_r_layout():
+def test_repr_layout():
     s = pipeline.step_hvg(hvg_no=30)
     assert repr(s) == (
-        "<Step> hvg(hvg_no=30, hvg_params=None, streaming=None, verbose=False)"
+        "Step(\n"
+        "  name='hvg',\n"
+        "  kwargs={'hvg_no': 30, 'hvg_params': None, 'streaming': None, "
+        "'verbose': False},\n"
+        ")"
     )
     p = pipeline.step_hvg(hvg_no=30) >> pipeline.step_metacells(
         "bootstrapped", params=BT, target_size=1e4
     )
-    assert repr(p).splitlines() == [
-        "<Pipeline> 2 steps",
-        "  1. hvg                       "
-        "hvg_no=30, hvg_params=None, streaming=None, verbose=False",
-        "  2. metacells (bootstrapped)  "
-        "params=<BtMetacellsParams>, target_size=10000.0",
-    ]
+    assert repr(p) == ("Pipeline(n_steps=2, steps=['hvg', 'metacells (bootstrapped)'])")
     one = pipeline.Pipeline((pipeline.step_harmony("batch_index"),))
-    assert repr(one).splitlines()[0] == "<Pipeline> 1 step"
-    assert repr(pipeline.Pipeline()) == "<Pipeline> 0 steps\n  (empty)"
-    assert "hvg=[0, 1, 2]" in repr(pipeline.step_pca(10, hvg=[0, 1, 2]))
-    assert "hvg=<ndarray>" in repr(pipeline.step_pca(10, hvg=np.arange(5)))
+    assert "n_steps=1" in repr(one)
+    assert repr(pipeline.Pipeline()) == "Pipeline(n_steps=0, steps=[])"
+    assert "'hvg': [0, 1, 2]" in repr(pipeline.step_pca(10, hvg=[0, 1, 2]))
+    assert "'hvg': 'ndarray'" in repr(pipeline.step_pca(10, hvg=np.arange(5)))
+    assert "'params': 'BtMetacellsParams'" in repr(
+        pipeline.step_metacells("bootstrapped", params=BT, target_size=1e4)
+    )
 
 
 ##############

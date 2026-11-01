@@ -34,6 +34,7 @@ from bixverse import _bixverse
 from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.qc import _auto_streaming
+from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse.params import (
     AucellParams,
@@ -96,8 +97,12 @@ class ScMatrixRes:
         )
 
     def __repr__(self) -> str:
-        n, m = self.shape
-        return f"ScMatrixRes: {n} cells x {m} gene sets ({', '.join(self.columns)})"
+        return compact_repr(
+            "ScMatrixRes",
+            n_cells=self.shape[0],
+            n_sets=self.shape[1],
+            index_col=self.index_col,
+        )
 
 
 @beartype
@@ -117,8 +122,9 @@ class LmActivityRes:
     fdr: ScMatrixRes
 
     def __repr__(self) -> str:
-        n, m = self.es.shape
-        return f"LmActivityRes: {n} cells x {m} sources (es, pvals, fdr)"
+        return compact_repr(
+            "LmActivityRes", n_cells=self.es.shape[0], n_sources=self.es.shape[1]
+        )
 
 
 @beartype
@@ -137,8 +143,11 @@ class VisionAutocorRes:
     auto_cor: pl.DataFrame
 
     def __repr__(self) -> str:
-        n, m = self.vision_matrix.shape
-        return f"VisionAutocorRes: {n} cells x {m} gene sets"
+        return compact_repr(
+            "VisionAutocorRes",
+            n_cells=self.vision_matrix.shape[0],
+            n_sets=self.vision_matrix.shape[1],
+        )
 
 
 @beartype
@@ -164,26 +173,16 @@ class Hotspot:
 
     def __repr__(self) -> str:
         """A summary of the genes, cells and modules."""
-        n_genes = len(self.genes)
-        used = self.params["used_cells"]
-        assert isinstance(used, tuple)
-        lines = [
-            "Hotspot gene-gene local correlation results",
-            f"  Genes: {n_genes}",
-            f"  Cells: {len(used)}",
-        ]
+        used = self.params.get("used_cells")
         m = self.module_membership
-        if m is None:
-            lines.append(
-                "  Modules: not yet computed (see generate_hotspot_membership)"
-            )
-        else:
-            assigned = m["cluster_member"].drop_nulls()
-            lines.append(
-                f"  Modules: {assigned.n_unique()} ({assigned.len()} genes assigned, "
-                f"{n_genes - assigned.len()} unassigned)"
-            )
-        return "\n".join(lines)
+        assigned = None if m is None else m["cluster_member"].drop_nulls()
+        return compact_repr(
+            "Hotspot",
+            n_genes=len(self.genes),
+            n_cells=len(used) if isinstance(used, tuple) else None,
+            n_modules=None if assigned is None else assigned.n_unique(),
+            n_assigned=None if assigned is None else assigned.len(),
+        )
 
 
 ###########

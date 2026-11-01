@@ -35,6 +35,7 @@ from bixverse._core.multimodal import (
     modality_cache,
     require_adt,
 )
+from bixverse._core.repr import compact_repr
 from bixverse._core.state import CsrMatrix
 from bixverse._core.subset import ScOrMc
 from bixverse._core.traj import PagaRes
@@ -48,7 +49,7 @@ Layer = Literal["norm", "magic"]
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class GraphPlotData:
     """A graph laid out on an embedding: the PAGA or Milo node-link plot.
 
@@ -62,6 +63,14 @@ class GraphPlotData:
     nodes: pl.DataFrame
     edges: pl.DataFrame
     embedding: str
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "GraphPlotData",
+            n_nodes=self.nodes.height,
+            n_edges=self.edges.height,
+            embedding=self.embedding,
+        )
 
 
 ###########

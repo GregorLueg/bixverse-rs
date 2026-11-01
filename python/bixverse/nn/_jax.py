@@ -26,6 +26,8 @@ import optax
 from beartype import beartype
 from jax.scipy.special import gammaln
 
+from bixverse._core.repr import compact_repr
+
 from .._bixverse import CellReader
 from ._data import iterate_counts
 from ._params import (
@@ -119,7 +121,7 @@ def log_zinb_positive(
 ###########
 
 
-@dataclass
+@dataclass(repr=False)
 class Vae:
     """scVI on JAX: parameters, BatchNorm statistics and the batch count.
 
@@ -135,6 +137,14 @@ class Vae:
     params: dict
     state: dict
     n_batch: int
+
+    def __repr__(self) -> str:
+        leaves = jax.tree_util.tree_leaves(self.params)
+        return compact_repr(
+            "Vae",
+            n_batch=self.n_batch,
+            n_params=sum(int(np.size(x)) for x in leaves),
+        )
 
 
 @beartype

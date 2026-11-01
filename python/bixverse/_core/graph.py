@@ -37,6 +37,7 @@ from bixverse._core.multimodal import (
     require_fresh,
     stamp,
 )
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrMc, ScOrScSubset
@@ -65,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class KnnMetrics:
     """A kNN compared against a reference.
 
@@ -82,9 +83,17 @@ class KnnMetrics:
     final_recall: float
     final_ratio: float
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "KnnMetrics",
+            n_cells=len(self.all_matches),
+            final_recall=round(self.final_recall, 4),
+            final_ratio=round(self.final_ratio, 4),
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class FastClusters:
     """Fast clustering result.
 
@@ -103,6 +112,14 @@ class FastClusters:
     k_means_cluster: np.ndarray | None
     centroids: np.ndarray | None
     resolutions: tuple[float, ...]
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "FastClusters",
+            n_cells=self.memberships.height,
+            resolutions=list(self.resolutions),
+            n_centroids=None if self.centroids is None else len(self.centroids),
+        )
 
 
 ###########

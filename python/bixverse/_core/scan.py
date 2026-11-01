@@ -10,7 +10,7 @@ import re
 import tempfile
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +19,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.repr import compact_repr
 
 ###########
 # Globals #
@@ -67,7 +68,7 @@ class TenxH5Meta:
     n_genes: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Prescan:
     """The gene universe and per-file tasks of a multi-file load.
 
@@ -80,7 +81,12 @@ class Prescan:
     """
 
     universe: tuple[str, ...]
-    file_tasks: tuple[dict[str, object], ...] = field(repr=False)
+    file_tasks: tuple[dict[str, object], ...]
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "Prescan", n_genes=len(self.universe), n_files=len(self.file_tasks)
+        )
 
     @property
     def universe_size(self) -> int:

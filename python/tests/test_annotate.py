@@ -195,7 +195,7 @@ def test_reference_shapes(sc, reference):
     assert reference.centroids.shape == reference.c_cache.shape == (k, N_PCS)
     assert reference.r is not None and reference.r.shape == (k, sc.n_cells)
     np.testing.assert_allclose(reference.nr, reference.r.sum(axis=1), rtol=1e-4)
-    assert "Labels: cell_grp" in repr(reference)
+    assert "labels=['cell_grp']" in repr(reference)
 
 
 def test_save_load_round_trip(reference, tmp_path):

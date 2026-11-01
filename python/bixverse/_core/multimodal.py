@@ -33,6 +33,7 @@ import polars as pl
 from beartype import beartype
 
 from bixverse._core import db
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import Counts, SingleCells, _check_range
 from bixverse._core.state import (
     CsrMatrix,
@@ -62,7 +63,7 @@ MODALITY_ONLY_MM = "modality = '{}' is only supported for SingleCellsMultiModal.
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class DsbInfo:
     """What a DSB normalisation estimated on the way.
 
@@ -87,9 +88,17 @@ class DsbInfo:
     dsb_params: DsbParams
     scale_factor: str
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "DsbInfo",
+            n_proteins=len(self.protein_background_mean),
+            isotype_names=list(self.isotype_names),
+            scale_factor=self.scale_factor,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class AdtCounts:
     """ADT counts with their normalisation.
 
@@ -126,11 +135,11 @@ class AdtCounts:
 
     def __repr__(self) -> str:
         n, p = self.raw_counts.shape
-        return f"AdtCounts(cells={n}, proteins={p}, type={self.type!r})"
+        return compact_repr("AdtCounts", n_cells=n, n_proteins=p, type=self.type)
 
 
 @beartype
-@dataclass
+@dataclass(repr=False)
 class WnnSlot:
     """The weighted nearest neighbour integration.
 
@@ -147,6 +156,14 @@ class WnnSlot:
     weights: pl.DataFrame
     modality_1: str
     modality_2: str
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "WnnSlot",
+            n_cells=self.weights.height,
+            modalities=[self.modality_1, self.modality_2],
+            cache=self.cache,
+        )
 
 
 #########################

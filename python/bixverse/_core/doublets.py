@@ -35,6 +35,7 @@ from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.ingest import _prepare
 from bixverse._core.qc import _auto_streaming
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, Selection, SingleCells
 from bixverse.params import (
     BoostParams,
@@ -76,23 +77,30 @@ logger = logging.getLogger(__name__)
 ###########
 
 
-@beartype
-def _rate_line(n_cells: int, n_doublets: int) -> str:
-    """`N cells, M doublets (P%)`."""
-    return f"{n_cells} cells, {n_doublets} doublets ({100 * n_doublets / n_cells:.1f}%)"
+def _rounded(x: GroupScalar) -> float | dict[str, float]:
+    """A scalar, or each value of a per-group dict, to 4 places."""
+    if isinstance(x, dict):
+        return {g: round(v, 4) for g, v in x.items()}
+    return round(x, 4)
 
 
-@beartype
-def _scalar(x: GroupScalar) -> float:
-    """An ungrouped result's scalar."""
-    assert isinstance(x, float)
-    return x
-
-
-@beartype
-def _group_header(name: str, group_by: str, n_groups: int, rest: str) -> str:
-    """The first line of a grouped result's repr."""
-    return f"{name} (grouped by '{group_by}', {n_groups} groups): {rest}"
+def _call_summary(
+    calls: np.ndarray, cell_groups: np.ndarray | None, group_by: str | None
+) -> dict[str, object]:
+    """The call counts shared by the doublet reprs, per group when grouped."""
+    n, d = len(calls), int(calls.sum())
+    out: dict[str, object] = {
+        "n_cells": n,
+        "n_doublets": d,
+        "doublet_rate": round(d / n, 4) if n else 0.0,
+    }
+    if group_by is not None and cell_groups is not None:
+        out["group_by"] = group_by
+        out["doublets_per_group"] = {
+            g: int(calls[cell_groups == g].sum())
+            for g in dict.fromkeys(cell_groups.tolist())
+        }
+    return out
 
 
 @beartype
@@ -141,47 +149,20 @@ class ScrubletRes:
 
     def __repr__(self) -> str:
         """Summary of the calls, per group when grouped."""
-        n = len(self.predicted_doublets)
-        d = int(self.predicted_doublets.sum())
-        if self.group_by is not None:
-            assert isinstance(self.threshold, dict) and self.cell_groups is not None
-            lines = [
-                _group_header(
-                    "ScrubletRes",
-                    self.group_by,
-                    len(self.threshold),
-                    _rate_line(n, d),
-                ),
-                "Per-group:",
-            ]
-            for g, thr in self.threshold.items():
-                mask = self.cell_groups == g
-                calls = self.predicted_doublets[mask]
-                lines.append(
-                    f"  - {g}: {_rate_line(int(mask.sum()), int(calls.sum()))}, "
-                    f"threshold = {thr:.4f}"
-                )
-        else:
-            assert isinstance(self.doublet_scores_sim, np.ndarray)
-            lines = [
-                f"ScrubletRes: {_rate_line(n, d)}",
-                f"  Threshold:              {_scalar(self.threshold):.4f}",
-                "  Detected doublet rate:  "
-                f"{100 * _scalar(self.detected_doublet_rate):.1f}%",
-                "  Detectable fraction:    "
-                f"{100 * _scalar(self.detectable_doublet_fraction):.1f}%",
-                "  Overall doublet rate:   "
-                f"{100 * _scalar(self.overall_doublet_rate):.1f}%",
-                f"  Simulated doublets:     {len(self.doublet_scores_sim)}",
-            ]
-        extras = [
-            name
-            for name, value in (("PCA", self.pca), ("doublet pairs", self.pair_1))
-            if value is not None
-        ]
-        if extras:
-            lines.append(f"  Optional data:          {', '.join(extras)}")
-        return "\n".join(lines)
+        sim = self.doublet_scores_sim
+        n_sim = (
+            {g: len(v) for g, v in sim.items()} if isinstance(sim, dict) else len(sim)
+        )
+        return compact_repr(
+            "ScrubletRes",
+            **_call_summary(self.predicted_doublets, self.cell_groups, self.group_by),
+            threshold=_rounded(self.threshold),
+            detectable_fraction=_rounded(self.detectable_doublet_fraction),
+            overall_doublet_rate=_rounded(self.overall_doublet_rate),
+            n_simulated=n_sim,
+            pca=self.pca is not None,
+            pairs=self.pair_1 is not None,
+        )
 
 
 @beartype
@@ -207,27 +188,15 @@ class BoostRes:
 
     def __repr__(self) -> str:
         """Summary of the calls, per group when grouped."""
-        n, d = len(self.doublet), int(self.doublet.sum())
-        if self.group_by is not None:
-            assert self.cell_groups is not None
-            groups = list(dict.fromkeys(self.cell_groups.tolist()))
-            lines = [
-                _group_header("BoostRes", self.group_by, len(groups), _rate_line(n, d)),
-                "Per-group:",
-            ]
-            for g in groups:
-                mask = self.cell_groups == g
-                lines.append(
-                    f"  - {g}: "
-                    f"{_rate_line(int(mask.sum()), int(self.doublet[mask].sum()))}"
-                )
-            return "\n".join(lines)
-        return "\n".join(
-            [
-                f"BoostRes: {_rate_line(n, d)}",
-                f"  Score range: [{self.doublet_score.min():.4f}, "
-                f"{self.doublet_score.max():.4f}]",
-            ]
+        score_range = (
+            [round(float(f(self.doublet_score)), 4) for f in (np.min, np.max)]
+            if len(self.doublet_score)
+            else None
+        )
+        return compact_repr(
+            "BoostRes",
+            **_call_summary(self.doublet, self.cell_groups, self.group_by),
+            score_range=score_range,
         )
 
 
@@ -266,42 +235,12 @@ class ScDblFinderRes:
 
     def __repr__(self) -> str:
         """Summary of the calls, per group when grouped."""
-        n = len(self.predicted_doublets)
-        d = int(self.predicted_doublets.sum())
-        n_clusters = len(np.unique(self.cluster_labels))
-        has_features = "TRUE" if self.features is not None else "FALSE"
-        if self.group_by is not None:
-            assert isinstance(self.threshold, dict) and self.cell_groups is not None
-            lines = [
-                _group_header(
-                    "ScDblFinderRes",
-                    self.group_by,
-                    len(self.threshold),
-                    _rate_line(n, d),
-                ),
-                "Per-group:",
-            ]
-            for g, thr in self.threshold.items():
-                mask = self.cell_groups == g
-                calls = self.predicted_doublets[mask]
-                lines.append(
-                    f"  - {g}: {_rate_line(int(mask.sum()), int(calls.sum()))}, "
-                    f"threshold = {thr:.4f}"
-                )
-            lines += [
-                f"  Total clusters:    {n_clusters} (prefixed)",
-                f"  Features available: {has_features}",
-            ]
-            return "\n".join(lines)
-        return "\n".join(
-            [
-                f"ScDblFinderRes: {_rate_line(n, d)}",
-                f"  Threshold:        {_scalar(self.threshold):.4f}",
-                f"  Score range:      [{self.doublet_score.min():.4f}, "
-                f"{self.doublet_score.max():.4f}]",
-                f"  Final clusters:   {n_clusters}",
-                f"  Features available: {has_features}",
-            ]
+        return compact_repr(
+            "ScDblFinderRes",
+            **_call_summary(self.predicted_doublets, self.cell_groups, self.group_by),
+            threshold=_rounded(self.threshold),
+            n_clusters=len(np.unique(self.cluster_labels)),
+            features=self.features is not None,
         )
 
 

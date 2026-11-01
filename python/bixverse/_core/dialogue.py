@@ -28,6 +28,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.subset import ScOrMc
 from bixverse.params import (
@@ -105,23 +106,17 @@ class DialogueResult:
             .to_list()
         )
         sig = self.signatures["list"]
-        lines = [
-            "DialogueResult (multicellular programmes)",
-            f"  Source class:     {self.source_class}",
-            f"  Cell types:       {len(self.cell_types)} "
-            f"({', '.join(self.cell_types)})",
-            f"  Shared samples:   {len(self.shared_samples)}",
-            f"  Programmes:       {k}",
-            *(
-                f"    mcp_{i:02d} - worst pair p: {worst[i]:.4g} | spans "
-                f"{len(self.mcp_cell_types[i])} cell type(s)"
-                for i in range(k)
-            ),
-            f"  Genes with a verdict: {self.verdicts.height}",
-            f"  Signature genes:  {(sig == 'permissive').sum()} permissive | "
-            f"{(sig == 'strict').sum()} strict",
-        ]
-        return "\n".join(lines)
+        return compact_repr(
+            "DialogueResult",
+            source_class=self.source_class,
+            cell_types=list(self.cell_types),
+            n_shared_samples=len(self.shared_samples),
+            n_programmes=k,
+            worst_pair_p=[round(p, 4) for p in worst],
+            n_verdicts=self.verdicts.height,
+            n_permissive=int((sig == "permissive").sum()),
+            n_strict=int((sig == "strict").sum()),
+        )
 
 
 @beartype

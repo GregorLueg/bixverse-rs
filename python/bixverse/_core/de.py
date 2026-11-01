@@ -39,6 +39,7 @@ from bixverse._core.doublets import _as_character
 from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.integrate import _hard_state
 from bixverse._core.pp import _factor_codes, _obs_aligned
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import Selection, SingleCells
 from bixverse._core.state import CsrMatrix
 from bixverse._core.subset import ScOrScSubset
@@ -150,16 +151,14 @@ class ScSpecificMarkers:
     def __repr__(self) -> str:
         """Summary of the reference groups and their markers."""
         refs = self.summary["ref_grp"].unique(maintain_order=True).to_list()
-        return "\n".join(
-            [
-                f"ScSpecificMarkers: {len(refs)} reference "
-                f"{'group' if len(refs) == 1 else 'groups'}, "
-                f"{self.summary['gene_id'].n_unique()} genes tested",
-                f"  Column:      {self.params['column_of_interest']}",
-                f"  References:  {', '.join(refs)}",
-                f"  Alternative: {self.params['alternative']} | min. proportion: "
-                f"{self.params['min_prop']:.7g}",
-            ]
+        return compact_repr(
+            "ScSpecificMarkers",
+            n_references=len(refs),
+            n_genes=self.summary["gene_id"].n_unique(),
+            column=self.params["column_of_interest"],
+            references=refs,
+            alternative=self.params["alternative"],
+            min_prop=self.params["min_prop"],
         )
 
 
@@ -192,21 +191,22 @@ class ScNebula:
         method = to_rust(p["nebula_params"])["nebula_method"]
         failed = int((res["convergence"] <= NEBULA_FAILED_CONVERGENCE).sum())
         collapsed = int(res["sigma_at_bound"].sum())
-        return "\n".join(
-            [
-                f"ScNebula: {res.height} genes fitted, "
-                f"{self.coefficients.width - 1} coefficients",
-                f"  Method:   {method} | subject column: {p['subject_col']}",
-                f"  Tested:   {p['tested']}",
-                f"  Subjects: {p['n_subjects']} | cells: {p['n_cells']}",
-                f"  Warnings: {failed} did not converge, {collapsed} collapsed to "
-                "a plain NB",
-            ]
+        return compact_repr(
+            "ScNebula",
+            n_genes=res.height,
+            n_coefficients=self.coefficients.width - 1,
+            method=method,
+            subject_col=p["subject_col"],
+            tested=p["tested"],
+            n_subjects=p["n_subjects"],
+            n_cells=p["n_cells"],
+            n_failed=failed,
+            n_collapsed=collapsed,
         )
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class MiloR:
     """Milo neighbourhoods and their test.
 
@@ -233,9 +233,18 @@ class MiloR:
     params: dict[str, object]
     nhoods_info: pl.DataFrame | None = None
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "MiloR",
+            n_cells=self.nhoods.shape[0],
+            n_nhoods=self.nhoods.shape[1],
+            n_samples=len(self.samples),
+            tested=self.nhoods_info is not None,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class MeldRes:
     """MELD densities.
 
@@ -249,9 +258,16 @@ class MeldRes:
     raw_scores: pl.DataFrame
     norm_scores: pl.DataFrame
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "MeldRes",
+            n_cells=self.raw_scores.height,
+            n_samples=self.raw_scores.width - 1,
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class PseudoBulked:
     """Pseudobulked counts.
 
@@ -265,6 +281,14 @@ class PseudoBulked:
     counts: np.ndarray | CsrMatrix
     samples: tuple[str, ...]
     gene_ids: np.ndarray
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "PseudoBulked",
+            n_samples=len(self.samples),
+            n_genes=len(self.gene_ids),
+            sparse=isinstance(self.counts, CsrMatrix),
+        )
 
 
 ###########

@@ -36,6 +36,7 @@ from bixverse._core.ingest import _prepare
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.multimodal import Modality, modality_cache, require_fresh, stamp
 from bixverse._core.qc import _auto_streaming
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import MagicLayer
 from bixverse._core.subset import ScOrMc, ScOrScSubset
@@ -83,7 +84,7 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ResidualFit:
     """A fitted residual model.
 
@@ -100,6 +101,17 @@ class ResidualFit:
     params: SctransformParams | AprParams
     group_column: str | None
     covariate_names: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ResidualFit",
+            method=self.method,
+            n_cells=len(self.cell_indices),
+            n_genes=len(self.genes),
+            n_groups=self.n_groups,
+            group_column=self.group_column,
+            covariates=list(self.covariate_names),
+        )
 
     @property
     def cell_indices(self) -> np.ndarray:
@@ -118,7 +130,7 @@ class ResidualFit:
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class BatchHvg:
     """Batch-aware HVGs.
 
@@ -133,9 +145,16 @@ class BatchHvg:
     hvg_gene_idx: np.ndarray
     hvg_data: pl.DataFrame
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "BatchHvg",
+            n_hvgs=len(self.hvg_genes),
+            n_batches=self.hvg_data["batch"].n_unique(),
+        )
+
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CorrectedCounts:
     """A corrected gene-major store written without its cell-major twin.
 
@@ -150,6 +169,14 @@ class CorrectedCounts:
     genes: np.ndarray
     n_genes: int
     n_cells: int
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "CorrectedCounts",
+            n_cells=self.n_cells,
+            n_genes=self.n_genes,
+            f_path=str(self.f_path),
+        )
 
 
 ###########

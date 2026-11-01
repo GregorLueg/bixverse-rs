@@ -45,6 +45,7 @@ from bixverse._core.metacells_generate import (
 )
 from bixverse._core.multimodal import CacheModality, Modality
 from bixverse._core.pp import calculate_pca, find_hvg
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.subset import SingleCellsSubset
 from bixverse.params import (
@@ -81,24 +82,18 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-def _format_value(v: object) -> str:
-    """Scalars and short sequences of scalars verbatim, the rest as `<type>`."""
+def _short_value(v: object) -> object:
+    """Scalars and short sequences of scalars verbatim, the rest as the type name."""
     scalar = (type(None), bool, int, float, str)
     if isinstance(v, scalar):
-        return repr(v)
+        return v
     if (
         isinstance(v, list | tuple)
         and len(v) <= 4
         and all(isinstance(x, scalar) for x in v)
     ):
-        return repr(v)
-    return f"<{type(v).__name__}>"
-
-
-@beartype
-def _format_kwargs(kwargs: Mapping[str, object]) -> str:
-    """One line of `name=value` pairs."""
-    return ", ".join(f"{k}={_format_value(v)}" for k, v in kwargs.items())
+        return v
+    return type(v).__name__
 
 
 @beartype
@@ -178,7 +173,11 @@ class Step:
         return Pipeline((self, other))
 
     def __repr__(self) -> str:
-        return f"<Step> {self.name}({_format_kwargs(self.kwargs)})"
+        return compact_repr(
+            "Step",
+            name=self.name,
+            kwargs={k: _short_value(v) for k, v in self.kwargs.items()},
+        )
 
 
 @beartype
@@ -209,16 +208,11 @@ class Pipeline:
         return len(self.steps)
 
     def __repr__(self) -> str:
-        n = len(self.steps)
-        lines = [f"<Pipeline> {n} step{'' if n == 1 else 's'}"]
-        if n == 0:
-            return "\n".join([*lines, "  (empty)"])
-        width = max(len(s.name) for s in self.steps)
-        lines += [
-            f"  {i}. {s.name:<{width}}  {_format_kwargs(s.kwargs)}"
-            for i, s in enumerate(self.steps, start=1)
-        ]
-        return "\n".join(lines)
+        return compact_repr(
+            "Pipeline",
+            n_steps=len(self.steps),
+            steps=[s.name for s in self.steps],
+        )
 
 
 #########

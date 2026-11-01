@@ -125,7 +125,7 @@ def test_find_specific_markers_record(sc):
     comp = de.get_marker_comparisons(res)
     assert set(comp["rival_grp"].unique()) == {"cell_type_1", "cell_type_2"}
     assert comp.height == 2 * de.get_marker_summary(res).height
-    assert repr(res).startswith("ScSpecificMarkers: 1 reference group, ")
+    assert repr(res).startswith("ScSpecificMarkers(") and "n_references=1" in repr(res)
 
 
 def test_find_specific_markers_checks(sc):
@@ -216,7 +216,7 @@ def test_nebula_record(sc):
     assert res.results["gene_id"].to_list() == res.coefficients["gene_id"].to_list()
     assert "cell_overdispersion_shrunk" in res.results.columns
     assert de.get_params(res)["n_subjects"] == 6
-    assert repr(res).splitlines()[1] == "  Method:   ln | subject column: sample_id"
+    assert "method='ln'" in repr(res) and "subject_col='sample_id'" in repr(res)
     plain = de.nebula(
         sc,
         "sample_id",

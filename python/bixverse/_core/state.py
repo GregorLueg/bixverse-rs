@@ -24,6 +24,8 @@ import numpy as np
 import polars as pl
 from beartype import beartype
 
+from bixverse._core.repr import compact_repr
+
 ###########
 # Globals #
 ###########
@@ -116,7 +118,7 @@ def _lookup(ids: np.ndarray, wanted: Sequence[str], what: str) -> np.ndarray:
 
 
 @beartype
-@dataclass
+@dataclass(repr=False)
 class ScMap:
     """Ids and index sets of an experiment.
 
@@ -132,6 +134,15 @@ class ScMap:
     gene_ids: np.ndarray
     cells_to_keep: np.ndarray
     hvg: np.ndarray | None = None
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ScMap",
+            n_cells=len(self.cell_ids),
+            n_genes=len(self.gene_ids),
+            n_kept=len(self.cells_to_keep),
+            n_hvgs=None if self.hvg is None else len(self.hvg),
+        )
 
     def __post_init__(self) -> None:
         """Coerce the index vectors to `uint32` and check their range.
@@ -178,7 +189,7 @@ class ScMap:
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class KnnGraph:
     """A kNN result.
 
@@ -192,6 +203,14 @@ class KnnGraph:
     indices: np.ndarray
     distances: np.ndarray
     dist_metric: str
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "KnnGraph",
+            n_cells=self.indices.shape[0],
+            k=self.indices.shape[1],
+            metric=self.dist_metric,
+        )
 
     def __post_init__(self) -> None:
         """Check dtypes and that both matrices have the same shape.
@@ -207,7 +226,7 @@ class KnnGraph:
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CsrMatrix:
     """A CSR sparse matrix as its three component vectors.
 
@@ -222,6 +241,9 @@ class CsrMatrix:
     indices: np.ndarray
     indptr: np.ndarray
     shape: tuple[int, int]
+
+    def __repr__(self) -> str:
+        return compact_repr("CsrMatrix", shape=self.shape, nnz=len(self.data))
 
     def __post_init__(self) -> None:
         """Check dtypes and that the components line up.
@@ -249,7 +271,7 @@ class CsrMatrix:
 
 
 @beartype
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class MagicLayer:
     """The MAGIC imputed layer.
 
@@ -260,6 +282,9 @@ class MagicLayer:
 
     data: np.ndarray
     features: np.ndarray
+
+    def __repr__(self) -> str:
+        return compact_repr("MagicLayer", shape=self.data.shape)
 
     def __post_init__(self) -> None:
         """Check the matrix and that one feature names each column.
@@ -306,7 +331,7 @@ def cells_hash(cells_to_keep: np.ndarray) -> str:
 
 
 @beartype
-@dataclass
+@dataclass(repr=False)
 class ScCache:
     """Analysis results held in memory.
 
@@ -339,6 +364,18 @@ class ScCache:
     _embedding_refs: dict[str, weakref.ref] = field(
         default_factory=dict, repr=False, compare=False
     )
+
+    def __repr__(self) -> str:
+        pca = self.pca_factors
+        return compact_repr(
+            "ScCache",
+            pca=None if pca is None else pca.shape,
+            embeddings=list(self.embeddings),
+            knn=self.knn,
+            connectivities=self.connectivities,
+            magic=self.magic,
+            residual_fit=self.residual_fit is not None,
+        )
 
     def __setattr__(self, name: str, value: object) -> None:
         """Assign a slot, dropping the stamp of a replaced payload."""

@@ -114,7 +114,7 @@ def test_influence_follows_the_network():
     col = {g: j for j, g in enumerate(inf.gene_ids)}
     assert m[0, col["G1"]] > 0 and m[0, col["G4"]] == 0
     assert m[1, col["G4"]] > 0 and m[1, col["G1"]] == 0
-    assert "Damping factor:     0.500" in repr(inf)
+    assert "damping_factor=0.5" in repr(inf)
 
 
 def test_influence_rejects_unknown_seeds():
@@ -133,7 +133,7 @@ def test_as_ligand_target_influence_transposes_nichenetr():
     assert inf.gene_ids == ("G1", "G2", "G3")
     assert inf.ligand_seeds == (("L1",), ("L2",))
     np.testing.assert_array_equal(inf.influence, ltm.T)
-    assert "Damping" not in repr(inf)
+    assert "damping_factor=None" in repr(inf)
     with pytest.raises(ValueError, match="unique"):
         lr.as_ligand_target_influence(ltm, ["G1", "G1", "G3"], ["L1", "L2"])
     with pytest.raises(ValueError, match="do not fit"):

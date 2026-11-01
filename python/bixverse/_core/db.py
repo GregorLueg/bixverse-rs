@@ -31,6 +31,7 @@ import polars as pl
 from beartype import beartype
 
 from bixverse import _bixverse
+from bixverse._core.repr import compact_repr
 
 ###########
 # Globals #
@@ -75,7 +76,7 @@ class TableNotFoundError(Exception):
 ###########
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ParquetFrameInfo:
     """Description of a Parquet metadata table, as the Rust writer returns it.
 
@@ -94,6 +95,14 @@ class ParquetFrameInfo:
     categories: tuple[tuple[str, ...] | None, ...]
     skipped: tuple[str, ...] = ()
     n_rows: int = 0
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ParquetFrameInfo",
+            n_rows=self.n_rows,
+            n_columns=len(self.names),
+            n_skipped=len(self.skipped),
+        )
 
     @beartype
     def __post_init__(self) -> None:
@@ -115,7 +124,7 @@ class ParquetFrameInfo:
         return self.categories[i] if self.types[i] == "categorical" else None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ParquetPart:
     """One file of a multi-file load.
 
@@ -128,6 +137,14 @@ class ParquetPart:
     path: Path
     info: ParquetFrameInfo
     exp_id: str
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ParquetPart",
+            path=self.path.name,
+            exp_id=self.exp_id,
+            n_rows=self.info.n_rows,
+        )
 
 
 ##############

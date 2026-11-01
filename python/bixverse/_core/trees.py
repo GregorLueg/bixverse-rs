@@ -32,6 +32,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse.params import BonsaiParams, to_rust
 
@@ -87,26 +88,21 @@ class BonsaiTree:
     params: BonsaiParams
 
     def __repr__(self) -> str:
-        """A multi-line summary of the tree."""
+        """Summary of the tree."""
         leaves = self.nodes.filter(pl.col("is_leaf"))
-        n_leaves = leaves.height
-        n_cells = int(leaves["n_cells"].sum())
-        cells = f" ({n_cells} cells)" if n_cells > n_leaves else ""
-        seconds = " | ".join(
-            f"{s} {t:.1f}"
-            for s, t in zip(self.timings["stage"], self.timings["seconds"], strict=True)
-        )
-        return "\n".join(
-            [
-                f"BonsaiTree: {n_leaves} leaves{cells}, "
-                f"{self.nodes.height - n_leaves} inferred ancestors",
-                f"  Genes: {len(self.genes_used)} used, "
-                f"{len(self.genes_dropped)} dropped",
-                f"  Loglikelihood: {self.loglik:.1f}",
-                f"  Layout: {self.layout}"
-                + (" (hyperbolic)" if self.hyperbolic else ""),
-                f"  Seconds: {seconds}",
-            ]
+        timings = dict(zip(self.timings["stage"], self.timings["seconds"], strict=True))
+        total = timings.get("total")
+        return compact_repr(
+            "BonsaiTree",
+            n_leaves=leaves.height,
+            n_cells=int(leaves["n_cells"].sum()),
+            n_ancestors=self.nodes.height - leaves.height,
+            n_genes_used=len(self.genes_used),
+            n_genes_dropped=len(self.genes_dropped),
+            loglik=round(self.loglik, 1),
+            layout=self.layout,
+            hyperbolic=self.hyperbolic,
+            seconds=None if total is None else round(total, 1),
         )
 
 

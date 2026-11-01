@@ -37,6 +37,7 @@ from bixverse._core.multimodal import (
     require_fresh,
 )
 from bixverse._core.pp import _factor_codes
+from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import get_counts
 from bixverse._core.state import KnnGraph
 from bixverse._core.subset import ScOrMc
@@ -101,28 +102,21 @@ class PalantirRes:
         return list(self.terminal_states)
 
     def __repr__(self) -> str:
-        """A multi-line summary of the run."""
+        """Summary of the run; repair edges flag a disconnected kNN graph."""
         info = self.run_info
-        n_states = len(self.terminal_states)
-        lines = [
-            f"PalantirRes: {self.pseudotime.height} cells, {n_states} terminal "
-            f"{'state' if n_states == 1 else 'states'} ({info['modality']} modality)",
-            f"  Start cell: {self.start_cell} | waypoints: {info['n_waypoints']}",
-            f"  Converged: {info['converged']} ({info['iterations']} iterations)",
-            f"  Repair edges: {info['repair_edges']}, stranded waypoints: "
-            f"{info['stranded_waypoints']}",
-        ]
-        if info["repair_edges"]:
-            lines.append(
-                "  Note: the kNN graph was disconnected. Consider a larger knn."
-            )
-        if not info["eigen_converged"]:
-            lines.append(
-                "  Note: the diffusion eigensolve did not converge (residual "
-                f"{info['eigen_residual']:.2e}).\n         The embedding is "
-                "under-resolved, raise lanczos_max_restarts."
-            )
-        return "\n".join(lines)
+        return compact_repr(
+            "PalantirRes",
+            n_cells=self.pseudotime.height,
+            n_terminal_states=len(self.terminal_states),
+            modality=info.get("modality"),
+            start_cell=self.start_cell,
+            n_waypoints=info.get("n_waypoints"),
+            converged=info.get("converged"),
+            iterations=info.get("iterations"),
+            repair_edges=info.get("repair_edges"),
+            stranded_waypoints=info.get("stranded_waypoints"),
+            eigen_converged=info.get("eigen_converged"),
+        )
 
 
 @beartype
@@ -147,17 +141,15 @@ class PagaRes:
     params: dict[str, str]
 
     def __repr__(self) -> str:
-        """A multi-line summary; both graphs are symmetric, hence the halving."""
-        return "\n".join(
-            [
-                f"PagaRes: {self.sizes.height} clusters, "
-                f"{int(self.sizes['n_cells'].sum())} cells "
-                f"({self.params['modality']} modality)",
-                f"  Clustering: {self.params['cluster_col']}",
-                f"  Abstracted edges: {np.count_nonzero(self.connectivities) / 2:.0f}",
-                "  Spanning forest edges: "
-                f"{np.count_nonzero(self.connectivities_tree) / 2:.0f}",
-            ]
+        """Summary; both graphs are symmetric, hence the halving."""
+        return compact_repr(
+            "PagaRes",
+            n_clusters=self.sizes.height,
+            n_cells=int(self.sizes["n_cells"].sum()),
+            modality=self.params.get("modality"),
+            cluster_col=self.params.get("cluster_col"),
+            n_edges=int(np.count_nonzero(self.connectivities) // 2),
+            n_tree_edges=int(np.count_nonzero(self.connectivities_tree) // 2),
         )
 
 
@@ -184,31 +176,22 @@ class GeneTrendsRes:
     run_info: dict[str, object]
 
     def __repr__(self) -> str:
-        """A multi-line summary of the trend fit."""
+        """Summary of the trend fit."""
         info = self.run_info
-        n_cells = info["n_cells"]
         jitter = info["jitter_used"]
-        assert isinstance(n_cells, dict) and isinstance(jitter, dict)
         gp = self.params["gene_trend_params"]
-        assert isinstance(gp, GeneTrendsParams)
-        n_b = len(self.branches)
-        source = (
-            "MAGIC imputed counts" if self.params["use_magic"] else "normalised counts"
+        assert isinstance(jitter, dict) and isinstance(gp, GeneTrendsParams)
+        return compact_repr(
+            "GeneTrendsRes",
+            branches=list(self.branches),
+            n_genes=self.trends["gene"].n_unique(),
+            resolution=info["resolution"],
+            cells_per_branch=info["n_cells"],
+            source="magic" if self.params["use_magic"] else "norm",
+            length_scale=round(gp.length_scale, 4),
+            sigma=round(gp.sigma, 4),
+            extra_jitter=any(j > gp.jitter for j in jitter.values()),
         )
-        lines = [
-            f"GeneTrendsRes: {n_b} {'branch' if n_b == 1 else 'branches'}, "
-            f"{self.trends['gene'].n_unique()} genes, {info['resolution']} grid "
-            "points",
-            "  Cells per branch: "
-            + ", ".join(f"{b} ({n_cells[b]})" for b in self.branches),
-            f"  Source: {source}",
-            f"  Length scale: {gp.length_scale:g} | sigma: {gp.sigma:g}",
-        ]
-        if any(j > gp.jitter for j in jitter.values()):
-            lines.append(
-                "  Note: the Cholesky needed extra jitter on at least one branch."
-            )
-        return "\n".join(lines)
 
 
 ###########

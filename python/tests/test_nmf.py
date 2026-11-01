@@ -59,7 +59,7 @@ def test_nmf_shapes_and_getters(sc):
     assert obs["cell_idx"].to_list() == sc.cells_to_keep.tolist()
     sc.add_obs(obs)
     assert bvnmf.get_params(res)["k"] == 3
-    assert "NmfResult (single-run HALS NMF)" in repr(res)
+    assert repr(res).startswith("NmfResult(") and "k=3" in repr(res)
 
 
 def test_nmf_is_seeded(sc):
@@ -87,7 +87,7 @@ def test_stabilised_nmf_best_run(sc):
     assert best.n_iter is None
     np.testing.assert_array_equal(best.h, res.h_per_run[res.best_idx])
     assert best.final_loss == res.losses.min()
-    assert "Best run:" in repr(res)
+    assert f"best_run={res.best_idx}" in repr(res)
 
 
 def test_consensus_nmf_frames(sc):
@@ -97,7 +97,7 @@ def test_consensus_nmf_frames(sc):
     assert res.cluster_sizes["n"].sum() == int(res.clusters["kept"].sum())
     stab = bvnmf.get_stability(res)
     assert stab["stability"] == res.stability
-    assert "ConsensusNmfResult" in repr(res)
+    assert repr(res).startswith("ConsensusNmfResult(")
 
 
 def test_consensus_nmf_guards(sc):
@@ -119,7 +119,7 @@ def test_k_sweep_nulls_failed_stability(sc):
             sc, [2, 3], n_runs=3, nmf_hals_params=HALS, nmf_consensus_params=tight
         )
     assert res.frame["stability"].null_count() == 2
-    assert "every k failed" in repr(res)
+    assert "best_k=None" in repr(res)
     with pytest.raises(ValueError, match="density_threshold"):
         bvnmf.consensus_nmf(
             sc, 2, n_runs=3, nmf_hals_params=HALS, nmf_consensus_params=tight
