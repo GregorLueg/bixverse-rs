@@ -188,11 +188,12 @@ pub fn sparse_svd_lanczos_mlx<T: BixverseFloat>(
     let u_host = u.as_f32()?;
 
     let from = |x: f64| T::from_f64(x).expect("f64 casts to the crate float");
-    let res = SvdResults {
+    let mut res = SvdResults {
         u: Mat::from_fn(n, k, |i, c| from(u_host[i * k + c] as f64 / s[c])),
         s: s.iter().map(|&x| from(x)).collect(),
         v: Mat::from_fn(m, k, |j, c| from(v[(j, c)])),
     };
+    res.flip_signs();
     drop((u, sigma_dev, op));
     clear_cache()?;
 

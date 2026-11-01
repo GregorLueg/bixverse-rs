@@ -383,11 +383,13 @@ where
         );
     }
 
-    Ok(SvdResults {
+    let mut res = SvdResults {
         u: u_mat,
         s: s_vec,
         v: v_mat,
-    })
+    };
+    res.flip_signs();
+    Ok(res)
 }
 
 ///////////

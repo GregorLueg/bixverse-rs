@@ -230,7 +230,7 @@ pub(crate) fn solve_dense_pca(
     seed: usize,
 ) -> SingleCellPcaRes {
     let (n_cells, n_genes) = (scaled.nrows(), scaled.ncols());
-    let res: RandomSvdResults<f64> = match solver {
+    let mut res: RandomSvdResults<f64> = match solver {
         PcaSolver::Covariance | PcaSolver::Auto => dense_covariance_svd(scaled, no_pcs)?,
         PcaSolver::Randomised => randomised_svd(
             scaled,
@@ -250,6 +250,8 @@ pub(crate) fn solve_dense_pca(
             }
         }
     };
+    // here rather than in `randomised_svd`, which ICA, NMF and rPCA call too
+    res.flip_signs();
     let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
     let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
     let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();

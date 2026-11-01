@@ -101,34 +101,50 @@ impl<T> SvdResult<T> for SvdResults<T> {
     }
 }
 
-impl<T: Float> SvdResults<T> {
-    /// Fix the sign of every component, in place
-    ///
-    /// Each singular pair is only defined up to a joint sign flip, and
-    /// iterative solvers return either sign depending on their start vector
-    /// and on summation order across threads. The largest-magnitude entry of
-    /// each column of `v` is made positive and the matching column of `u`
-    /// flipped with it, the rule of scikit-learn's `svd_flip`. Using the
-    /// largest entry rather than the first non-zero one keeps the decision
-    /// clear of rounding noise.
-    pub fn flip_signs(&mut self) {
-        for c in 0..self.v.ncols() {
-            let mut pivot = T::zero();
-            for r in 0..self.v.nrows() {
-                let x = self.v[(r, c)];
-                if x.abs() > pivot.abs() {
-                    pivot = x;
-                }
-            }
-            if pivot < T::zero() {
-                for r in 0..self.v.nrows() {
-                    self.v[(r, c)] = -self.v[(r, c)];
-                }
-                for r in 0..self.u.nrows() {
-                    self.u[(r, c)] = -self.u[(r, c)];
-                }
+/// Fix the sign of every singular pair, in place
+///
+/// Each singular pair is only defined up to a joint sign flip, and iterative
+/// solvers return either sign depending on their start vector and on summation
+/// order across threads. The largest-magnitude entry of each column of `v` is
+/// made positive and the matching column of `u` flipped with it, the rule of
+/// scikit-learn's `svd_flip`. Using the largest entry rather than the first
+/// non-zero one keeps the decision clear of rounding noise.
+///
+/// ### Params
+///
+/// * `u` - The left singular vectors
+/// * `v` - The right singular vectors
+fn flip_singular_pairs<T: Float>(u: &mut Mat<T>, v: &mut Mat<T>) {
+    for c in 0..v.ncols() {
+        let mut pivot = T::zero();
+        for r in 0..v.nrows() {
+            let x = v[(r, c)];
+            if x.abs() > pivot.abs() {
+                pivot = x;
             }
         }
+        if pivot < T::zero() {
+            for r in 0..v.nrows() {
+                v[(r, c)] = -v[(r, c)];
+            }
+            for r in 0..u.nrows() {
+                u[(r, c)] = -u[(r, c)];
+            }
+        }
+    }
+}
+
+impl<T: Float> SvdResults<T> {
+    /// Fix the sign of every component, in place. See [flip_singular_pairs].
+    pub fn flip_signs(&mut self) {
+        flip_singular_pairs(&mut self.u, &mut self.v);
+    }
+}
+
+impl<T: Float> RandomSvdResults<T> {
+    /// Fix the sign of every component, in place. See [flip_singular_pairs].
+    pub fn flip_signs(&mut self) {
+        flip_singular_pairs(&mut self.u, &mut self.v);
     }
 }
 
@@ -545,7 +561,9 @@ where
     let s: Vec<F> = svd.S().column_vector().iter().copied().collect();
     let v = svd.V().to_owned();
 
-    Ok(RandomSvdResults { u, s, v })
+    let mut res = RandomSvdResults { u, s, v };
+    res.flip_signs();
+    Ok(res)
 }
 
 /// Build a column-major matrix from a function over `(row, column)`
@@ -834,11 +852,13 @@ where
         });
         drop((values, indices, indptr));
         let res = dense_covariance_svd(z.as_ref(), rank)?;
-        return Ok(RandomSvdResults {
+        let mut res = RandomSvdResults {
             u: Mat::from_fn(n, rank, |i, c| F::from_f64(res.u[(i, c)]).unwrap()),
             v: Mat::from_fn(m, rank, |j, c| F::from_f64(res.v[(j, c)]).unwrap()),
             s: res.s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
-        });
+        };
+        res.flip_signs();
+        return Ok(res);
     }
 
     // relabel features by descending frequency: most pair updates then hit the
@@ -1047,11 +1067,13 @@ where
             }
         });
 
-    Ok(RandomSvdResults {
+    let mut res = RandomSvdResults {
         u,
         v,
         s: s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
-    })
+    };
+    res.flip_signs();
+    Ok(res)
 }
 
 ///////////

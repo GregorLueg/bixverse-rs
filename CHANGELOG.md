@@ -16,10 +16,13 @@
   batch-balanced row is sorted by distance (ties by index) before taking k, so
   the stored kNN holds the k nearest rather than the k lowest-index entries. The
   connectivity graph is unchanged; kBET and LISI computed after BBKNN change.
-- The sparse Lanczos SVD on the CPU (`sparse_svd_lanczos()`) and in `bixverse-gpu`
-  applies `SvdResults::flip_signs` (largest-magnitude loading positive), so runs
-  are reproducible. Stored PCA factors can change sign against 0.9.4; distances,
-  kNN and clusters don't.
+- Every single cell PCA solver on the counts now fixes its signs with `flip_signs`
+  (largest-magnitude loading positive): Lanczos, randomised and covariance on the CPU,
+  sparse and dense, exact on the CPU, and Lanczos and randomised in `bixverse-gpu` and
+  `bixverse-mlx`. Stored PCA factors can change sign against 0.9.4. The rule is the same
+  everywhere, but an approximate solver can still pick the other sign from an exact one
+  where a component is weakly resolved, because its largest entry differs.
+  `randomised_svd()` itself is unchanged for its other callers (ICA, NMF, rPCA).
 - Symphony: `knn_majority_vote()` gives ties to the lowest label, as documented
   (was the highest). `build_symphony_reference()`, `symphony_map_query()` and
   `symphony_map_query_parts()` return errors on mismatched batch or gene map

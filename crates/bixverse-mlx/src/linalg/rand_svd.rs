@@ -462,13 +462,14 @@ fn rand_svd_impl<T: BixverseFloat>(
     let u_host = u.as_f32()?;
 
     let from = |x: f64| T::from_f64(x).expect("f64 casts to the crate float");
-    let res = SvdResults {
+    let mut res = SvdResults {
         u: Mat::from_fn(n, n_components, |i, j| {
             from(u_host[i * n_components + j] as f64)
         }),
         s: (0..n_components).map(|i| from(svd.S()[i])).collect(),
         v: Mat::from_fn(m, n_components, |i, j| from(svd.U()[(i, j)])),
     };
+    res.flip_signs();
     drop((u, v_z_dev, z, q, y, omega_dev, sigma_dev, sigma_sq_dev, op));
     clear_cache()?;
     lap(&[], false, &mut clock, &mut st_times.finalise)?;
