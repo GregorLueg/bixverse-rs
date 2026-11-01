@@ -317,7 +317,7 @@
 # bv.graph.find_neighbours(
 #     sc,
 #     embd_to_use="pca",
-#     neighbours_params=NeighboursParams(knn_method="nndescent", extract_knn=True),
+#     neighbours_params=NeighboursParams(knn_method="nndescent"),
 # )
 # ```
 #

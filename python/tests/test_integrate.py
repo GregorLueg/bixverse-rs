@@ -174,14 +174,13 @@ def test_fast_mnn_stamps_follow_the_pca_choice(sc):
     assert sc.cache.stamps["mnn"].parents == (sc.cache.stamps["pca"].id,)
 
 
-def test_deprecated_randomised_maps_onto_svd_solver(sc):
-    with pytest.warns(UserWarning, match="deprecated"):
-        integrate.seurat_rpca(
-            sc,
-            BATCH,
-            sc.gene_ids(sc.map.hvg).tolist(),
-            rpca_params=SeuratRpcaParams(dims=5, k_weight=20, randomised=True),
-        )
+def test_seurat_rpca_runs_with_the_randomised_solver(sc):
+    integrate.seurat_rpca(
+        sc,
+        BATCH,
+        sc.gene_ids(sc.map.hvg).tolist(),
+        rpca_params=SeuratRpcaParams(dims=5, k_weight=20, svd_solver="randomised"),
+    )
     assert sc.cache.embeddings["rpca"].shape == (sc.n_cells, 5)
 
 

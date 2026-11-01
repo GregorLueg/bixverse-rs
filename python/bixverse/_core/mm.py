@@ -26,7 +26,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
-from bixverse._core.graph import _first_dims, _knn_params
+from bixverse._core.graph import _first_dims
 from bixverse._core.multimodal import (
     AdtCounts,
     CacheModality,
@@ -585,7 +585,7 @@ def generate_wnn_graph(
     e2 = _wnn_embedding(mm, modality_2, embd_to_use_2, no_embd_to_use_2)
     if verbose:
         logger.info("Running WNN graph generation.")
-    idx, dist, w1, w2 = _bixverse.wnn(e1, e2, _knn_params(params), seed, int(verbose))
+    idx, dist, w1, w2 = _bixverse.wnn(e1, e2, to_rust(params), seed, int(verbose))
     knn = KnnGraph(indices=idx, distances=dist, dist_metric=WNN_DIST_METRIC)
 
     if verbose:

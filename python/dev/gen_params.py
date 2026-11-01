@@ -225,6 +225,7 @@ SPEC_PROSE: tuple[tuple[str, str], ...] = (
     ("to get a call instead of `NA`.", "to get a call instead of null."),
     ("Symphony R default is 0.1.", "The Symphony default is 0.1."),
     ("Symphony R hardcodes 1.0.", "Symphony fixes it at 1.0."),
+    ('`"nndescent_graph"` hands back', '`"nndescent"` hands back'),
 )
 
 
@@ -282,7 +283,9 @@ def py_type(spec: str, f: dict) -> str:
         default = f["default"]
         kind = {bool: "lgl", int: "int", float: "dbl", str: "chr"}[type(default)]
     if kind == "choice":
-        base = "Literal[" + ", ".join(repr(c) for c in f["choices"]) + "]"
+        # the crate has no "nndescent_graph" method: "nndescent" is graph-only
+        choices = [c for c in f["choices"] if c != "nndescent_graph"]
+        base = "Literal[" + ", ".join(repr(c) for c in choices) + "]"
     else:
         base = SCALAR_TYPES[kind]
     if f["len"] != "1":
@@ -458,6 +461,7 @@ def main(
         f"__all__ = {sorted(names[s['name']] for s in generated)!r}\n"
     )
     out.write_text("".join(parts))
+    subprocess.run(["ruff", "check", "--select", "F401", "--fix", "-q", str(out)])
     subprocess.run(["ruff", "format", str(out)], check=True)
     skipped = sorted(s["name"] for s in specs.values() if s["handwritten"])
     print(f"wrote {len(generated)} classes to {out}; hand-written: {skipped}")

@@ -115,7 +115,7 @@ KnnParams()
 # | KmKnn | An exact method that takes a shortcut via k-means cluster | (Fast) exact | On well structured (low dimensional) data, it gives you an exact kNN search that is substantially faster than Exhaustive on large data sets | Does not matter |
 # | Annoy | The classic approximate nearest neighbour search you know from Seurat | Tree-based | A memory-based version of Annoy that avoids the round trip to the disk-based index of the original. Good default for data sets with up to half a million cells with fast index building (but slower querying) | Ideally ≤ 100 as otherwise the query phase can become quite long... |
 # | HNSW | A powerful graph-based index for large data sets and vector search index powering a large number of data bases. | Graph-based | Need to tackle large data sets ... ? HNSW does that for you. An important note is that due to the benign race condition during graph construction this index is not deterministic. On large data sets this makes basically no difference, but something to keep in mind for smaller ones! | ≤50 or you need to bump the `ef_search` substantially |
-# | NNDescent | Another graph-based index that is ideal for tackling large data sets | Graph-based | Another graph-based index that is very good at dealing with large data sets. Uses tricks from PyNNDescent and is designed to be very memory-efficient. `extract_knn=True` skips the query phase entirely and hands you the descent graph | ≤30. The initial kNN is designed with a node degree of 30, so you might see degradation in the performance when you ask for higher k. If you try this, set `ef_budget` high! |
+# | NNDescent | Another graph-based index that is ideal for tackling large data sets | Graph-based | Another graph-based index that is very good at dealing with large data sets. Uses tricks from PyNNDescent and is designed to be very memory-efficient. there is no query phase: it hands you the descent graph | ≤30. The initial kNN is designed with a node degree of 30, so you might see degradation in the performance when you ask for higher k. If you try this, set `ef_budget` high! |
 # | IVF | A cluster-based index that partitions the data via k-means into Voronoi cells | Cluster-based | If you read a bit about vector searches, this is a very common algorithm which works well with quantisations in particular (and GPU-acceleration...). For the usual ephemeral kNN graph generation in single cell maybe not the right call, but if you need A LOT of neighbours on large data sets, this is a very good choice! | Does not matter (outside of absurd high numbers) |
 #
 # There are additional GPU-accelerated kNN searches in the `bixverse_gpu`
@@ -135,7 +135,6 @@ KnnParams()
 # | delta | `0.001` | **NNDescent:** The termination criterion for the NNDescent iterations. When less than 0.001 (0.1%) of the edges are updated, the iterations stop and the algorithm is considered converged. |
 # | diversify_prob | `0.0` | **NNDescent:** If you want to do additional diversification after the NNDescent algorithm converged. This is based on the original paper, but in reality usually degrades graph quality while not providing too many benefits. |
 # | ef_budget | `None` | **NNDescent:** The beam width for the query phase for NNDescent. If `None`, it will use the library default, i.e., `(k * 2).clamp(50, 200).max(k)`. Generally not really needed to touch, but limits the number of k neighbours you can confidently return. |
-# | extract_knn | `False` | **NNDescent:** Hand back the graph the descent already built instead of beam searching it. There is no query phase at all, so it is much faster, and `ef_budget` stops mattering. You pay for it in recall. Rows the descent never filled come back padded with duplicate edges and you get a warning saying how many. |
 # | m | `16` | **HNSW:** The node degree during the index creation. Creates 16 edges per given node in the graph-based index. |
 # | ef_construction | `200` | **HNSW:** The budget to generate good connections during construction of the index. Higher values yields a better initial graph-index. |
 # | ef_search | `100` | **HNSW:** The beam width during querying of the index. If a high quality graph was generated, usually does not need to be too high. If you set `k` high, you should adapt this parameter. |
@@ -248,27 +247,10 @@ print(
 # As we can see, this approximate index also reaches perfect recall and distance
 # ratio.
 #
-# NNDescent has a second gear. The descent already builds a kNN graph on its way
-# to convergence, and `extract_knn=True` hands you that graph instead of
-# running a beam search over the index. No query phase at all.
-
-# %%
-nndescent_extracted = bv.graph.generate_knn(
-    sc,
-    neighbours_params=NeighboursParams(knn_method="nndescent", extract_knn=True),
-)
-
-extracted_vs_exhaustive = bv.graph.calc_knn_metrics(exhaustive_knn, nndescent_extracted)
-
-print(
-    "NNDescent (graph extraction) vs exhaustive.\n"
-    f"  Recall@15: {extracted_vs_exhaustive.final_recall:.3f}.\n"
-    f"  Distance ratio: {extracted_vs_exhaustive.final_ratio:.3f}."
-)
-
-# %% [markdown]
-# That is the trade: you give up a bit of recall and get the query phase for
-# free. On million-cell data that is the difference worth having.
+# NNDescent has no query phase: the descent already builds a kNN graph on its
+# way to convergence, and `"nndescent"` hands you that graph instead of running
+# a beam search over an index. You trade a bit of recall for speed, which is the
+# difference worth having on million-cell data.
 #
 # ## Conclusions
 #

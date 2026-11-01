@@ -40,17 +40,6 @@ from bixverse.params import (
 
 
 @beartype
-def _knn_dict(
-    p: BtMetacellsParams | SeacellsParams | SupercellParams,
-) -> dict[str, object]:
-    """The dict Rust reads, `extract_knn` dropped as `find_neighbours` does:
-    `"nndescent"` is graph-only in the crate."""
-    d = to_rust(p)
-    d.pop("extract_knn", None)
-    return d
-
-
-@beartype
 def _require_fresh(sc: ScOrScSubset, artefacts: Sequence[str]) -> None:
     """Refuse stale inputs: cell indices go straight into Rust.
 
@@ -178,7 +167,7 @@ def generate_bt_meta_cells(
         embd,
         sc.cells_to_keep,
         to_use,
-        _knn_dict(p),
+        to_rust(p),
         target_size,
         seed,
         verbose,
@@ -275,7 +264,7 @@ def _generate_seacells(
         None if knn is None else np.ascontiguousarray(knn.distances),
         sc.cells_to_keep,
         to_use,
-        _knn_dict(seacell_params),
+        to_rust(seacell_params),
         target_size,
         seed,
         verbose,
@@ -366,7 +355,7 @@ def generate_supercells(
         embd,
         sc.cells_to_keep,
         to_use,
-        _knn_dict(p),
+        to_rust(p),
         target_size,
         seed,
         verbose,

@@ -144,7 +144,9 @@ class KnnDefaults:
     Attributes:
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -156,10 +158,6 @@ class KnnDefaults:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -181,7 +179,6 @@ class KnnDefaults:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -422,7 +419,9 @@ class BoostParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -434,10 +433,6 @@ class BoostParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -484,7 +479,6 @@ class BoostParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -833,7 +827,9 @@ class MeldParams:
             densities comparable regardless of cells-per-condition.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -845,10 +841,6 @@ class MeldParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -877,7 +869,6 @@ class MeldParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -934,8 +925,9 @@ class NebulaParams:
             `cpc` and `mincp` pool every cell, so one subject can carry a gene
             through on its own. `0` switches the check off, as in the `nebula`
             package.
-        reml: Estimate the overdispersions by restricted maximum likelihood. This arm has not been validated against a reference.
-            Leave it off unless you know why you want it.
+        reml: Estimate the overdispersions by restricted maximum likelihood. This
+            arm has not been validated against a reference. Leave it off unless you
+            know why you want it.
         eps: Absolute stopping tolerance for the optimiser.
         gene_batch_size: Genes read and fitted per batch. Bounds how much of the
             store is resident at once and changes nothing about the answer, since
@@ -1131,7 +1123,9 @@ class BbknnParams:
             clustering. If `None`, it defaults to `10 * neighbours_within_batch`.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -1143,10 +1137,6 @@ class BbknnParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1172,7 +1162,6 @@ class BbknnParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -1211,10 +1200,10 @@ class BbknnParams:
 class BonsaiParams:
     """Wrapper function for Bonsai parameters
 
-    Parameters for `bonsai()`. Sanity turns the raw counts into posterior log
-    fold changes with error bars, Bonsai builds a tree over the cells from those,
-    and the tree is laid out in 2D for plotting. The Sanity defaults come from
-    sanity-sc-rs, the search defaults from bonsai-rs.
+    Parameters for `bonsai()`. Sanity turns the raw counts into posterior log fold
+    changes with error bars, Bonsai builds a tree over the cells from those, and the
+    tree is laid out in 2D for plotting. The Sanity defaults come from sanity-sc-rs,
+    the search defaults from bonsai-rs.
 
     Attributes:
         variance_rule: How Sanity treats each gene's variance in log fold change.
@@ -1275,8 +1264,8 @@ class BonsaiParams:
 class BranchSelectionParams:
     """Wrapper function for the branch cell selection parameters
 
-    Parameters controlling which cells `run_gene_trends()` assigns to each
-    branch. The threshold on a fate's probability is an expanding quantile over the
+    Parameters controlling which cells `run_gene_trends()` assigns to each branch.
+    The threshold on a fate's probability is an expanding quantile over the
     pseudotime-sorted cells, made monotone with a cumulative maximum, so a fate's
     bar can only rise as differentiation proceeds. The defaults are the reference
     ones.
@@ -1313,7 +1302,9 @@ class BtMetacellsParams:
         max_iter: Maximum number of iterations for the algorithm.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -1325,10 +1316,6 @@ class BtMetacellsParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1353,7 +1340,6 @@ class BtMetacellsParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -1563,8 +1549,8 @@ class EmptyDropletsParams:
 
     Attributes:
         method: How the empty droplets are called, see the description.
-        is_empty_column: Name of the logical obs column holding the mask. Required
-            for `method = "supplied"`, ignored otherwise.
+        is_empty_column: Name of the logical obs column holding the mask, `True` for
+            an empty droplet. Used by `method = "supplied"`, ignored otherwise.
         umi_cutoff: Barcodes with a library size strictly below this are empty.
             Required for `method = "umi_cutoff"`, ignored otherwise.
         expected_cells: Number of real cells expected in the run. Required for
@@ -1572,7 +1558,7 @@ class EmptyDropletsParams:
     """
 
     method: Literal["supplied", "umi_cutoff", "expected_cells", "knee"] = "supplied"
-    is_empty_column: str | None = None
+    is_empty_column: str | None = "is_empty"
     umi_cutoff: int | None = None
     expected_cells: int | None = None
 
@@ -1592,8 +1578,8 @@ class FastClusterParams:
     handed back to its cells.
 
     Attributes:
-        n_centroids: Number of k-means centroids. If `None`, defaults to
-            `floor(sqrt(n_cells))`.
+        n_centroids: Number of k-means centroids. If `None`, defaults to `floor(4 *
+            sqrt(n_cells))`.
         km_type: Which k-means to run for the coarsening.
         k_means_iter: Number of k-means iterations.
         batch_size: `km_type = "minibatch"` only. Batch size.
@@ -1702,7 +1688,9 @@ class FastmnnParams:
         sparse_svd: Shall the sparse SVD be used.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -1714,10 +1702,6 @@ class FastmnnParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1729,8 +1713,6 @@ class FastmnnParams:
             `sqrt(n_lists)` clusters.
         mean_center: Shall the data be mean centred
         normalise_variance: Shall the data have normalised variance
-        randomised: Deprecated, use `svd_solver`. `True` maps to `"randomised"`,
-            `False` to `"exact"`.
         clr: Shall the CLR-type `PFlogPF` be applied, see Booeshaghi, et al.
         size_factor: The used size factor during I/O. It needs to be the same as
             during I/O to have correct results when using the `PFlogPF`
@@ -1758,7 +1740,6 @@ class FastmnnParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -1766,7 +1747,6 @@ class FastmnnParams:
     n_probe: int | None = None
     mean_center: bool = True
     normalise_variance: bool = True
-    randomised: bool | None = None
     clr: bool = False
     size_factor: float = 10000.0
     svd_solver: Literal["auto", "covariance", "randomised", "exact"] = "auto"
@@ -1890,7 +1870,7 @@ class HarmonyParams:
     def __post_init__(self) -> None:
         check_range("k", self.k, 1, None, False, True)
         check_len("sigma", self.sigma)
-        check_range("sigma", self.sigma, 0, None, False, True)
+        check_range("sigma", self.sigma, 0, None, True, True)
         check_len("theta", self.theta)
         check_range("theta", self.theta, 0, None, False, True)
         check_len("lambda_", self.lambda_)
@@ -1938,8 +1918,8 @@ class HarmonyV2Params:
         batch_proportion_cutoff: Cutoff for pruning batches with small proportions
             during ridge regression.
         use_dynamic_lambda: If `True`, lambda is estimated per cluster as `alpha`
-            times the expected counts, as in Harmony v2, instead of using the
-            fixed `lambda` value.
+            times the expected counts, as in Harmony v2, instead of using the fixed
+            `lambda` value.
         k_means_iter: The number of iterations to use for the clustering.
         k_means_init: The initialisation.
         gemm: Controls which CPU implementation is used by the method. GEMM is
@@ -1970,7 +1950,7 @@ class HarmonyV2Params:
     def __post_init__(self) -> None:
         check_range("k", self.k, 1, None, False, True)
         check_len("sigma", self.sigma)
-        check_range("sigma", self.sigma, 0, None, False, True)
+        check_range("sigma", self.sigma, 0, None, True, True)
         check_len("theta", self.theta)
         check_range("theta", self.theta, 0, None, False, True)
         check_len("lambda_", self.lambda_)
@@ -2009,7 +1989,9 @@ class HotspotParams:
             neighbour distance. Only read when `weighted_graph = True`.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2021,10 +2003,6 @@ class HotspotParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2050,7 +2028,6 @@ class HotspotParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2084,8 +2061,8 @@ class HvgParams:
         method: `"scran"` fits a weighted lowess trend to the variance of the log-
             expression against its mean and ranks genes by the residual, as in
             scran's `modelGeneVar()`. `"residual"` ranks genes by the residual
-            variance of a model fitted with `fit_residuals()`, and needs that fit
-            on the object first. It also treats `hvg_no` as a per-group count and
+            variance of a model fitted with `fit_residuals()`, and needs that fit on
+            the object first. It also treats `hvg_no` as a per-group count and
             returns the union across groups, so a grouped fit can select more than
             `hvg_no` genes.
         loess_span: The span parameter for the loess function that is used to
@@ -2130,7 +2107,9 @@ class KnnParams:
     Attributes:
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Distance metric to use.
         n_trees: Annoy param: number of trees.
         search_budget: Annoy param: optional search budget per tree. If `None`,
@@ -2140,10 +2119,6 @@ class KnnParams:
             end of index construction.
         ef_budget: NNDescent param: optional query budget. Higher values improve
             recall at the cost of speed.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers.
         ef_construction: HNSW param: size of the dynamic candidate list during
             construction.
@@ -2165,7 +2140,6 @@ class KnnParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2192,8 +2166,8 @@ class KnnParams:
 class MagicParams:
     """Wrapper function for MAGIC imputation parameters
 
-    Parameters controlling the MAGIC imputation run by `run_magic()`. The
-    defaults mirror the reference implementation.
+    Parameters controlling the MAGIC imputation run by `run_magic()`. The defaults
+    mirror the reference implementation.
 
     Attributes:
         n_steps: Diffusion steps applied to the counts. Zero is legal and hands back
@@ -2486,7 +2460,9 @@ class NeighboursParams:
             neighbours weigh 2 and one-sided ones 1.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2498,10 +2474,6 @@ class NeighboursParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2530,7 +2502,6 @@ class NeighboursParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2561,9 +2532,9 @@ class PalantirParams:
     """Wrapper function for Palantir parameters
 
     Parameters controlling the Palantir trajectory inference. The kNN graph you hand
-    to `run_palantir()` feeds the diffusion kernel. The geodesics are measured
-    over a second kNN graph that Palantir builds internally on the multiscale space,
-    and `knn` is what controls that one. It is a different knob from `k` in the kNN
+    to `run_palantir()` feeds the diffusion kernel. The geodesics are measured over
+    a second kNN graph that Palantir builds internally on the multiscale space, and
+    `knn` is what controls that one. It is a different knob from `k` in the kNN
     parameter block, which sizes the backend index. Palantir overrides `k` and
     `ann_dist` for its internal search, so only `knn_method` and the backend tuning
     parameters have an effect.
@@ -2590,7 +2561,9 @@ class PalantirParams:
         lanczos_tol: Relative residual tolerance for the Lanczos solver.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2602,10 +2575,6 @@ class PalantirParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2626,7 +2595,7 @@ class PalantirParams:
     max_iterations: int = 25
     branch_prob_threshold: float = 0.01
     lanczos_basis_size: int | None = None
-    lanczos_max_restarts: int = 16
+    lanczos_max_restarts: int = 64
     lanczos_tol: float = 1e-08
     k: int = 15
     knn_method: Literal["kmknn", "hnsw", "annoy", "nndescent", "ivf", "exhaustive"] = (
@@ -2638,7 +2607,6 @@ class PalantirParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2775,7 +2743,9 @@ class SeacellsParams:
             archetype finding. Useful for larger data sets.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2787,10 +2757,6 @@ class SeacellsParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2822,7 +2788,6 @@ class SeacellsParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2871,7 +2836,9 @@ class SeuratCcaParams:
         sd: Bandwidth divisor of the Gaussian kernel used for the anchor weights.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2883,10 +2850,6 @@ class SeuratCcaParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2898,8 +2861,6 @@ class SeuratCcaParams:
             `sqrt(n_lists)` clusters.
         mean_center: Shall the data be mean centred
         normalise_variance: Shall the data have normalised variance
-        randomised: Deprecated, use `svd_solver`. `True` maps to `"randomised"`,
-            `False` to `"exact"`.
         clr: Shall the CLR-type `PFlogPF` be applied, see Booeshaghi, et al.
         size_factor: The used size factor during I/O. It needs to be the same as
             during I/O to have correct results when using the `PFlogPF`
@@ -2932,7 +2893,6 @@ class SeuratCcaParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -2940,7 +2900,6 @@ class SeuratCcaParams:
     n_probe: int | None = None
     mean_center: bool = True
     normalise_variance: bool = True
-    randomised: bool | None = None
     clr: bool = False
     size_factor: float = 10000.0
     svd_solver: Literal["auto", "covariance", "randomised", "exact"] = "auto"
@@ -2984,7 +2943,9 @@ class SeuratRpcaParams:
         sd: Bandwidth divisor of the Gaussian kernel used for the anchor weights.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -2996,10 +2957,6 @@ class SeuratRpcaParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3011,8 +2968,6 @@ class SeuratRpcaParams:
             `sqrt(n_lists)` clusters.
         mean_center: Shall the data be mean centred
         normalise_variance: Shall the data have normalised variance
-        randomised: Deprecated, use `svd_solver`. `True` maps to `"randomised"`,
-            `False` to `"exact"`.
         clr: Shall the CLR-type `PFlogPF` be applied, see Booeshaghi, et al.
         size_factor: The used size factor during I/O. It needs to be the same as
             during I/O to have correct results when using the `PFlogPF`
@@ -3042,7 +2997,6 @@ class SeuratRpcaParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -3050,7 +3004,6 @@ class SeuratRpcaParams:
     n_probe: int | None = None
     mean_center: bool = True
     normalise_variance: bool = True
-    randomised: bool | None = None
     clr: bool = False
     size_factor: float = 10000.0
     svd_solver: Literal["auto", "covariance", "randomised", "exact"] = "auto"
@@ -3094,7 +3047,9 @@ class SupercellParams:
             the result an approximation. `None` (default) keeps the walks exact.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -3106,10 +3061,6 @@ class SupercellParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3136,7 +3087,6 @@ class SupercellParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -3352,7 +3302,9 @@ class VisionParams:
         n_cluster: Number of clusters for the random gene set clustering generation.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -3364,10 +3316,6 @@ class VisionParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3377,7 +3325,6 @@ class VisionParams:
             generates `sqrt(n)` lists.
         n_probe: IVF param: number of clusters/centroids to query. `None` queries
             `sqrt(n_lists)` clusters.
-        nn_max_iter: Undocumented.
     """
 
     n_perm: int = 500
@@ -3392,13 +3339,11 @@ class VisionParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
     n_list: int | None = None
     n_probe: int | None = None
-    nn_max_iter: int = 15
 
     def __post_init__(self) -> None:
         check_range("n_perm", self.n_perm, 1, None, False, True)
@@ -3436,7 +3381,9 @@ class WnnParams:
         sigma_floor: Minimum sigma value (avoids division by zero).
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -3448,10 +3395,6 @@ class WnnParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3482,7 +3425,6 @@ class WnnParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -3563,7 +3505,9 @@ class ScdblfinderParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -3575,10 +3519,6 @@ class ScdblfinderParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3631,7 +3571,6 @@ class ScdblfinderParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100
@@ -3715,9 +3654,8 @@ class ScenicBinariseParams:
 class ScrubletParams:
     """Wrapper function for Scrublet doublet detection parameters
 
-    Constructor for the various Scrublet parameters. In this case, the default for
-    the kNN graph generation was set to `"hnsw"` as this algorithm showed the best
-    performance in different empirical benchmarks.
+    Constructor for the various Scrublet parameters. The kNN graph uses the
+    `KnnDefaults` search (`"kmknn"`) with automatic neighbour detection (`k = 0`).
 
     Attributes:
         sim_doublet_ratio: Number of doublets to simulate relative to the number of
@@ -3753,7 +3691,9 @@ class ScrubletParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search.
+            search. `"nndescent"` hands back the graph the NN-Descent built instead
+            of beam searching an index: much faster, at the cost of some recall.
+            Rows the descent never filled come back padded with duplicate edges.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
@@ -3765,10 +3705,6 @@ class ScrubletParams:
             potentially better edges.
         ef_budget: NNDescent param: optional query budget parameter. Can accelerate
             querying, but at the cost of Recall.
-        extract_knn: NNDescent param: hand back the graph the descent already built
-            instead of beam searching it. Skips the query pass entirely, so it is
-            much faster, at the cost of some recall. Rows the descent never filled
-            come back padded with duplicate edges. Ignored by every other method.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3807,7 +3743,6 @@ class ScrubletParams:
     delta: float = 0.001
     diversify_prob: float = 0.0
     ef_budget: int | None = None
-    extract_knn: bool = False
     m: int = 16
     ef_construction: int = 200
     ef_search: int = 100

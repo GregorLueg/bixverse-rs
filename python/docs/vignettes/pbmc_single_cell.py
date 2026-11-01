@@ -180,7 +180,7 @@ all_markers.filter(pl.col("fdr") <= 0.05).sort(
 # ### Fast clustering
 #
 # For large data sets there is an accelerated clustering: k-means first
-# (`sqrt(N)` centroids by default), then Louvain or Leiden on a graph over the
+# (`floor(4 * sqrt(N))` centroids by default), then Louvain or Leiden on a graph over the
 # centroids, across a set of resolutions. The centroid graph options, the seed
 # stability statistics and how the result compares against the full graph
 # clustering are in the

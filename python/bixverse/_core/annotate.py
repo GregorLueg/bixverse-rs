@@ -40,7 +40,6 @@ import polars as pl
 from beartype import beartype
 
 from bixverse import _bixverse
-from bixverse._core.graph import _knn_params
 from bixverse._core.integrate import (
     HARMONY_CELLS_PER_CLUSTER,
     HARMONY_MAX_CLUSTERS,
@@ -943,7 +942,7 @@ def transfer_labels_symphony(
         np.ascontiguousarray(embd, dtype=np.float32),
         codes,
         len(levels),
-        _knn_params(knn_params or KnnParams()),
+        to_rust(knn_params or KnnParams()),
         seed,
         verbose,
     )

@@ -44,7 +44,6 @@ from bixverse.params import (
     FastClusterParams,
     KnnParams,
     NeighboursParams,
-    WnnParams,
     to_rust,
 )
 
@@ -129,17 +128,6 @@ def _first_dims(embd: np.ndarray, no_embd_to_use: int | None) -> np.ndarray:
 
 
 @beartype
-def _knn_params(params: NeighboursParams | KnnParams | WnnParams) -> dict[str, object]:
-    """The dict Rust reads the kNN (and graph, or WNN) settings from.
-
-    `extract_knn` is dropped: `"nndescent"` is graph-only in the crate.
-    """
-    d = to_rust(params)
-    d.pop("extract_knn", None)
-    return d
-
-
-@beartype
 def _knn(
     embd: np.ndarray,
     params: NeighboursParams | KnnParams,
@@ -149,7 +137,7 @@ def _knn(
 ) -> KnnGraph:
     """A kNN with distances over an embedding."""
     indices, distances = _bixverse.knn_with_dist(
-        embd, _knn_params(params), validate_index, seed, verbose
+        embd, to_rust(params), validate_index, seed, verbose
     )
     return KnnGraph(indices=indices, distances=distances, dist_metric=params.ann_dist)
 

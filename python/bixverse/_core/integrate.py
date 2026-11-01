@@ -235,24 +235,6 @@ def _soft_state(sc: ScOrScSubset, labels: Sequence[str]) -> None:
 
 
 @beartype
-def _pca_keys(
-    params: FastmnnParams | SeuratCcaParams | SeuratRpcaParams,
-) -> dict[str, object]:
-    """`to_rust(params)` with the deprecated `randomised` mapped onto
-    `svd_solver`."""
-    d = to_rust(params)
-    randomised = d.pop("randomised")
-    if randomised is not None:
-        d["svd_solver"] = "randomised" if randomised else "exact"
-        warnings.warn(
-            "`randomised` is deprecated, use `svd_solver` instead. Mapping "
-            f'randomised = {randomised} to svd_solver = "{d["svd_solver"]}".',
-            stacklevel=3,
-        )
-    return d
-
-
-@beartype
 def _knn_for_metric(sc: ScOrScSubset, n: int, what: str) -> KnnGraph | None:
     """The cached kNN, warning when absent or stale.
 
@@ -653,7 +635,7 @@ def fast_mnn(
         sc,
         batch_column,
         batch_hvg_genes,
-        _pca_keys(fastmnn_params or FastmnnParams()),
+        to_rust(fastmnn_params or FastmnnParams()),
         use_precomputed_pca,
         "mnn",
         _bixverse.fast_mnn,
@@ -707,7 +689,7 @@ def seurat_cca(
         sc,
         batch_column,
         batch_hvg_genes,
-        _pca_keys(cca_params or SeuratCcaParams()),
+        to_rust(cca_params or SeuratCcaParams()),
         use_precomputed_pca,
         "cca",
         _bixverse.seurat_cca,
@@ -760,7 +742,7 @@ def seurat_rpca(
         sc,
         batch_column,
         batch_hvg_genes,
-        _pca_keys(rpca_params or SeuratRpcaParams()),
+        to_rust(rpca_params or SeuratRpcaParams()),
         use_precomputed_pca,
         "rpca",
         _bixverse.seurat_rpca,

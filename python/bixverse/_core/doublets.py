@@ -1021,7 +1021,13 @@ def _resolve_empty_droplets(
         col = empty_params.is_empty_column
         assert col is not None
         if col not in obs.columns:
-            raise ValueError(f"'{col}' is not a column in the obs table.")
+            raise ValueError(
+                f"`method = 'supplied'` reads the empty droplet mask from the obs "
+                f"column '{col}', which does not exist. Add it, point "
+                "`is_empty_column` at your own column, or call the empty droplets "
+                "from the counts with `method` set to 'umi_cutoff', "
+                "'expected_cells' or 'knee'."
+            )
         if obs[col].dtype != pl.Boolean:
             raise ValueError(f"'{col}' must be a logical column.")
         if obs[col].null_count():
