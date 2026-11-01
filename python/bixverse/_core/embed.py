@@ -44,9 +44,7 @@ def _nn_defaults() -> mf.NeighbourParams:
         m=16,
         ef_construction=100,
         ef_search=100,
-        diversify_prob=0.0,
         delta=0.001,
-        extract_knn=True,
         bt_budget=0.1,
     )
 

@@ -37,7 +37,7 @@ mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # `bixverse.nn` on JAX, CPU or CUDA (`jax[cuda12]` on top for the latter).
 jax = ["jax>=0.5", "optax>=0.2"]
 # `bixverse.embed`: UMAP, t-SNE, PHATE and friends.
-embed = ["manifolds-rs>=0.4.1"]
+embed = ["manifolds-rs>=0.5.0"]
 # The `bixverse.pl` plots. The `extract_*` plot data functions need nothing.
 plots = ["matplotlib>=3.8"]
 # `bixverse_gpu`: the GPU twins, a separate wheel built from `gpu/`.
@@ -50,7 +50,7 @@ dev = [
     "ruff>=0.9",
     "ty>=0.0.1",
     "scipy>=1.9",
-    "manifolds-rs>=0.4.1",
+    "manifolds-rs>=0.5.0",
     "matplotlib>=3.8",
 ]
 # mkdocstrings reads the installed package, so a docs build needs the compiled

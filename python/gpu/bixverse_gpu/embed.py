@@ -33,7 +33,7 @@ __all__ = [
 @beartype
 def _nn_defaults() -> mf.NeighbourParamsGpu:
     """GPU neighbour parameters: everything left to Rust but `delta`."""
-    return mf.NeighbourParamsGpu(delta=0.001, extract_knn=False)
+    return mf.NeighbourParamsGpu(delta=0.001)
 
 
 @beartype
