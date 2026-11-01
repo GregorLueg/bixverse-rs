@@ -27,7 +27,7 @@ Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
     scTransform, MAGIC.
   - `bv.graph`: kNN (all the `ann-search-rs` indices), neighbour graphs,
     Leiden / Louvain, fast clustering, kNN metrics. `bv.embed`: UMAP, t-SNE,
-    PHATE, densMAP, den-SNE and ForceAtlas2 through manifolds-rs (`embed`
+    PHATE, densMAP, den-SNE and ForceAtlas2 through manifolds-rs 0.5.0 or later (`embed`
     extra).
   - `bv.integrate`: fastMNN, Harmony v1 and v2, Seurat CCA and RPCA, BBKNN,
     kBET and the integration metrics.

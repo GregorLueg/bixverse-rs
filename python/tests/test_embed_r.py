@@ -7,20 +7,20 @@ untouched one, applies the same cell filter, takes R's PCA and kNN and runs
 the same embeddings. Skipped when Rscript, bixverse, manifoldsR or the
 `embed` extra is missing.
 
-Tolerances. Both sides are deterministic for a seed (measured: bit-identical
-reruns on each side), but they do not wrap the same crate: manifoldsR 0.6.0
-builds manifolds-rs 0.8.0 from a git branch, the manifolds-rs 0.4.1 wheel
-builds 0.7.2. PHATE agrees anyway (measured max abs difference 4.9e-15) and
-is compared at `atol=1e-6`. UMAP, densMAP, t-SNE, den-SNE and ForceAtlas2 do
-not, so they are compared on structure:
+Tolerances. Both sides are deterministic for a seed and the manifolds-rs 0.5.0
+wheel wraps the crate at 0.8.0, as manifoldsR does. UMAP, densMAP, PHATE and
+ForceAtlas2 agree (measured max abs difference 5.1e-13, on a scale of 947) and are
+compared at `atol=1e-6`.
+
+t-SNE and den-SNE do not (uncorrelated axes, measured; manifoldsR builds from a git
+branch, not the release, and the cause is not established), so they are compared on
+structure:
 
 - `pres`, the fraction of each cell's 15 nearest PCA neighbours kept among
-  its 15 nearest in 2D, must agree within `PRES_TOL` (measured: at most
-  0.009 apart, densMAP).
+  its 15 nearest in 2D, must agree within `PRES_TOL`.
 - `shared`, the fraction of each cell's 15 nearest 2D neighbours common to
-  both embeddings, must reach `MIN_SHARED` (measured 0.335, 0.265, 0.337,
-  0.303, 0.920). That is the agreement of one implementation with itself
-  under another seed (measured 0.330, 0.247, 0.355, 0.317, 0.918).
+  both embeddings, must reach `MIN_SHARED`, the agreement of one implementation
+  with itself under another seed (measured 0.337 and 0.303, against 0.355 and 0.317).
 """
 
 import json
@@ -39,13 +39,8 @@ SCRIPT = Path(__file__).parents[1] / "dev" / "sc_embed_fixtures.R"
 
 K = 15
 PRES_TOL = 0.03
-MIN_SHARED = {
-    "umap": 0.25,
-    "densmap": 0.2,
-    "tsne": 0.25,
-    "densne": 0.25,
-    "fa2": 0.85,
-}
+EXACT = {"umap", "densmap", "phate", "fa2"}
+MIN_SHARED = {"tsne": 0.25, "densne": 0.25}
 FUNCTIONS = {
     "umap": embed.umap,
     "densmap": embed.densmap,
@@ -128,7 +123,7 @@ def test_embedding_matches_r(sc, ref, slot):
     got = sc.cache.embeddings[slot]
     want = np.array(ref["embeddings"][slot])
     assert got.shape == want.shape
-    if slot == "phate":
+    if slot in EXACT:
         np.testing.assert_allclose(got, want, rtol=0, atol=1e-6)
         return
     pca = _knn_2d(sc.cache.pca_factors)
