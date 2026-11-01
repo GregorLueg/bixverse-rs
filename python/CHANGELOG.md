@@ -5,7 +5,9 @@ reports the crate it vendored as `bixverse.__core_version__`.
 
 ## 0.3.0
 
-Requires `bixverse-sc-data` 0.10.0.
+Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
+`bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`, plus `bixverse-gpu` and
+`bixverse-sc-gpu` for the GPU wheel. R parity is tested against bixverse 0.9.0.
 
 **Features**
 
@@ -65,6 +67,8 @@ Requires `bixverse-sc-data` 0.10.0.
   `docs/vignettes/<name>.py` (the source) with its executed `.ipynb` next to
   it, rendered on the docs site. `dev/vignettes.py execute` re-runs them,
   `dev/vignettes.py check` flags a notebook that no longer matches its source.
+- API reference pages for every public module, the parameters and the GPU wheel,
+  and landing pages and a README rewritten around the suite.
 - `bixverse.io.get_cell_ranger_params()` builds the mtx parameters for a Cell
   Ranger output directory, as R's `get_cell_ranger_params()`.
 - `download_kang_pbmc()` and `download_thymus_ageing()` return h5ad files

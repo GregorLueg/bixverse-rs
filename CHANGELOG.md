@@ -12,6 +12,31 @@
   `generate_knn_nndescent()` lost the argument. Use `knn_method =
   "nndescent_graph"` instead (see Features). `warn_unsupported_extract()` is
   gone with it.
+- `bbknn_first_neighbours()` is now `bbknn_nearest_neighbours()`: each
+  batch-balanced row is sorted by distance (ties by index) before taking k, so
+  the stored kNN holds the k nearest rather than the k lowest-index entries. The
+  connectivity graph is unchanged; kBET and LISI computed after BBKNN change.
+- The sparse Lanczos SVD on the CPU (`sparse_svd_lanczos()`) and in `bixverse-gpu`
+  applies `SvdResults::flip_signs` (largest-magnitude loading positive), so runs
+  are reproducible. Stored PCA factors can change sign against 0.9.4; distances,
+  kNN and clusters don't.
+- Symphony: `knn_majority_vote()` gives ties to the lowest label, as documented
+  (was the highest). `build_symphony_reference()`, `symphony_map_query()` and
+  `symphony_map_query_parts()` return errors on mismatched batch or gene map
+  lengths instead of panicking.
+- Plot extractors z-score by the sample SD on the store path too
+  (`extract_norm_counts()`, `extract_norm_counts_multi()`), as the in-memory paths
+  do. Scaled values shift by `sqrt(n/(n-1)) - 1`. Fewer than two values stay
+  unscaled.
+- `bixverse-r`: scDblFinder reads `gbm_n_trees` for the GBM rounds, not the Annoy
+  `n_trees`, so the effective default goes from 50 rounds to the spec's 200.
+  `parse_sigma_method()` accepts `snn_farthest` / `sigma_idx` and an unknown value
+  errors; `sigma_idx` used to fall back silently to the SNN bandwidth, so WNN
+  weights change for anyone who set it. DIALOGUE reads an integer `seed`; every run
+  used 1234 before, so any non-default seed changes results.
+- `parse_leiden_iterations()`, `parse_community_algorithm()`, `parse_magic_layer()`,
+  the Bonsai parsers and the MetaCells2 similarity parsers moved out of `bixverse-r`
+  into the crates that own the params.
 
 ### Features
 
@@ -27,8 +52,27 @@
 - `SingleCellReading::read_genes_sparse_csr()`: genes from a gene-major store
   straight into CSR, without holding the CSC next to its transpose. Default
   method, so every reader has it.
+- Logic lifted out of the R shell so every front end calls the same function:
+  `hvg_on_store()`, `pca_on_store()`, `fit_residuals_on_store()` and the residual
+  twins, the meta cell generators, `build_symphony_reference_on_store()`,
+  `make_milor_nhoods()`, `fast_mnn_on_store()`, `seurat_cca_on_store()`,
+  `seurat_rpca_on_store()`, `compare_knn()`, `pad_knn_rows()`, `run_wnn()`,
+  `adt_clr()`, `cellphonedb_run()`, `vision_with_autocorrelation()`,
+  `max_symmetrise_to_sparse_graph()`, `seacells_on_store_with()`,
+  `knn_with_dist_gpu()`. `bixverse_sc_data::h5_scan` reads h5ad dimensions and
+  detects the raw count slot, `h5_10x_io::write_tenx_h5()` writes 10x h5.
+- serde `Deserialize` on the single cell params structs, with renames matching the
+  R keys, so a front end needs one key map. This is what the Python wheels use.
 
 ### Fixes
+
+- `meld` checked labels with `l > n_groups`, so a label equal to `n_groups`
+  panicked. Now `>=`.
+- `extract_grouped_gene_stats()` returns `InvalidArgument` on a length mismatch or
+  an out-of-range group id instead of panicking.
+- CPU Scrublet returns `InvalidArgument` when `no_pcs` is 0 or exceeds
+  `min(genes, cells)` instead of a faer assertion.
+- Hotspot's `Default` model is `"danb"`, matching the R spec.
 
 - IVF in `dispatch_knn()` and `batch_knn_search()` passed `n_list` as
   `n_probe`, so it probed every list. It uses `n_probe` now.
@@ -38,8 +82,7 @@
 
 ### Dependencies
 
-- `ann-search-rs` 0.12 (git branch `chore-clean-up` until released),
-  `bonsai-rs` on ann-search-rs 0.12, `edge-rs` 0.3.2.
+- `ann-search-rs` 0.12, `bonsai-rs` 0.3.1, `edge-rs` 0.3.2.
 
 ### Performance
 
