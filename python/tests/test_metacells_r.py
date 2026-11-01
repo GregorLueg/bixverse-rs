@@ -14,7 +14,7 @@ labels, regions and labels are compared exactly, every float at `RTOL`
 (measured: at most 5.3e-15, relative for the normalised counts, SEACells
 RSS, HVG statistics, PCA, residual PCA, density distances, compactness,
 separation and purity, absolute for the kNN distances), PCA and diffusion
-components up to a sign each, scaled by the largest entry. The subset and
+components scaled by the largest entry. The subset and
 per group runs build their own HVGs, PCA and kNN on both sides first.
 """
 
@@ -41,26 +41,14 @@ from bixverse.params import (
 )
 from bixverse.pipeline import step_hvg, step_neighbours, step_pca
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_metacells_fixtures.R"
 
 RTOL = 1e-12
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -150,13 +138,11 @@ def _check_mc(mc: metacells.MetaCells, want: dict) -> None:
             np.testing.assert_allclose(got.data, exp["x"], rtol=RTOL)
 
 
-def _same_up_to_sign(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
-    """Columns equal up to a sign each, relative to the largest entry."""
+def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
+    """Equal relative to the largest entry."""
     assert got.shape == want.shape, err_msg
-    signs = np.sign(np.sum(got * want, axis=0))
-    signs[signs == 0] = 1
     np.testing.assert_allclose(
-        got * signs,
+        got,
         want,
         rtol=RTOL,
         atol=RTOL * np.abs(want).max(),
@@ -168,8 +154,8 @@ def _check_pca(mc: metacells.MetaCells, want: dict) -> None:
     np.testing.assert_allclose(
         mc.cache.pca_singular_vals, want["singular_values"], rtol=RTOL
     )
-    _same_up_to_sign(mc.cache.pca_factors, np.array(want["factors"]), "factors")
-    _same_up_to_sign(mc.cache.pca_loadings, np.array(want["loadings"]), "loadings")
+    _same_columns(mc.cache.pca_factors, np.array(want["factors"]), "factors")
+    _same_columns(mc.cache.pca_loadings, np.array(want["loadings"]), "loadings")
 
 
 ##############
@@ -347,7 +333,7 @@ def test_diffusion_and_manifold_match_r(ref, sc, chain):
     want = ref["diffusion"]
     dcs = mc.other_data["dcs"]
     assert isinstance(dcs, np.ndarray)
-    _same_up_to_sign(dcs, np.array(want["dcs"]), "dcs")
+    _same_columns(dcs, np.array(want["dcs"]), "dcs")
     np.testing.assert_allclose(
         mc.other_data["density_dist"], want["density_dist"], rtol=RTOL
     )

@@ -54,13 +54,12 @@ if (mode == "write") {
   )
 
   # the filter: every cell outside cell_type_3, in descending order on
-  # purpose, since the cell set is order sensitive
+  # purpose; R stores it unique and ascending
   obs <- get_sc_obs(sc)
   keep <- rev(obs$cell_idx[obs$cell_grp != "cell_type_3"])
   sc <- set_cells_to_keep(sc, as.integer(keep))
 
-  # one value per kept cell, in ascending cell order
-  kept_sorted <- sort(get_cells_to_keep(sc) + 1L)
+  kept_sorted <- get_cells_to_keep(sc) + 1L
   arm <- ifelse(kept_sorted %% 2L == 0L, "even", "odd")
   sc <- set_sc_new_obs_col(sc, col_name = "arm", new_data = arm)
 

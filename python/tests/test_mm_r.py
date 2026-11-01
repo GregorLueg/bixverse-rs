@@ -11,9 +11,8 @@ graphs, PAGA and MAGIC over the WNN and ADT kNN. WNN and everything after it
 start from R's RNA and ADT PCA, so they test the routing and the fusion, not
 the PCA again. Skipped when Rscript or the package is missing.
 
-Tolerances, measured against R 0.8.4. The `float64` outputs (CLR, DSB, the
-raw ADT PCA) agree to a few ulps (max relative 2e-11, on near-zero PCA
-scores) and are held to `RTOL` with `ATOL` for the near-zero entries. The
+Tolerances. The `float64` outputs (CLR, DSB, the raw ADT PCA) are held to
+`RTOL` with `ATOL` for the near-zero entries. The
 `float32` outputs (the cached PCA, kNN distances, weights, graph weights,
 MAGIC) agree to the 15 digits jsonlite prints them with and are held to
 `RTOL_F32`. Indices, labels and graph structure are exact.
@@ -39,9 +38,11 @@ from bixverse.params import (
     WnnParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_mm_fixtures.R"
 
-RTOL = 1e-10
+RTOL = 1e-12
 ATOL = 1e-12
 RTOL_F32 = 1e-6
 ATOL_F32 = 1e-7
@@ -54,21 +55,7 @@ DSB_ARRAYS = (
 )
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 def _run_r(*args: str) -> None:
@@ -269,15 +256,28 @@ def test_calculate_pca_adt_matches_r(ref, sc, run, no_pcs, randomised, seed):
     assert sc.check_state(["pca"], modality="adt") is True
 
 
+def test_calculate_pca_adt_features_match_r(ref, sc):
+    mm.calculate_pca_adt(sc, 5, features=ref["adt_features"])
+    want, c = ref["adt_pca_features"], sc.adt_cache
+    _close(c.pca_factors, want["factors"], "factors", RTOL_F32, 1e-6)
+    _close(c.pca_loadings, want["loadings"], "loadings", RTOL_F32, ATOL_F32)
+    _close(c.pca_singular_vals, want["sv"], "sv", RTOL_F32, ATOL_F32)
+
+
 #######
 # WNN #
 #######
 
 
-@pytest.mark.parametrize("run", ["wnn", "wnn_alt"])
+@pytest.mark.parametrize("run", ["wnn", "wnn_alt", "wnn_sigma"])
 def test_generate_wnn_graph_matches_r(ref, sc_pca, run):
     kwargs: dict[str, Any] = {
         "wnn": {"wnn_params": WnnParams(knn_range=100)},
+        "wnn_sigma": {
+            "wnn_params": WnnParams(
+                knn_range=100, sigma_method="sigma_idx", sigma_idx=9
+            )
+        },
         "wnn_alt": {
             "no_embd_to_use_1": 8,
             "wnn_params": WnnParams(

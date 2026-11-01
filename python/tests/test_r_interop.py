@@ -15,24 +15,12 @@ import pytest
 
 import bixverse as bv
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_interop.R"
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 def _run_r(mode: str, directory: Path, out: Path) -> dict:
@@ -80,16 +68,15 @@ def test_python_opens_the_r_directory(r_dir):
 def test_r_cell_filter_arrives_zero_based(r_dir):
     path, ref = r_dir
     sc = bv.io.load_existing(path)
-    # R's map is 0-based already; the DuckDB only carries the set, not R's
-    # order, so Python rebuilds it ascending
-    assert sc.cells_to_keep.tolist() == sorted(ref["cells_to_keep_r"])
-    assert ref["cells_to_keep_r"] != sorted(ref["cells_to_keep_r"])
+    # the fixture hands R a descending filter; R's map is 0-based and ascending
+    assert ref["cells_to_keep_r"] == sorted(ref["cells_to_keep_r"])
+    assert sc.cells_to_keep.tolist() == ref["cells_to_keep_r"]
 
     obs = sc.obs()
     assert obs["cell_idx"].to_list() == [i - 1 for i in ref["obs_cell_idx"]]
     assert obs["to_keep"].to_list() == ref["obs_to_keep"]
     kept = sc.obs(filtered=True)["cell_idx"].to_list()
-    assert kept == sorted(ref["cells_to_keep_r"])
+    assert kept == ref["cells_to_keep_r"]
 
 
 def test_r_obs_column_arrives(r_dir):
@@ -158,13 +145,11 @@ def test_r_reads_python_filter_and_obs(r_dir, tmp_path):
     _check_obs(back, keep, frame, ref["n_cells_total"])
 
 
-def test_r_memory_file_wins_over_a_python_filter(r_dir, tmp_path):
-    # R prefers its own memory.qs2 for the cell filter, as Python prefers
-    # memory_py.*: the obs columns arrive, the filter change does not
-    _, ref = r_dir
+def test_python_filter_wins_over_r_memory_file(r_dir, tmp_path):
+    # obs.to_keep is authoritative on both sides: a stale memory.qs2 loses
     path = _copy(r_dir, tmp_path, keep_r_memory=True)
     keep, frame = _modify(path)
 
     back = _run_r("read", path, tmp_path / "back.json")
-    assert back["cells_to_keep_r"] == ref["cells_to_keep_r"]
-    _check_obs(back, keep, frame, ref["n_cells_total"])
+    assert back["cells_to_keep_r"] == keep.tolist()
+    _check_obs(back, keep, frame, r_dir[1]["n_cells_total"])

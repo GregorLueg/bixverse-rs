@@ -13,10 +13,6 @@ results agree to the 15 significant digits jsonlite prints (measured: at most
 weight and metric). Embeddings are f32 and compared at `rtol=1e-6` with an
 absolute floor of `1e-7` times the largest entry; f64 metrics at
 `rtol=1e-12`. kNN indices, graph structure and kBET decisions are exact.
-fastMNN, CCA and rPCA without a pre-computed PCA compute one on the sparse
-Lanczos path, whose component signs are not reproducible run to run (Python
-against Python differs too), so those embeddings are compared up to a sign
-per column; with R's PCA handed in they match without the sign freedom.
 """
 
 import json
@@ -39,6 +35,8 @@ from bixverse.params import (
     SeuratRpcaParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_integrate_fixtures.R"
 
 RTOL_F32 = 1e-6
@@ -50,21 +48,7 @@ RPCA = SeuratRpcaParams(dims=10, k_weight=50)
 MNN = FastmnnParams(no_pcs=15, k=10)
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -107,14 +91,10 @@ def sc_corrected(ref, sc):
 ###########
 
 
-def _same_embedding(got: np.ndarray, want: list, *, up_to_sign: bool = False) -> None:
+def _same_embedding(got: np.ndarray, want: list) -> None:
     w = np.array(want)
     assert got.dtype == np.float32
     assert got.shape == w.shape
-    if up_to_sign:
-        signs = np.sign(np.sum(got * w, axis=0))
-        signs[signs == 0] = 1
-        got = got * signs
     np.testing.assert_allclose(got, w, rtol=RTOL_F32, atol=ATOL_F32 * np.abs(w).max())
 
 
@@ -122,12 +102,10 @@ def _same_bbknn(sc: bv.SingleCells, want: dict) -> None:
     knn, g = sc.cache.knn, sc.cache.connectivities
     assert knn is not None and g is not None
     assert knn.dist_metric == want["knn"]["metric"]
-    # R 0.8.4 keeps the k lowest-index entries of each batch-balanced row; the
-    # crate now keeps the k nearest. Both are drawn from the same candidates,
-    # so the Python rows are sorted and never further than R's sorted rows.
-    assert np.all(np.diff(knn.distances, axis=1) >= 0)
-    r_sorted = np.sort(np.asarray(want["knn"]["dist"], dtype=np.float64), axis=1)
-    assert np.all(knn.distances <= r_sorted + ATOL_F32)
+    np.testing.assert_array_equal(knn.indices, want["knn"]["indices"])
+    np.testing.assert_allclose(
+        knn.distances, want["knn"]["dist"], rtol=RTOL_F32, atol=ATOL_F32
+    )
     wg = want["graph"]
     assert g.shape == (wg["n"], wg["n"])
     np.testing.assert_array_equal(g.indptr, wg["indptr"])
@@ -191,7 +169,7 @@ def test_harmony_v2_fixed_lambda_matches_r(ref, sc):
 
 def test_fast_mnn_matches_r(ref, sc):
     integrate.fast_mnn(sc, BATCH, ref["batch_hvg"], fastmnn_params=MNN)
-    _same_embedding(sc.cache.embeddings["mnn"], ref["mnn"], up_to_sign=True)
+    _same_embedding(sc.cache.embeddings["mnn"], ref["mnn"])
     assert sc.cache.stamps["mnn"].parents == ()
 
 
@@ -211,12 +189,12 @@ def test_fast_mnn_precomputed_matches_r(ref, sc):
 
 def test_seurat_cca_matches_r(ref, sc):
     integrate.seurat_cca(sc, BATCH, ref["batch_hvg"], cca_params=CCA)
-    _same_embedding(sc.cache.embeddings["cca"], ref["cca"], up_to_sign=True)
+    _same_embedding(sc.cache.embeddings["cca"], ref["cca"])
 
 
 def test_seurat_rpca_matches_r(ref, sc):
     integrate.seurat_rpca(sc, BATCH, ref["batch_hvg"], rpca_params=RPCA)
-    _same_embedding(sc.cache.embeddings["rpca"], ref["rpca"], up_to_sign=True)
+    _same_embedding(sc.cache.embeddings["rpca"], ref["rpca"])
 
 
 def test_seurat_rpca_precomputed_matches_r(ref, sc):
@@ -345,8 +323,6 @@ def test_cell_type_asw_matches_r(ref, sc_corrected):
         sc_corrected, "cell_grp", embd_to_use="mnn", max_cells=None
     )
     assert got is not None
-    # the mnn embedding carries the Lanczos sign freedom; silhouettes are
-    # distance based, so they do not
     _close(got.per_cell, want["per_cell"], RTOL_F32)
     _close(got.mean_asw, want["mean_asw"], RTOL_F32)
     assert got.n_cell_types == want["n_cell_types"]
@@ -366,6 +342,7 @@ def test_graph_connectivity_matches_r(ref, sc_corrected):
     ("key", "kwargs"),
     [
         ("summary", {"cell_type_column": "cell_grp", "embd_to_use": "harmony"}),
+        ("summary_no_embedding", {"embd_to_use": None}),
     ],
 )
 def test_integration_metrics_match_r(ref, sc_corrected, key, kwargs):

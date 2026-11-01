@@ -1045,9 +1045,10 @@ def cellsweep(
     Barcodes split three ways: empty droplets, annotated barcodes that passed
     QC, and the rest, which is left out of the fit and the output. The raw
     layer takes the stochastically rounded counts, the normalised layer the
-    float magnitudes. As in R, obs is the input's (including its now stale
-    `nnz` and `lib_size`) plus `cellsweep_alpha`, `cellsweep_z`,
-    `cellsweep_beta`, `cellsweep_ll` and `cellsweep_converged`; var gains a
+    float magnitudes. As in R, obs is the input's with `nnz` and `lib_size`
+    replaced by the denoised counts' statistics, plus `cellsweep_alpha`,
+    `cellsweep_z`, `cellsweep_beta`, `cellsweep_ll` and
+    `cellsweep_converged`; var gains a
     fresh `no_cells_exp` and `cellsweep_ambient`, the mean ambient profile
     over the samples.
 
@@ -1170,6 +1171,10 @@ def cellsweep(
             )
             for fit in fits
         ]
+    )
+    diagnostics = diagnostics.with_columns(
+        lib_size=pl.Series(res["lib_size"], dtype=pl.Int32),
+        nnz=pl.Series(res["nnz"], dtype=pl.Int32),
     )
     ambient = np.mean(np.stack([fit["ambient"] for fit in fits]), axis=0)
     with db.connect(db.db_path(path)) as con:

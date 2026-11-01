@@ -11,16 +11,12 @@ caller has something to find. Both sides run the same Rust on the same inputs
 with the same seeds, so the results agree to the digits jsonlite prints
 (measured: at most 5e-15 relative on every score, error, z-score, threshold,
 rate and scDblFinder feature). Scores are compared at `rtol=1e-12`; calls,
-cluster labels, pairs and empty droplet masks exactly; the Scrublet PCA up to
-a sign per column. CellSweep writes through the same writer with the same
-seeded rounding, so obs and var match column for column and both count
+cluster labels, pairs and empty droplet masks exactly. CellSweep writes through
+the same writer with the same seeded rounding, so obs and var match column for
+column and both count
 layers of a sample of cells match exactly (measured: bit for bit on every
 cell).
 
-scDblFinder takes `gbm_n_trees=50` on the Python side, R's effective value:
-R's list conversion reads the GBM round count from `n_trees`, the Annoy key,
-and never reads `gbm_n_trees`. On these data the CV stops before 50 rounds,
-so the spec default of 200 gives the same result.
 """
 
 import json
@@ -43,30 +39,17 @@ from bixverse.params import (
     ScrubletParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_doublets_fixtures.R"
 
 RTOL = 1e-12
 SCRUBLET = ScrubletParams(no_pcs=10, min_gene_var_pctl=0.0, n_bins_histogram=20)
 BOOST = BoostParams(min_gene_var_pctl=0.0, no_pcs=10, n_iters=5)
-# R's effective GBM round count, see the module docstring
-SCDBL = ScdblfinderParams(no_pcs=10, n_genes=50, cxds_genes=50, gbm_n_trees=50)
+SCDBL = ScdblfinderParams(no_pcs=10, n_genes=50, cxds_genes=50)
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -191,9 +174,7 @@ def test_scrublet_matches_r(ref, sc):
     np.testing.assert_array_equal(res.pair_2, ref["scrublet"]["pair_2"])
     pca, want = res.pca, np.array(ref["scrublet"]["pca"])
     assert isinstance(pca, np.ndarray) and pca.shape == want.shape
-    np.testing.assert_allclose(
-        np.abs(pca), np.abs(want), rtol=1e-6, atol=1e-7 * np.abs(want).max()
-    )
+    np.testing.assert_allclose(pca, want, rtol=1e-6, atol=1e-7 * np.abs(want).max())
 
 
 def test_scrublet_manual_matches_r(ref, sc):
@@ -269,6 +250,18 @@ def test_scdblfinder_matches_r(ref, sc):
     assert features.columns[1:] == ref["scdblfinder"]["feature_names"]
     assert features["cell_id"].to_list() == sc.cell_ids(res.cell_indices).tolist()
     _close(features.drop("cell_id").to_numpy(), ref["scdblfinder"]["features"])
+
+
+def test_scdblfinder_gbm_rounds_match_r(ref, sc):
+    res = doublets.scdblfinder(
+        sc,
+        scdblfinder_params=ScdblfinderParams(
+            no_pcs=10, n_genes=50, cxds_genes=50, gbm_n_trees=3
+        ),
+    )
+    _same_scdbl(res, ref["scdblfinder_short"])
+    short, full = ref["scdblfinder_short"], ref["scdblfinder"]
+    assert short["doublet_score"] != full["doublet_score"]
 
 
 def test_scdblfinder_grouped_matches_r(ref, sc):

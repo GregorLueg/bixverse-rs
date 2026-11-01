@@ -432,16 +432,13 @@ def calculate_pca_adt(
     `calculate_pca_adt_sc`.
 
     Scores, loadings and singular values go to `mm.adt_cache`, stamped
-    `"adt:pca"`. As in R the full SVD stores the component standard
-    deviations (singular values over `sqrt(n - 1)`) and the randomised one
-    the raw singular values.
+    `"adt:pca"`.
 
     Args:
         mm: The experiment, with ADT counts.
         no_pcs: Number of components, at most the number of features used.
         features: ADT feature ids to restrict to, e.g. without the isotypes.
-            The loadings rows follow them. `None` for all; R ignores this
-            argument.
+            The loadings rows follow them. `None` for all.
         randomised_svd: Randomised SVD, faster and less precise.
         seed: Seed for the randomised SVD.
 
@@ -462,6 +459,10 @@ def calculate_pca_adt(
     scores, loadings, sv = _bixverse.adt_pca(
         np.ascontiguousarray(norm), no_pcs, randomised_svd, seed
     )
+    # the full SVD binding returns component SDs, the randomised one singular
+    # values; store singular values on both paths
+    if not randomised_svd:
+        sv = np.asarray(sv) * np.sqrt(len(rows) - 1)
     cache = mm.adt_cache
     cache.pca_factors = scores.astype(np.float32)
     cache.pca_loadings = loadings.astype(np.float32)

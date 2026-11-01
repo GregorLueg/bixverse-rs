@@ -29,6 +29,8 @@ import bixverse as bv
 from bixverse import graph
 from bixverse.params import FastClusterParams, NeighboursParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_graph_fixtures.R"
 
 RTOL_F32 = 1e-6
@@ -38,21 +40,7 @@ EXACT = ("exhaustive", "kmknn")
 APPROX = ("annoy", "hnsw", "nndescent", "ivf")
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 def _run_r(*args: str) -> None:

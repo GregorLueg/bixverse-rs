@@ -27,6 +27,8 @@ from bixverse import metacells
 from bixverse import nmf as bvnmf
 from bixverse.params import BtMetacellsParams, NmfConsensusParams, NmfHalsParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_nmf_fixtures.R"
 
 RTOL = 1e-12
@@ -34,21 +36,7 @@ RTOL = 1e-12
 HALS_100 = NmfHalsParams(max_iter=100)
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 ###########

@@ -277,7 +277,7 @@ def test_per_group_on_a_numeric_column(sc):
     out = pipeline.apply_pipeline_per_group(
         pipeline.Pipeline((pipeline.step_hvg(hvg_no=20),)), sc, "batch_index"
     )
-    assert list(out) == ["1.0", "2.0"]
+    assert list(out) == ["1", "2"]
     n = sum(sub.shape[0] for sub in out.values())
     assert n == len(sc.cells_to_keep)
 

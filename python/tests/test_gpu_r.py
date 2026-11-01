@@ -7,9 +7,9 @@ steps on a copy of the untouched one. Skipped without Rscript, bixverse.gpu,
 the GPU wheel or a GPU adapter.
 
 Tolerances. Both sides run the GPU SVD in `f32` on the same store and seed,
-so the components agree to a few f32 ulps; they are compared up to a sign
-per component, since the installed R package may predate the sign fix of the
-GPU Lanczos.
+so the components agree to a few f32 ulps. They are compared up to a sign per
+component because bixverse.gpu 0.6.2 predates the GPU Lanczos sign fix (the
+exact solver comes back flipped, measured); drop that once it is rebuilt.
 """
 
 import json
@@ -27,8 +27,8 @@ bg = pytest.importorskip("bixverse_gpu")
 
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_gpu_fixtures.R"
 
-RTOL = 1e-4
-ATOL = 1e-5
+RTOL = 1e-6
+ATOL = 1e-7
 
 
 def _r_available() -> bool:

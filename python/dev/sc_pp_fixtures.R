@@ -249,8 +249,12 @@ ref$sct <- residual_report(sc, ref$residual_hvg_no)
 
 ref$corrected_dir <- file.path(root, "r_corrected")
 unlink(ref$corrected_dir, recursive = TRUE)
+# on a fresh copy, so its var holds what the Python run has
+sc_sct <- set_cells_to_keep(load("r_pp_sct"), ref$keep)
+sc_sct <- fit_residuals_sc(sc_sct, method = "sctransform", .verbose = FALSE)
+invisible(residual_report(sc_sct, ref$residual_hvg_no))
 corrected <- sct_corrected_counts_sc(
-  sc,
+  sc_sct,
   dir_out = ref$corrected_dir,
   .verbose = FALSE
 )

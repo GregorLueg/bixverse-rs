@@ -125,6 +125,11 @@ ref$per_group <- lapply(per_group, function(sub) {
   )
 })
 
+# a numeric group column
+per_batch <- apply_pipeline_per_group(p_grp, sc, group_col = "batch_index")
+ref$batches <- names(per_batch)
+ref$per_batch_hvg <- lapply(per_batch, get_hvg)
+
 ## meta cells, then the MetaCells chain ----------------------------------------
 
 p_mc <- step_metacells_sc(

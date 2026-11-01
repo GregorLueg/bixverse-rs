@@ -226,7 +226,7 @@ hs <- generate_hotspot_membership(hs, fdr_threshold = 0.05, min_size = 3L)
 ref$hs_pair <- list(
   z = mat(hs$z),
   cor = mat(hs$cor),
-  member = hs$module_memership$cluster_member
+  member = hs$module_membership$cluster_member
 )
 
 ## SCENIC ----------------------------------------------------------------------

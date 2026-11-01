@@ -14,8 +14,7 @@ is missing.
 Both sides run the same Rust on the same inputs with the same seeds, so cell
 ids, terminal states, waypoints, PAGA graph structure, branch cells, tree
 topology, leaf order and genes used are compared exactly, every float at
-`RTOL`. R 0.8.4 builds against bonsai-rs 0.3.0, the wheel against 0.3.1;
-see the Bonsai tests for what that changes.
+`RTOL`.
 """
 
 import json
@@ -36,26 +35,14 @@ from bixverse.params import (
     PalantirParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_traj_fixtures.R"
 
 RTOL = 1e-12
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 ############
@@ -297,6 +284,13 @@ def test_palantir_metacells_matches_r(ref, mc):
     )
     assert res is not None
     _check_palantir(res, want)
+    trends = traj.run_gene_trends(
+        mc,
+        res,
+        features=ref["features"],
+        gene_trend_params=GeneTrendsParams(resolution=25),
+    )
+    _check_trends(trends, ref["mc_trends"])
 
 
 ########

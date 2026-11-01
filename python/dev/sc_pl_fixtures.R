@@ -247,6 +247,16 @@ ref$mc_expr <- tab(extract_gene_expression(
   scale = TRUE
 ))
 ref$mc_dot <- tab(extract_dot_plot_data(mc, ref$genes, "mc_grp"))
+ref$single_group_dot <- tab(extract_dot_plot_data(sub, ref$genes, "cell_grp"))
+ref$mc_levels <- c("a", "b", "c", "unused")
+mc[["mc_fac"]] <- factor(ref$mc_grp, levels = ref$mc_levels)
+ref$mc_dot_unused <- tab(extract_dot_plot_data(mc, ref$genes, "mc_fac"))
+ref$mc_expr_unused <- tab(extract_gene_expression(
+  mc,
+  ref$genes,
+  obs_cols = "mc_fac",
+  scale = TRUE
+))
 
 ## PAGA ------------------------------------------------------------------------
 
@@ -299,6 +309,23 @@ ref$milo_alt <- plot_list(extract_milo_plot_data(
   embedding = "pca",
   alpha = 0.9,
   overlap = 3L
+))
+
+## filter change after the ADT counts went in --------------------------------
+
+ref$keep_late <- ref$keep[-seq_len(30L)]
+mm <- set_cells_to_keep(mm, ref$keep_late)
+ref$late_expr_adt <- tab(extract_gene_expression(
+  mm,
+  ref$proteins,
+  obs_cols = "cell_grp",
+  modality = "adt"
+))
+ref$late_dot_adt <- tab(extract_dot_plot_data(
+  mm,
+  ref$proteins,
+  "cell_grp",
+  modality = "adt"
 ))
 
 write_json(ref, args[[2]])

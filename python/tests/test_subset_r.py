@@ -14,8 +14,8 @@ PCA, singular values and markers, absolute for the kNN distances, edge
 weights and PHATE). Index sets, HVGs, kNN indices, graph
 structure and cluster labels are compared exactly. f64 marker statistics at
 `rtol=1e-12`. f32 outputs (PCA, kNN distances, edge weights) at `rtol=1e-5`,
-`atol=1e-6` (scaled by the largest entry for the PCA), PCA components up to a
-sign each. PHATE at `atol=1e-6`, as in `test_embed_r.py`.
+`atol=1e-6` (scaled by the largest entry for the PCA). PHATE at `atol=1e-6`, as
+in `test_embed_r.py`.
 """
 
 import json
@@ -30,6 +30,8 @@ import bixverse as bv
 from bixverse import de, graph, pp
 from bixverse.params import FastClusterParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_subset_fixtures.R"
 
 RTOL_F64 = 1e-12
@@ -37,21 +39,7 @@ RTOL_F32 = 1e-5
 ATOL_F32 = 1e-6
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -92,13 +80,11 @@ def run(ref, tmp_path_factory):
     return {"sc": sc, "sub": sub, "before": before, "fast": fast, "markers": markers}
 
 
-def _same_up_to_sign(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
-    """Columns equal up to a sign each, relative to the largest entry."""
+def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
+    """Equal relative to the largest entry."""
     assert got.shape == want.shape, err_msg
-    signs = np.sign(np.sum(got * want, axis=0))
-    signs[signs == 0] = 1
     np.testing.assert_allclose(
-        got * signs,
+        got,
         want,
         rtol=RTOL_F32,
         atol=ATOL_F32 * np.abs(want).max(),
@@ -127,8 +113,8 @@ def test_subset_hvg_and_pca_match_r(ref, run):
     np.testing.assert_allclose(
         sub.cache.pca_singular_vals, want["singular_values"], rtol=RTOL_F32
     )
-    _same_up_to_sign(sub.cache.pca_factors, np.array(want["factors"]), "factors")
-    _same_up_to_sign(sub.cache.pca_loadings, np.array(want["loadings"]), "loadings")
+    _same_columns(sub.cache.pca_factors, np.array(want["factors"]), "factors")
+    _same_columns(sub.cache.pca_loadings, np.array(want["loadings"]), "loadings")
 
 
 def test_subset_neighbours_match_r(ref, run):

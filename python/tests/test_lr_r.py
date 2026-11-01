@@ -10,12 +10,11 @@ quality column, and with the library size and the HVGs), a
 Python copies the untouched directories, applies the same filter, rebuilds
 the same inputs and reruns. Skipped when Rscript or the package is missing.
 
-Tolerances, measured against R 0.8.4. Both sides run the same Rust on the
+Tolerances, measured. Both sides run the same Rust on the
 same inputs, so ids, gates, ranks, kept features, verdict and signature
 genes are exact, and every float agrees to the 15 digits jsonlite prints
-(max relative 5e-15), held to `RTOL`. The subunit order within a complex is
-not compared: R sorts it in the session locale. Checked once by hand on the
-real CellPhoneDB v5 download: both flatten it to the same 2911 rows.
+(max relative 5e-15), held to `RTOL`. Checked once by hand on the real
+CellPhoneDB v5 download: both flatten it to the same 2911 rows.
 """
 
 import json
@@ -38,27 +37,15 @@ from bixverse.params import (
     LigandTargetParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_lr_fixtures.R"
 
 RTOL = 1e-12
 ATOL = 1e-12
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 ###########
@@ -173,7 +160,7 @@ def dlg_data():
     return bv.io.generate_dialogue_test_data(seed=11)
 
 
-PMD = DialoguePmdParams(k=2, n_permutations=20, abn_c=10, n_genes=12)
+PMD = DialoguePmdParams(k=2, n_permutations=20, abn_c=10, n_genes=12, seed=77)
 
 
 def _zero_based(want: dict) -> dict:
@@ -307,12 +294,8 @@ def test_cellphonedb_db_matches_r(ref, lr_db):
     for col in lr_db.columns:
         w = _as_list(want[col])
         if col.startswith("genes_"):
-            # R sorts the subunits in the session locale, Python by code point
-            assert [sorted(g) for g in lr_db[col].to_list()] == [
-                sorted(_as_list(g)) for g in w
-            ], col
-        else:
-            assert lr_db[col].to_list() == w, col
+            w = [_as_list(g) for g in w]
+        assert lr_db[col].to_list() == w, col
 
 
 @pytest.mark.parametrize("case", ["simple", "statistical", "degs", "restricted"])
@@ -354,7 +337,11 @@ def test_dialogue_quality_matches_r(ref, dsc, dlg_data):
     _same_dialogue(got, ref["dialogue"]["quality"])
 
 
-def test_dialogue_lib_size_and_hvg_match_r(ref, dsc, dlg_data):
+@pytest.mark.parametrize(
+    ("run", "satterthwaite"),
+    [("lib_size", False), ("lib_size_satterthwaite", True)],
+)
+def test_dialogue_lib_size_and_hvg_match_r(ref, dsc, dlg_data, run, satterthwaite):
     pp.find_hvg(dsc, hvg_no=150)
     assert dsc.map.hvg is not None
     assert dsc.map.hvg.tolist() == ref["dlg_hvg"]
@@ -364,9 +351,9 @@ def test_dialogue_lib_size_and_hvg_match_r(ref, dsc, dlg_data):
         "sample_id",
         dlg_data.features,
         pmd_params=PMD,
-        hlm_params=DialogueHlmParams(satterthwaite=False),
+        hlm_params=DialogueHlmParams(satterthwaite=satterthwaite),
     )
-    _same_dialogue(got, ref["dialogue"]["lib_size"])
+    _same_dialogue(got, ref["dialogue"][run])
 
 
 def test_dialogue_subset_matches_r(ref, dsc, dlg_data):
@@ -432,7 +419,9 @@ def mc_features(ref, mc) -> dict[str, pl.DataFrame]:
     return {ct: frame.filter(labels == ct) for ct in sorted(set(ref["mc_cell_grp"]))}
 
 
-MC_PMD = DialoguePmdParams(k=2, n_permutations=20, abn_c=2, p_anova=1.0, n_genes=12)
+MC_PMD = DialoguePmdParams(
+    k=2, n_permutations=20, abn_c=2, p_anova=1.0, n_genes=12, seed=77
+)
 
 
 @pytest.mark.parametrize("quality", [True, False])

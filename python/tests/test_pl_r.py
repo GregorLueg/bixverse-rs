@@ -10,7 +10,7 @@ MAGIC layer, PAGA and Milo results, so the tests check the extraction only.
 The meta cells are regenerated from R's kNN, which phase 10 holds exact.
 Skipped when Rscript or the package is missing.
 
-Tolerances, measured against R 0.8.4: expression values, means, percents
+Tolerances, measured: expression values, means, percents
 and z-scores (store and in-memory) agree to 6e-14 absolute, 3e-14 relative,
 and are held to `RTOL` / `ATOL`. Coordinates on the RNA PCA agree to 5e-15;
 R's ADT PCA scores are `float64` and the Python cache holds `float32`, so
@@ -32,6 +32,8 @@ from bixverse import de, metacells, mm, traj
 from bixverse import pl as bvpl
 from bixverse.params import BtMetacellsParams, SyntheticDataAdtParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_pl_fixtures.R"
 
 RTOL = 1e-12
@@ -41,21 +43,7 @@ RTOL_COORD = 1e-6
 ATOL_COORD = 1e-7
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 ###########
@@ -378,6 +366,56 @@ def test_subset_and_metacells_match_r(ref, sc, mc):
         ref["mc_expr"],
     )
     _same_frame(bvpl.extract_dot_plot_data(mc, ref["genes"], "mc_grp"), ref["mc_dot"])
+
+
+def test_single_group_dot_plot_matches_r(ref, sc):
+    sub = bv.SingleCellsSubset(sc, "cell_grp", ref["subset_group"])
+    _same_frame(
+        bvpl.extract_dot_plot_data(sub, ref["genes"], "cell_grp"),
+        ref["single_group_dot"],
+    )
+
+
+def test_unused_factor_level_matches_r(ref, mc):
+    mc.add_obs(
+        pl.DataFrame(
+            {"mc_fac": pl.Series(ref["mc_grp"], dtype=pl.Enum(ref["mc_levels"]))}
+        )
+    )
+    _same_frame(
+        bvpl.extract_dot_plot_data(mc, ref["genes"], "mc_fac"), ref["mc_dot_unused"]
+    )
+    _same_frame(
+        bvpl.extract_gene_expression(mc, ref["genes"], obs_cols=["mc_fac"], scale=True),
+        ref["mc_expr_unused"],
+    )
+
+
+def test_filter_change_after_adt_matches_r(ref, tmp_path):
+    directory = tmp_path / "mm"
+    shutil.copytree(ref["base_dir"], directory)
+    obj = bv.SingleCellsMultiModal(directory)
+    obj.set_cells_to_keep(ref["keep"])
+    data = bv.io.generate_single_cell_test_data_adt(
+        SyntheticDataAdtParams(n_cells=600), seed=123
+    )
+    mm.add_adt_counts(
+        obj,
+        np.ascontiguousarray(data.counts[::-1]),
+        data.obs["cell_id"].to_numpy()[::-1],
+        data.var["protein_id"].to_list(),
+    )
+    obj.set_cells_to_keep(ref["keep_late"])
+    _same_frame(
+        bvpl.extract_gene_expression(
+            obj, ref["proteins"], obs_cols=["cell_grp"], modality="adt"
+        ),
+        ref["late_expr_adt"],
+    )
+    _same_frame(
+        bvpl.extract_dot_plot_data(obj, ref["proteins"], "cell_grp", modality="adt"),
+        ref["late_dot_adt"],
+    )
 
 
 ##########

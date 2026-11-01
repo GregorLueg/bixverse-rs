@@ -254,7 +254,6 @@ def test_gene_trends_magic(sc, pal):
 
 
 def test_gene_trends_metacells(mc):
-    # R errors here, as get_cell_names() has no MetaCells method
     ids = mc.cell_ids().tolist()
     pal = traj.run_palantir(
         mc,

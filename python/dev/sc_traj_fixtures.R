@@ -329,8 +329,13 @@ mc_pal <- run_palantir_sc(
 )
 ref$mc_palantir <- palantir_report(mc_pal)
 ref$mc_paga <- paga_report(run_paga_sc(mc, cluster_col = "seg", .verbose = FALSE))
-# no gene trends: run_gene_trends_sc() on MetaCells calls get_cell_names(),
-# which has no MetaCells method, so R errors before reaching Rust
+ref$mc_trends <- trends_report(run_gene_trends_sc(
+  mc,
+  palantir_res = mc_pal,
+  features = ref$features,
+  gene_trend_params = params_sc_gene_trends(resolution = 25L),
+  .verbose = FALSE
+))
 
 ## bonsai ----------------------------------------------------------------------
 

@@ -13,8 +13,7 @@ included). f64 outputs (HVG statistics, residual variances) are compared at
 `rtol=1e-12`. f32 outputs (PCA, MAGIC, corrected counts) at `rtol=1e-5` and
 `atol=1e-6` (scaled by the largest entry for the PCA): a few f32 ulps, room
 for a different reduction order on another machine or thread count without
-letting a wrong algorithm through. PCA components are compared up to a sign
-per component. The randomised solvers run with R's seed.
+letting a wrong algorithm through. The randomised solvers run with R's seed.
 """
 
 import json
@@ -29,6 +28,8 @@ import bixverse as bv
 from bixverse import pp
 from bixverse.params import AprParams, HvgParams, MagicParams, PcaParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_pp_fixtures.R"
 
 RTOL_F64 = 1e-12
@@ -36,21 +37,7 @@ RTOL_F32 = 1e-5
 ATOL_F32 = 1e-6
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 def _run_r(*args: str) -> None:
@@ -118,14 +105,12 @@ def _same_frame(frame, want: dict, *, gene_idx_offset: int = 0) -> None:
             assert col.to_list() == values, name
 
 
-def _same_up_to_sign(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
-    """Columns equal up to a sign each, relative to the largest entry."""
+def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
+    """Equal relative to the largest entry."""
     assert got.shape == want.shape, err_msg
-    signs = np.sign(np.sum(got * want, axis=0))
-    signs[signs == 0] = 1
     scale = np.abs(want).max()
     np.testing.assert_allclose(
-        got * signs, want, rtol=RTOL_F32, atol=ATOL_F32 * scale, err_msg=err_msg
+        got, want, rtol=RTOL_F32, atol=ATOL_F32 * scale, err_msg=err_msg
     )
 
 
@@ -136,8 +121,8 @@ def _same_pca(sc: bv.SingleCells, want: dict, name: str) -> None:
         rtol=RTOL_F32,
         err_msg=f"{name}: singular values",
     )
-    _same_up_to_sign(sc.cache.pca_factors, _arr(want["factors"]), f"{name}: factors")
-    _same_up_to_sign(sc.cache.pca_loadings, _arr(want["loadings"]), f"{name}: loadings")
+    _same_columns(sc.cache.pca_factors, _arr(want["factors"]), f"{name}: factors")
+    _same_columns(sc.cache.pca_loadings, _arr(want["loadings"]), f"{name}: loadings")
 
 
 #########
@@ -291,8 +276,7 @@ def test_sctransform_matches_r(ref, sc, tmp_path):
             got.toarray(), want.toarray(), rtol=RTOL_F32, atol=ATOL_F32, err_msg=layer
         )
     assert corrected.obs().columns == r_corrected.obs().columns
-    # R ran more HVG passes on its copy, so only the source's own columns
-    assert corrected.var().columns == sc.var().columns
+    assert corrected.var().columns == r_corrected.var().columns
 
 
 def test_sctransform_covariate_matches_r(ref, sc):

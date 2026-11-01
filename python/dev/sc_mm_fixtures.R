@@ -214,6 +214,14 @@ ref$adt_pca_rand <- list(
   sv = get_pca_singular_val(mm_rand, modality = "adt")
 )
 
+ref$adt_features <- adt$var$protein_id[!adt$var$is_isotype]
+mm_feat <- calculate_pca_adt_sc(mm, no_pcs = 5L, features = ref$adt_features)
+ref$adt_pca_features <- list(
+  factors = mat(get_pca_factors(mm_feat, modality = "adt")),
+  loadings = mat(get_pca_loadings(mm_feat, modality = "adt")),
+  sv = get_pca_singular_val(mm_feat, modality = "adt")
+)
+
 mm <- find_hvg_sc(mm, hvg_no = 40L, .verbose = FALSE)
 mm <- calculate_pca_sc(mm, no_pcs = 10L, .verbose = FALSE)
 ref$rna_pca <- mat(get_pca_factors(mm))
@@ -251,6 +259,16 @@ mm_alt <- generate_wnn_graph_sc(
   .verbose = FALSE
 )
 ref$wnn_alt <- wnn_report(mm_alt)
+
+ref$wnn_sigma <- wnn_report(generate_wnn_graph_sc(
+  mm,
+  wnn_params = params_sc_wnn(
+    knn_range = 100L,
+    sigma_method = "sigma_idx",
+    sigma_idx = 9L
+  ),
+  .verbose = FALSE
+))
 
 ## modality routing ------------------------------------------------------------
 

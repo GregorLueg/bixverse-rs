@@ -364,9 +364,8 @@ invisible(load_dlg("dlg_base"))
 dsc <- load_dlg("r_dlg")
 ref$dlg_base_dir <- file.path(root, "dlg_base")
 
-# no `seed`: bixverse-r 0.9.x reads it with `as_real()`, which drops the
-# integer `params_dialogue_pmd()` hands over, so R always runs on 1234
 pmd <- params_dialogue_pmd(
+  seed = 77L,
   k = 2L,
   n_permutations = 20L,
   abn_c = 10L,
@@ -411,6 +410,16 @@ ref$dialogue$lib_size <- dlg_list(dialogue_sc(
   features = dlg$features,
   pmd_params = pmd,
   hlm_params = params_dialogue_hlm(satterthwaite = FALSE),
+  .verbose = FALSE
+))
+
+ref$dialogue$lib_size_satterthwaite <- dlg_list(dialogue_sc(
+  dsc,
+  cell_type_col = "cell_grp",
+  sample_col = "sample_id",
+  features = dlg$features,
+  pmd_params = pmd,
+  hlm_params = params_dialogue_hlm(satterthwaite = TRUE),
   .verbose = FALSE
 ))
 
@@ -494,6 +503,7 @@ mc_features <- purrr::map(mc_types, \(ct) {
 names(mc_features) <- mc_types
 
 mc_pmd <- params_dialogue_pmd(
+  seed = 77L,
   k = 2L,
   n_permutations = 20L,
   abn_c = 2L,

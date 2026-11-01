@@ -14,9 +14,7 @@ Both sides run the same Rust on the same inputs with the same seeds, so the
 (measured: at most 5e-15 relative on every ScType score, margin, agreement
 and composition fraction, every reference term and both query mappings);
 they are compared at `RTOL`. Every assignment, cluster call, composition
-count and transferred label is compared exactly. Two caveats: the SVD sign
-of half the PCs floats between the Python and the R builds, so everything
-in PC space is sign-aligned on the loadings first; and the pre-Harmony
+count and transferred label is compared exactly. One caveat: the pre-Harmony
 scores `z_orig` differ from R's by up to one `float32` ulp on small values
 (measured: 7.1e-8 relative, 4.8e-11 of the largest score; the cause is not
 established, `z_corr` built from them matches), so they are compared at
@@ -42,27 +40,15 @@ from bixverse.params import (
     SymphonyMapParams,
 )
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_annotate_fixtures.R"
 
 RTOL = 1e-12
 RTOL_F32 = 1e-6
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -142,13 +128,6 @@ def _close(got: object, want: object, rtol: float = RTOL) -> None:
         rtol=rtol,
         atol=rtol * float(np.max(np.abs(np.asarray(want, dtype=np.float64)))),
     )
-
-
-def _signs(got: np.ndarray, want: object) -> np.ndarray:
-    """Per-PC sign that aligns `got` with `want`; the SVD sign floats
-    between the Python and the R builds."""
-    w = np.asarray(want, dtype=np.float64)
-    return np.where(np.sum(got.astype(np.float64) * w, axis=0) < 0, -1.0, 1.0)
 
 
 ##########
@@ -244,27 +223,23 @@ def test_assign_sc_type_matches_r(ref, sc, scores, key, kwargs):
 # Symphony #
 ############
 
-# terms in PC space flip with the loading signs, the rest do not
 PC_TERMS = ("loadings", "z_corr", "centroids", "c_cache")
 FIXED_TERMS = ("gene_means", "gene_sds", "nr")
 
 
-def _same_reference(got: annotate.SymphonyReference, want: dict) -> np.ndarray:
-    """Compare the reference terms, sign-aligned; returns the signs."""
-    signs = _signs(got.loadings, want["loadings"])
+def _same_reference(got: annotate.SymphonyReference, want: dict) -> None:
     for name in PC_TERMS:
-        _close(getattr(got, name) * signs, want[name])
+        _close(getattr(got, name), want[name])
     for name in FIXED_TERMS:
         _close(getattr(got, name), want[name])
-    return signs
 
 
 def test_symphony_reference_matches_r(ref, symphony):
     want = ref["symphony"]
     assert symphony.hvg_gene_names == want["hvg_gene_names"]
-    signs = _same_reference(symphony, want)
+    _same_reference(symphony, want)
     assert symphony.z_orig is not None and symphony.r is not None
-    _close(symphony.z_orig * signs, want["z_orig"], rtol=RTOL_F32)
+    _close(symphony.z_orig, want["z_orig"], rtol=RTOL_F32)
     _close(symphony.r, want["r"])
     assert symphony.labels is not None
     assert symphony.labels["cell_grp"].to_list() == want["labels"]["cell_grp"]
@@ -297,10 +272,9 @@ def test_symphony_v2_slim_matches_r(ref, sc):
 def test_map_symphony_query_matches_r(ref, symphony, query, key, kwargs):
     annotate.map_symphony_query(symphony, query, **kwargs)
     want = ref[key]
-    signs = _signs(symphony.loadings, ref["symphony"]["loadings"])
     embd = query.cache.embeddings
-    _close(embd["symphony"] * signs, want["z_corr"])
-    _close(embd["symphony_pca"] * signs, want["z_pca"])
+    _close(embd["symphony"], want["z_corr"])
+    _close(embd["symphony_pca"], want["z_pca"])
     _close(embd["symphony_r"], want["r"])
     if "batch_column" not in kwargs:
         np.testing.assert_array_equal(
@@ -316,17 +290,8 @@ def test_transfer_labels_matches_r(ref, symphony, query):
     want = ref["transfer"]
     assert got.columns == list(want)
     _close(got["confidence_cell_grp"], want["confidence_cell_grp"])
-    # R 0.8.4 gives a tied vote to the highest label; the crate now gives it to
-    # the lowest, as documented. Labels agree everywhere else, and where they
-    # differ the vote share is the same and Python holds the lower label.
     pred = got["predicted_cell_grp"].to_list()
-    differ = [
-        i
-        for i, (a, b) in enumerate(zip(pred, want["predicted_cell_grp"], strict=True))
-        if a != b
-    ]
-    assert all(pred[i] < want["predicted_cell_grp"][i] for i in differ)
-    assert len(differ) < len(pred) // 10
+    assert pred == want["predicted_cell_grp"]
     obs = query.obs(
         cols=["cell_idx", "predicted_cell_grp", "confidence_cell_grp"], filtered=True
     )

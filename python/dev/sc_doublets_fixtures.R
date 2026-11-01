@@ -205,6 +205,16 @@ ref$scdblfinder <- scdbl_out(scdblfinder_sc(
   return_features = TRUE,
   .verbose = FALSE
 ))
+ref$scdblfinder_short <- scdbl_out(scdblfinder_sc(
+  sc,
+  scdblfinder_params = params_scdblfinder(
+    pca = list(no_pcs = 10L),
+    n_genes = 50L,
+    cxds_genes = 50L,
+    gbm_n_trees = 3L
+  ),
+  .verbose = FALSE
+))
 ref$scdblfinder_grouped <- scdbl_out(suppressWarnings(scdblfinder_sc(
   sc,
   scdblfinder_params = scdbl_p,

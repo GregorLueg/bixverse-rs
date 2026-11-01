@@ -316,7 +316,7 @@ ref$summary <- as.list(calculate_integration_metrics_sc(
   embd_to_use = "harmony",
   .verbose = FALSE
 ))
-ref$summary_bbknn <- as.list(calculate_integration_metrics_sc(
+ref$summary_no_embedding <- as.list(calculate_integration_metrics_sc(
   sc,
   batch_column = "batch_index",
   embd_to_use = NULL,

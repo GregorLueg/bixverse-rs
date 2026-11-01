@@ -12,7 +12,7 @@ Tolerances, as `test_subset_r.py` and `test_metacells_r.py`: both sides run
 the same Rust on the same store and cell set. Index sets, HVGs, kNN indices,
 cluster labels, memberships and raw counts are compared exactly. The f32 PCA
 and kNN distances at `rtol=1e-5`, `atol=1e-6` (scaled by the largest entry for
-the PCA), PCA components up to a sign each; the f64 meta cell normalised
+the PCA); the f64 meta cell normalised
 counts at `rtol=1e-12`.
 """
 
@@ -28,6 +28,8 @@ import bixverse as bv
 from bixverse import metacells, pipeline
 from bixverse.params import BtMetacellsParams, NeighboursParams
 
+from .conftest import R_SKIP_REASON, r_available
+
 SCRIPT = Path(__file__).parents[1] / "dev" / "sc_pipeline_fixtures.R"
 
 RTOL_F64 = 1e-12
@@ -35,21 +37,7 @@ RTOL_F32 = 1e-5
 ATOL_F32 = 1e-6
 
 
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-pytestmark = pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
+pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
 
 
 @pytest.fixture(scope="module")
@@ -83,16 +71,11 @@ def sc(ref, tmp_path_factory):
     return sc
 
 
-def _same_up_to_sign(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
-    """Columns equal up to a sign each, relative to the largest entry.
-
-    Needed against R 0.8.4, which predates the crate's Lanczos sign fix: the
-    experiment PCA comes back with flipped columns (measured)."""
+def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
+    """Equal relative to the largest entry."""
     assert got.shape == want.shape, err_msg
-    signs = np.sign(np.sum(got * want, axis=0))
-    signs[signs == 0] = 1
     np.testing.assert_allclose(
-        got * signs,
+        got,
         want,
         rtol=RTOL_F32,
         atol=ATOL_F32 * np.abs(want).max(),
@@ -104,8 +87,8 @@ def _check_pca(obj: bv.SingleCells | bv.SingleCellsSubset | bv.MetaCells, want):
     np.testing.assert_allclose(
         obj.cache.pca_singular_vals, want["singular_values"], rtol=RTOL_F32
     )
-    _same_up_to_sign(obj.cache.pca_factors, np.array(want["factors"]), "factors")
-    _same_up_to_sign(obj.cache.pca_loadings, np.array(want["loadings"]), "loadings")
+    _same_columns(obj.cache.pca_factors, np.array(want["factors"]), "factors")
+    _same_columns(obj.cache.pca_loadings, np.array(want["loadings"]), "loadings")
 
 
 def _check_knn(obj: bv.SingleCells | bv.SingleCellsSubset, want: dict) -> None:
@@ -173,6 +156,12 @@ def test_per_group_pipeline_matches_r(ref, sc):
         _check_knn(sub, want["knn"])
         assert sub.obs()["grp_leiden"].to_list() == want["leiden"], g
     assert "grp_leiden" not in sc.obs_columns()
+
+    by_batch = pipeline.apply_pipeline_per_group(p, sc, "batch_index")
+    assert list(by_batch) == ref["batches"]
+    for g, sub in by_batch.items():
+        assert sub.map.hvg is not None
+        assert sub.map.hvg.tolist() == ref["per_batch_hvg"][g], g
 
 
 def test_metacell_pipeline_matches_r(ref, sc):

@@ -122,8 +122,11 @@ def _groups(sc: SingleCells, group_col: str, groups: Sequence[str] | None) -> li
         raise ValueError(f"Column '{group_col}' not found in obs.")
     if groups is not None:
         return list(groups)
-    values = sc.obs(cols=[group_col], filtered=True)[group_col].cast(pl.String)
-    return values.unique(maintain_order=True).to_list()
+    values = sc.obs(cols=[group_col], filtered=True)[group_col]
+    # whole doubles are "1", not "1.0", as R's as.character
+    if values.dtype.is_float() and (values == values.floor()).all():
+        values = values.cast(pl.Int64)
+    return values.cast(pl.String).unique(maintain_order=True).to_list()
 
 
 ###########
