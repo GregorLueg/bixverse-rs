@@ -8,10 +8,9 @@ Rows follow the cells results align to: the kept cells in `cells_to_keep`
 order, or the meta cells in row order. Factor-like columns (`gene`, `group`,
 `cluster`) are polars Enums whose categories carry R's level order.
 
-Two scalings coexist, as in R: `scale=True` on the store (the RNA `"norm"`
-layer of `SingleCells` / `SingleCellsSubset`) z-scores in Rust with the
-population standard deviation; on in-memory matrices (ADT, MAGIC, meta
-cells) it divides by the sample standard deviation.
+`scale=True` z-scores by the sample standard deviation on every path: in Rust
+on the store (the RNA `"norm"` layer of `SingleCells` / `SingleCellsSubset`),
+here on in-memory matrices (ADT, MAGIC, meta cells).
 """
 
 from __future__ import annotations
@@ -568,6 +567,15 @@ def extract_gene_violin_data(
     """Per-cell expression with its group, long, as R's
     `extract_gene_violin_data`.
 
+    Args:
+        sc: The experiment, a subset or meta cells.
+        features: Gene ids, or ADT feature ids for `"adt"`.
+        grouping_variable: obs column to group by.
+        scale: z-score each feature across the cells.
+        clip: Clip the z-scores to `[-clip, clip]`, with `scale`.
+        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        layer: `"norm"`, or `"magic"` for the imputed layer of `run_magic`.
+
     Returns:
         `cell_id`, `group` (Enum in level order), `gene` (Enum in feature
         order) and `expression`, gene-major.
@@ -613,6 +621,16 @@ def extract_feature_pair(
     A `_rna` or `_adt` suffix on either feature picks its modality; without
     one, `modality` applies. Rows stay in kept cell order; R's merge sorts
     them by cell id.
+
+    Args:
+        sc: The experiment, a subset or meta cells.
+        feature_1: First feature, with an optional `_rna` / `_adt` suffix.
+        feature_2: Second feature, same convention.
+        obs_cols: obs columns to attach.
+        scale: z-score each feature across the cells.
+        clip: Clip the z-scores to `[-clip, clip]`, with `scale`.
+        modality: Default modality for a feature without a suffix.
+        layer: `"norm"`, or `"magic"` for the imputed layer of `run_magic`.
 
     Returns:
         `cell_id`, `feature_1`, `feature_2` and the obs columns, over the

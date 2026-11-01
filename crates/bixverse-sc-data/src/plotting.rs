@@ -25,7 +25,8 @@ pub struct GroupedGeneStats {
     pub pct_expressed: Vec<f32>,
 }
 
-/// Z-score in place using SIMD helpers, optionally clamp.
+/// Z-score in place by the sample SD using SIMD helpers, optionally clamp. Fewer
+/// than two values stay unscaled.
 ///
 /// ### Params
 ///
@@ -34,8 +35,11 @@ pub struct GroupedGeneStats {
 fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
     let n = data.len() as f32;
     let mean = sum_simd_f32(data) / n;
-    let var = sum_squared_dev_simd_f32(data, mean) / n;
-    let sd = var.sqrt();
+    let sd = if data.len() > 1 {
+        (sum_squared_dev_simd_f32(data, mean) / (n - 1.0)).sqrt()
+    } else {
+        0.0
+    };
     if sd > 1e-8 {
         for x in data.iter_mut() {
             *x = (*x - mean) / sd;
