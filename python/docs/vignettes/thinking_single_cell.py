@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Thinking about single cells the bixverse way
 #
-# *Gregor Lueg and Grant Neilson*
+# *Python port of the R vignette [Thinking about single cells the bixverse way](https://gregorlueg.github.io/bixverse/articles/thinking_single_cell.html). Original authors: Gregor Lueg and Grant Neilson.*
 #
 # ## Intro
 #

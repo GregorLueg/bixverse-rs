@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Technical design choices for the single cell implementation
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Technical design choices for the single cell implementation](https://gregorlueg.github.io/bixverse/articles/design_single_cell.html). Original author: Gregor Lueg.*
 #
 # *This is an opinionated piece, so take what is written here with a pinch of
 # salt. The statements here reflect my personal opinions, not those of any of my

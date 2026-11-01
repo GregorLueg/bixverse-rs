@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Cell trees with Bonsai
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Cell trees with Bonsai](https://gregorlueg.github.io/bixverse/articles/bonsai.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Clustering, cell type annotation and reference mapping
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Clustering, cell type annotation and reference mapping](https://gregorlueg.github.io/bixverse/articles/cell_type_annotation.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

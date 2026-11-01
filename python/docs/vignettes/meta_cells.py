@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Meta cells with bixverse
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Meta cells with bixverse](https://gregorlueg.github.io/bixverse/articles/meta_cells.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

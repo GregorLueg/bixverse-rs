@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Pearson residuals and scTransform
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Pearson residuals and scTransform](https://gregorlueg.github.io/bixverse/articles/single_cell_residuals.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

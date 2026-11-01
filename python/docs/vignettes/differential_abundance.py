@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Differential abundance with Milo and MELD
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Differential abundance with Milo and MELD](https://gregorlueg.github.io/bixverse/articles/differential_abundance.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

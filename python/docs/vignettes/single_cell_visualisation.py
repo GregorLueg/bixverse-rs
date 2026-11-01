@@ -1,7 +1,7 @@
 # %% [markdown]
 # # A guide to single-cell plotting functions
 #
-# *Liesbeth François*
+# *Python port of the R vignette [A guide to single-cell plotting functions](https://gregorlueg.github.io/bixverse/articles/single_cell_visualisation.html). Original author: Liesbeth François.*
 #
 # ## Intro
 #

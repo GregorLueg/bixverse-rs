@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Multi-modal single cell analysis with bixverse
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Multi-modal single cell analysis with bixverse](https://gregorlueg.github.io/bixverse/articles/multi_modal_single_cells.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

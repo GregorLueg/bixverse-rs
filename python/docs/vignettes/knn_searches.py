@@ -1,7 +1,7 @@
 # %% [markdown]
 # # KNN searches for single cell
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [KNN searches for single cell](https://gregorlueg.github.io/bixverse/articles/knn_searches.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

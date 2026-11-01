@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Multicellular programmes with DIALOGUE
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Multicellular programmes with DIALOGUE](https://gregorlueg.github.io/bixverse/articles/dialogue.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

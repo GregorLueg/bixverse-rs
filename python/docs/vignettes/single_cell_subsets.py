@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Sub-clustering and per-group pipelines
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Sub-clustering and per-group pipelines](https://gregorlueg.github.io/bixverse/articles/single_cell_subsets.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

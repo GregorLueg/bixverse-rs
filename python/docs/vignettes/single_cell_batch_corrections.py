@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Batch correction with bixverse
 #
-# *Grant Neilson, Gregor Lueg and Liesbeth François*
+# *Python port of the R vignette [Batch correction with bixverse](https://gregorlueg.github.io/bixverse/articles/single_cell_batch_corrections.html). Original authors: Grant Neilson, Gregor Lueg and Liesbeth François.*
 #
 # ## Intro
 #

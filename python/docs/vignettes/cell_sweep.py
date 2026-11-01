@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Ambient RNA removal with CellSweep
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Ambient RNA removal with CellSweep](https://gregorlueg.github.io/bixverse/articles/cell_sweep.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

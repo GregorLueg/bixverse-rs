@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Analysing PBMCs with bixverse
 #
-# *Grant Neilson, Gregor Lueg and Liesbeth François*
+# *Python port of the R vignette [Analysing PBMCs with bixverse](https://gregorlueg.github.io/bixverse/articles/pbmc_single_cell.html). Original authors: Grant Neilson, Gregor Lueg and Liesbeth François.*
 #
 # A standard single cell analysis on the PBMC3k data set with `bixverse`. If you
 # have not read the [design choices](design_single_cell.ipynb) and the

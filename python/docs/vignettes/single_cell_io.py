@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Single-cell data I/O in bixverse
 #
-# *Andrew Skelton and Gregor Lueg*
+# *Python port of the R vignette [Single-cell data I/O in bixverse](https://gregorlueg.github.io/bixverse/articles/single_cell_io.html). Original authors: Andrew Skelton and Gregor Lueg.*
 #
 # ## Intro
 #

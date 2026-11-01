@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Ligand-receptor analysis with bixverse
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Ligand-receptor analysis with bixverse](https://gregorlueg.github.io/bixverse/articles/ligand_receptor.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

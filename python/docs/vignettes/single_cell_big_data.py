@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Scaling to millions of cells with bixverse
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Scaling to millions of cells with bixverse](https://gregorlueg.github.io/bixverse/articles/single_cell_big_data.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

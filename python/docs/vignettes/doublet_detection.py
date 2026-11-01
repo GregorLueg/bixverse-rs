@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Doublet detection with bixverse
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Doublet detection with bixverse](https://gregorlueg.github.io/bixverse/articles/doublet_detection.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

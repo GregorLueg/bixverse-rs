@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Trajectory inference with Palantir and PAGA
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Trajectory inference with Palantir and PAGA](https://gregorlueg.github.io/bixverse/articles/trajectory_inference.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

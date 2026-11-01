@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Gene set analysis and GRN inference on PBMCs
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Gene set analysis and GRN inference on PBMCs](https://gregorlueg.github.io/bixverse/articles/bag_of_genes_single_cells.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #

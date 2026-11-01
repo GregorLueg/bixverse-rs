@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Differential expression with donor structure
 #
-# *Gregor Lueg*
+# *Python port of the R vignette [Differential expression with donor structure](https://gregorlueg.github.io/bixverse/articles/differential_expression.html). Original author: Gregor Lueg.*
 #
 # ## Intro
 #
