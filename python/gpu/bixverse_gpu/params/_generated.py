@@ -33,27 +33,25 @@ class KnnGpuDefaults:
         ann_dist: Manhattan is not supported by the GPU kernels.
         n_list: IVF only. Number of clusters. `None` gives `sqrt(n)`.
         n_probe: IVF only. Clusters to probe. `None` gives `sqrt(n_list)`.
-        graph_k: NN-descent only. Node degree of the graph after pruning. `None`
-            gives 30, widened to cover `k` when `extract_knn` is set.
-        k_build: NN-descent only. Build degree before pruning. `None` gives `max(k,
-            floor(1.5 * k))`.
-        n_tree: NN-descent only. Trees seeding the descent.
-        delta: NN-descent only. Termination criterium for the descent.
-        rho: NN-descent only. Sampling rate for the descent.
-        refine_knn: NN-descent only. 2-hop refinement sweeps after the descent. Buys
-            graph quality at a linear cost. `None` gives 0.
-        beam_width: NN-descent only. Beam width when querying. Ignored when
-            `extract_knn` is set.
-        max_beam_iters: NN-descent only. Beam search iterations. Ignored when
-            `extract_knn` is set.
-        n_entry_points: NN-descent only. Entry points when querying. Ignored when
-            `extract_knn` is set.
-        extract_knn: NN-descent only. Hand back the graph the descent built instead
-            of beam searching over it.
+        graph_k: CAGRA only. Node degree of the graph after pruning. `None` gives
+            30.
+        k_build: NN-descent and CAGRA. Working degree of the descent. `None` gives
+            `max(k, floor(1.5 * k))`.
+        n_tree: NN-descent and CAGRA. Trees seeding the descent.
+        delta: NN-descent and CAGRA. Termination criterium for the descent.
+        rho: NN-descent and CAGRA. Sampling rate for the descent.
+        refine_knn: NN-descent and CAGRA. 2-hop refinement sweeps after the descent.
+            Buys graph quality at a linear cost. `None` gives 0.
+        beam_width: CAGRA only, which includes NN-descent on a cross-query. Beam
+            width when querying.
+        max_beam_iters: CAGRA only, which includes NN-descent on a cross-query. Beam
+            search iterations.
+        n_entry_points: CAGRA only, which includes NN-descent on a cross-query.
+            Entry points when querying.
     """
 
     k: int = 15
-    knn_method: Literal["exhaustive", "ivf", "nndescent"] = "exhaustive"
+    knn_method: Literal["exhaustive", "ivf", "nndescent", "cagra"] = "exhaustive"
     ann_dist: Literal["euclidean", "cosine"] = "euclidean"
     n_list: int | None = None
     n_probe: int | None = None
@@ -66,7 +64,6 @@ class KnnGpuDefaults:
     beam_width: int | None = None
     max_beam_iters: int | None = None
     n_entry_points: int | None = None
-    extract_knn: bool = False
 
     def __post_init__(self) -> None:
         check_range("k", self.k, 0, None, False, True)
@@ -167,28 +164,28 @@ class BbknnGpuParams:
         ann_dist: Manhattan is not supported by the GPU kernels.
         n_list: IVF only. Number of clusters. `None` gives `sqrt(n)`.
         n_probe: IVF only. Clusters to probe. `None` gives `sqrt(n_list)`.
-        graph_k: NN-descent only. Node degree of the graph after pruning. `None`
-            gives 30, widened to cover `k` when `extract_knn` is set.
-        k_build: NN-descent only. Build degree before pruning. `None` gives `max(k,
-            floor(1.5 * k))`.
-        n_tree: NN-descent only. Trees seeding the descent.
-        delta: NN-descent only. Termination criterium for the descent.
-        rho: NN-descent only. Sampling rate for the descent.
-        refine_knn: NN-descent only. 2-hop refinement sweeps after the descent. Buys
-            graph quality at a linear cost. `None` gives 0.
-        beam_width: NN-descent only. Beam width when querying. Ignored when
-            `extract_knn` is set.
-        max_beam_iters: NN-descent only. Beam search iterations. Ignored when
-            `extract_knn` is set.
-        n_entry_points: NN-descent only. Entry points when querying. Ignored when
-            `extract_knn` is set.
+        graph_k: CAGRA only. Node degree of the graph after pruning. `None` gives
+            30.
+        k_build: NN-descent and CAGRA. Working degree of the descent. `None` gives
+            `max(k, floor(1.5 * k))`.
+        n_tree: NN-descent and CAGRA. Trees seeding the descent.
+        delta: NN-descent and CAGRA. Termination criterium for the descent.
+        rho: NN-descent and CAGRA. Sampling rate for the descent.
+        refine_knn: NN-descent and CAGRA. 2-hop refinement sweeps after the descent.
+            Buys graph quality at a linear cost. `None` gives 0.
+        beam_width: CAGRA only, which includes NN-descent on a cross-query. Beam
+            width when querying.
+        max_beam_iters: CAGRA only, which includes NN-descent on a cross-query. Beam
+            search iterations.
+        n_entry_points: CAGRA only, which includes NN-descent on a cross-query.
+            Entry points when querying.
     """
 
     neighbours_within_batch: int = 3
     set_op_mix_ratio: float = 1.0
     local_connectivity: float = 1.0
     trim: int | None = None
-    knn_method: Literal["exhaustive", "ivf", "nndescent"] = "exhaustive"
+    knn_method: Literal["exhaustive", "ivf", "nndescent", "cagra"] = "exhaustive"
     ann_dist: Literal["euclidean", "cosine"] = "euclidean"
     n_list: int | None = None
     n_probe: int | None = None
@@ -355,27 +352,27 @@ class FastmnnGpuParams:
         ann_dist: Manhattan is not supported by the GPU kernels.
         n_list: IVF only. Number of clusters. `None` gives `sqrt(n)`.
         n_probe: IVF only. Clusters to probe. `None` gives `sqrt(n_list)`.
-        graph_k: NN-descent only. Node degree of the graph after pruning. `None`
-            gives 30, widened to cover `k` when `extract_knn` is set.
-        k_build: NN-descent only. Build degree before pruning. `None` gives `max(k,
-            floor(1.5 * k))`.
-        n_tree: NN-descent only. Trees seeding the descent.
-        delta: NN-descent only. Termination criterium for the descent.
-        rho: NN-descent only. Sampling rate for the descent.
-        refine_knn: NN-descent only. 2-hop refinement sweeps after the descent. Buys
-            graph quality at a linear cost. `None` gives 0.
-        beam_width: NN-descent only. Beam width when querying. Ignored when
-            `extract_knn` is set.
-        max_beam_iters: NN-descent only. Beam search iterations. Ignored when
-            `extract_knn` is set.
-        n_entry_points: NN-descent only. Entry points when querying. Ignored when
-            `extract_knn` is set.
+        graph_k: CAGRA only. Node degree of the graph after pruning. `None` gives
+            30.
+        k_build: NN-descent and CAGRA. Working degree of the descent. `None` gives
+            `max(k, floor(1.5 * k))`.
+        n_tree: NN-descent and CAGRA. Trees seeding the descent.
+        delta: NN-descent and CAGRA. Termination criterium for the descent.
+        rho: NN-descent and CAGRA. Sampling rate for the descent.
+        refine_knn: NN-descent and CAGRA. 2-hop refinement sweeps after the descent.
+            Buys graph quality at a linear cost. `None` gives 0.
+        beam_width: CAGRA only, which includes NN-descent on a cross-query. Beam
+            width when querying.
+        max_beam_iters: CAGRA only, which includes NN-descent on a cross-query. Beam
+            search iterations.
+        n_entry_points: CAGRA only, which includes NN-descent on a cross-query.
+            Entry points when querying.
     """
 
     ndist: float = 3.0
     cos_norm: bool = True
     k: int = 20
-    knn_method: Literal["exhaustive", "ivf", "nndescent"] = "exhaustive"
+    knn_method: Literal["exhaustive", "ivf", "nndescent", "cagra"] = "exhaustive"
     ann_dist: Literal["euclidean", "cosine"] = "cosine"
     n_list: int | None = None
     n_probe: int | None = None

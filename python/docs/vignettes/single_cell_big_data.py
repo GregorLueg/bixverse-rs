@@ -325,7 +325,7 @@
 # bvg.graph.find_neighbours(
 #     sc,
 #     embd_to_use="pca",
-#     knn_params=KnnGpuDefaults(knn_method="nndescent", extract_knn=True),
+#     knn_params=KnnGpuDefaults(knn_method="nndescent"),
 #     verbose=True,
 # )
 # ```
@@ -423,7 +423,7 @@
 # bvg.graph.find_neighbours(
 #     sc,
 #     embd_to_use="harmony_gpu",  # or harmony_v2 if you just did the CPU version
-#     knn_params=KnnGpuDefaults(knn_method="nndescent", extract_knn=True),
+#     knn_params=KnnGpuDefaults(knn_method="nndescent"),
 #     verbose=True,
 # )
 # ```

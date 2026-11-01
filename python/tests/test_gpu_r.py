@@ -7,9 +7,7 @@ steps on a copy of the untouched one. Skipped without Rscript, bixverse.gpu,
 the GPU wheel or a GPU adapter.
 
 Tolerances. Both sides run the GPU SVD in `f32` on the same store and seed,
-so the components agree to a few f32 ulps. They are compared up to a sign per
-component because bixverse.gpu 0.6.2 predates the GPU Lanczos sign fix (the
-exact solver comes back flipped, measured); drop that once it is rebuilt.
+so the components agree to a few f32 ulps.
 """
 
 import json
@@ -77,13 +75,11 @@ def sc(ref, tmp_path):
     return sc
 
 
-def _same_up_to_sign(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
-    """Columns equal up to a sign each, relative to the largest entry."""
+def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
+    """Equal relative to the largest entry."""
     assert got.shape == want.shape, err_msg
-    signs = np.sign(np.sum(got * want, axis=0))
-    signs[signs == 0] = 1
     np.testing.assert_allclose(
-        got * signs, want, rtol=RTOL, atol=ATOL * np.abs(want).max(), err_msg=err_msg
+        got, want, rtol=RTOL, atol=ATOL * np.abs(want).max(), err_msg=err_msg
     )
 
 
@@ -94,9 +90,9 @@ def test_gpu_pca_matches_r(ref, sc, solver):
     np.testing.assert_allclose(
         sc.cache.pca_singular_vals, want["singular_values"], rtol=RTOL
     )
-    _same_up_to_sign(
+    _same_columns(
         sc.cache.pca_factors, np.asarray(want["factors"]), f"{solver}: factors"
     )
-    _same_up_to_sign(
+    _same_columns(
         sc.cache.pca_loadings, np.asarray(want["loadings"]), f"{solver}: loadings"
     )

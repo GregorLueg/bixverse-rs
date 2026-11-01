@@ -57,21 +57,12 @@ logger = logging.getLogger(__name__)
 
 
 @beartype
-def _knn_params(params: KnnGpuDefaults) -> dict[str, object]:
-    """The dict Rust reads the GPU kNN from, `extract_knn` dropped as on the
-    CPU side: `"nndescent"` is graph-only in the crate."""
-    d = to_rust(params)
-    d.pop("extract_knn", None)
-    return d
-
-
-@beartype
 def _knn(
     embd: np.ndarray, params: KnnGpuDefaults, seed: int, verbose: bool
 ) -> KnnGraph:
     """`knn_with_dist` on the GPU over an embedding."""
     indices, distances = _bixverse_gpu.knn_with_dist(
-        embd, _knn_params(params), seed, verbose
+        embd, to_rust(params), seed, verbose
     )
     return KnnGraph(indices=indices, distances=distances, dist_metric=params.ann_dist)
 
@@ -94,9 +85,9 @@ def generate_knn(
 ) -> KnnGraph | None:
     """A GPU kNN over an embedding, without touching the experiment.
 
-    Methods: `"exhaustive"` (exact, the default), `"ivf"` and `"nndescent"`
-    (the descent graph, handed back without a search). Euclidean distances
-    are true L2.
+    Methods: `"nndescent"` (the default: the descent graph, handed back without a
+    search), `"exhaustive"` (exact), `"ivf"` and `"cagra"` (the graph, beam
+    searched). Euclidean distances are true L2.
 
     Args:
         sc: The experiment.
@@ -104,8 +95,8 @@ def generate_knn(
         cells_to_use: Cell ids to restrict the kNN to; they keep the
             embedding's row order. `None` for all kept cells.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        knn_params: The GPU kNN parameters, `k` included. `None` uses the
-            defaults.
+        knn_params: The GPU kNN parameters, `k` included. `None` runs
+            `"nndescent"` with the defaults.
         seed: Seed for the index build.
         verbose: Controls verbosity.
 
@@ -116,7 +107,7 @@ def generate_knn(
     Raises:
         BixverseError: Without a GPU adapter.
     """
-    params = knn_params or KnnGpuDefaults()
+    params = knn_params or KnnGpuDefaults(knn_method="nndescent")
     embd = _embedding(sc, embd_to_use)
     if embd is None:
         warnings.warn(
@@ -152,7 +143,8 @@ def find_neighbours(
             `embeddings`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
         modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
-        knn_params: The GPU kNN parameters. `None` uses the defaults.
+        knn_params: The GPU kNN parameters. `None` runs `"nndescent"` with the
+            defaults.
         graph_params: How the kNN becomes a graph. `None` uses the defaults.
         seed: Seed for the index build.
         verbose: Controls verbosity.
@@ -161,7 +153,7 @@ def find_neighbours(
         ValueError: If the embedding is stale.
         BixverseError: Without a GPU adapter.
     """
-    params = knn_params or KnnGpuDefaults()
+    params = knn_params or KnnGpuDefaults(knn_method="nndescent")
     graph = graph_params or KnnGraphDefaults()
     cache = modality_cache(sc, modality)
     embd = _embedding(sc, embd_to_use, modality)

@@ -247,7 +247,7 @@ def test_exhaustive_knn_matches_cpu(sc):
     want = graph.generate_knn(
         sc, neighbours_params=NeighboursParams(knn_method="exhaustive")
     )
-    got = bg.graph.generate_knn(sc)
+    got = bg.graph.generate_knn(sc, knn_params=KnnGpuDefaults(knn_method="exhaustive"))
     assert want is not None and got is not None
     assert graph.calc_knn_metrics(want, got).final_recall == 1.0
     np.testing.assert_allclose(
@@ -260,6 +260,7 @@ def test_exhaustive_knn_matches_cpu(sc):
     [
         (KnnGpuDefaults(knn_method="ivf"), 0.7),
         (KnnGpuDefaults(knn_method="nndescent"), 0.95),
+        (KnnGpuDefaults(knn_method="cagra"), 0.9),
     ],
 )
 def test_approximate_knn_recall(sc, params, recall):
@@ -272,13 +273,22 @@ def test_approximate_knn_recall(sc, params, recall):
     assert graph.calc_knn_metrics(want, got).final_recall >= recall
 
 
+def test_neighbours_default_to_nndescent(sc):
+    # the GPU descent is not deterministic run to run, so no exact comparison
+    exact = KnnGpuDefaults(knn_method="exhaustive")
+    want = bg.graph.generate_knn(sc, knn_params=exact)
+    got = bg.graph.generate_knn(sc)
+    assert want is not None and got is not None
+    assert graph.calc_knn_metrics(want, got).final_recall >= 0.95
+
+
 def test_neighbours_and_clusters_match_cpu(sc):
     graph.find_neighbours(
         sc, neighbours_params=NeighboursParams(knn_method="exhaustive")
     )
     want = sc.cache.connectivities
     graph.find_clusters(sc, name="cpu")
-    bg.graph.find_neighbours(sc)
+    bg.graph.find_neighbours(sc, knn_params=KnnGpuDefaults(knn_method="exhaustive"))
     got = sc.cache.connectivities
     assert got is not None and want is not None
     np.testing.assert_array_equal(got.indptr, want.indptr)
