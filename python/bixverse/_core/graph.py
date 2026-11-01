@@ -134,11 +134,10 @@ def _first_dims(embd: np.ndarray, no_embd_to_use: int | None) -> np.ndarray:
 def _knn_params(params: NeighboursParams | KnnParams | WnnParams) -> dict[str, object]:
     """The dict Rust reads the kNN (and graph, or WNN) settings from.
 
-    `extract_knn` on `"nndescent"` is the crate's `"nndescent_graph"` method.
+    `extract_knn` is dropped: `"nndescent"` is graph-only in the crate.
     """
     d = to_rust(params)
-    if d.pop("extract_knn") and d["knn_method"] == "nndescent":
-        d["knn_method"] = "nndescent_graph"
+    d.pop("extract_knn", None)
     return d
 
 
@@ -233,8 +232,8 @@ def generate_knn(
     `generate_knn_sc`.
 
     Exact methods: `"kmknn"` (the default) and `"exhaustive"`. Approximate:
-    `"hnsw"`, `"nndescent"` (with `extract_knn=True` the descent graph is
-    handed back without a query pass), `"ivf"` and `"annoy"`.
+    `"hnsw"`, `"nndescent"` (the descent graph, handed back without a query
+    pass), `"ivf"` and `"annoy"`.
 
     Args:
         sc: The experiment.

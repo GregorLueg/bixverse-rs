@@ -2,5 +2,6 @@
 
 pub mod fast_clusters;
 pub mod harmony;
+pub mod knn;
 pub mod pca;
 pub mod seacells;

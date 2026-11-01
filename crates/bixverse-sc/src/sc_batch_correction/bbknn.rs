@@ -268,9 +268,9 @@ fn get_batch_balanced_knn(
                     ann_verbosity,
                 )?
             }
-            // A graph-only build cannot answer a cross-query, so the graph
-            // method queries an index too.
-            KnnSearch::NNDescent | KnnSearch::NNDescentGraph => {
+            // A graph-only build cannot answer a cross-query, so NNDescent
+            // builds and searches the index here.
+            KnnSearch::NNDescent => {
                 let index = build_nndescent_index(
                     sub_matrix.as_ref(),
                     &bbknn_params.knn_params.ann_dist,

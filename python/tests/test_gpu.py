@@ -260,7 +260,6 @@ def test_exhaustive_knn_matches_cpu(sc):
     [
         (KnnGpuDefaults(knn_method="ivf"), 0.7),
         (KnnGpuDefaults(knn_method="nndescent"), 0.95),
-        (KnnGpuDefaults(knn_method="nndescent", extract_knn=True), 0.95),
     ],
 )
 def test_approximate_knn_recall(sc, params, recall):
