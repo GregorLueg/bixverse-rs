@@ -144,20 +144,20 @@ class KnnDefaults:
     Attributes:
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -419,20 +419,20 @@ class BoostParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -827,20 +827,20 @@ class MeldParams:
             densities comparable regardless of cells-per-condition.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1123,20 +1123,20 @@ class BbknnParams:
             clustering. If `None`, it defaults to `10 * neighbours_within_batch`.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1302,20 +1302,20 @@ class BtMetacellsParams:
         max_iter: Maximum number of iterations for the algorithm.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1688,20 +1688,20 @@ class FastmnnParams:
         sparse_svd: Shall the sparse SVD be used.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -1989,20 +1989,20 @@ class HotspotParams:
             neighbour distance. Only read when `weighted_graph = True`.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2107,18 +2107,19 @@ class KnnParams:
     Attributes:
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Distance metric to use.
         n_trees: Annoy param: number of trees.
         search_budget: Annoy param: optional search budget per tree. If `None`,
             defaults to `n_trees * k * 20` internally.
         delta: NNDescent param: early termination criterion.
-        diversify_prob: NNDescent param: diversification probability applied at the
-            end of index construction.
-        ef_budget: NNDescent param: optional query budget. Higher values improve
-            recall at the cost of speed.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers.
         ef_construction: HNSW param: size of the dynamic candidate list during
             construction.
@@ -2460,20 +2461,20 @@ class NeighboursParams:
             neighbours weigh 2 and one-sided ones 1.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2561,20 +2562,20 @@ class PalantirParams:
         lanczos_tol: Relative residual tolerance for the Lanczos solver.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2743,20 +2744,20 @@ class SeacellsParams:
             archetype finding. Useful for larger data sets.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2836,20 +2837,20 @@ class SeuratCcaParams:
         sd: Bandwidth divisor of the Gaussian kernel used for the anchor weights.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -2943,20 +2944,20 @@ class SeuratRpcaParams:
         sd: Bandwidth divisor of the Gaussian kernel used for the anchor weights.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3047,20 +3048,20 @@ class SupercellParams:
             the result an approximation. `None` (default) keeps the walks exact.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3302,20 +3303,20 @@ class VisionParams:
         n_cluster: Number of clusters for the random gene set clustering generation.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3372,8 +3373,8 @@ class WnnParams:
         knn_range: Candidate pool size per modality. Each cell's kNN input must
             contain at least this many neighbours.
         sigma_method: Bandwidth method.
-        sigma_idx: `"sigma_idx"` only: 0-based kNN index for bandwidth.e. `k_nn -
-            1`).
+        sigma_idx: `"sigma_idx"` only: 0-based kNN index for the bandwidth (i.e.
+            `k_nn - 1`).
         s_nn: `"snn_farthest"` only: kNN size used to build the SNN graph.
         sd_scale: Multiplier on sigma.
         kernel_power: Kernel exponent power.
@@ -3381,20 +3382,20 @@ class WnnParams:
         sigma_floor: Minimum sigma value (avoids division by zero).
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3505,20 +3506,20 @@ class ScdblfinderParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3666,9 +3667,8 @@ class ScrubletParams:
         stdev_doublet_rate: Uncertainty in the expected doublet rate.
         n_bins_histogram: Number of bins for histogram-based automatic threshold
             detection. Typically 50-100.
-        manual_threshold: Manual doublet score threshold. If `None` (default),
-            threshold is automatically detected from simulated doublet score
-            distribution.
+        manual_threshold: Manual doublet score threshold. If `None` (default), the
+            threshold comes from Otsu's method on the observed doublet scores.
         log_transform: Shall the counts be log-normalised.
         mean_center: Shall mean centring be applied.
         normalise_variance: Shall the variance be normalised.
@@ -3691,20 +3691,20 @@ class ScrubletParams:
             `PcaParams` for the trade-offs.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
-            search. `"nndescent"` hands back the graph the NN-Descent built instead
-            of beam searching an index: much faster, at the cost of some recall.
-            Rows the descent never filled come back padded with duplicate edges.
+            search. `"nndescent"` hands back the graph the NN-Descent built, with no
+            index and no query pass. Rows the descent left short are re-queried
+            exactly.
         ann_dist: Which distance metric to use for the approximate nearest neighbour
             search.
         n_trees: Annoy param: number of trees to generate for Annoy.
         search_budget: Annoy param: optional search budget per tree for Annoy. If
             not provided, it will default to `n_tree * k * 20`.
         delta: NNDescent param: early termination criterium for NNDescent.
-        diversify_prob: NNDescent param: diversification probability for the
-            NNDescent index. This will diversify the index at the end and identify
-            potentially better edges.
-        ef_budget: NNDescent param: optional query budget parameter. Can accelerate
-            querying, but at the cost of Recall.
+        diversify_prob: NNDescent param: diversification probability. Only used
+            where a query runs against an NN-Descent index, not for the graph of a
+            self kNN.
+        ef_budget: NNDescent param: optional query budget. Only used where a query
+            runs against an NN-Descent index, not for the graph of a self kNN.
         m: HNSW param: number of connections between layers for HNSW.
         ef_construction: HNSW param: size of dynamic candidate list during
             construction.
@@ -3832,7 +3832,7 @@ class SymphonyMapParams:
     lambda_: float = 1.0
 
     def __post_init__(self) -> None:
-        check_range("sigma", self.sigma, 0, None, False, True)
+        check_range("sigma", self.sigma, 0, None, True, True)
         check_range("lambda_", self.lambda_, 0, None, False, True)
         _extras.run(self)
 

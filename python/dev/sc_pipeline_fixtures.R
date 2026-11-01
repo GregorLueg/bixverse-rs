@@ -153,7 +153,7 @@ mc <- apply_pipeline(p_mc, sc)
 ref$mc <- c(
   mc_report(mc),
   list(
-    hvg = get_hvg(mc) - 1L,
+    hvg = get_hvg(mc),
     pca = pca_report(mc),
     leiden = get_sc_obs(mc)$mc_leiden
   )

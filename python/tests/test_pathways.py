@@ -332,7 +332,7 @@ def test_vision_w_autocor_cached_and_searched_knn(sc):
 def test_hotspot_round_trip(sc):
     genes = GS["type_1"] + GS["type_2"]
     auto = pathways.hotspot_autocor(sc, hotspot_params=HS, genes_to_take=genes)
-    assert auto.columns == ["gene_id", "gaerys_c", "z_score", "pval", "fdr"]
+    assert auto.columns == ["gene_id", "gearys_c", "z_score", "pval", "fdr"]
     assert sorted(auto["gene_id"].to_list()) == sorted(genes)
     streamed = pathways.hotspot_autocor(
         sc, hotspot_params=HS, genes_to_take=genes, streaming=True

@@ -148,7 +148,7 @@ def mc(ref, sc):
     )
     assert mc is not None
     assert mc.cell_ids().tolist() == ref["mc_ids"]
-    mc.hvg = np.array(ref["mc_hvg"], dtype=np.uint32) - 1
+    mc.hvg = np.array(ref["mc_hvg"], dtype=np.uint32)
     return mc
 
 

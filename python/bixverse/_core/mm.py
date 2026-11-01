@@ -457,7 +457,7 @@ def calculate_pca_adt(
     """PCA over the scaled, normalised ADT counts.
 
     Scores, loadings and singular values go to `mm.adt_cache`, stamped
-    `"adt:pca"`.
+    `"adt:pca"`. The largest-magnitude loading of each component is positive.
 
     Args:
         mm: The experiment, with ADT counts.
@@ -490,6 +490,11 @@ def calculate_pca_adt(
     scores, loadings, sv = _bixverse.adt_pca(
         np.ascontiguousarray(norm), no_pcs, randomised_svd, seed
     )
+    # the randomised binding returns the oversampled columns of v too
+    loadings = loadings[:, :no_pcs]
+    pivots = loadings[np.argmax(np.abs(loadings), axis=0), np.arange(no_pcs)]
+    signs = np.where(pivots < 0, -1.0, 1.0)
+    scores, loadings = scores * signs, loadings * signs
     # the full SVD binding returns component SDs, the randomised one singular
     # values; store singular values on both paths
     if not randomised_svd:

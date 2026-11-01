@@ -160,14 +160,14 @@ ref$mc2 <- c(
 ## MetaCells chain -------------------------------------------------------------
 
 mc <- find_hvg_sc(mc_bt, hvg_no = 50L, .verbose = FALSE)
-ref$mc_hvg <- get_hvg(mc) - 1L
+ref$mc_hvg <- get_hvg(mc)
 ref$mc_var <- column_values(get_sc_var(mc))
 ref$mc_hvg_scran <- get_hvg(find_hvg_sc(
   mc_bt,
   hvg_no = 50L,
   hvg_params = params_sc_hvg(method = "scran"),
   .verbose = FALSE
-)) - 1L
+))
 ref$mc_hvg_data <- column_values(get_hvg_data_sc(
   mc_bt,
   cell_ids = get_sc_obs(mc_bt)$meta_cell_id[1:30],
@@ -199,7 +199,7 @@ mc_res <- find_hvg_sc(
   hvg_params = params_sc_hvg(method = "residual"),
   .verbose = FALSE
 )
-ref$mc_res_hvg <- get_hvg(mc_res) - 1L
+ref$mc_res_hvg <- get_hvg(mc_res)
 mc_res <- calculate_pca_sc(
   mc_res,
   no_pcs = 10L,

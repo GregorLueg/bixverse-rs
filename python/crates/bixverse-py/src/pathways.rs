@@ -257,11 +257,11 @@ fn lm_dict<'py>(py: Python<'py>, res: LmActivityRes<f32>) -> PyResult<Bound<'py,
 ///
 /// ### Returns
 ///
-/// Dict with `gene_idx` (`uint32`), `gaerys_c`, `z_score`, `pval` and `fdr`.
+/// Dict with `gene_idx` (`uint32`), `gearys_c`, `z_score`, `pval` and `fdr`.
 fn hotspot_gene_dict<'py>(py: Python<'py>, res: HotSpotGeneRes) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     out.set_item("gene_idx", u32_array(py, &res.gene_idx))?;
-    out.set_item("gaerys_c", res.c.into_pyarray(py))?;
+    out.set_item("gearys_c", res.c.into_pyarray(py))?;
     out.set_item("z_score", res.z.into_pyarray(py))?;
     out.set_item("pval", res.pval.into_pyarray(py))?;
     out.set_item("fdr", res.fdr.into_pyarray(py))?;

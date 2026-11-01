@@ -310,7 +310,7 @@ def test_lm_activity_coef_matches_r(ref, sc):
 def _check_hs_autocor(got: pl.DataFrame, want: dict, name: str) -> None:
     want = _frame(want)
     assert got["gene_id"].to_list() == want["gene_id"].to_list(), name
-    for col in ("gaerys_c", "z_score", "pval", "fdr"):
+    for col in ("gearys_c", "z_score", "pval", "fdr"):
         _close(got[col].to_numpy(), want[col].to_list(), f"{name} {col}")
 
 

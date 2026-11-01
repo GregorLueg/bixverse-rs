@@ -985,7 +985,7 @@ def hotspot_autocor(
         verbose: Controls verbosity.
 
     Returns:
-        `gene_id`, `gaerys_c`, `z_score`, `pval` and `fdr`.
+        `gene_id`, `gearys_c`, `z_score`, `pval` and `fdr`.
 
     Raises:
         ValueError: If the embedding or the cached kNN is missing or stale.
@@ -1030,7 +1030,7 @@ def hotspot_autocor(
     return pl.DataFrame(
         {
             "gene_id": sc.gene_ids(res["gene_idx"]),
-            "gaerys_c": res["gaerys_c"],
+            "gearys_c": res["gearys_c"],
             "z_score": res["z_score"],
             "pval": res["pval"],
             "fdr": res["fdr"],
