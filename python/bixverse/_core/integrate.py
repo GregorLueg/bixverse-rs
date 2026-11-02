@@ -38,6 +38,7 @@ from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     BbknnParams,
     FastmnnParams,
@@ -344,7 +345,7 @@ def _harmony(
     run: Callable[..., np.ndarray],
     modality: CacheModality,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
 ) -> None:
     """Shared body of Harmony v1, v2 and the GPU twin. `params` is any Harmony
     bundle; `run` the extension call."""
@@ -384,7 +385,7 @@ def harmony(
     modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Harmony on the PCA.
 
@@ -400,7 +401,8 @@ def harmony(
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the PCA is stale, or a batch column is missing or
@@ -439,7 +441,7 @@ def harmony_v2(
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Harmony v2 on the PCA.
 
@@ -455,7 +457,8 @@ def harmony_v2(
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the PCA is stale, or a batch column is missing or
@@ -492,7 +495,7 @@ def bbknn(
     no_embd_to_use: int | None = None,
     bbknn_params: BbknnParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Batch-balanced kNN.
 
@@ -511,7 +514,8 @@ def bbknn(
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
         bbknn_params: The parameters. `None` uses the defaults.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is stale, or the batch column is
@@ -550,7 +554,7 @@ def _bbknn(
     no_embd_to_use: int | None,
     params: dict[str, object],
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
     run: Callable[..., tuple],
 ) -> None:
     """The body of `bbknn` over `to_rust(params)`, with the extension call
@@ -619,7 +623,7 @@ def _anchor_correction(
     name: str,
     run: Callable[..., np.ndarray],
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
     *,
     single_batch_returns: bool,
 ) -> None:
@@ -661,7 +665,7 @@ def fast_mnn(
     fastmnn_params: FastmnnParams | None = None,
     use_precomputed_pca: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """fastMNN on a PCA of the batch-aware HVGs.
 
@@ -677,7 +681,8 @@ def fast_mnn(
         use_precomputed_pca: Use the cached PCA instead of computing one on
             `batch_hvg_genes`.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the batch column is missing or incomplete, or the
@@ -714,7 +719,7 @@ def seurat_cca(
     cca_params: SeuratCcaParams | None = None,
     use_precomputed_pca: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Seurat CCA anchor integration.
 
@@ -732,7 +737,8 @@ def seurat_cca(
             The gene-space filter still needs the loadings, so this saves
             less than it does for fastMNN.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the batch column is missing or incomplete, or the
@@ -768,7 +774,7 @@ def seurat_rpca(
     rpca_params: SeuratRpcaParams | None = None,
     use_precomputed_pca: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Seurat reciprocal PCA anchor integration.
 
@@ -785,7 +791,8 @@ def seurat_rpca(
         use_precomputed_pca: Correct the cached PCA instead of computing the
             union PCA; the per-batch PCAs are always computed.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the batch column is missing or incomplete, or the
@@ -823,7 +830,7 @@ def calculate_kbet(
     batch_column: str,
     *,
     threshold: float = 0.05,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> KbetScores | None:
     """kBET on the cached kNN.
 
@@ -831,7 +838,8 @@ def calculate_kbet(
         sc: The experiment, with a kNN.
         batch_column: obs column with the batch.
         threshold: p-values at or below it count as significant.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores; `None` (with a warning) for one batch or no kNN.
@@ -880,7 +888,7 @@ def calculate_lisi(
     type: LisiType = "batch",
     weighted: bool = False,
     perplexity: float = 30.0,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> LisiScores | None:
     """LISI on the cached kNN.
 
@@ -894,7 +902,8 @@ def calculate_lisi(
         weighted: Weight the neighbours with a perplexity-calibrated
             Gaussian kernel on the kNN distances; else uniformly.
         perplexity: Perplexity of the weighted version; clamped to k.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores; `None` (with a warning) for one label or no kNN.
@@ -947,7 +956,7 @@ def calculate_batch_asw(
     embd_to_use: str = "pca",
     max_cells: int | None = 5000,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> BatchSilhouetteScores | None:
     """Batch average silhouette width on an embedding.
 
@@ -958,7 +967,8 @@ def calculate_batch_asw(
         max_cells: Subsample to this many cells, the pass is O(n^2). `None`
             uses all.
         seed: Seed for the subsampling.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores; `None` (with a warning) for one batch or a missing
@@ -1066,7 +1076,7 @@ def calculate_cell_type_asw(
     embd_to_use: str = "pca",
     max_cells: int | None = 5000,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> CellTypeAswScores | None:
     """Cell type silhouette width on an embedding, rescaled to `[0, 1]`.
 
@@ -1076,7 +1086,8 @@ def calculate_cell_type_asw(
         embd_to_use: The embedding, `"pca"` or a name in `sc.cache.embeddings`.
         max_cells: Subsample to this many cells. `None` uses all.
         seed: Seed for the subsampling.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores; `None` (with a warning) for one cell type or a missing
@@ -1171,6 +1182,7 @@ def calculate_integration_metrics(
     embd_to_use: str | None = "pca",
     max_cells: int | None = 5000,
     seed: int = 42,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """The batch mixing and biological conservation metrics in one row.
 
@@ -1191,6 +1203,8 @@ def calculate_integration_metrics(
             skips them.
         max_cells: Subsampling for the silhouette widths.
         seed: Seed for the subsampling.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         One row: `embedding`, `kbet_accept`, `batch_asw`, `ilisi`,
@@ -1204,16 +1218,21 @@ def calculate_integration_metrics(
         ...     sc, "batch_index", cell_type_column="cell_grp", embd_to_use="mnn"
         ... )
     """
-    kbet = calculate_kbet(sc, batch_column)
-    ilisi = calculate_lisi(sc, batch_column, type="batch")
+    kbet = calculate_kbet(sc, batch_column, verbose=verbose)
+    ilisi = calculate_lisi(sc, batch_column, type="batch", verbose=verbose)
     batch_asw = pcr = clisi = ct_asw = conn = None
     if embd_to_use is not None:
         batch_asw = calculate_batch_asw(
-            sc, batch_column, embd_to_use=embd_to_use, max_cells=max_cells, seed=seed
+            sc,
+            batch_column,
+            embd_to_use=embd_to_use,
+            max_cells=max_cells,
+            seed=seed,
+            verbose=verbose,
         )
         pcr = calculate_pcr(sc, batch_column, embd_to_use=embd_to_use)
     if cell_type_column is not None:
-        clisi = calculate_lisi(sc, cell_type_column, type="cell_type")
+        clisi = calculate_lisi(sc, cell_type_column, type="cell_type", verbose=verbose)
         conn = calculate_graph_connectivity(sc, cell_type_column)
         if embd_to_use is not None:
             ct_asw = calculate_cell_type_asw(
@@ -1222,6 +1241,7 @@ def calculate_integration_metrics(
                 embd_to_use=embd_to_use,
                 max_cells=max_cells,
                 seed=seed,
+                verbose=verbose,
             )
 
     row = {

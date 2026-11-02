@@ -36,6 +36,7 @@ from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc, ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     AucellParams,
     HotspotParams,
@@ -234,7 +235,7 @@ def _matrix_res(sc: ScOrMc, values: np.ndarray, columns: Sequence[str]) -> ScMat
 
 
 @beartype
-def _streaming(n_cells: int, streaming: bool | None, verbose: bool) -> bool:
+def _streaming(n_cells: int, streaming: bool | None, verbose: Verbose) -> bool:
     """Resolve `streaming` by size, logging when it switches on."""
     res = _auto_streaming(n_cells, streaming)
     if res and verbose:
@@ -298,7 +299,7 @@ def module_scores(
     n_ctrl: int = 100,
     seed: int = 42,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScMatrixRes:
     """Module activity scores.
 
@@ -312,7 +313,8 @@ def module_scores(
         n_ctrl: Control genes per gene set gene.
         seed: Seed for the control draws.
         streaming: Read the cells in chunks. `None` decides by size.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScMatrixRes` over the kept cells.
@@ -352,7 +354,7 @@ def aucell(
     *,
     aucell_params: AucellParams | None = None,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScMatrixRes:
     """AUCell scores.
 
@@ -366,7 +368,8 @@ def aucell(
         aucell_params: The parameters. `None` uses the defaults.
         streaming: Read the cells in chunks. `None` decides by size; unused
             for meta cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScMatrixRes`.
@@ -433,7 +436,7 @@ def vision(
     gs_list: Signatures,
     *,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScMatrixRes:
     """VISION signature scores.
 
@@ -443,7 +446,8 @@ def vision(
             `"neg"` may be left out. Unknown ids warn and drop.
         streaming: Read the cells in chunks. `None` decides by size; unused
             for meta cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScMatrixRes`.
@@ -613,7 +617,7 @@ def _vision_autocor(
     vision_params: VisionParams,
     streaming: bool | None,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
 ) -> VisionAutocorRes:
     """`vision_w_autocor` with the null signatures given."""
     sigs = _signatures(sc, gs_list)
@@ -681,7 +685,7 @@ def vision_w_autocor(
     vision_params: VisionParams | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> VisionAutocorRes:
     """VISION scores with their local autocorrelation.
 
@@ -701,7 +705,8 @@ def vision_w_autocor(
         streaming: Read the cells in chunks. `None` decides by size; unused
             for meta cells.
         seed: Seed for the null signatures and the kNN search.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `VisionAutocorRes`.
@@ -828,7 +833,7 @@ def lm_activity(
     net: pl.DataFrame,
     *,
     lm_params: LmActivityParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScMatrixRes | LmActivityRes | None:
     """ULM / MLM activity scores (decoupler style).
 
@@ -841,7 +846,8 @@ def lm_activity(
         net: `source`, `target` and optionally `weight`, see
             `prep_lm_network`.
         lm_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores as a `ScMatrixRes`, or with `p_values` an `LmActivityRes`;
@@ -962,7 +968,7 @@ def hotspot_autocor(
     genes_to_take: Sequence[str] | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """HotSpot gene autocorrelation.
 
@@ -981,7 +987,8 @@ def hotspot_autocor(
         streaming: Stream the genes. `None` decides by size; unused for meta
             cells.
         seed: Seed for the kNN search.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `gene_id`, `gearys_c`, `z_score`, `pval` and `fdr`.
@@ -1050,7 +1057,7 @@ def hotspot_gene_cor(
     streaming: bool | None = None,
     working_mem_gb: float = 4.0,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Hotspot:
     """HotSpot gene-gene local correlations.
 
@@ -1069,7 +1076,8 @@ def hotspot_gene_cor(
         working_mem_gb: Memory for the resident gene panels of the streaming
             path, excluding the two output matrices.
         seed: Seed for the kNN search.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `Hotspot` result.

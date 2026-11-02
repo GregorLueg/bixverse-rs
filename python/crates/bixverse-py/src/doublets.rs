@@ -74,7 +74,7 @@ fn readers(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cells, params, seed = 42, streaming = false,
-    return_combined_pca = false, return_pairs = false, verbose = false
+    return_combined_pca = false, return_pairs = false, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn scrublet<'py>(
@@ -87,7 +87,7 @@ pub fn scrublet<'py>(
     streaming: bool,
     return_combined_pca: bool,
     return_pairs: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: ScrubletParams = from_py(params, "scrublet params")?;
     let cells = index_vec(&cells)?;
@@ -97,7 +97,7 @@ pub fn scrublet<'py>(
             Scrublet::new(&gene_reader, &cell_reader, params, &cells).run_scrublet(
                 streaming,
                 seed,
-                verbose as usize,
+                verbose,
                 return_combined_pca,
                 return_pairs,
             )
@@ -124,7 +124,7 @@ pub fn scrublet<'py>(
 ///
 /// Dict with `doublet`, `doublet_score` and `voting_avg`.
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, f_path_cell, cells, params, seed = 42, streaming = false, verbose = false))]
+#[pyo3(signature = (f_path_gene, f_path_cell, cells, params, seed = 42, streaming = false, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn boost<'py>(
     py: Python<'py>,
@@ -134,18 +134,15 @@ pub fn boost<'py>(
     params: &Bound<'py, PyAny>,
     seed: usize,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: BoostParams = from_py(params, "boost params")?;
     let cells = index_vec(&cells)?;
     let (gene_reader, cell_reader) = readers(f_path_gene, f_path_cell)?;
     let res = py
         .detach(|| {
-            BoostClassifier::new(&gene_reader, &cell_reader, params, &cells).run_boost(
-                streaming,
-                seed,
-                verbose as usize,
-            )
+            BoostClassifier::new(&gene_reader, &cell_reader, params, &cells)
+                .run_boost(streaming, seed, verbose)
         })
         .map_err(BvErr::from)?;
 
@@ -180,7 +177,7 @@ pub fn boost<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cells, params, return_features = false, seed = 42,
-    streaming = false, verbose = false
+    streaming = false, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn scdblfinder<'py>(
@@ -192,7 +189,7 @@ pub fn scdblfinder<'py>(
     return_features: bool,
     seed: usize,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let mut params: ScDblFinderParams = from_py(params, "scdblfinder params")?;
     params.return_features = return_features;
@@ -200,11 +197,8 @@ pub fn scdblfinder<'py>(
     let (gene_reader, cell_reader) = readers(f_path_gene, f_path_cell)?;
     let res = py
         .detach(|| {
-            ScDblFinder::new(&gene_reader, &cell_reader, params, &cells).run(
-                seed,
-                streaming,
-                verbose as usize,
-            )
+            ScDblFinder::new(&gene_reader, &cell_reader, params, &cells)
+                .run(seed, streaming, verbose)
         })
         .map_err(BvErr::from)?;
 
@@ -319,7 +313,7 @@ fn fit_dict<'py>(
 /// Dict with `cell_order` (0-based source indices in output order),
 /// `lib_size`, `nnz` and `fits`, one dict per sample.
 #[pyfunction]
-#[pyo3(signature = (f_path_source, f_path_target, samples, params, target_size, verbose = false))]
+#[pyo3(signature = (f_path_source, f_path_target, samples, params, target_size, verbose = 1))]
 pub fn cellsweep<'py>(
     py: Python<'py>,
     f_path_source: &str,
@@ -327,7 +321,7 @@ pub fn cellsweep<'py>(
     samples: &Bound<'py, PyAny>,
     params: &Bound<'py, PyAny>,
     target_size: f32,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let samples: Vec<CellSweepSample> = from_py(samples, "cellsweep samples")?;
     let params: CellSweepParams = from_py(params, "cellsweep params")?;
@@ -340,7 +334,7 @@ pub fn cellsweep<'py>(
                 params,
                 f_path_target,
                 target_size,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;

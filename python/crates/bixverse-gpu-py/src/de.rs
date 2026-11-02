@@ -37,7 +37,7 @@ use crate::error::GpuErr;
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cells_to_keep, gene_indices, subject_ids, design, params,
-    offset = None, verbose = false
+    offset = None, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nebula<'py>(
@@ -50,7 +50,7 @@ pub fn nebula<'py>(
     design: PyReadonlyArray2<'py, f64>,
     params: &Bound<'py, PyAny>,
     offset: Option<PyReadonlyArray1<'py, f64>>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_plane_ops()?;
     let params: NebulaScParams = from_py(params, "NEBULA params")?;
@@ -78,7 +78,7 @@ pub fn nebula<'py>(
                     offset.as_deref(),
                     &params,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })

@@ -23,6 +23,7 @@ from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells
 from bixverse._core.pp import _factor_codes
 from bixverse._core.state import KnnGraph
+from bixverse._validate import Verbose
 from bixverse.params import KnnDefaults, to_rust
 
 ###########
@@ -191,7 +192,7 @@ def calc_diffusion_coordinates(
     n_dcs: int = 10,
     k_density: int = 150,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Diffusion map of the source cells and a density region per meta cell.
 
@@ -212,7 +213,8 @@ def calc_diffusion_coordinates(
         n_dcs: Diffusion components.
         k_density: The neighbour giving the density.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the kNN does not cover the kept source cells.

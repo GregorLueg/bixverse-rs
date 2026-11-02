@@ -55,7 +55,7 @@ on_off = bv.pathways.binarise_regulon_activity(auc)
 
 **Gotchas.** Gene sets, TFs and networks use the gene ids of var, not symbols.
 Unknown ids drop; for the TFs in `scenic_grn` you only hear about it with
-`verbose=True`. `hotspot_autocor` and `hotspot_gene_cor` raise if the
+`verbose` on. `hotspot_autocor` and `hotspot_gene_cor` raise if the
 embedding or the cached kNN is stale after a change of the cell filter, and the
 gene by gene output of `hotspot_gene_cor` grows with the square of
 `genes_to_take`, so cut it down by autocorrelation first. `cells_to_take` drops

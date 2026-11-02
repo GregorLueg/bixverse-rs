@@ -40,7 +40,7 @@ const DEFAULT_WAVE_BYTE_BUDGET: usize = 4 * 1024 * 1024 * 1024;
 #[pyfunction]
 #[pyo3(signature = (
     f_path_genes, cell_indices, gene_indices, tf_indices, params, streaming, seed = 42,
-    verbose = false, wave_byte_budget = DEFAULT_WAVE_BYTE_BUDGET
+    verbose = 1, wave_byte_budget = DEFAULT_WAVE_BYTE_BUDGET
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn scenic_grn<'py>(
@@ -52,7 +52,7 @@ pub fn scenic_grn<'py>(
     params: &Bound<'py, PyAny>,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     wave_byte_budget: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     ensure_gpu()?;
@@ -62,7 +62,7 @@ pub fn scenic_grn<'py>(
     let genes = index_vec(&gene_indices)?;
     let tfs = index_vec(&tf_indices)?;
     let reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             on_device(|device| {
@@ -100,7 +100,7 @@ pub fn scenic_grn<'py>(
 /// `(n_targets, n_tfs)` `float64` importances.
 #[pyfunction]
 #[pyo3(signature = (
-    data, indices, indptr, shape, tf_indices, params, seed = 42, verbose = false,
+    data, indices, indptr, shape, tf_indices, params, seed = 42, verbose = 1,
     wave_byte_budget = DEFAULT_WAVE_BYTE_BUDGET
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -113,7 +113,7 @@ pub fn mc_scenic_grn<'py>(
     tf_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     wave_byte_budget: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     ensure_gpu()?;
@@ -124,15 +124,7 @@ pub fn mc_scenic_grn<'py>(
     let res = py
         .detach(|| {
             on_device(|device| {
-                run_scenic_grn_in_memory_gpu(
-                    &m,
-                    &tfs,
-                    &params,
-                    &gpu,
-                    seed,
-                    device,
-                    verbose as usize,
-                )
+                run_scenic_grn_in_memory_gpu(&m, &tfs, &params, &gpu, seed, device, verbose)
             })
         })
         .map_err(GpuErr::from)?;

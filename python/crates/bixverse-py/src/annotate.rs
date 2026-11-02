@@ -192,7 +192,7 @@ fn composition_dict<'py>(
 /// Dict with `cell_types` and the `(n_cells, n_cell_types)` `float64`
 /// `scores`.
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, cell_indices, markers, sensitivity, weight_floor = None, verbose = false))]
+#[pyo3(signature = (f_path_gene, cell_indices, markers, sensitivity, weight_floor = None, verbose = 1))]
 pub fn sc_type<'py>(
     py: Python<'py>,
     f_path_gene: &str,
@@ -200,7 +200,7 @@ pub fn sc_type<'py>(
     markers: &Bound<'py, PyAny>,
     sensitivity: bool,
     weight_floor: Option<f32>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let markers: Vec<CellTypeMarkers> = from_py(markers, "cell markers")?;
     let cells = index_vec(&cell_indices)?;
@@ -214,7 +214,7 @@ pub fn sc_type<'py>(
                 sensitivity,
                 None,
                 weight_floor,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -397,7 +397,7 @@ pub fn sc_type_assign_cells<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, hvg_indices, batch_labels, pca_params, no_pcs,
-    harmony_params, harmony_version, seed = 42, verbose = false
+    harmony_params, harmony_version, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn build_symphony_ref<'py>(
@@ -412,7 +412,7 @@ pub fn build_symphony_ref<'py>(
     harmony_params: &Bound<'py, PyAny>,
     harmony_version: &str,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let pca_params: SingleCellPcaParams = from_py(pca_params, "pca params")?;
     let backend = match harmony_version {
@@ -451,7 +451,7 @@ pub fn build_symphony_ref<'py>(
                 no_pcs,
                 backend,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -495,7 +495,7 @@ pub fn build_symphony_ref<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_query, cell_indices, gene_means, gene_sds, loadings, centroids, nr, c_cache,
-    gene_map, batch_labels, params, verbose = false
+    gene_map, batch_labels, params, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn symphony_map_query<'py>(
@@ -511,7 +511,7 @@ pub fn symphony_map_query<'py>(
     gene_map: PyReadonlyArray1<'py, i64>,
     batch_labels: Vec<PyReadonlyArray1<'py, u32>>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: SymphonyMapParams = from_py(params, "symphony map params")?;
     let cells = index_vec(&cell_indices)?;
@@ -546,18 +546,8 @@ pub fn symphony_map_query<'py>(
     let res = py
         .detach(|| {
             symphony_map_query_parts(
-                &reader,
-                &cells,
-                means,
-                sds,
-                loadings,
-                centroids,
-                nr,
-                c_cache,
-                &gene_map,
-                &labels,
-                &params,
-                verbose as usize,
+                &reader, &cells, means, sds, loadings, centroids, nr, c_cache, &gene_map, &labels,
+                &params, verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -590,7 +580,7 @@ pub fn symphony_map_query<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     reference_z_corr, query_z_corr, reference_labels, n_labels, knn_params, seed = 42,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn transfer_labels_symphony<'py>(
@@ -601,7 +591,7 @@ pub fn transfer_labels_symphony<'py>(
     n_labels: usize,
     knn_params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let knn_params: KnnParams = from_py(knn_params, "knn params")?;
     let (reference, query) = (mat_view(&reference_z_corr)?, mat_view(&query_z_corr)?);
@@ -621,7 +611,7 @@ pub fn transfer_labels_symphony<'py>(
     let (pred, conf) = py
         .detach(|| {
             let (knn, _) =
-                generate_knn_cross_with_dist(reference, query, &knn_params, seed, verbose)?;
+                generate_knn_cross_with_dist(reference, query, &knn_params, seed, verbose > 0)?;
             Ok::<_, bixverse_sc::prelude::ScErrors>(knn_majority_vote(&knn, &labels, n_labels))
         })
         .map_err(BvErr::from)?;

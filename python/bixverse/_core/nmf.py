@@ -31,6 +31,7 @@ from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
 
 ###########
@@ -377,7 +378,7 @@ def nmf(
     use_second_layer: bool = True,
     nmf_hals_params: NmfHalsParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> NmfResult:
     """One HALS NMF run.
 
@@ -390,7 +391,8 @@ def nmf(
         use_second_layer: Factorise the normalised rather than the raw counts.
         nmf_hals_params: The solver. `None` uses the defaults (NNDSVD).
         seed: Seed for a random initialisation.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `NmfResult`.
@@ -428,7 +430,7 @@ def _nmf(
     use_second_layer: bool = True,
     nmf_hals_params: NmfHalsParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType,
 ) -> NmfResult:
     """The body of `nmf`, with the extension module `ext` supplied, so
@@ -484,7 +486,7 @@ def stabilised_nmf(
     nmf_hals_params: NmfHalsParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> StabilisedNmfResult:
     """Randomly initialised HALS NMF restarts.
 
@@ -499,7 +501,8 @@ def stabilised_nmf(
             random.
         n_runs: Number of restarts.
         seed: Base seed of the restarts.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `StabilisedNmfResult`.
@@ -538,7 +541,7 @@ def _stabilised_nmf(
     nmf_hals_params: NmfHalsParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType,
 ) -> StabilisedNmfResult:
     """The body of `stabilised_nmf`, with the extension module `ext` supplied, so
@@ -638,7 +641,7 @@ def consensus_nmf(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ConsensusNmfResult:
     """Consensus HALS NMF (cNMF).
 
@@ -658,7 +661,8 @@ def consensus_nmf(
         nmf_consensus_params: The consensus step. `None` uses the defaults.
         n_runs: Number of restarts, at least 2.
         seed: Base seed of the restarts and the consensus k-means.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ConsensusNmfResult`.
@@ -704,7 +708,7 @@ def _consensus_nmf(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType,
 ) -> ConsensusNmfResult:
     """The body of `consensus_nmf`, with the extension module `ext` supplied, so
@@ -783,7 +787,7 @@ def nmf_k_sweep(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> NmfKSweepResult:
     """Consensus NMF over a range of k.
 
@@ -801,7 +805,8 @@ def nmf_k_sweep(
         nmf_consensus_params: The consensus step. `None` uses the defaults.
         n_runs: Restarts per k, at least 2.
         seed: Base seed of the restarts and the consensus k-means.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `NmfKSweepResult`.
@@ -845,7 +850,7 @@ def _nmf_k_sweep(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType,
 ) -> NmfKSweepResult:
     """The body of `nmf_k_sweep`, with the extension module `ext` supplied, so

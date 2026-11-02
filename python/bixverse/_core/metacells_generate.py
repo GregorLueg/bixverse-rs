@@ -25,6 +25,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, build_metacells
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     BtMetacellsParams,
     Metacells2DacParams,
@@ -97,7 +98,7 @@ def generate_bt_meta_cells(
     cells_to_use: Sequence[str] | None = None,
     target_size: float = 1e5,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells | None:
     """Bootstrapped meta cells after hdWGCNA.
 
@@ -116,7 +117,8 @@ def generate_bt_meta_cells(
         cells_to_use: Cell ids to restrict the meta cells to.
         target_size: Library size to normalise the meta cells to.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The meta cells, or `None` (with a warning) if the kNN or embedding is
@@ -188,7 +190,7 @@ def generate_seacells(
     regenerate_knn: bool = False,
     target_size: float = 1e5,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells:
     """SEACells, kernel archetypal analysis.
 
@@ -208,7 +210,8 @@ def generate_seacells(
         regenerate_knn: Build the kNN on the embedding.
         target_size: Library size to normalise the meta cells to.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is missing, or it or the kNN is stale.
@@ -245,7 +248,7 @@ def _generate_seacells(
     regenerate_knn: bool,
     target_size: float,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
     run: Callable[..., dict[str, Any]],
 ) -> MetaCells:
     """The body of `generate_seacells`, with the extension call `run`
@@ -286,7 +289,7 @@ def generate_supercells(
     cells_to_use: Sequence[str] | None = None,
     target_size: float = 1e5,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells | None:
     """SuperCells, walktrap on the kNN graph.
 
@@ -303,7 +306,8 @@ def generate_supercells(
         cells_to_use: Cell ids to restrict the meta cells to.
         target_size: Library size to normalise the meta cells to.
         seed: Seed for a kNN build.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The meta cells, or `None` (with a warning) if the kNN or embedding is
@@ -372,7 +376,7 @@ def generate_metacells2(
     cells_to_use: Sequence[str] | None = None,
     target_size: float = 1e5,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells:
     """MetaCells2 (divide and conquer) on the raw counts.
 
@@ -390,7 +394,8 @@ def generate_metacells2(
         cells_to_use: Cell ids to restrict to; ids not kept warn and drop.
         target_size: Library size to normalise the meta cells to.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     References:
         Ben-Kiki, et al., Genome Biol, 2022.

@@ -33,6 +33,7 @@ from bixverse._core.scan import (
     warn_skipped,
 )
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import MinQualityParams, MtxIoParams, to_rust
 
 ###########
@@ -146,7 +147,7 @@ def _finish(
     lib_size: np.ndarray,
     *,
     csc_mem_gb: float | None,
-    verbose: bool,
+    verbose: Verbose,
     populate: Callable[[duckdb.DuckDBPyConnection], None],
 ) -> SingleCells:
     """The shared tail of every loader.
@@ -159,7 +160,8 @@ def _finish(
         nnz: Genes detected per written cell.
         lib_size: Library size per written cell.
         csc_mem_gb: Memory for the CSR to CSC conversion, `None` for one pass.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
         populate: Called with an open connection to write obs and var.
 
     Returns:
@@ -270,7 +272,7 @@ def load_csr(
     *,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load an in-memory cells x genes count matrix.
 
@@ -286,7 +288,8 @@ def load_csr(
         qc: Cell and gene QC thresholds and the target size.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
             `None` converts in one pass.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -354,7 +357,7 @@ def load_h5ad(
     cell_id_col: str | None = None,
     h5ad_streaming: bool = True,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load an h5ad file.
 
@@ -369,7 +372,8 @@ def load_h5ad(
         h5ad_streaming: Stream the counts in batches instead of materialising
             the filtered matrix first.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -423,7 +427,7 @@ def stream_h5ad(
     qc: MinQualityParams | None = None,
     raw_count_slot: Literal["auto"] | RawSlot = "auto",
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """`load_h5ad` with `h5ad_streaming=True`.
 
@@ -434,7 +438,8 @@ def stream_h5ad(
         raw_count_slot: Where the raw counts are. `"auto"` detects it, see
             `detect_raw_count_slot`.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -460,7 +465,7 @@ def load_h5ad_norm(
     qc: MinQualityParams | None = None,
     cell_id_col: str | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load an h5ad file holding only normalised counts.
 
@@ -475,7 +480,8 @@ def load_h5ad_norm(
         qc: Cell and gene QC thresholds and the target size.
         cell_id_col: obs column to use as cell identifier.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -518,7 +524,7 @@ def load_multi_h5ad(
     qc: MinQualityParams | None = None,
     cell_id_col: str | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load several h5ad files into one experiment.
 
@@ -532,7 +538,8 @@ def load_multi_h5ad(
         qc: Cell and gene QC thresholds and the target size.
         cell_id_col: obs column to use as cell identifier.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -632,7 +639,7 @@ def load_mtx(
     *,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load an mtx file with its barcodes and features.
 
@@ -645,7 +652,8 @@ def load_mtx(
         mtx_params: The three files and their layout.
         qc: Cell and gene QC thresholds and the target size.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -695,7 +703,7 @@ def load_multi_mtx(
     *,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load several mtx directories into one experiment.
 
@@ -704,7 +712,8 @@ def load_multi_mtx(
         prescan: Output of `prescan_mtx_dirs`.
         qc: Cell and gene QC thresholds and the target size.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -761,7 +770,7 @@ def load_tenx_h5(
     qc: MinQualityParams | None = None,
     feature_type: str | None = "Gene Expression",
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load a 10x CellRanger h5 file.
 
@@ -773,7 +782,8 @@ def load_tenx_h5(
         qc: Cell and gene QC thresholds and the target size.
         feature_type: Modality to keep. `None` is gene expression.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -814,7 +824,7 @@ def load_multi_tenx_h5(
     *,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Load several 10x h5 files into one experiment.
 
@@ -823,7 +833,8 @@ def load_multi_tenx_h5(
         prescan: Output of `prescan_tenx_h5_files`.
         qc: Cell and gene QC thresholds and the target size.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment.
@@ -882,7 +893,7 @@ def merge_sc_experiments(
     renormalise: bool = False,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Merge several experiments into a new one.
 
@@ -900,7 +911,8 @@ def merge_sc_experiments(
             size.
         qc: Only `target_size` is used; no QC filtering happens in a merge.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The merged experiment.
@@ -971,7 +983,7 @@ def archive_sc_exp(
     *,
     level: int = 3,
     remove_bins: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> dict[str, int]:
     """Archive the counts for cold storage.
 
@@ -983,7 +995,8 @@ def archive_sc_exp(
         sc: The experiment.
         level: zstd level, 1 to 22.
         remove_bins: Delete both stores afterwards.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `n_cells`, `nnz`, `n_norm_stored` (cells whose normalised values
@@ -1013,7 +1026,7 @@ def upgrade_sc_store(
     *,
     codec: Literal["lz4", "zstd", "none"] = "lz4",
     keep_backup: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Convert a v3 store to the v4 format in place.
 
@@ -1025,7 +1038,8 @@ def upgrade_sc_store(
         sc: The experiment.
         codec: Chunk codec of the new files.
         keep_backup: Keep the originals as `<path>.v3.bak`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The experiment, reading the converted store.

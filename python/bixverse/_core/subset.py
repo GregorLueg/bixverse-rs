@@ -39,6 +39,7 @@ from bixverse._core.single_cells import (
     _check_range,
 )
 from bixverse._core.state import ScCache, ScMap, _lookup, stale_artefacts
+from bixverse._validate import Verbose
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,7 @@ def merge_subset_obs(
     new_names: Sequence[str] | None = None,
     prefix_values: bool = False,
     overwrite: bool = False,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Write obs columns of one or more subsets into the parent's obs.
 
@@ -293,7 +294,8 @@ def merge_subset_obs(
             `"<group>_<value>"`, which casts to string. Needed when several
             subsets share a column whose labels repeat across them.
         overwrite: Replace parent columns of the same name.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If a subset is not from `sc`, a column is missing or

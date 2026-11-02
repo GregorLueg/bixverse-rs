@@ -43,6 +43,7 @@ from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import Selection, SingleCells
 from bixverse._core.state import CsrMatrix
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import EdgerQlParams, MeldParams, NebulaParams, to_rust
 from bixverse.params._checks import check_range
 
@@ -445,7 +446,7 @@ def find_markers(
     method: Method = "wilcox",
     alternative: Alternative = "twosided",
     min_prop: float = 0.05,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """Wilcoxon DGE between two groups of cells.
 
@@ -456,7 +457,8 @@ def find_markers(
         method: Only `"wilcox"`, reserved.
         alternative: The test alternative.
         min_prop: A gene is tested if this share of either group expresses it.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `gene_id`, `lfc`, `prop1`, `prop2`, `z_scores`, `p_values` and `fdr`,
@@ -495,7 +497,7 @@ def find_all_markers(
     method: Method = "wilcox",
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """One-vs-rest Wilcoxon DGE for every group of a column.
 
@@ -510,7 +512,8 @@ def find_all_markers(
             the group.
         min_prop: A gene is tested for a group if this share of the group or
             of the rest expresses it.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `grp`, `gene_id`, `lfc`, `prop1`, `prop2`, `z_scores`, `p_values` and
@@ -559,7 +562,7 @@ def find_specific_markers(
     method: Method = "wilcox",
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScSpecificMarkers | None:
     """Markers that hold up against every rival group separately.
 
@@ -578,7 +581,8 @@ def find_specific_markers(
         alternative: The test alternative; `"greater"` asks for genes up in
             the reference.
         min_prop: A gene is tested if this share of any group expresses it.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScSpecificMarkers`, or `None` with a warning if no gene passed
@@ -740,7 +744,7 @@ def get_pseudobulked(
     *,
     return_format: Literal["dense", "sparse"] = "dense",
     assay: Literal["raw", "norm"] = "raw",
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> PseudoBulked:
     """Pseudobulk groups of cells.
 
@@ -750,7 +754,8 @@ def get_pseudobulked(
         return_format: A dense array or a CSR matrix.
         assay: `"raw"` sums the raw counts, `"norm"` averages the normalised
             counts over the group, zeros included.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `PseudoBulked`, samples in `cell_list` order.
@@ -876,7 +881,7 @@ def pseudobulk_dge(
     coef: Coef | None = None,
     contrast: np.ndarray | Sequence[float] | None = None,
     edger_params: EdgerQlParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """edgeR quasi-likelihood DGE on pseudobulked cells.
 
@@ -890,7 +895,8 @@ def pseudobulk_dge(
         coef: See `run_edger_ql`.
         contrast: See `run_edger_ql`.
         edger_params: See `run_edger_ql`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         See `run_edger_ql`; `feature_id` holds the gene ids.
@@ -941,7 +947,7 @@ def nebula(
     cells_to_use: Sequence[str] | None = None,
     offset: np.ndarray | Sequence[float] | None = None,
     nebula_params: NebulaParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScNebula:
     """NEBULA's negative binomial gamma mixed model.
 
@@ -964,7 +970,8 @@ def nebula(
         offset: Strictly positive scaling per cell, aligned to the cells that
             survive the design. `None` uses the library sizes.
         nebula_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScNebula`.
@@ -1009,7 +1016,7 @@ def _nebula(
     cells_to_use: Sequence[str] | None = None,
     offset: np.ndarray | Sequence[float] | None = None,
     nebula_params: object = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType,
 ) -> ScNebula:
     """The body of `nebula`, with the extension module `ext` supplied, so
@@ -1170,7 +1177,7 @@ def get_milor_abundances(
     no_embd_to_use: int | None = None,
     milor_params: MiloRParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MiloR | None:
     """Milo neighbourhoods and their cell counts per sample.
 
@@ -1186,7 +1193,8 @@ def get_milor_abundances(
         milor_params: The parameters. `None` uses the defaults; a `k_refine`
             above the embedding width is lowered to it with a warning.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `MiloR`, or `None` with a warning if there is no kNN.
@@ -1492,7 +1500,7 @@ def meld(
     embd_to_use: str = "pca",
     meld_params: MeldParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MeldRes | None:
     """MELD sample densities over the kNN graph.
 
@@ -1508,7 +1516,8 @@ def meld(
         meld_params: The parameters. `None` uses the defaults; the kNN keys
             are unused, the cached kNN is taken as is.
         seed: Seed for the largest eigenvalue estimate.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `MeldRes` over the kept cells, or `None` with a warning if there

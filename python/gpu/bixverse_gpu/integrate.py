@@ -22,6 +22,7 @@ from beartype import beartype
 from bixverse._core.integrate import _bbknn, _hard_state, _harmony, _labels
 from bixverse._core.multimodal import CacheModality
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import BbknnGpuParams, FastmnnGpuParams, HarmonyV2GpuParams
@@ -43,7 +44,7 @@ def harmony_v2(
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2GpuParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Harmony v2 on the PCA on the GPU.
 
@@ -58,7 +59,8 @@ def harmony_v2(
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the PCA is stale, or the batch column is missing or
@@ -90,7 +92,7 @@ def bbknn(
     no_embd_to_use: int | None = None,
     bbknn_params: BbknnGpuParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Batch-balanced kNN with the per-batch searches on the GPU.
 
@@ -107,7 +109,8 @@ def bbknn(
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
         bbknn_params: The parameters. `None` uses the defaults.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the PCA is stale, or the batch column is missing or
@@ -138,7 +141,7 @@ def fast_mnn(
     no_embd_to_use: int | None = None,
     fastmnn_params: FastmnnGpuParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """fastMNN on the PCA in the object, neighbour searches on the GPU.
 
@@ -152,7 +155,8 @@ def fast_mnn(
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
         fastmnn_params: The parameters. `None` uses the defaults.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the PCA is stale, or the batch column is missing,

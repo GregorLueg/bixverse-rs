@@ -350,7 +350,7 @@ fn keep_rows(keep: Option<PyReadonlyArray1<'_, u32>>) -> PyResult<Option<Vec<usi
 ///
 /// The QC dict, see [qc_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, data, indices, indptr, shape, qc_params, verbose = false))]
+#[pyo3(signature = (f_path_cells, data, indices, indptr, shape, qc_params, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn csr_to_file<'py>(
     py: Python<'py>,
@@ -360,7 +360,7 @@ pub fn csr_to_file<'py>(
     indptr: PyReadonlyArray1<'py, u32>,
     shape: (usize, usize),
     qc_params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     if indptr.len() != shape.0 + 1 {
@@ -376,7 +376,7 @@ pub fn csr_to_file<'py>(
         shape,
     );
     let (n_cells, n_genes, cell_qc) = py
-        .detach(|| write_r_counts(&f_path_cells, csr, qc, verbose))
+        .detach(|| write_r_counts(&f_path_cells, csr, qc, verbose > 0))
         .map_err(BvErr::from)?;
     qc_dict(py, n_cells, n_genes, &cell_qc)
 }
@@ -404,7 +404,7 @@ pub fn csr_to_file<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cs_type, no_cells, no_genes, qc_params, slot = "X",
-    streaming = true, verbose = false
+    streaming = true, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn h5ad_to_file<'py>(
@@ -417,7 +417,7 @@ pub fn h5ad_to_file<'py>(
     qc_params: &Bound<'py, PyAny>,
     slot: &str,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let slot = raw_slot(slot)?;
@@ -437,7 +437,7 @@ pub fn h5ad_to_file<'py>(
                 no_genes,
                 qc,
                 slot,
-                verbose,
+                verbose > 0,
             )
         })
         .map_err(BvErr::from)?;
@@ -468,7 +468,7 @@ pub fn h5ad_to_file<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cs_type, no_cells, no_genes, obs_lib_size_col, target_size,
-    qc_params, verbose = false
+    qc_params, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn norm_h5ad_to_file<'py>(
@@ -481,7 +481,7 @@ pub fn norm_h5ad_to_file<'py>(
     obs_lib_size_col: &str,
     target_size: f32,
     qc_params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let cs_type = cs_type.to_string();
@@ -497,7 +497,7 @@ pub fn norm_h5ad_to_file<'py>(
                 &lib_col,
                 target_size,
                 qc,
-                verbose,
+                verbose > 0,
             )
         })
         .map_err(BvErr::from)?;
@@ -523,7 +523,7 @@ pub fn norm_h5ad_to_file<'py>(
 /// The QC dict, see [qc_dict].
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_cells, mtx_path, qc_params, cells_as_rows, streaming = true, verbose = false
+    f_path_cells, mtx_path, qc_params, cells_as_rows, streaming = true, verbose = 1
 ))]
 pub fn mtx_to_file<'py>(
     py: Python<'py>,
@@ -532,7 +532,7 @@ pub fn mtx_to_file<'py>(
     qc_params: &Bound<'py, PyAny>,
     cells_as_rows: bool,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let cells = path_str(&f_path_cells)?;
@@ -540,11 +540,11 @@ pub fn mtx_to_file<'py>(
         .detach(|| {
             let mut reader = MtxReader::new(&mtx_path, qc, cells_as_rows)?
                 .with_temp_dir(spill_dir(&f_path_cells));
-            let quality = reader.parse_mtx_quality(verbose)?;
+            let quality = reader.parse_mtx_quality(verbose > 0)?;
             if streaming {
-                reader.process_mtx_and_write_bin_streaming(cells, &quality, verbose)
+                reader.process_mtx_and_write_bin_streaming(cells, &quality, verbose > 0)
             } else {
-                reader.process_mtx_and_write_bin(cells, &quality, verbose)
+                reader.process_mtx_and_write_bin(cells, &quality, verbose > 0)
             }
         })
         .map_err(BvErr::from)?;
@@ -572,7 +572,7 @@ pub fn mtx_to_file<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, version, no_cells, no_genes, qc_params, feature_type = None,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn tenx_h5_to_file<'py>(
@@ -584,7 +584,7 @@ pub fn tenx_h5_to_file<'py>(
     no_genes: usize,
     qc_params: &Bound<'py, PyAny>,
     feature_type: Option<String>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let version = version.map(tenx_version).transpose()?;
@@ -598,7 +598,7 @@ pub fn tenx_h5_to_file<'py>(
                 no_genes,
                 qc,
                 feature_type.as_deref(),
-                verbose,
+                verbose > 0,
             )
         })
         .map_err(BvErr::from)?;
@@ -625,14 +625,14 @@ pub fn tenx_h5_to_file<'py>(
 ///
 /// The multi-file dict, see [multi_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = false))]
+#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = 1))]
 pub fn multi_h5ad_to_file<'py>(
     py: Python<'py>,
     f_path_cells: PathBuf,
     file_tasks: &Bound<'py, PyAny>,
     universe_size: usize,
     qc_params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let tasks: Vec<H5adFileTask> = from_py(file_tasks, "file_tasks")?;
@@ -643,7 +643,7 @@ pub fn multi_h5ad_to_file<'py>(
                 &f_path_cells,
                 universe_size,
                 &qc,
-                verbose,
+                verbose > 0,
             )
         })
         .map_err(BvErr::from)?;
@@ -678,20 +678,26 @@ pub fn multi_h5ad_to_file<'py>(
 ///
 /// The multi-file dict, see [multi_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = false))]
+#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = 1))]
 pub fn multi_mtx_to_file<'py>(
     py: Python<'py>,
     f_path_cells: PathBuf,
     file_tasks: &Bound<'py, PyAny>,
     universe_size: usize,
     qc_params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let tasks: Vec<MtxFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
         .detach(|| {
-            mtx_multifile_io::multi_mtx_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose)
+            mtx_multifile_io::multi_mtx_to_file(
+                &tasks,
+                &f_path_cells,
+                universe_size,
+                &qc,
+                verbose > 0,
+            )
         })
         .map_err(BvErr::from)?;
     let per_file = res
@@ -724,19 +730,19 @@ pub fn multi_mtx_to_file<'py>(
 ///
 /// The multi-file dict, see [multi_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = false))]
+#[pyo3(signature = (f_path_cells, file_tasks, universe_size, qc_params, verbose = 1))]
 pub fn multi_tenx_h5_to_file<'py>(
     py: Python<'py>,
     f_path_cells: PathBuf,
     file_tasks: &Bound<'py, PyAny>,
     universe_size: usize,
     qc_params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let tasks: Vec<TenxFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
-        .detach(|| multi_10x_h5_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose))
+        .detach(|| multi_10x_h5_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose > 0))
         .map_err(BvErr::from)?;
     let per_file = res
         .per_file
@@ -772,7 +778,7 @@ pub fn multi_tenx_h5_to_file<'py>(
 /// `nnz`).
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_cells, merge_tasks, universe_size, renormalise, target_size, verbose = false
+    f_path_cells, merge_tasks, universe_size, renormalise, target_size, verbose = 1
 ))]
 pub fn merge_sc_files<'py>(
     py: Python<'py>,
@@ -781,7 +787,7 @@ pub fn merge_sc_files<'py>(
     universe_size: usize,
     renormalise: bool,
     target_size: f32,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let tasks: Vec<BinMergeTask> = from_py(merge_tasks, "merge_tasks")?;
     let res = py
@@ -792,7 +798,7 @@ pub fn merge_sc_files<'py>(
                 universe_size,
                 renormalise,
                 target_size,
-                verbose,
+                verbose > 0,
             )
         })
         .map_err(BvErr::from)?;
@@ -826,17 +832,17 @@ pub fn merge_sc_files<'py>(
 ///
 /// `None`; raises on failure.
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, f_path_genes, max_mem_gb = None, verbose = false))]
+#[pyo3(signature = (f_path_cells, f_path_genes, max_mem_gb = None, verbose = 1))]
 pub fn generate_gene_based_data(
     py: Python<'_>,
     f_path_cells: PathBuf,
     f_path_genes: PathBuf,
     max_mem_gb: Option<f64>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<()> {
     let cells = path_str(&f_path_cells)?;
     let genes = path_str(&f_path_genes)?;
-    py.detach(|| write_gene_file(cells, genes, max_nnz(max_mem_gb), verbose))
+    py.detach(|| write_gene_file(cells, genes, max_nnz(max_mem_gb), verbose > 0))
         .map_err(BvErr::from)?;
     Ok(())
 }
@@ -872,18 +878,18 @@ pub fn gene_nnz<'py>(py: Python<'py>, f_path_genes: PathBuf) -> PyResult<Bound<'
 ///
 /// `n_cells`, `nnz`, `n_norm_stored` and `archive_bytes`.
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, f_path_archive, level = 3, verbose = false))]
+#[pyo3(signature = (f_path_cells, f_path_archive, level = 3, verbose = 1))]
 pub fn archive_cells<'py>(
     py: Python<'py>,
     f_path_cells: PathBuf,
     f_path_archive: PathBuf,
     level: i32,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let cells = path_str(&f_path_cells)?;
     let archive = path_str(&f_path_archive)?;
     let stats = py
-        .detach(|| archive_cell_file(cells, archive, level, verbose))
+        .detach(|| archive_cell_file(cells, archive, level, verbose > 0))
         .map_err(BvErr::from)?;
     let d = PyDict::new(py);
     d.set_item("n_cells", stats.n_cells)?;
@@ -907,19 +913,19 @@ pub fn archive_cells<'py>(
 ///
 /// `None`; raises on failure.
 #[pyfunction]
-#[pyo3(signature = (f_path_archive, f_path_cells, f_path_genes, max_mem_gb = None, verbose = false))]
+#[pyo3(signature = (f_path_archive, f_path_cells, f_path_genes, max_mem_gb = None, verbose = 1))]
 pub fn restore_cells_archive(
     py: Python<'_>,
     f_path_archive: PathBuf,
     f_path_cells: PathBuf,
     f_path_genes: PathBuf,
     max_mem_gb: Option<f64>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<()> {
     let archive = path_str(&f_path_archive)?;
     let cells = path_str(&f_path_cells)?;
     let genes = path_str(&f_path_genes)?;
-    py.detach(|| restore_archive(archive, cells, genes, max_nnz(max_mem_gb), verbose))
+    py.detach(|| restore_archive(archive, cells, genes, max_nnz(max_mem_gb), verbose > 0))
         .map_err(BvErr::from)?;
     Ok(())
 }
@@ -952,14 +958,14 @@ pub fn file_version(path: PathBuf) -> PyResult<u32> {
 ///
 /// `None`; raises on failure, leaving the store untouched.
 #[pyfunction]
-#[pyo3(signature = (f_path_cells, f_path_genes, codec = "lz4", keep_backup = true, verbose = false))]
+#[pyo3(signature = (f_path_cells, f_path_genes, codec = "lz4", keep_backup = true, verbose = 1))]
 pub fn upgrade_to_v4(
     py: Python<'_>,
     f_path_cells: PathBuf,
     f_path_genes: PathBuf,
     codec: &str,
     keep_backup: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<()> {
     let codec = parse_chunk_codec(codec).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -968,7 +974,7 @@ pub fn upgrade_to_v4(
     })?;
     let cells = path_str(&f_path_cells)?;
     let genes = path_str(&f_path_genes)?;
-    py.detach(|| upgrade_store_to_v4(cells, Some(genes), codec, keep_backup, verbose))
+    py.detach(|| upgrade_store_to_v4(cells, Some(genes), codec, keep_backup, verbose > 0))
         .map_err(BvErr::from)?;
     Ok(())
 }

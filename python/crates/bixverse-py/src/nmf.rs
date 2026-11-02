@@ -76,7 +76,7 @@ fn mc_matrix(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    seed = 42, verbose = false
+    seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_single_sc<'py>(
@@ -89,7 +89,7 @@ pub fn nmf_single_sc<'py>(
     use_second_layer: bool,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let (genes, cells) = (index_vec(&gene_indices)?, index_vec(&cell_indices)?);
@@ -104,7 +104,7 @@ pub fn nmf_single_sc<'py>(
                 preprocessing,
                 use_second_layer,
                 Some(opts),
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -134,7 +134,7 @@ pub fn nmf_single_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    n_runs, seed = 42, verbose = false
+    n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_multi_sc<'py>(
@@ -148,7 +148,7 @@ pub fn nmf_multi_sc<'py>(
     params: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let (genes, cells) = (index_vec(&gene_indices)?, index_vec(&cell_indices)?);
@@ -165,7 +165,7 @@ pub fn nmf_multi_sc<'py>(
                 Some(opts),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -197,7 +197,7 @@ pub fn nmf_multi_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    consensus, n_runs, seed = 42, verbose = false
+    consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_consensus_sc<'py>(
@@ -212,7 +212,7 @@ pub fn nmf_consensus_sc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let cons = consensus_params(consensus, seed)?;
@@ -231,7 +231,7 @@ pub fn nmf_consensus_sc<'py>(
                 Some(cons),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -262,7 +262,7 @@ pub fn nmf_consensus_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k_range, preprocessing, use_second_layer,
-    params, consensus, n_runs, seed = 42, verbose = false
+    params, consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_k_sweep_sc<'py>(
@@ -277,7 +277,7 @@ pub fn nmf_k_sweep_sc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let cons = consensus_params(consensus, seed)?;
@@ -296,7 +296,7 @@ pub fn nmf_k_sweep_sc<'py>(
                 Some(cons),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -331,7 +331,7 @@ pub fn nmf_k_sweep_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, seed = 42,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_single_mc<'py>(
@@ -345,21 +345,12 @@ pub fn nmf_single_mc<'py>(
     use_second_layer: bool,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let m = mc_matrix((&data, &indices, &indptr, shape))?;
     let res = py
-        .detach(|| {
-            nmf_single_run_mc(
-                m,
-                k,
-                preprocessing,
-                use_second_layer,
-                Some(opts),
-                verbose as usize,
-            )
-        })
+        .detach(|| nmf_single_run_mc(m, k, preprocessing, use_second_layer, Some(opts), verbose))
         .map_err(BvErr::from)?;
     nmf_single_dict(py, res)
 }
@@ -388,7 +379,7 @@ pub fn nmf_single_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, n_runs,
-    seed = 42, verbose = false
+    seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_multi_mc<'py>(
@@ -403,7 +394,7 @@ pub fn nmf_multi_mc<'py>(
     params: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let m = mc_matrix((&data, &indices, &indptr, shape))?;
@@ -417,7 +408,7 @@ pub fn nmf_multi_mc<'py>(
                 Some(opts),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -449,7 +440,7 @@ pub fn nmf_multi_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, consensus,
-    n_runs, seed = 42, verbose = false
+    n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_consensus_mc<'py>(
@@ -465,7 +456,7 @@ pub fn nmf_consensus_mc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let cons = consensus_params(consensus, seed)?;
@@ -481,7 +472,7 @@ pub fn nmf_consensus_mc<'py>(
                 Some(cons),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -513,7 +504,7 @@ pub fn nmf_consensus_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k_range, preprocessing, use_second_layer, params,
-    consensus, n_runs, seed = 42, verbose = false
+    consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_k_sweep_mc<'py>(
@@ -529,7 +520,7 @@ pub fn nmf_k_sweep_mc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = hals_opts(params, seed)?;
     let cons = consensus_params(consensus, seed)?;
@@ -545,7 +536,7 @@ pub fn nmf_k_sweep_mc<'py>(
                 Some(cons),
                 n_runs,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;

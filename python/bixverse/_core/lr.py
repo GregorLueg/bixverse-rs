@@ -36,6 +36,7 @@ from bixverse._core.doublets import _as_character
 from bixverse._core.download import _cache, _download
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import CellphonedbParams, LigandTargetParams, to_rust
 
 ###########
@@ -1050,7 +1051,7 @@ def _flatten_cellphonedb(tables: Mapping[str, pl.DataFrame]) -> pl.DataFrame:
 
 @beartype
 def get_cellphonedb_db(
-    cache_dir: Path | str | None = None, *, verbose: bool = True
+    cache_dir: Path | str | None = None, *, verbose: Verbose = True
 ) -> pl.DataFrame:
     """The CellPhoneDB v5.0.0 ligand-receptor database.
 
@@ -1123,7 +1124,7 @@ def cellphonedb(
     receivers: Sequence[str] | None = None,
     gene_id_col: str = "gene_id",
     params: CellphonedbParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """CellPhoneDB ligand-receptor analysis.
 
@@ -1156,7 +1157,8 @@ def cellphonedb(
         gene_id_col: The var column holding the symbols used in `lr_db`. A
             duplicated symbol resolves to its first gene.
         params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         One row per interaction and pair: `interaction_id`, `partner_a`,

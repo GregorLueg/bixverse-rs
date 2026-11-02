@@ -346,7 +346,7 @@ fn mat_view_f64<'a>(m: &'a PyReadonlyArray2<'_, f64>) -> PyResult<MatRef<'a, f64
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, f_path_genes, gene_sets, cells_to_keep, nbin, ctrl, seed, streaming,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn module_scores<'py>(
@@ -359,7 +359,7 @@ pub fn module_scores<'py>(
     ctrl: usize,
     seed: usize,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let sets = index_sets(&gene_sets)?;
     let cells = index_vec(&cells_to_keep)?;
@@ -376,7 +376,7 @@ pub fn module_scores<'py>(
                 ctrl,
                 streaming,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -404,7 +404,7 @@ pub fn module_scores<'py>(
 ///
 /// `(n_cells, n_sets)` `float64` scores.
 #[pyfunction]
-#[pyo3(signature = (f_path, gene_sets, cells_to_keep, params, streaming, verbose = false))]
+#[pyo3(signature = (f_path, gene_sets, cells_to_keep, params, streaming, verbose = 1))]
 pub fn aucell<'py>(
     py: Python<'py>,
     f_path: &str,
@@ -412,7 +412,7 @@ pub fn aucell<'py>(
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: AucellParams = from_py(params, "AUCell params")?;
     let sets = index_sets(&gene_sets)?;
@@ -421,9 +421,9 @@ pub fn aucell<'py>(
     let res = py
         .detach(|| {
             if streaming {
-                calculate_aucell_streaming(&reader, &sets, &cells, Some(params), verbose as usize)
+                calculate_aucell_streaming(&reader, &sets, &cells, Some(params), verbose)
             } else {
-                calculate_aucell(&reader, &sets, &cells, Some(params), verbose as usize)
+                calculate_aucell(&reader, &sets, &cells, Some(params), verbose)
             }
         })
         .map_err(BvErr::from)?;
@@ -449,7 +449,7 @@ pub fn aucell<'py>(
 ///
 /// `(n_metacells, n_sets)` `float64` scores.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, gene_sets, params, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, gene_sets, params, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_aucell<'py>(
     py: Python<'py>,
@@ -459,13 +459,13 @@ pub fn mc_aucell<'py>(
     shape: (usize, usize),
     gene_sets: Vec<PyReadonlyArray1<'py, u32>>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: AucellParams = from_py(params, "AUCell params")?;
     let sets = index_sets(&gene_sets)?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
-        .detach(|| calculate_aucell_metacells(&m, &sets, Some(params), verbose as usize))
+        .detach(|| calculate_aucell_metacells(&m, &sets, Some(params), verbose))
         .map_err(BvErr::from)?;
     by_set_array(py, &res)
 }
@@ -525,14 +525,14 @@ pub fn regulon_thresholds<'py>(
 ///
 /// `(n_cells, n_signatures)` `float64` scores.
 #[pyfunction]
-#[pyo3(signature = (f_path, sigs, cells_to_keep, streaming, verbose = false))]
+#[pyo3(signature = (f_path, sigs, cells_to_keep, streaming, verbose = 1))]
 pub fn vision<'py>(
     py: Python<'py>,
     f_path: &str,
     sigs: Vec<PySignature<'py>>,
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let sigs = signatures(&sigs)?;
     let cells = index_vec(&cells_to_keep)?;
@@ -540,9 +540,9 @@ pub fn vision<'py>(
     let res = py
         .detach(|| {
             if streaming {
-                calculate_vision_streaming(&reader, &sigs, &cells, verbose as usize)
+                calculate_vision_streaming(&reader, &sigs, &cells, verbose)
             } else {
-                calculate_vision(&reader, &sigs, &cells, verbose as usize)
+                calculate_vision(&reader, &sigs, &cells, verbose)
             }
         })
         .map_err(BvErr::from)?;
@@ -566,7 +566,7 @@ pub fn vision<'py>(
 ///
 /// `(n_metacells, n_signatures)` `float64` scores.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, sigs, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, sigs, verbose = 1))]
 pub fn mc_vision<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f32>,
@@ -574,12 +574,12 @@ pub fn mc_vision<'py>(
     indptr: PyReadonlyArray1<'py, u32>,
     shape: (usize, usize),
     sigs: Vec<PySignature<'py>>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let sigs = signatures(&sigs)?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x)?;
     let res = py
-        .detach(|| calculate_vision_metacells(&m, &sigs, verbose as usize))
+        .detach(|| calculate_vision_metacells(&m, &sigs, verbose))
         .map_err(BvErr::from)?;
     by_cell_array(py, &res, sigs.len())
 }
@@ -609,7 +609,7 @@ pub fn mc_vision<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path, sigs, random_sigs, cluster_membership, cells_to_keep, embd, knn_indices,
-    knn_dist, params, streaming, seed = 42, verbose = false
+    knn_dist, params, streaming, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn vision_autocor<'py>(
@@ -625,7 +625,7 @@ pub fn vision_autocor<'py>(
     params: &Bound<'py, PyAny>,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: KnnParams = from_py(params, "VISION params")?;
     let sigs = signatures(&sigs)?;
@@ -647,10 +647,10 @@ pub fn vision_autocor<'py>(
         knn_dist.as_ref(),
         &params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
     let reader = ParallelSparseReader::new(f_path).map_err(BvErr::from)?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             let score = |s: &[SignatureGenes]| {
@@ -692,7 +692,7 @@ pub fn vision_autocor<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, sigs, random_sigs, cluster_membership, embd, knn_indices,
-    knn_dist, params, seed = 42, verbose = false
+    knn_dist, params, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_vision_autocor<'py>(
@@ -709,7 +709,7 @@ pub fn mc_vision_autocor<'py>(
     knn_dist: Option<PyReadonlyArray2<'py, f32>>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: KnnParams = from_py(params, "VISION params")?;
     let sigs = signatures(&sigs)?;
@@ -731,9 +731,9 @@ pub fn mc_vision_autocor<'py>(
         knn_dist.as_ref(),
         &params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             let score = |s: &[SignatureGenes]| calculate_vision_metacells(&m, s, v);
@@ -763,21 +763,21 @@ pub fn mc_vision_autocor<'py>(
 ///
 /// See [lm_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path, net, cells_to_keep, params, verbose = false))]
+#[pyo3(signature = (f_path, net, cells_to_keep, params, verbose = 1))]
 pub fn lm_activity<'py>(
     py: Python<'py>,
     f_path: &str,
     net: Vec<PyFeatureSet<'py>>,
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: LmActivityParams = from_py(params, "lm activity params")?;
     let reader = ParallelSparseReader::new(f_path).map_err(BvErr::from)?;
     let net = feature_sets(&net, reader.get_header().total_genes)?;
     let cells = index_vec(&cells_to_keep)?;
     let res = py
-        .detach(|| calculate_lm_activity(&reader, &net, &cells, Some(params), verbose as usize))
+        .detach(|| calculate_lm_activity(&reader, &net, &cells, Some(params), verbose))
         .map_err(BvErr::from)?;
     lm_dict(py, res)
 }
@@ -800,7 +800,7 @@ pub fn lm_activity<'py>(
 ///
 /// See [lm_dict].
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, net, params, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, net, params, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_lm_activity<'py>(
     py: Python<'py>,
@@ -810,13 +810,13 @@ pub fn mc_lm_activity<'py>(
     shape: (usize, usize),
     net: Vec<PyFeatureSet<'py>>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: LmActivityParams = from_py(params, "lm activity params")?;
     let net = feature_sets(&net, shape.1)?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x)?;
     let res = py
-        .detach(|| calculate_lm_activity_metacells(&m, &net, Some(params), verbose as usize))
+        .detach(|| calculate_lm_activity_metacells(&m, &net, Some(params), verbose))
         .map_err(BvErr::from)?;
     lm_dict(py, res)
 }
@@ -850,7 +850,7 @@ pub fn mc_lm_activity<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_genes, f_path_cells, embd, knn_indices, knn_dist, params, cells_to_keep,
-    genes_to_use, streaming, seed = 42, verbose = false
+    genes_to_use, streaming, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn hotspot_autocor<'py>(
@@ -865,7 +865,7 @@ pub fn hotspot_autocor<'py>(
     genes_to_use: PyReadonlyArray1<'py, u32>,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HotSpotParams = from_py(params, "HotSpot params")?;
     let cells = index_vec(&cells_to_keep)?;
@@ -882,11 +882,11 @@ pub fn hotspot_autocor<'py>(
         knn_dist.as_ref(),
         &params.knn_params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
     let gene_reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
     let cell_reader = ParallelSparseReader::new(f_path_cells).map_err(BvErr::from)?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             let mut hs = Hotspot::new(
@@ -933,7 +933,7 @@ pub fn hotspot_autocor<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_genes, f_path_cells, embd, knn_indices, knn_dist, params, cells_to_keep,
-    genes_to_use, working_mem_gb, streaming, seed = 42, verbose = false
+    genes_to_use, working_mem_gb, streaming, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn hotspot_gene_cor<'py>(
@@ -949,7 +949,7 @@ pub fn hotspot_gene_cor<'py>(
     working_mem_gb: f64,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HotSpotParams = from_py(params, "HotSpot params")?;
     let cells = index_vec(&cells_to_keep)?;
@@ -966,11 +966,11 @@ pub fn hotspot_gene_cor<'py>(
         knn_dist.as_ref(),
         &params.knn_params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
     let gene_reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
     let cell_reader = ParallelSparseReader::new(f_path_cells).map_err(BvErr::from)?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             let mut hs = Hotspot::new(
@@ -1025,7 +1025,7 @@ pub fn hotspot_gene_cor<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, embd, knn_indices, knn_dist, params, cells_to_keep,
-    genes_to_use, seed = 42, verbose = false
+    genes_to_use, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_hotspot_autocor<'py>(
@@ -1041,7 +1041,7 @@ pub fn mc_hotspot_autocor<'py>(
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     genes_to_use: PyReadonlyArray1<'py, u32>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HotSpotParams = from_py(params, "HotSpot params")?;
     let cells = index_vec(&cells_to_keep)?;
@@ -1058,13 +1058,11 @@ pub fn mc_hotspot_autocor<'py>(
         knn_dist.as_ref(),
         &params.knn_params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
-        .detach(|| {
-            hotspot_autocor_metacells(&m, &knn, &dist, &cells, &genes, &params, verbose as usize)
-        })
+        .detach(|| hotspot_autocor_metacells(&m, &knn, &dist, &cells, &genes, &params, verbose))
         .map_err(BvErr::from)?;
     hotspot_gene_dict(py, res)
 }
@@ -1095,7 +1093,7 @@ pub fn mc_hotspot_autocor<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, embd, knn_indices, knn_dist, params, cells_to_keep,
-    genes_to_use, seed = 42, verbose = false
+    genes_to_use, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_hotspot_gene_cor<'py>(
@@ -1111,7 +1109,7 @@ pub fn mc_hotspot_gene_cor<'py>(
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     genes_to_use: PyReadonlyArray1<'py, u32>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HotSpotParams = from_py(params, "HotSpot params")?;
     let cells = index_vec(&cells_to_keep)?;
@@ -1128,13 +1126,11 @@ pub fn mc_hotspot_gene_cor<'py>(
         knn_dist.as_ref(),
         &params.knn_params,
         seed,
-        verbose,
+        verbose > 0,
     )?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
-        .detach(|| {
-            hotspot_gene_cor_metacells(&m, &knn, &dist, &cells, &genes, &params, verbose as usize)
-        })
+        .detach(|| hotspot_gene_cor_metacells(&m, &knn, &dist, &cells, &genes, &params, verbose))
         .map_err(BvErr::from)?;
     hotspot_pair_dict(py, res)
 }
@@ -1187,19 +1183,19 @@ pub fn hotspot_cluster_genes<'py>(
 ///
 /// The 0-based genes that pass, `uint32`.
 #[pyfunction]
-#[pyo3(signature = (f_path_genes, cell_indices, params, verbose = false))]
+#[pyo3(signature = (f_path_genes, cell_indices, params, verbose = 1))]
 pub fn scenic_filter<'py>(
     py: Python<'py>,
     f_path_genes: &str,
     cell_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let cells = index_vec(&cell_indices)?;
     let reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
     let res = py
-        .detach(|| scenic_gene_filter(&reader, &cells, &params, verbose as usize))
+        .detach(|| scenic_gene_filter(&reader, &cells, &params, verbose))
         .map_err(BvErr::from)?;
     Ok(u32_array(py, &res))
 }
@@ -1225,7 +1221,7 @@ pub fn scenic_filter<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_genes, cell_indices, gene_indices, tf_indices, params, streaming, seed = 42,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn scenic_grn<'py>(
@@ -1237,14 +1233,14 @@ pub fn scenic_grn<'py>(
     params: &Bound<'py, PyAny>,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let cells = index_vec(&cell_indices)?;
     let genes = index_vec(&gene_indices)?;
     let tfs = index_vec(&tf_indices)?;
     let reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
-    let v = verbose as usize;
+    let v = verbose;
     let res: Mat<f32> = py
         .detach(|| {
             if streaming {
@@ -1277,7 +1273,7 @@ pub fn scenic_grn<'py>(
 ///
 /// `(n_targets, n_tfs)` `float64` importances.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, tf_indices, params, seed = 42, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, tf_indices, params, seed = 42, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_scenic_grn<'py>(
     py: Python<'py>,
@@ -1288,13 +1284,13 @@ pub fn mc_scenic_grn<'py>(
     tf_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let tfs = index_vec(&tf_indices)?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
-        .detach(|| run_scenic_grn_in_memory(&m, &tfs, &params, seed, verbose as usize))
+        .detach(|| run_scenic_grn_in_memory(&m, &tfs, &params, seed, verbose))
         .map_err(BvErr::from)?;
     mat_f64(py, &res)
 }
@@ -1368,7 +1364,7 @@ pub fn importance_threshold<'py>(
 ///
 /// One `float64` correlation per pair.
 #[pyfunction]
-#[pyo3(signature = (f_path_genes, genes_1, genes_2, cells_to_keep, spearman, verbose = false))]
+#[pyo3(signature = (f_path_genes, genes_1, genes_2, cells_to_keep, spearman, verbose = 1))]
 pub fn pairwise_gene_cors<'py>(
     py: Python<'py>,
     f_path_genes: &str,
@@ -1376,7 +1372,7 @@ pub fn pairwise_gene_cors<'py>(
     genes_2: PyReadonlyArray1<'py, u32>,
     cells_to_keep: PyReadonlyArray1<'py, u32>,
     spearman: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (g1, g2) = (index_vec(&genes_1)?, index_vec(&genes_2)?);
     if g1.len() != g2.len() {
@@ -1387,9 +1383,7 @@ pub fn pairwise_gene_cors<'py>(
     let cells = index_vec(&cells_to_keep)?;
     let reader = ParallelSparseReader::new(f_path_genes).map_err(BvErr::from)?;
     let res = py
-        .detach(|| {
-            pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, verbose as usize)
-        })
+        .detach(|| pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, verbose))
         .map_err(BvErr::from)?;
     Ok(f64_array(py, &res))
 }
@@ -1413,7 +1407,7 @@ pub fn pairwise_gene_cors<'py>(
 ///
 /// One `float64` correlation per pair.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, genes_1, genes_2, spearman, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, genes_1, genes_2, spearman, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_pairwise_gene_cors<'py>(
     py: Python<'py>,
@@ -1424,7 +1418,7 @@ pub fn mc_pairwise_gene_cors<'py>(
     genes_1: PyReadonlyArray1<'py, u32>,
     genes_2: PyReadonlyArray1<'py, u32>,
     spearman: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (g1, g2) = (index_vec(&genes_1)?, index_vec(&genes_2)?);
     if g1.len() != g2.len() {
@@ -1434,7 +1428,7 @@ pub fn mc_pairwise_gene_cors<'py>(
     }
     let csc = csr_from_parts((&data, &indices, &indptr, shape), |x| x)?.transform();
     let res = py
-        .detach(|| pairwise_gene_correlations_in_memory(&csc, &g1, &g2, spearman, verbose as usize))
+        .detach(|| pairwise_gene_correlations_in_memory(&csc, &g1, &g2, spearman, verbose))
         .map_err(BvErr::from)?;
     Ok(f64_array(py, &res))
 }
@@ -1466,7 +1460,7 @@ pub fn mc_pairwise_gene_cors<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     rankings, gene_sets, auc_threshold, nes_threshold, max_rank, method, n_mean,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn cistarget<'py>(
@@ -1478,7 +1472,7 @@ pub fn cistarget<'py>(
     max_rank: i32,
     method: &str,
     n_mean: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyList>> {
     let method = parse_rcc_type(method).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -1497,7 +1491,7 @@ pub fn cistarget<'py>(
             max_rank,
             &method,
             n_mean,
-            verbose,
+            verbose > 0,
         )
     });
 

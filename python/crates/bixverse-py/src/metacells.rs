@@ -60,10 +60,10 @@ use py_common::results::{metacells_dict, seacells_dict};
 /// ### Returns
 ///
 /// The options, the gene batching left at its default.
-fn mc_opts(seed: u64, verbose: bool) -> SctStreamOpts {
+fn mc_opts(seed: u64, verbose: usize) -> SctStreamOpts {
     SctStreamOpts {
         seed,
-        verbose: verbose as usize,
+        verbose,
         ..SctStreamOpts::default()
     }
 }
@@ -94,7 +94,7 @@ fn mc_opts(seed: u64, verbose: bool) -> SctStreamOpts {
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cell, knn, embd, cells_to_keep, cells_to_use, params, target_size, seed,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn bootstrapped_metacells<'py>(
@@ -107,7 +107,7 @@ pub fn bootstrapped_metacells<'py>(
     params: &Bound<'py, PyAny>,
     target_size: f32,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: BootstrappedMetaCellParams = from_py(params, "bootstrapped meta cell params")?;
     let knn = knn.as_ref().map(knn_rows).transpose()?;
@@ -125,7 +125,7 @@ pub fn bootstrapped_metacells<'py>(
                 &params,
                 target_size,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -155,7 +155,7 @@ pub fn bootstrapped_metacells<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cell, embd, knn_indices, knn_distances, cells_to_keep, cells_to_use, params,
-    target_size, seed, verbose = false
+    target_size, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn seacells<'py>(
@@ -169,7 +169,7 @@ pub fn seacells<'py>(
     params: &Bound<'py, PyAny>,
     target_size: f32,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: SEACellsParams = from_py(params, "SEACells params")?;
     let knn = knn_pair(knn_indices.as_ref(), knn_distances.as_ref())?;
@@ -187,7 +187,7 @@ pub fn seacells<'py>(
                 &params,
                 target_size,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -217,7 +217,7 @@ pub fn seacells<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cell, knn_indices, knn_distances, embd, cells_to_keep, cells_to_use, params,
-    target_size, seed, verbose = false
+    target_size, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn supercells<'py>(
@@ -231,7 +231,7 @@ pub fn supercells<'py>(
     params: &Bound<'py, PyAny>,
     target_size: f32,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: SuperCellParams = from_py(params, "SuperCell params")?;
     let knn = knn_pair(knn_indices.as_ref(), knn_distances.as_ref())?;
@@ -249,7 +249,7 @@ pub fn supercells<'py>(
                 &params,
                 target_size,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -277,7 +277,7 @@ pub fn supercells<'py>(
 /// `rare_module_of_gene`, and `selected_genes`.
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_cell, cell_indices, mc2_params, dac_params, target_size, seed, verbose = false
+    f_path_cell, cell_indices, mc2_params, dac_params, target_size, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn metacells2<'py>(
@@ -288,13 +288,23 @@ pub fn metacells2<'py>(
     dac_params: &Bound<'py, PyAny>,
     target_size: f32,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let mc2: MetacellsParams = from_py(mc2_params, "MetaCells2 params")?;
     let dac: DacParams = from_py(dac_params, "MetaCells2 divide and conquer params")?;
     let cells = index_vec(&cell_indices)?;
     let res = py
-        .detach(|| metacells2_on_store(f_path_cell, &cells, &mc2, &dac, target_size, seed, verbose))
+        .detach(|| {
+            metacells2_on_store(
+                f_path_cell,
+                &cells,
+                &mc2,
+                &dac,
+                target_size,
+                seed,
+                verbose > 0,
+            )
+        })
         .map_err(BvErr::from)?;
     let selected: Vec<u32> = res.selected_genes.iter().map(|&g| g as u32).collect();
     let d = metacells_dict(py, res.base)?;
@@ -336,7 +346,7 @@ pub fn metacells2<'py>(
 /// per cell and `"high"`, `"mid"` or `"low"` per cell.
 #[pyfunction]
 #[pyo3(signature = (
-    knn_indices, knn_distances, n_dcs, k_density, knn_params, seed, verbose = false
+    knn_indices, knn_distances, n_dcs, k_density, knn_params, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn metacell_density<'py>(
@@ -347,23 +357,13 @@ pub fn metacell_density<'py>(
     k_density: usize,
     knn_params: &Bound<'py, PyAny>,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Vec<&'static str>)> {
     let params: KnnParams = from_py(knn_params, "kNN params")?;
     let idx = knn_rows(&knn_indices)?;
     let dist = dist_rows(&knn_distances, knn_indices.shape())?;
     let res = py
-        .detach(|| {
-            compute_diffusion_density(
-                &idx,
-                &dist,
-                n_dcs,
-                k_density,
-                &params,
-                seed,
-                verbose as usize,
-            )
-        })
+        .detach(|| compute_diffusion_density(&idx, &dist, n_dcs, k_density, &params, seed, verbose))
         .map_err(BvErr::from)?;
     let regions = res
         .regions
@@ -545,7 +545,7 @@ pub fn mc_pca<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, method, group_of_cell, covariates, params, seed = 42,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_fit_residuals(
@@ -559,7 +559,7 @@ pub fn mc_fit_residuals(
     covariates: Vec<(String, PyReadonlyArray1<'_, f64>)>,
     params: &Bound<'_, PyAny>,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<PyResidualFit> {
     let params = match method {
         "sctransform" => ResidualParams::Sct(from_py::<SctParams>(params, "sctransform params")?),
@@ -612,7 +612,7 @@ pub fn mc_fit_residuals(
 ///
 /// `(genes, variance, hvg)`, as `residual_variance`.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, fit, n_hvg, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, fit, n_hvg, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_residual_variance<'py>(
     py: Python<'py>,
@@ -622,7 +622,7 @@ pub fn mc_residual_variance<'py>(
     shape: (usize, usize),
     fit: &PyResidualFit,
     n_hvg: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let opts = mc_opts(SctStreamOpts::default().seed, verbose);
@@ -666,7 +666,7 @@ pub fn mc_residual_variance<'py>(
 /// `(scores, loadings, singular_values)`, `float32`.
 #[pyfunction]
 #[pyo3(signature = (
-    data, indices, indptr, shape, fit, gene_indices, no_pcs, params, seed, verbose = false
+    data, indices, indptr, shape, fit, gene_indices, no_pcs, params, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_pca_residuals<'py>(
@@ -680,23 +680,13 @@ pub fn mc_pca_residuals<'py>(
     no_pcs: usize,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let params: SingleCellPcaParams = from_py(params, "pca params")?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let genes = index_vec(&gene_indices)?;
     let (scores, loadings, s) = py
-        .detach(|| {
-            pca_residuals_in_memory(
-                &m,
-                &fit.inner,
-                &genes,
-                no_pcs,
-                &params,
-                seed,
-                verbose as usize,
-            )
-        })
+        .detach(|| pca_residuals_in_memory(&m, &fit.inner, &genes, no_pcs, &params, seed, verbose))
         .map_err(BvErr::from)?;
     Ok((
         mat_array(py, &scores)?,

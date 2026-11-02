@@ -75,7 +75,7 @@ def csr_to_file(
     indptr: np.ndarray,
     shape: tuple[int, int],
     qc_params: dict[str, object],
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def h5ad_to_file(
     f_path_cells: Path,
@@ -86,7 +86,7 @@ def h5ad_to_file(
     qc_params: dict[str, object],
     slot: str = ...,
     streaming: bool = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def norm_h5ad_to_file(
     f_path_cells: Path,
@@ -97,7 +97,7 @@ def norm_h5ad_to_file(
     obs_lib_size_col: str,
     target_size: float,
     qc_params: dict[str, object],
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def mtx_to_file(
     f_path_cells: Path,
@@ -105,7 +105,7 @@ def mtx_to_file(
     qc_params: dict[str, object],
     cells_as_rows: bool,
     streaming: bool = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def tenx_h5_to_file(
     f_path_cells: Path,
@@ -115,28 +115,28 @@ def tenx_h5_to_file(
     no_genes: int,
     qc_params: dict[str, object],
     feature_type: str | None = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def multi_h5ad_to_file(
     f_path_cells: Path,
     file_tasks: list[dict[str, object]],
     universe_size: int,
     qc_params: dict[str, object],
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def multi_mtx_to_file(
     f_path_cells: Path,
     file_tasks: list[dict[str, object]],
     universe_size: int,
     qc_params: dict[str, object],
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def multi_tenx_h5_to_file(
     f_path_cells: Path,
     file_tasks: list[dict[str, object]],
     universe_size: int,
     qc_params: dict[str, object],
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 def merge_sc_files(
     f_path_cells: Path,
@@ -144,7 +144,7 @@ def merge_sc_files(
     universe_size: int,
     renormalise: bool,
     target_size: float,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> dict[str, Any]: ...
 
 # Store maintenance
@@ -153,18 +153,18 @@ def generate_gene_based_data(
     f_path_cells: Path,
     f_path_genes: Path,
     max_mem_gb: float | None = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> None: ...
 def gene_nnz(f_path_genes: Path) -> np.ndarray: ...
 def archive_cells(
-    f_path_cells: Path, f_path_archive: Path, level: int = ..., verbose: bool = ...
+    f_path_cells: Path, f_path_archive: Path, level: int = ..., verbose: int = ...
 ) -> dict[str, int]: ...
 def restore_cells_archive(
     f_path_archive: Path,
     f_path_cells: Path,
     f_path_genes: Path,
     max_mem_gb: float | None = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> None: ...
 def file_version(path: Path) -> int: ...
 def upgrade_to_v4(
@@ -172,7 +172,7 @@ def upgrade_to_v4(
     f_path_genes: Path,
     codec: str = ...,
     keep_backup: bool = ...,
-    verbose: bool = ...,
+    verbose: int = ...,
 ) -> None: ...
 
 # obs / var and scans
@@ -275,14 +275,14 @@ def top_genes_perc(
     top_n_vals: list[int],
     cell_indices: np.ndarray,
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> list[np.ndarray]: ...
 def gene_set_perc(
     f_path_cell: str,
     gene_sets: list[np.ndarray],
     cell_indices: np.ndarray,
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> list[np.ndarray]: ...
 def hvg(
     f_path_gene: str,
@@ -290,7 +290,7 @@ def hvg(
     cell_indices: np.ndarray,
     params: dict[str, object],
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def hvg_batch_aware(
     f_path_gene: str,
@@ -299,7 +299,7 @@ def hvg_batch_aware(
     batch_labels: np.ndarray,
     params: dict[str, object],
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def pca(
     f_path_gene: str,
@@ -310,7 +310,7 @@ def pca(
     params: dict[str, object],
     sparse: bool,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 
 class ResidualFit:
@@ -335,7 +335,7 @@ def fit_residuals(
     params: dict[str, object],
     gene_batch_size: int | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> ResidualFit: ...
 def residual_variance(
     f_path_gene: str,
@@ -344,7 +344,7 @@ def residual_variance(
     cell_indices: np.ndarray,
     n_hvg: int,
     gene_batch_size: int | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def pca_residuals(
     f_path_gene: str,
@@ -355,7 +355,7 @@ def pca_residuals(
     no_pcs: int,
     params: dict[str, object],
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def sct_corrected_counts(
     f_path_gene: str,
@@ -363,14 +363,14 @@ def sct_corrected_counts(
     cell_indices: np.ndarray,
     f_path_out: str,
     gene_batch_size: int | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def gene_store_to_cell_store(
     f_path_in: str,
     f_path_out: str,
     cells_per_phase: int,
     gene_batch_size: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> None: ...
 def magic_impute(
     f_path_gene: str,
@@ -379,14 +379,14 @@ def magic_impute(
     cell_indices: np.ndarray,
     gene_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def knn_with_dist(
     embd: np.ndarray,
     params: dict[str, object],
     validate_index: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]: ...
 def knn_metrics(
     idx_ref: np.ndarray,
@@ -398,7 +398,7 @@ def knn_graph(
     indices: np.ndarray,
     distances: np.ndarray | None,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def leiden(
     data: np.ndarray,
@@ -412,21 +412,21 @@ def fast_cluster(
     params: dict[str, object],
     n_seeds: int = 1,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]: ...
 def harmony(
     pca: np.ndarray,
     params: dict[str, object],
     batch_labels: list[np.ndarray],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def harmony_v2(
     pca: np.ndarray,
     params: dict[str, object],
     batch_labels: list[np.ndarray],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def bbknn_graph(
     embd: np.ndarray,
@@ -434,7 +434,7 @@ def bbknn_graph(
     params: dict[str, object],
     k: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: ...
 def fast_mnn(
     f_path_gene: str,
@@ -445,7 +445,7 @@ def fast_mnn(
     precomputed_pca: np.ndarray | None,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def seurat_cca(
     f_path_gene: str,
@@ -456,7 +456,7 @@ def seurat_cca(
     precomputed_pca: np.ndarray | None,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def seurat_rpca(
     f_path_gene: str,
@@ -467,31 +467,29 @@ def seurat_rpca(
     precomputed_pca: np.ndarray | None,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
-def kbet(
-    knn: np.ndarray, batches: np.ndarray, verbose: bool = False
-) -> dict[str, Any]: ...
+def kbet(knn: np.ndarray, batches: np.ndarray, verbose: int = 1) -> dict[str, Any]: ...
 def lisi(
     knn: np.ndarray,
     knn_dist: np.ndarray | None,
     labels: np.ndarray,
     perplexity: float | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def batch_asw(
     embd: np.ndarray,
     batches: np.ndarray,
     max_cells: int | None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def cell_type_asw(
     embd: np.ndarray,
     labels: np.ndarray,
     max_cells: int | None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def pcr(embd: np.ndarray, batches: np.ndarray) -> dict[str, Any]: ...
 def graph_connectivity(knn: np.ndarray, labels: np.ndarray) -> dict[str, Any]: ...
@@ -504,7 +502,7 @@ def scrublet(
     streaming: bool = False,
     return_combined_pca: bool = False,
     return_pairs: bool = False,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def boost(
     f_path_gene: str,
@@ -513,7 +511,7 @@ def boost(
     params: dict[str, object],
     seed: int = 42,
     streaming: bool = False,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def scdblfinder(
     f_path_gene: str,
@@ -523,7 +521,7 @@ def scdblfinder(
     return_features: bool = False,
     seed: int = 42,
     streaming: bool = False,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def empty_droplets(lib_size: np.ndarray, params: dict[str, object]) -> np.ndarray: ...
 def cellsweep(
@@ -532,7 +530,7 @@ def cellsweep(
     samples: list[dict[str, Any]],
     params: dict[str, object],
     target_size: float,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def dge_mann_whitney(
     f_path_cell: str,
@@ -540,14 +538,14 @@ def dge_mann_whitney(
     cells_2: np.ndarray,
     min_prop: float,
     alternative: str,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def dge_one_vs_rest(
     f_path_gene: str,
     cell_groups: list[np.ndarray],
     min_prop: float,
     alternative: str,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> list[dict[str, Any]]: ...
 def dge_one_vs_many(
     f_path_gene: str,
@@ -555,14 +553,14 @@ def dge_one_vs_many(
     references: np.ndarray,
     min_prop: float,
     alternative: str,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> list[dict[str, Any]]: ...
 def pseudobulk(
     f_path_cell: str,
     cell_groups: list[np.ndarray],
     assay: str,
     sparse: bool = False,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> Any: ...
 def edger_ql(
     counts: np.ndarray,
@@ -581,7 +579,7 @@ def nebula(
     design: np.ndarray,
     params: dict[str, object],
     offset: np.ndarray | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def milor_nhoods(
     embd: np.ndarray,
@@ -590,7 +588,7 @@ def milor_nhoods(
     n_samples: int,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def spatial_fdr(p_values: np.ndarray, connectivity: np.ndarray) -> np.ndarray: ...
 def meld(
@@ -600,7 +598,7 @@ def meld(
     n_labels: int,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def sc_type(
     f_path_gene: str,
@@ -608,7 +606,7 @@ def sc_type(
     markers: list[dict[str, Any]],
     sensitivity: bool,
     weight_floor: float | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def sc_type_cluster_assignment(
     cell_types: list[str], scores: np.ndarray, cluster_labels: np.ndarray
@@ -631,7 +629,7 @@ def build_symphony_ref(
     harmony_params: dict[str, object],
     harmony_version: str,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def symphony_map_query(
     f_path_query: str,
@@ -645,7 +643,7 @@ def symphony_map_query(
     gene_map: np.ndarray,
     batch_labels: list[np.ndarray],
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def transfer_labels_symphony(
     reference_z_corr: np.ndarray,
@@ -654,7 +652,7 @@ def transfer_labels_symphony(
     n_labels: int,
     knn_params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]: ...
 def bootstrapped_metacells(
     f_path_cell: str,
@@ -665,7 +663,7 @@ def bootstrapped_metacells(
     params: dict[str, object],
     target_size: float,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def seacells(
     f_path_cell: str,
@@ -677,7 +675,7 @@ def seacells(
     params: dict[str, object],
     target_size: float,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def supercells(
     f_path_cell: str,
@@ -689,7 +687,7 @@ def supercells(
     params: dict[str, object],
     target_size: float,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def metacells2(
     f_path_cell: str,
@@ -698,7 +696,7 @@ def metacells2(
     dac_params: dict[str, object],
     target_size: float,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def metacell_density(
     knn_indices: np.ndarray,
@@ -707,7 +705,7 @@ def metacell_density(
     k_density: int,
     knn_params: dict[str, object],
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]: ...
 def metacell_compactness(
     dcs: np.ndarray, metacells: list[np.ndarray]
@@ -740,7 +738,7 @@ def mc_fit_residuals(
     covariates: list[tuple[str, np.ndarray]],
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> ResidualFit: ...
 def mc_residual_variance(
     data: np.ndarray,
@@ -749,7 +747,7 @@ def mc_residual_variance(
     shape: tuple[int, int],
     fit: ResidualFit,
     n_hvg: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def mc_pca_residuals(
     data: np.ndarray,
@@ -761,7 +759,7 @@ def mc_pca_residuals(
     no_pcs: int,
     params: dict[str, object],
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def palantir(
     knn_indices: np.ndarray,
@@ -770,7 +768,7 @@ def palantir(
     terminal_states: np.ndarray | None,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def paga(
     knn_indices: np.ndarray,
@@ -790,7 +788,7 @@ def sc_bonsai(
     cell_indices: np.ndarray,
     gene_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def mc_bonsai(
     data: np.ndarray,
@@ -799,7 +797,7 @@ def mc_bonsai(
     shape: tuple[int, int],
     gene_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def bonsai_layout(
     parent: np.ndarray,
@@ -817,7 +815,7 @@ def module_scores(
     ctrl: int,
     seed: int,
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def aucell(
     f_path: str,
@@ -825,7 +823,7 @@ def aucell(
     cells_to_keep: np.ndarray,
     params: dict[str, object],
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def mc_aucell(
     data: np.ndarray,
@@ -834,7 +832,7 @@ def mc_aucell(
     shape: tuple[int, int],
     gene_sets: list[np.ndarray],
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def regulon_thresholds(
     auc: np.ndarray, params: dict[str, object]
@@ -844,7 +842,7 @@ def vision(
     sigs: list[tuple[np.ndarray, np.ndarray]],
     cells_to_keep: np.ndarray,
     streaming: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def mc_vision(
     data: np.ndarray,
@@ -852,7 +850,7 @@ def mc_vision(
     indptr: np.ndarray,
     shape: tuple[int, int],
     sigs: list[tuple[np.ndarray, np.ndarray]],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def vision_autocor(
     f_path: str,
@@ -866,7 +864,7 @@ def vision_autocor(
     params: dict[str, object],
     streaming: bool,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def mc_vision_autocor(
     data: np.ndarray,
@@ -881,14 +879,14 @@ def mc_vision_autocor(
     knn_dist: np.ndarray | None,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def lm_activity(
     f_path: str,
     net: list[tuple[np.ndarray, np.ndarray]],
     cells_to_keep: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def mc_lm_activity(
     data: np.ndarray,
@@ -897,7 +895,7 @@ def mc_lm_activity(
     shape: tuple[int, int],
     net: list[tuple[np.ndarray, np.ndarray]],
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def hotspot_autocor(
     f_path_genes: str,
@@ -910,7 +908,7 @@ def hotspot_autocor(
     genes_to_use: np.ndarray,
     streaming: bool,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def hotspot_gene_cor(
     f_path_genes: str,
@@ -924,7 +922,7 @@ def hotspot_gene_cor(
     working_mem_gb: float,
     streaming: bool,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def mc_hotspot_autocor(
     data: np.ndarray,
@@ -938,7 +936,7 @@ def mc_hotspot_autocor(
     cells_to_keep: np.ndarray,
     genes_to_use: np.ndarray,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def mc_hotspot_gene_cor(
     data: np.ndarray,
@@ -952,7 +950,7 @@ def mc_hotspot_gene_cor(
     cells_to_keep: np.ndarray,
     genes_to_use: np.ndarray,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, np.ndarray]: ...
 def hotspot_cluster_genes(
     z: np.ndarray, fdr_threshold: float, min_size: int
@@ -961,7 +959,7 @@ def scenic_filter(
     f_path_genes: str,
     cell_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def scenic_grn(
     f_path_genes: str,
@@ -971,7 +969,7 @@ def scenic_grn(
     params: dict[str, object],
     streaming: bool,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def mc_scenic_grn(
     data: np.ndarray,
@@ -981,7 +979,7 @@ def mc_scenic_grn(
     tf_indices: np.ndarray,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def top_k_targets(
     importance: np.ndarray, k: int, by_gene: bool, min_value: float | None = None
@@ -995,7 +993,7 @@ def pairwise_gene_cors(
     genes_2: np.ndarray,
     cells_to_keep: np.ndarray,
     spearman: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def mc_pairwise_gene_cors(
     data: np.ndarray,
@@ -1005,7 +1003,7 @@ def mc_pairwise_gene_cors(
     genes_1: np.ndarray,
     genes_2: np.ndarray,
     spearman: bool,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def cistarget(
     rankings: np.ndarray,
@@ -1015,7 +1013,7 @@ def cistarget(
     max_rank: int,
     method: str,
     n_mean: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> list[dict[str, Any]]: ...
 def nmf_single_sc(
     f_path_gene: str,
@@ -1026,7 +1024,7 @@ def nmf_single_sc(
     use_second_layer: bool,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_multi_sc(
     f_path_gene: str,
@@ -1038,7 +1036,7 @@ def nmf_multi_sc(
     params: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_consensus_sc(
     f_path_gene: str,
@@ -1051,7 +1049,7 @@ def nmf_consensus_sc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_k_sweep_sc(
     f_path_gene: str,
@@ -1064,7 +1062,7 @@ def nmf_k_sweep_sc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_single_mc(
     data: np.ndarray,
@@ -1076,7 +1074,7 @@ def nmf_single_mc(
     use_second_layer: bool,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_multi_mc(
     data: np.ndarray,
@@ -1089,7 +1087,7 @@ def nmf_multi_mc(
     params: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_consensus_mc(
     data: np.ndarray,
@@ -1103,7 +1101,7 @@ def nmf_consensus_mc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_k_sweep_mc(
     data: np.ndarray,
@@ -1117,7 +1115,7 @@ def nmf_k_sweep_mc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def adt_clr(counts: np.ndarray, seurat_clr: bool) -> np.ndarray: ...
 def dsb(

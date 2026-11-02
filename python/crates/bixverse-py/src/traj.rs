@@ -80,7 +80,7 @@ fn dense_f64<'py>(py: Python<'py>, m: &CompressedSparseData2<f64>) -> PyResult<B
 /// `stranded_waypoints`.
 #[pyfunction]
 #[pyo3(signature = (
-    knn_indices, knn_dist, early_cell, terminal_states, params, seed = 42, verbose = false
+    knn_indices, knn_dist, early_cell, terminal_states, params, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn palantir<'py>(
@@ -91,7 +91,7 @@ pub fn palantir<'py>(
     terminal_states: Option<PyReadonlyArray1<'py, u32>>,
     params: &Bound<'py, PyAny>,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: PalantirParams = from_py(params, "Palantir params")?;
     let knn = knn_rows(&knn_indices)?;
@@ -106,7 +106,7 @@ pub fn palantir<'py>(
                 terminal.as_deref(),
                 params,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;

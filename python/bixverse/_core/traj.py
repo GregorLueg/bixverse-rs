@@ -41,6 +41,7 @@ from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import get_counts
 from bixverse._core.state import KnnGraph
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import (
     BranchSelectionParams,
     GeneTrendsParams,
@@ -301,7 +302,7 @@ def run_palantir(
     modality: Modality = "rna",
     palantir_params: PalantirParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> PalantirRes | None:
     """Palantir trajectory inference over the cached kNN graph.
 
@@ -322,7 +323,8 @@ def run_palantir(
             `SingleCellsMultiModal`.
         palantir_params: The parameters. `None` uses the defaults.
         seed: Seed for the eigensolver, the waypoints and the multiscale kNN.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `PalantirRes`, or `None` with a warning if there is no kNN.
@@ -425,7 +427,7 @@ def run_paga(
     cluster_col: str,
     *,
     modality: Modality = "rna",
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> PagaRes | None:
     """PAGA graph abstraction of the cached kNN graph.
 
@@ -440,7 +442,8 @@ def run_paga(
             are kept; other columns are sorted into levels.
         modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
             `SingleCellsMultiModal`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `PagaRes`, or `None` with a warning if there is no kNN.
@@ -558,7 +561,7 @@ def run_gene_trends(
     use_magic: bool = False,
     branch_params: BranchSelectionParams | None = None,
     gene_trend_params: GeneTrendsParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> GeneTrendsRes:
     """Gene trends over the Palantir pseudotime.
 
@@ -580,7 +583,8 @@ def run_gene_trends(
             counts; `SingleCells` and `SingleCellsSubset` only.
         branch_params: Branch cell selection. `None` uses the defaults.
         gene_trend_params: The Gaussian process. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `GeneTrendsRes`.

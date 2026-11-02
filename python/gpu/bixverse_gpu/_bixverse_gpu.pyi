@@ -17,13 +17,13 @@ def pca(
     params: dict[str, object],
     sparse: bool = True,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 def knn_with_dist(
     embd: np.ndarray,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]: ...
 def leiden(
     data: np.ndarray,
@@ -37,14 +37,14 @@ def fast_cluster(
     params: dict[str, object],
     n_seeds: int = 1,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]: ...
 def harmony_v2(
     pca: np.ndarray,
     params: dict[str, object],
     batch_labels: list[np.ndarray],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def bbknn_graph(
     embd: np.ndarray,
@@ -52,14 +52,14 @@ def bbknn_graph(
     params: dict[str, object],
     k: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: ...
 def fast_mnn(
     embd: np.ndarray,
     batch_labels: np.ndarray,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> np.ndarray: ...
 def scrublet(
     f_path_gene: str,
@@ -70,7 +70,7 @@ def scrublet(
     streaming: bool = False,
     return_combined_pca: bool = False,
     return_pairs: bool = False,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def seacells(
     f_path_cell: str,
@@ -82,7 +82,7 @@ def seacells(
     params: dict[str, object],
     target_size: float,
     seed: int,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def sc_bonsai(
     f_path_gene: str,
@@ -90,7 +90,7 @@ def sc_bonsai(
     cell_indices: np.ndarray,
     gene_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def mc_bonsai(
     data: np.ndarray,
@@ -99,7 +99,7 @@ def mc_bonsai(
     shape: tuple[int, int],
     gene_indices: np.ndarray,
     params: dict[str, object],
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_single_sc(
     f_path_gene: str,
@@ -110,7 +110,7 @@ def nmf_single_sc(
     use_second_layer: bool,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_multi_sc(
     f_path_gene: str,
@@ -122,7 +122,7 @@ def nmf_multi_sc(
     params: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_consensus_sc(
     f_path_gene: str,
@@ -135,7 +135,7 @@ def nmf_consensus_sc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_k_sweep_sc(
     f_path_gene: str,
@@ -148,7 +148,7 @@ def nmf_k_sweep_sc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_single_mc(
     data: np.ndarray,
@@ -160,7 +160,7 @@ def nmf_single_mc(
     use_second_layer: bool,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_multi_mc(
     data: np.ndarray,
@@ -173,7 +173,7 @@ def nmf_multi_mc(
     params: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_consensus_mc(
     data: np.ndarray,
@@ -187,7 +187,7 @@ def nmf_consensus_mc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def nmf_k_sweep_mc(
     data: np.ndarray,
@@ -201,7 +201,7 @@ def nmf_k_sweep_mc(
     consensus: dict[str, object],
     n_runs: int,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...
 def scenic_grn(
     f_path_genes: str,
@@ -211,7 +211,7 @@ def scenic_grn(
     params: dict[str, object],
     streaming: bool,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
     wave_byte_budget: int = ...,
 ) -> np.ndarray: ...
 def mc_scenic_grn(
@@ -222,7 +222,7 @@ def mc_scenic_grn(
     tf_indices: np.ndarray,
     params: dict[str, object],
     seed: int = 42,
-    verbose: bool = False,
+    verbose: int = 1,
     wave_byte_budget: int = ...,
 ) -> np.ndarray: ...
 def nebula(
@@ -234,5 +234,5 @@ def nebula(
     design: np.ndarray,
     params: dict[str, object],
     offset: np.ndarray | None = None,
-    verbose: bool = False,
+    verbose: int = 1,
 ) -> dict[str, Any]: ...

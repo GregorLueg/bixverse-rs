@@ -7,7 +7,7 @@
 //! the root's parent is `-1`.
 
 use bixverse_sc::mc_analysis::bonsai_mc::sanity_bonsai_mc;
-use bixverse_sc::prelude::{ParallelSparseReader, verbosity_from_flag};
+use bixverse_sc::prelude::{ParallelSparseReader, parse_verbosity_level};
 use bixverse_sc::sc_analysis::bonsai::{
     BonsaiScParams, NO_NODE, bonsai_layout as layout_rs, parse_bonsai_layout, sanity_bonsai_sc,
 };
@@ -45,7 +45,7 @@ use pyo3::types::PyDict;
 ///
 /// See `bonsai_dict`.
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, gene_indices, params, verbose = false))]
+#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, gene_indices, params, verbose = 1))]
 pub fn sc_bonsai<'py>(
     py: Python<'py>,
     f_path_gene: &str,
@@ -53,7 +53,7 @@ pub fn sc_bonsai<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     gene_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: BonsaiScParams = from_py(params, "Bonsai params")?;
     let cells = index_vec(&cell_indices)?;
@@ -68,7 +68,7 @@ pub fn sc_bonsai<'py>(
                 &cells,
                 &genes,
                 &params,
-                verbosity_from_flag(verbose),
+                parse_verbosity_level(verbose),
             )
         })
         .map_err(BvErr::from)?;
@@ -94,7 +94,7 @@ pub fn sc_bonsai<'py>(
 ///
 /// See `bonsai_dict`, the meta cells as the leaves in their row order.
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, gene_indices, params, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, gene_indices, params, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_bonsai<'py>(
     py: Python<'py>,
@@ -104,13 +104,13 @@ pub fn mc_bonsai<'py>(
     shape: (usize, usize),
     gene_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: BonsaiScParams = from_py(params, "Bonsai params")?;
     let genes = index_vec(&gene_indices)?;
     let counts = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
-        .detach(|| sanity_bonsai_mc(&counts, &genes, &params, verbosity_from_flag(verbose)))
+        .detach(|| sanity_bonsai_mc(&counts, &genes, &params, parse_verbosity_level(verbose)))
         .map_err(BvErr::from)?;
     bonsai_dict(py, res)
 }

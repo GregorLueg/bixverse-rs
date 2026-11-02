@@ -37,13 +37,13 @@ use crate::error::GpuErr;
 /// excluded, Euclidean as true L2. Rows an approximate index left short are
 /// padded with duplicate edges, as the CPU twin does.
 #[pyfunction]
-#[pyo3(signature = (embd, params, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, params, seed = 42, verbose = 1))]
 pub fn knn_with_dist<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     ensure_gpu()?;
     let params: KnnParamsGpu = from_py(params, "GPU knn params")?;
@@ -55,12 +55,10 @@ pub fn knn_with_dist<'py>(
         )));
     }
     let (mut idx, mut dist) = py
-        .detach(|| {
-            on_device(|device| knn_with_dist_gpu(view, k, &params, device, seed, verbose as usize))
-        })
+        .detach(|| on_device(|device| knn_with_dist_gpu(view, k, &params, device, seed, verbose)))
         .map_err(GpuErr::from)?;
     let padded = pad_knn_rows(&mut idx, Some(&mut dist), k);
-    if padded > 0 && verbose {
+    if padded > 0 && verbose > 0 {
         println!(
             "{padded} of {n} rows came back with fewer than {k} neighbours and were padded \
              with duplicate edges."
@@ -136,7 +134,7 @@ pub fn leiden<'py>(
 ///
 /// See [`fast_cluster_out`].
 #[pyfunction]
-#[pyo3(signature = (embd, resolutions, params, n_seeds = 1, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, resolutions, params, n_seeds = 1, seed = 42, verbose = 1))]
 pub fn fast_cluster<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
@@ -144,7 +142,7 @@ pub fn fast_cluster<'py>(
     params: &Bound<'py, PyAny>,
     n_seeds: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<FastClusterOut<'py>> {
     ensure_gpu()?;
     let fc: FastClusterParams = from_py(params, "fast cluster params")?;
@@ -162,7 +160,7 @@ pub fn fast_cluster<'py>(
                     &resolutions,
                     n_seeds,
                     seed,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })

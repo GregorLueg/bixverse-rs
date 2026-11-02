@@ -123,7 +123,7 @@ def test_repr_layout():
         "Step(\n"
         "  name='hvg',\n"
         "  kwargs={'hvg_no': 30, 'hvg_params': None, 'streaming': None, "
-        "'verbose': False},\n"
+        "'verbose': True},\n"
         ")"
     )
     p = pipeline.step_hvg(hvg_no=30) >> pipeline.step_metacells(

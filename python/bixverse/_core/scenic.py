@@ -34,6 +34,7 @@ from bixverse._core.metacells import MetaCells, csr_args, csr_subset
 from bixverse._core.pathways import Hotspot, ScMatrixRes, _gene_idx, _streaming
 from bixverse._core.repr import compact_repr
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import (
     CistargetParams,
     ScenicBinariseParams,
@@ -152,7 +153,7 @@ def _cells(sc: ScOrMc, cells_to_take: Sequence[str] | None) -> np.ndarray:
 
 
 @beartype
-def _mc_params(params: ScenicParams, verbose: bool) -> ScenicParams:
+def _mc_params(params: ScenicParams, verbose: Verbose) -> ScenicParams:
     """Cap `min_samples_leaf` for meta cells."""
     # by design: with the single cell leaf sizes on the far fewer meta cells, the
     # trees are not very informative
@@ -177,7 +178,7 @@ def scenic_gene_filter(
     *,
     scenic_params: ScenicParams | None = None,
     cells_to_take: Sequence[str] | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> list[str]:
     """Genes with enough counts and enough expressing cells.
 
@@ -189,7 +190,8 @@ def scenic_gene_filter(
         sc: The experiment, a subset or meta cells.
         scenic_params: The parameters. `None` uses the defaults.
         cells_to_take: Cell (meta cell) ids to use. `None` for the kept cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The passing gene ids, in gene order.
@@ -257,7 +259,7 @@ def scenic_grn(
     cells_to_take: Sequence[str] | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScenicGrn:
     """GRN inference, the GENIE3 / GRNBoost2 step of SCENIC.
 
@@ -275,7 +277,8 @@ def scenic_grn(
         streaming: Stream the targets. `None` decides by size; unused for
             meta cells.
         seed: Seed for the learners.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScenicGrn`.
@@ -313,7 +316,7 @@ def _scenic_grn(
     cells_to_take: Sequence[str] | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
     ext: ModuleType | SimpleNamespace,
 ) -> ScenicGrn:
     """The body of `scenic_grn`, with the extension module `ext` supplied, so
@@ -462,7 +465,7 @@ def identify_tf_to_genes(
     k_genes: int | None = None,
     n_sd: float = 2.0,
     min_importance: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScenicGrn:
     """TF to gene links from the importances.
 
@@ -478,7 +481,8 @@ def identify_tf_to_genes(
         k_genes: Targets per TF for `"top_k"`.
         n_sd: Standard deviations above the mean for `"threshold"`.
         min_importance: Optional floor on the importance, in `[0, 1]`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         A copy with `tf_to_gene_results` set: `tf`, `gene`, `importance`.
@@ -544,7 +548,7 @@ def tf_to_genes_correlations(
     mode: Mode = "activating",
     remove_self: bool = True,
     spearman: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScenicGrn:
     """Sign the TF to gene links by correlation.
 
@@ -560,7 +564,8 @@ def tf_to_genes_correlations(
         mode: Which links to keep.
         remove_self: Drop TF to itself links.
         spearman: Spearman rather than Pearson.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         A copy whose links gain `pairwise_cor` and `cor_sign`, filtered; `x`
@@ -626,7 +631,7 @@ def run_cistarget(
     annot_data: pl.DataFrame,
     *,
     cis_target_params: CistargetParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """CisTarget motif enrichment of gene sets.
 
@@ -638,7 +643,8 @@ def run_cistarget(
         annot_data: `motif`, `TF` and `annotationSource`, the motif to TF
             annotation.
         cis_target_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `motif`, `gs_name`, `nes`, `auc`, `rank_at_max`, `n_enriched`,
@@ -779,7 +785,7 @@ def tf_to_genes_motif_enrichment(
     cis_target_params: CistargetParams | None = None,
     gene_id_to_symbol: Mapping[str, str] | None = None,
     only_high_conf_tf: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScenicGrn:
     """Motif support for the TF to gene links.
 
@@ -798,7 +804,8 @@ def tf_to_genes_motif_enrichment(
         gene_id_to_symbol: Gene id to the symbol the database uses; links
             without a symbol are left out of the enrichment.
         only_high_conf_tf: Count only high confidence annotations.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         A copy with `cis_targets_results` set and the links gaining
@@ -873,7 +880,7 @@ def build_regulons(
     add_tf: bool = True,
     min_genes: int = 10,
     mode: Mode = "activating",
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> dict[str, list[str]] | None:
     """Regulons from the TF to gene links.
 
@@ -885,7 +892,8 @@ def build_regulons(
         min_genes: Minimum regulon size.
         mode: Which correlation signs to keep, if the links are signed. With
             `"both"` the regulons are named `<tf>_pos` and `<tf>_neg`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         Regulon name (sorted) to gene ids, or `None` with a warning when
@@ -970,7 +978,7 @@ def binarise_regulon_activity(
     auc: ScMatrixRes,
     *,
     binarise_params: ScenicBinariseParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> RegulonBinarisation:
     """On/off calls per regulon.
 
@@ -981,7 +989,8 @@ def binarise_regulon_activity(
     Args:
         auc: The AUCell scores of the regulons, at least two cells.
         binarise_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `RegulonBinarisation`.

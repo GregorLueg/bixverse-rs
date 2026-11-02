@@ -8,7 +8,7 @@
 
 use bixverse_sc::mc_generation::generate::seacells_on_store_with;
 use bixverse_sc::mc_generation::seacells::SEACellsParams;
-use bixverse_sc::prelude::verbosity_from_flag;
+use bixverse_sc::prelude::parse_verbosity_level;
 use bixverse_sc::sc_analysis::bonsai::BonsaiScParams;
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use bixverse_sc_gpu::errors::ScGpuErrors;
@@ -45,7 +45,7 @@ use crate::error::GpuErr;
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cell, embd, knn_indices, knn_distances, cells_to_keep, cells_to_use, params,
-    target_size, seed, verbose = false
+    target_size, seed, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn seacells<'py>(
@@ -59,7 +59,7 @@ pub fn seacells<'py>(
     params: &Bound<'py, PyAny>,
     target_size: f32,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let params: SEACellsParams = from_py(params, "SEACells params")?;
@@ -67,7 +67,7 @@ pub fn seacells<'py>(
     let embd = mat_view(&embd)?;
     let keep = index_vec(&cells_to_keep)?;
     let to_use = cells_to_use.as_ref().map(index_vec).transpose()?;
-    let v = verbose as usize;
+    let v = verbose;
     let res = py
         .detach(|| {
             on_device(|device| {
@@ -104,7 +104,7 @@ pub fn seacells<'py>(
 ///
 /// See [`bonsai_dict`].
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, gene_indices, params, verbose = false))]
+#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, gene_indices, params, verbose = 1))]
 pub fn sc_bonsai<'py>(
     py: Python<'py>,
     f_path_gene: &str,
@@ -112,7 +112,7 @@ pub fn sc_bonsai<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     gene_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_plane_ops()?;
     let params: BonsaiScParams = from_py(params, "Bonsai params")?;
@@ -130,7 +130,7 @@ pub fn sc_bonsai<'py>(
                     &genes,
                     &params,
                     device,
-                    verbosity_from_flag(verbose),
+                    parse_verbosity_level(verbose),
                 )
             })
         })
@@ -154,7 +154,7 @@ pub fn sc_bonsai<'py>(
 ///
 /// See [`bonsai_dict`].
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, shape, gene_indices, params, verbose = false))]
+#[pyo3(signature = (data, indices, indptr, shape, gene_indices, params, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn mc_bonsai<'py>(
     py: Python<'py>,
@@ -164,7 +164,7 @@ pub fn mc_bonsai<'py>(
     shape: (usize, usize),
     gene_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_plane_ops()?;
     let params: BonsaiScParams = from_py(params, "Bonsai params")?;
@@ -178,7 +178,7 @@ pub fn mc_bonsai<'py>(
                     &genes,
                     &params,
                     device,
-                    verbosity_from_flag(verbose),
+                    parse_verbosity_level(verbose),
                 )
             })
         })

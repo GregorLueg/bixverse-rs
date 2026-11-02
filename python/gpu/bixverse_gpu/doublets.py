@@ -10,6 +10,7 @@ from beartype import beartype
 
 from bixverse._core.doublets import ScrubletRes, Selection, _scrublet
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import ScrubletGpuParams
@@ -30,7 +31,7 @@ def scrublet(
     group_by: str | None = None,
     return_combined_pca: bool = False,
     return_pairs: bool = False,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScrubletRes:
     """Scrublet doublet detection with the SVD, the doublet projection and
     (by default) the kNN on the GPU.
@@ -49,7 +50,10 @@ def scrublet(
         return_combined_pca: Also return the PCA of observed and simulated
             cells.
         return_pairs: Also return the parents of the simulated doublets.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+            With `group_by`, `1` shows a progress bar over the groups and `2`
+            also runs each group at level `1`.
 
     Returns:
         The `ScrubletRes`.

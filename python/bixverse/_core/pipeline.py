@@ -48,6 +48,7 @@ from bixverse._core.pp import calculate_pca, find_hvg
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.subset import SingleCellsSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     BbknnParams,
     FastmnnParams,
@@ -355,7 +356,7 @@ def meta_cells_per_group(
     pipeline: Pipeline | None = None,
     groups: Sequence[str] | None = None,
     feature_space: str = "intersect",
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells:
     """Source-pure meta cells: one generator run per group, merged.
 
@@ -374,7 +375,8 @@ def meta_cells_per_group(
         groups: The levels to use; `None` for every level among the kept
             cells, in order of appearance.
         feature_space: Passed to `merge_meta_cells`.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The merged meta cells, a `source_id` column in obs.
@@ -424,7 +426,7 @@ def step_hvg(
     hvg_no: int = 2000,
     hvg_params: HvgParams | None = None,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.pp.find_hvg`.
 
@@ -432,7 +434,8 @@ def step_hvg(
         hvg_no: Number of HVGs, forwarded.
         hvg_params: The HVG parameters, forwarded.
         streaming: Read the genes in batches, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
 
     Examples:
         >>> step = bv.pipeline.step_hvg(hvg_no=500)
@@ -459,7 +462,7 @@ def step_pca(
     hvg: np.ndarray | Sequence[int] | Sequence[str] | None = None,
     seed: int = 42,
     residuals: bool = False,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.pp.calculate_pca`.
 
@@ -470,7 +473,8 @@ def step_pca(
         hvg: Gene indices or ids to use instead of the stored HVGs, forwarded.
         seed: Seed, forwarded.
         residuals: PCA on the residuals of `fit_residuals`, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
 
     Examples:
         >>> step = bv.pipeline.step_pca(20, sparse_svd=False)
@@ -499,7 +503,7 @@ def step_neighbours(
     modality: CacheModality = "rna",
     neighbours_params: NeighboursParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.graph.find_neighbours`.
 
@@ -509,7 +513,8 @@ def step_neighbours(
         modality: `"rna"` or `"adt"`, forwarded.
         neighbours_params: kNN and graph parameters, forwarded.
         seed: Seed, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
     """
     return Step(
         "neighbours",
@@ -578,7 +583,7 @@ def step_harmony(
     modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.integrate.harmony`.
 
@@ -589,7 +594,8 @@ def step_harmony(
         modality: The PCA to correct, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
     """
     return Step(
         "harmony",
@@ -613,7 +619,7 @@ def step_harmony_v2(
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.integrate.harmony_v2`.
 
@@ -624,7 +630,8 @@ def step_harmony_v2(
         modality: The PCA to correct, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
     """
     return Step(
         "harmony_v2",
@@ -649,7 +656,7 @@ def step_bbknn(
     no_embd_to_use: int | None = None,
     bbknn_params: BbknnParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.integrate.bbknn`.
 
@@ -661,7 +668,8 @@ def step_bbknn(
         no_embd_to_use: Number of leading dimensions, forwarded.
         bbknn_params: The parameters, forwarded.
         seed: Seed, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
     """
     return Step(
         "bbknn",
@@ -686,7 +694,7 @@ def step_fast_mnn(
     fastmnn_params: FastmnnParams | None = None,
     use_precomputed_pca: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Step:
     """Pipeline step for `bixverse.integrate.fast_mnn`.
 
@@ -696,7 +704,8 @@ def step_fast_mnn(
         fastmnn_params: The parameters, forwarded.
         use_precomputed_pca: Use the cached PCA, forwarded.
         seed: Seed, forwarded.
-        verbose: Controls verbosity, forwarded.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it, forwarded.
     """
     return Step(
         "fast_mnn",

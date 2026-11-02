@@ -38,6 +38,7 @@ from bixverse._core.multimodal import (
     require_adt,
 )
 from bixverse._core.state import CsrMatrix, KnnGraph, ScCache
+from bixverse._validate import Verbose
 from bixverse.params import DsbParams, KnnGraphDefaults, WnnParams, to_rust
 
 ###########
@@ -171,7 +172,7 @@ def new_adt_counts_dsb(
     dsb_params: DsbParams | None = None,
     scale_factor: Literal["standardise", "mean_subtract"] = "standardise",
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> AdtCounts:
     """DSB-normalised ADT counts.
 
@@ -193,7 +194,8 @@ def new_adt_counts_dsb(
         scale_factor: `"standardise"` or `"mean_subtract"`; only used with
             `empty_drops`.
         seed: Seed for the k-means initialisations.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: On isotypes needed but absent or unknown, or the inputs
@@ -336,7 +338,7 @@ def add_adt_counts(
     dsb_params: DsbParams | None = None,
     scale_factor: Literal["standardise", "mean_subtract"] = "standardise",
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Add ADT counts for the kept cells.
 
@@ -546,7 +548,7 @@ def generate_wnn_graph(
     wnn_params: WnnParams | None = None,
     graph_params: KnnGraphDefaults | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Weighted nearest neighbour graph over two modalities.
 
@@ -571,7 +573,8 @@ def generate_wnn_graph(
         graph_params: How the fused kNN becomes the neighbour graph. `None`
             uses the defaults.
         seed: Seed for the kNN index builds.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If an embedding is absent.

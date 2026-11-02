@@ -108,23 +108,23 @@ pub fn mad_outlier<'py>(
 ///
 /// One `float64` array per N value, one entry per cell.
 #[pyfunction]
-#[pyo3(signature = (f_path_cell, top_n_vals, cell_indices, streaming, verbose = false))]
+#[pyo3(signature = (f_path_cell, top_n_vals, cell_indices, streaming, verbose = 1))]
 pub fn top_genes_perc<'py>(
     py: Python<'py>,
     f_path_cell: &str,
     top_n_vals: Vec<usize>,
     cell_indices: PyReadonlyArray1<'py, u32>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyList>> {
     let cells = cell_vec(&cell_indices)?;
     let res = py
         .detach(|| {
             let reader = ParallelSparseReader::new(f_path_cell)?;
             if streaming {
-                get_top_genes_perc_streaming(&reader, &top_n_vals, &cells, verbose as usize)
+                get_top_genes_perc_streaming(&reader, &top_n_vals, &cells, verbose)
             } else {
-                get_top_genes_perc(&reader, &top_n_vals, &cells, verbose as usize)
+                get_top_genes_perc(&reader, &top_n_vals, &cells, verbose)
             }
         })
         .map_err(BvErr::from)?;
@@ -147,14 +147,14 @@ pub fn top_genes_perc<'py>(
 ///
 /// One `float64` array per gene set, one entry per cell.
 #[pyfunction]
-#[pyo3(signature = (f_path_cell, gene_sets, cell_indices, streaming, verbose = false))]
+#[pyo3(signature = (f_path_cell, gene_sets, cell_indices, streaming, verbose = 1))]
 pub fn gene_set_perc<'py>(
     py: Python<'py>,
     f_path_cell: &str,
     gene_sets: Vec<PyReadonlyArray1<'py, u32>>,
     cell_indices: PyReadonlyArray1<'py, u32>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyList>> {
     let cells = cell_vec(&cell_indices)?;
     let sets = gene_sets
@@ -165,9 +165,9 @@ pub fn gene_set_perc<'py>(
         .detach(|| {
             let reader = ParallelSparseReader::new(f_path_cell)?;
             if streaming {
-                get_gene_set_perc_streaming(&reader, sets, &cells, verbose as usize)
+                get_gene_set_perc_streaming(&reader, sets, &cells, verbose)
             } else {
-                get_gene_set_perc(&reader, sets, &cells, verbose as usize)
+                get_gene_set_perc(&reader, sets, &cells, verbose)
             }
         })
         .map_err(BvErr::from)?;

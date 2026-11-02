@@ -41,6 +41,7 @@ from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrMc, ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     FastClusterParams,
     KnnParams,
@@ -150,7 +151,7 @@ def _knn(
     params: NeighboursParams | KnnParams,
     seed: int,
     validate_index: bool,
-    verbose: bool,
+    verbose: Verbose,
 ) -> KnnGraph:
     """A kNN with distances over an embedding."""
     indices, distances = _bixverse.knn_with_dist(
@@ -229,7 +230,7 @@ def generate_knn(
     neighbours_params: NeighboursParams | KnnParams | None = None,
     seed: int = 42,
     validate_index: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> KnnGraph | None:
     """A kNN over an embedding, without touching the experiment.
 
@@ -247,7 +248,8 @@ def generate_knn(
         seed: Seed for the index build.
         validate_index: With `verbose`, report the recall of an approximate
             index against an exhaustive search on a random subset.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The kNN, indices into the rows used; `None` (with a warning) if the
@@ -319,7 +321,7 @@ def find_neighbours(
     modality: CacheModality = "rna",
     neighbours_params: NeighboursParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """The kNN and the neighbour graph over an embedding.
 
@@ -336,7 +338,8 @@ def find_neighbours(
         modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
         neighbours_params: kNN and graph parameters. `None` uses the defaults.
         seed: Seed for the index build.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is stale, or on `"adt"` without a
@@ -528,7 +531,7 @@ def fast_cluster(
     n_seeds: int = 1,
     return_kmeans: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> FastClusters:
     """k-means coarsening, a centroid graph and Louvain / Leiden on it.
 
@@ -548,7 +551,8 @@ def fast_cluster(
         n_seeds: Seeds per resolution; 1 skips the stability statistics.
         return_kmeans: Return the k-means assignments and centroids.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is absent, or on an empty resolution
@@ -587,7 +591,7 @@ def _fast_cluster(
     n_seeds: int,
     return_kmeans: bool,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
     run: Callable[..., tuple],
 ) -> FastClusters:
     """The body of `fast_cluster` over `to_rust(params)`, with the extension

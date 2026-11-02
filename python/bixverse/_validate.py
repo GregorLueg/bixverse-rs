@@ -1,9 +1,13 @@
 """Array checks at the FFI boundary."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
 from beartype import beartype
+from beartype.vale import Is
+
+# `0` silent, `1` progress, `2` detail. `bool` is an `int`, so `True` and `False` pass.
+Verbose = Annotated[int, Is[lambda v: 0 <= v <= 2]]
 
 
 @beartype

@@ -46,12 +46,12 @@ use pyo3::types::PyDict;
 /// ### Returns
 ///
 /// The options.
-fn stream_opts(gene_batch_size: Option<usize>, seed: u64, verbose: bool) -> SctStreamOpts {
+fn stream_opts(gene_batch_size: Option<usize>, seed: u64, verbose: usize) -> SctStreamOpts {
     let defaults = SctStreamOpts::default();
     SctStreamOpts {
         gene_batch_size: gene_batch_size.or(defaults.gene_batch_size),
         seed,
-        verbose: verbose as usize,
+        verbose,
     }
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn stats_dict<'py>(
 ///
 /// Column name to one value per store gene, see [stats_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, params, streaming, verbose = false))]
+#[pyo3(signature = (f_path_gene, f_path_cell, cell_indices, params, streaming, verbose = 1))]
 pub fn hvg<'py>(
     py: Python<'py>,
     f_path_gene: &str,
@@ -168,7 +168,7 @@ pub fn hvg<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HvgParams = from_py(params, "hvg params")?;
     let cells = index_vec(&cell_indices)?;
@@ -180,7 +180,7 @@ pub fn hvg<'py>(
                 &cells,
                 &params,
                 streaming,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -206,7 +206,7 @@ pub fn hvg<'py>(
 /// The statistics stacked batch after batch, with `batch` and `gene_idx`.
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_gene, f_path_cell, cell_indices, batch_labels, params, streaming, verbose = false
+    f_path_gene, f_path_cell, cell_indices, batch_labels, params, streaming, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn hvg_batch_aware<'py>(
@@ -217,7 +217,7 @@ pub fn hvg_batch_aware<'py>(
     batch_labels: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: HvgParams = from_py(params, "hvg params")?;
     let cells = index_vec(&cell_indices)?;
@@ -231,7 +231,7 @@ pub fn hvg_batch_aware<'py>(
                 &batches,
                 &params,
                 streaming,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -264,7 +264,7 @@ pub fn hvg_batch_aware<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, gene_indices, no_pcs, params, sparse, seed,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pca<'py>(
@@ -277,7 +277,7 @@ pub fn pca<'py>(
     params: &Bound<'py, PyAny>,
     sparse: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let params: SingleCellPcaParams = from_py(params, "pca params")?;
     let cells = index_vec(&cell_indices)?;
@@ -293,7 +293,7 @@ pub fn pca<'py>(
                 &params,
                 sparse,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -388,7 +388,7 @@ impl PyResidualFit {
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, method, cell_indices, group_of_cell, covariates, params,
-    gene_batch_size = None, seed = 42, verbose = false
+    gene_batch_size = None, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn fit_residuals(
@@ -402,7 +402,7 @@ pub fn fit_residuals(
     params: &Bound<'_, PyAny>,
     gene_batch_size: Option<usize>,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<PyResidualFit> {
     let params = match method {
         "sctransform" => ResidualParams::Sct(from_py::<SctParams>(params, "sctransform params")?),
@@ -460,7 +460,7 @@ pub fn fit_residuals(
 /// `float64` variance matrix and the selected genes, all 0-based.
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_gene, f_path_cell, fit, cell_indices, n_hvg, gene_batch_size = None, verbose = false
+    f_path_gene, f_path_cell, fit, cell_indices, n_hvg, gene_batch_size = None, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn residual_variance<'py>(
@@ -471,7 +471,7 @@ pub fn residual_variance<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     n_hvg: usize,
     gene_batch_size: Option<usize>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let cells = index_vec(&cell_indices)?;
     let opts = stream_opts(gene_batch_size, SctStreamOpts::default().seed, verbose);
@@ -516,7 +516,7 @@ pub fn residual_variance<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, fit, cell_indices, gene_indices, no_pcs, params, seed,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pca_residuals<'py>(
@@ -529,7 +529,7 @@ pub fn pca_residuals<'py>(
     no_pcs: usize,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let params: SingleCellPcaParams = from_py(params, "pca params")?;
     let cells = index_vec(&cell_indices)?;
@@ -545,7 +545,7 @@ pub fn pca_residuals<'py>(
                 no_pcs,
                 &params,
                 seed,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -574,7 +574,7 @@ pub fn pca_residuals<'py>(
 /// The 0-based source genes written, the new store's gene axis.
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_gene, fit, cell_indices, f_path_out, gene_batch_size = None, verbose = false
+    f_path_gene, fit, cell_indices, f_path_out, gene_batch_size = None, verbose = 1
 ))]
 pub fn sct_corrected_counts<'py>(
     py: Python<'py>,
@@ -583,7 +583,7 @@ pub fn sct_corrected_counts<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     f_path_out: &str,
     gene_batch_size: Option<usize>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let cells = index_vec(&cell_indices)?;
     let opts = stream_opts(gene_batch_size, SctStreamOpts::default().seed, verbose);
@@ -605,14 +605,14 @@ pub fn sct_corrected_counts<'py>(
 /// * `gene_batch_size` - Genes read per batch
 /// * `verbose` - Controls verbosity
 #[pyfunction]
-#[pyo3(name = "gene_store_to_cell_store", signature = (f_path_in, f_path_out, cells_per_phase, gene_batch_size, verbose = false))]
+#[pyo3(name = "gene_store_to_cell_store", signature = (f_path_in, f_path_out, cells_per_phase, gene_batch_size, verbose = 1))]
 pub fn gene_store_to_cell_store_py(
     py: Python<'_>,
     f_path_in: &str,
     f_path_out: &str,
     cells_per_phase: usize,
     gene_batch_size: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<()> {
     py.detach(|| {
         gene_store_to_cell_store(
@@ -620,7 +620,7 @@ pub fn gene_store_to_cell_store_py(
             f_path_out,
             cells_per_phase,
             gene_batch_size,
-            verbose as usize,
+            verbose,
         )
     })
     .map_err(BvErr::from)?;
@@ -651,7 +651,7 @@ pub fn gene_store_to_cell_store_py(
 /// The `(n_cells, n_genes)` `float32` imputed values.
 #[pyfunction]
 #[pyo3(signature = (
-    f_path_gene, knn_indices, knn_distances, cell_indices, gene_indices, params, verbose = false
+    f_path_gene, knn_indices, knn_distances, cell_indices, gene_indices, params, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn magic_impute<'py>(
@@ -662,7 +662,7 @@ pub fn magic_impute<'py>(
     cell_indices: PyReadonlyArray1<'py, u32>,
     gene_indices: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: MagicParams = from_py(params, "magic params")?;
     let k = knn_indices.shape()[1];
@@ -684,7 +684,7 @@ pub fn magic_impute<'py>(
             let reader = ParallelSparseReader::new(f_path_gene)?;
             let total_cells = reader.get_header().total_cells;
             let operator = MagicOperator::from_knn(&indices, &distances, &cells, total_cells)?;
-            magic_impute_genes(&reader, &operator, &genes, Some(params), verbose as usize)
+            magic_impute_genes(&reader, &operator, &genes, Some(params), verbose)
         })
         .map_err(BvErr::from)?;
     let n_genes = res.n_genes();

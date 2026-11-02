@@ -34,6 +34,7 @@ from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import BonsaiParams, to_rust
 
 ###########
@@ -214,7 +215,7 @@ def bonsai(
     *,
     hvg: np.ndarray | Sequence[int] | None = None,
     bonsai_params: BonsaiParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> BonsaiTree:
     """A Bonsai tree over the cells.
 
@@ -234,7 +235,8 @@ def bonsai(
         sc: The experiment or meta cells.
         hvg: 0-based candidate genes, e.g. `sc.map.hvg`. `None` takes every gene.
         bonsai_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `BonsaiTree`, leaves in the kept cell or meta cell order.
@@ -263,7 +265,7 @@ def _bonsai(
     *,
     hvg: np.ndarray | Sequence[int] | None,
     bonsai_params: BonsaiParams | None,
-    verbose: bool,
+    verbose: Verbose,
     ext: ModuleType,
 ) -> BonsaiTree:
     """The body of `bonsai`, with the extension module `ext` (its `sc_bonsai`

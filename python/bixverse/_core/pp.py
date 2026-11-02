@@ -40,6 +40,7 @@ from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import MagicLayer
 from bixverse._core.subset import ScOrMc, ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import (
     AprParams,
     HvgParams,
@@ -309,7 +310,7 @@ def _hvg_stats(
     cell_indices: np.ndarray,
     params: HvgParams,
     streaming: bool | None,
-    verbose: bool,
+    verbose: Verbose,
 ) -> dict[str, np.ndarray]:
     """HVG statistics over a cell selection."""
     return _bixverse.hvg(
@@ -323,7 +324,7 @@ def _hvg_stats(
 
 
 @beartype
-def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
+def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: Verbose) -> None:
     """Residual variance HVGs.
 
     Writes `residual_variance` (the mean over groups, NULL for genes the
@@ -357,7 +358,9 @@ def _find_hvg_residual(sc: ScOrScSubset, hvg_no: int, verbose: bool) -> None:
 
 
 @beartype
-def _find_hvg_mc(mc: MetaCells, hvg_no: int, params: HvgParams, verbose: bool) -> None:
+def _find_hvg_mc(
+    mc: MetaCells, hvg_no: int, params: HvgParams, verbose: Verbose
+) -> None:
     """`find_hvg` on meta cells.
 
     The statistics go to the meta cell var, the selection to `mc.hvg`. The
@@ -389,7 +392,7 @@ def find_hvg(
     hvg_no: int = 2000,
     hvg_params: HvgParams | None = None,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Select highly variable genes over the kept cells.
 
@@ -415,7 +418,8 @@ def find_hvg(
         hvg_params: The HVG parameters. `None` uses the defaults.
         streaming: Read the genes in batches. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` kept cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If `hvg_no` exceeds the gene count, or the residual model
@@ -447,7 +451,7 @@ def get_hvg_data(
     hvg_no: int = 3000,
     hvg_params: HvgParams | None = None,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """HVG statistics without touching the experiment.
 
@@ -460,7 +464,8 @@ def get_hvg_data(
             model fitted on a fixed cell set.
         streaming: Read the genes in batches. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `gene_idx` (0-based), `gene_id`, the statistics, `is_hvg` and
@@ -542,7 +547,7 @@ def find_hvg_batch_aware(
     gene_comb_method: GeneCombMethod = "union",
     hvg_params: HvgParams | None = None,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> BatchHvg:
     """HVGs per batch, combined across batches.
 
@@ -560,7 +565,8 @@ def find_hvg_batch_aware(
             batch with `fit_residuals(group_column=...)` instead.
         streaming: Read the genes in batches. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` kept cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The HVGs and the per-batch statistics.
@@ -636,7 +642,7 @@ def _calculate_pca_residual(
     selected: np.ndarray,
     sparse_svd: bool,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
 ) -> None:
     """PCA on residuals."""
     if sparse_svd:
@@ -706,7 +712,7 @@ def _calculate_pca_mc(
     params: PcaParams,
     residuals: bool,
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
 ) -> None:
     """`calculate_pca` on meta cells.
 
@@ -769,7 +775,7 @@ def calculate_pca(
     hvg: np.ndarray | Sequence[int] | Sequence[str] | None = None,
     seed: int = 42,
     residuals: bool = False,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """PCA over the kept cells and the HVGs.
 
@@ -789,7 +795,8 @@ def calculate_pca(
         seed: Seed for the randomised SVD.
         residuals: Run on the residuals of the model from `fit_residuals`.
             Dense only, and needs `clr` and `normalise_variance` off.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     On `MetaCells` the PCA is dense over the in-memory normalised counts
     (raw for the residual path) and `sparse_svd` is ignored.
@@ -918,7 +925,7 @@ def _fit_residuals_mc(
     group_column: str | None,
     covariate_columns: list[str],
     seed: int,
-    verbose: bool,
+    verbose: Verbose,
 ) -> None:
     """`fit_residuals` on meta cells: the in-memory raw counts, obs in row
     order."""
@@ -964,7 +971,7 @@ def fit_residuals(
     residual_params: SctransformParams | AprParams | None = None,
     gene_batch_size: int | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Fit a scTransform (v2) or analytic Pearson residual model over the
     kept cells.
@@ -985,7 +992,8 @@ def fit_residuals(
             `method`. `None` uses the defaults.
         gene_batch_size: Genes per disk batch. `None` uses the crate default.
         seed: Seed for the step-1 subsampling.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     On `MetaCells` the model is fitted on the summed counts (still negative
     binomial, at a far greater depth; `"analytic_pearson"` is the better
@@ -1093,7 +1101,7 @@ def sct_corrected_counts(
     build_cell_store: bool = True,
     overwrite: bool = False,
     gene_batch_size: int | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells | CorrectedCounts:
     """scTransform corrected counts as a new experiment.
 
@@ -1110,7 +1118,8 @@ def sct_corrected_counts(
             open the result. `False` writes only the gene-major store.
         overwrite: Replace an existing store at `dir_out`.
         gene_batch_size: Genes per disk batch. `None` uses the crate default.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The new experiment, or with `build_cell_store=False` what was
@@ -1183,7 +1192,7 @@ def run_magic(
     *,
     modality: Modality = "rna",
     magic_params: MagicParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Impute genes with MAGIC over the cached kNN graph.
 
@@ -1198,7 +1207,8 @@ def run_magic(
         modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         magic_params: The MAGIC parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the kNN graph is stale or does not cover the kept

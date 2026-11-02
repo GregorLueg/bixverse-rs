@@ -45,6 +45,7 @@ from bixverse._core.state import (
     stale_artefacts,
     state_report,
 )
+from bixverse._validate import Verbose
 
 ###########
 # Globals #
@@ -697,7 +698,7 @@ def merge_meta_cells(
     source_ids: Sequence[str] | None = None,
     feature_space: str = "intersect",
     prefix_ids: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells:
     """Row-bind several `MetaCells` into one.
 
@@ -718,7 +719,8 @@ def merge_meta_cells(
             cells.
         prefix_ids: Prefix the meta cell ids with `"<source_id>__"`. Without
             it, ids repeated across inputs are an error.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The merged meta cells, `is_merged` set, a `source_id` obs column and

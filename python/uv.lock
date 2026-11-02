@@ -370,6 +370,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "polars" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -443,6 +444,7 @@ requires-dist = [
     { name = "polars", specifier = ">=2.0.0" },
     { name = "scipy", marker = "extra == 'sparse'", specifier = ">=1.9" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4" },
+    { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["embed", "gpu", "jax", "mlx", "plots", "sparse", "torch"]
 

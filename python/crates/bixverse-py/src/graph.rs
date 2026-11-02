@@ -77,14 +77,14 @@ fn knn_slices<'a>(
 ///
 /// `(indices, distances)`: `(n_cells, k)` `uint32` and `float32`.
 #[pyfunction]
-#[pyo3(signature = (embd, params, validate_index = false, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, params, validate_index = false, seed = 42, verbose = 1))]
 pub fn knn_with_dist<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
     params: &Bound<'py, PyAny>,
     validate_index: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let params: KnnParams = from_py(params, "knn params")?;
     let view = mat_view(&embd)?;
@@ -93,10 +93,10 @@ pub fn knn_with_dist<'py>(
     let (idx, dist) = py
         .detach(|| {
             let (mut idx, dist) =
-                generate_knn_with_dist(view, &params, true, validate_index, seed, verbose)?;
+                generate_knn_with_dist(view, &params, true, validate_index, seed, verbose > 0)?;
             let mut dist = dist.expect("return_dist = true always yields distances");
             let padded = pad_knn_rows(&mut idx, Some(&mut dist), k);
-            if padded > 0 && verbose {
+            if padded > 0 && verbose > 0 {
                 println!(
                     "{padded} of {n} rows came back with fewer than {k} neighbours and were \
                      padded with duplicate edges."
@@ -178,13 +178,13 @@ pub fn knn_metrics<'py>(
 /// `(data, indices, indptr)` of the symmetric CSR, rows sorted: `float32`,
 /// `uint32`, `uint32`.
 #[pyfunction]
-#[pyo3(signature = (indices, distances, params, verbose = false))]
+#[pyo3(signature = (indices, distances, params, verbose = 1))]
 pub fn knn_graph<'py>(
     py: Python<'py>,
     indices: PyReadonlyArray2<'py, u32>,
     distances: Option<PyReadonlyArray2<'py, f32>>,
     params: &Bound<'py, PyAny>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let sym: KnnSymmetrisation = from_py(params, "graph params")?;
     let (idx, dist, n, k) = knn_slices(&indices, distances.as_ref())?;
@@ -195,7 +195,7 @@ pub fn knn_graph<'py>(
         None
     };
     let graph: SparseGraph<f32> = py
-        .detach(|| build_knn_graph(idx, dist, k, n, &sym, verbose as usize))
+        .detach(|| build_knn_graph(idx, dist, k, n, &sym, verbose))
         .map_err(|e| BvErr::from(ScErrors::from(e)))?;
 
     let mut indptr: Vec<u32> = Vec::with_capacity(n + 1);
@@ -280,7 +280,7 @@ pub fn leiden<'py>(
 /// centroids, and the stability statistics as a column dict (`None` for one
 /// seed).
 #[pyfunction]
-#[pyo3(signature = (embd, resolutions, params, n_seeds = 1, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, resolutions, params, n_seeds = 1, seed = 42, verbose = 1))]
 pub fn fast_cluster<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
@@ -288,24 +288,14 @@ pub fn fast_cluster<'py>(
     params: &Bound<'py, PyAny>,
     n_seeds: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<FastClusterOut<'py>> {
     let fc: FastClusterParams = from_py(params, "fast cluster params")?;
     let coarsener: CpuKMeans = from_py(params, "k-means params")?;
     let view = mat_view(&embd)?;
     let n = view.nrows();
     let res = py
-        .detach(|| {
-            fast_clusters(
-                view,
-                &coarsener,
-                &fc,
-                &resolutions,
-                n_seeds,
-                seed,
-                verbose as usize,
-            )
-        })
+        .detach(|| fast_clusters(view, &coarsener, &fc, &resolutions, n_seeds, seed, verbose))
         .map_err(BvErr::from)?;
 
     fast_cluster_out(py, res, n, n_seeds)

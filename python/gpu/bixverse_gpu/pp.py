@@ -15,6 +15,7 @@ from beartype import beartype
 
 from bixverse._core.pp import _set_pca
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import PcaParams, to_rust
 from bixverse_gpu import _bixverse_gpu
 
@@ -33,7 +34,7 @@ def calculate_pca(
     pca_params: PcaParams | None = None,
     hvg: np.ndarray | Sequence[int] | Sequence[str] | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Sparse PCA over the kept cells and the HVGs on the GPU.
 
@@ -49,7 +50,8 @@ def calculate_pca(
         hvg: 0-based gene indices or gene ids to use instead of `sc.map.hvg`;
             they replace it.
         seed: Seed for the sketch or the Lanczos starting block.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         BixverseError: Without a GPU adapter.

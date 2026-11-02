@@ -64,20 +64,20 @@ fn label_lists(labels: &[PyReadonlyArray1<'_, u32>]) -> PyResult<Vec<Vec<usize>>
 ///
 /// The `(n_cells, n_dims)` `float32` corrected embedding.
 #[pyfunction]
-#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = false))]
+#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = 1))]
 pub fn harmony<'py>(
     py: Python<'py>,
     pca: PyReadonlyArray2<'py, f32>,
     params: &Bound<'py, PyAny>,
     batch_labels: Vec<PyReadonlyArray1<'py, u32>>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: HarmonyParams = from_py(params, "harmony params")?;
     let labels = label_lists(&batch_labels)?;
     let view = mat_view(&pca)?;
     let res = py
-        .detach(|| harmony_v1(view, &labels, &params, seed, verbose as usize))
+        .detach(|| harmony_v1(view, &labels, &params, seed, verbose))
         .map_err(BvErr::from)?;
     mat_array(py, &res)
 }
@@ -98,20 +98,20 @@ pub fn harmony<'py>(
 ///
 /// The `(n_cells, n_dims)` `float32` corrected embedding.
 #[pyfunction]
-#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = false))]
+#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = 1))]
 pub fn harmony_v2<'py>(
     py: Python<'py>,
     pca: PyReadonlyArray2<'py, f32>,
     params: &Bound<'py, PyAny>,
     batch_labels: Vec<PyReadonlyArray1<'py, u32>>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: HarmonyParamsV2 = from_py(params, "harmony v2 params")?;
     let labels = label_lists(&batch_labels)?;
     let view = mat_view(&pca)?;
     let res = py
-        .detach(|| harmony2(view, &labels, &params, seed, verbose as usize))
+        .detach(|| harmony2(view, &labels, &params, seed, verbose))
         .map_err(BvErr::from)?;
     mat_array(py, &res)
 }
@@ -142,7 +142,7 @@ pub fn harmony_v2<'py>(
 /// and `float32` kNN, then the symmetric graph CSR, rows sorted, as
 /// `float32`, `uint32`, `uint32`.
 #[pyfunction]
-#[pyo3(signature = (embd, batch_labels, params, k, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, batch_labels, params, k, seed = 42, verbose = 1))]
 pub fn bbknn_graph<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
@@ -150,13 +150,13 @@ pub fn bbknn_graph<'py>(
     params: &Bound<'py, PyAny>,
     k: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<BbknnOut<'py>> {
     let params: BbknnParams = from_py(params, "bbknn params")?;
     let labels = index_vec(&batch_labels)?;
     let view = mat_view(&embd)?;
     let (distances, connectivities) = py
-        .detach(|| bbknn(view, &labels, &params, seed, verbose as usize))
+        .detach(|| bbknn(view, &labels, &params, seed, verbose))
         .map_err(BvErr::from)?;
     bbknn_out(py, &distances, &connectivities, k)
 }
@@ -228,7 +228,7 @@ fn store_inputs(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, gene_indices, batch_indices, precomputed_pca,
-    params, seed = 42, verbose = false
+    params, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn fast_mnn<'py>(
@@ -241,7 +241,7 @@ pub fn fast_mnn<'py>(
     precomputed_pca: Option<PyReadonlyArray2<'py, f32>>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: FastMnnParams = from_py(params, "fastmnn params")?;
     let s = store_inputs(
@@ -260,7 +260,7 @@ pub fn fast_mnn<'py>(
                 &s.batches,
                 s.pca,
                 &params,
-                verbose as usize,
+                verbose,
                 seed,
             )
         })
@@ -290,7 +290,7 @@ pub fn fast_mnn<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, gene_indices, batch_indices, precomputed_pca,
-    params, seed = 42, verbose = false
+    params, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn seurat_cca<'py>(
@@ -303,7 +303,7 @@ pub fn seurat_cca<'py>(
     precomputed_pca: Option<PyReadonlyArray2<'py, f32>>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: SeuratCcaParams = from_py(params, "seurat cca params")?;
     let s = store_inputs(
@@ -322,7 +322,7 @@ pub fn seurat_cca<'py>(
                 &s.batches,
                 s.pca,
                 &params,
-                verbose as usize,
+                verbose,
                 seed,
             )
         })
@@ -352,7 +352,7 @@ pub fn seurat_cca<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, gene_indices, batch_indices, precomputed_pca,
-    params, seed = 42, verbose = false
+    params, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn seurat_rpca<'py>(
@@ -365,7 +365,7 @@ pub fn seurat_rpca<'py>(
     precomputed_pca: Option<PyReadonlyArray2<'py, f32>>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: SeuratRpcaParams = from_py(params, "seurat rpca params")?;
     let s = store_inputs(
@@ -384,7 +384,7 @@ pub fn seurat_rpca<'py>(
                 &s.batches,
                 s.pca,
                 &params,
-                verbose as usize,
+                verbose,
                 seed,
             )
         })
@@ -411,17 +411,17 @@ pub fn seurat_rpca<'py>(
 /// Dict with `p_values`, `chi_square_stats`, `mean_chi_square` and
 /// `median_chi_square`.
 #[pyfunction]
-#[pyo3(signature = (knn, batches, verbose = false))]
+#[pyo3(signature = (knn, batches, verbose = 1))]
 pub fn kbet<'py>(
     py: Python<'py>,
     knn: PyReadonlyArray2<'py, u32>,
     batches: PyReadonlyArray1<'py, u32>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let rows = knn_rows(&knn)?;
     let batches = index_vec(&batches)?;
     let res = py
-        .detach(|| kbet_rs(&rows, &batches, verbose))
+        .detach(|| kbet_rs(&rows, &batches, verbose > 0))
         .map_err(BvErr::from)?;
     let out = PyDict::new(py);
     out.set_item("p_values", res.p_values.into_pyarray(py))?;
@@ -450,14 +450,14 @@ pub fn kbet<'py>(
 /// Dict with `per_cell`, `mean_lisi`, `median_lisi`, `n_labels`,
 /// `ilisi_norm` and `clisi_norm`.
 #[pyfunction]
-#[pyo3(signature = (knn, knn_dist, labels, perplexity = None, verbose = false))]
+#[pyo3(signature = (knn, knn_dist, labels, perplexity = None, verbose = 1))]
 pub fn lisi<'py>(
     py: Python<'py>,
     knn: PyReadonlyArray2<'py, u32>,
     knn_dist: Option<PyReadonlyArray2<'py, f32>>,
     labels: PyReadonlyArray1<'py, u32>,
     perplexity: Option<f64>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let rows = knn_rows(&knn)?;
     let dists = knn_dist
@@ -467,8 +467,8 @@ pub fn lisi<'py>(
     let labels = index_vec(&labels)?;
     let res = py
         .detach(|| match &dists {
-            Some(d) => lisi_weighted(&rows, d, &labels, perplexity, verbose),
-            None => lisi_rs(&rows, &labels, verbose),
+            Some(d) => lisi_weighted(&rows, d, &labels, perplexity, verbose > 0),
+            None => lisi_rs(&rows, &labels, verbose > 0),
         })
         .map_err(BvErr::from)?;
     let out = PyDict::new(py);
@@ -497,19 +497,19 @@ pub fn lisi<'py>(
 ///
 /// Dict with `per_cell`, `mean_asw` and `median_asw`.
 #[pyfunction]
-#[pyo3(signature = (embd, batches, max_cells, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, batches, max_cells, seed = 42, verbose = 1))]
 pub fn batch_asw<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
     batches: PyReadonlyArray1<'py, u32>,
     max_cells: Option<usize>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let view = mat_view(&embd)?;
     let batches = index_vec(&batches)?;
     let res = py
-        .detach(|| batch_silhouette_width(view, &batches, max_cells, seed, verbose))
+        .detach(|| batch_silhouette_width(view, &batches, max_cells, seed, verbose > 0))
         .map_err(BvErr::from)?;
     let out = PyDict::new(py);
     out.set_item("per_cell", res.per_cell.into_pyarray(py))?;
@@ -534,19 +534,19 @@ pub fn batch_asw<'py>(
 ///
 /// Dict with `per_cell`, `mean_asw` and `median_asw`.
 #[pyfunction]
-#[pyo3(signature = (embd, labels, max_cells, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, labels, max_cells, seed = 42, verbose = 1))]
 pub fn cell_type_asw<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
     labels: PyReadonlyArray1<'py, u32>,
     max_cells: Option<usize>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let view = mat_view(&embd)?;
     let labels = index_vec(&labels)?;
     let res = py
-        .detach(|| cell_type_asw_rs(view, &labels, max_cells, seed, verbose))
+        .detach(|| cell_type_asw_rs(view, &labels, max_cells, seed, verbose > 0))
         .map_err(BvErr::from)?;
     let out = PyDict::new(py);
     out.set_item("per_cell", res.per_cell.into_pyarray(py))?;

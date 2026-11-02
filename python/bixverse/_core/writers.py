@@ -22,6 +22,7 @@ from bixverse import _bixverse
 from bixverse._core.ingest import CsrLike, csr_buffers
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix
+from bixverse._validate import Verbose
 
 ###########
 # Globals #
@@ -245,7 +246,7 @@ def save_h5ad(
     assay: Literal["raw", "norm"] = "raw",
     chunk_size: int = 10_000,
     overwrite: bool = True,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> Path:
     """Write an experiment to a spec compliant h5ad file.
 
@@ -260,7 +261,8 @@ def save_h5ad(
         assay: Which counts go into `X`.
         chunk_size: Cells per streaming batch.
         overwrite: Replace an existing file.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The written path.

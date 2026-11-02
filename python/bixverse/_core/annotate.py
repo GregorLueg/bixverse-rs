@@ -49,6 +49,7 @@ from bixverse._core.integrate import (
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import (
     HarmonyParams,
     HarmonyV2Params,
@@ -344,7 +345,7 @@ def calc_sc_type_scores(
     *,
     sensitivity: bool = True,
     weight_floor: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScTypeResults:
     """ScType scores per cell.
 
@@ -353,7 +354,8 @@ def calc_sc_type_scores(
         cell_marker_list: Cell type to markers, see `prepare_cell_markers`.
         sensitivity: Downweight markers shared between cell types.
         weight_floor: In `[0, 1]`, the floor of those weights; `None` is 0.1.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The scores over the kept cells.
@@ -465,7 +467,7 @@ def assign_sc_type(
     *,
     cluster_col: str | None = None,
     sctype_cell_params: SctypeCellsParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScTypeCellResults:
     """Per-cell ScType calls.
 
@@ -482,7 +484,8 @@ def assign_sc_type(
         sc_type_res: The scores, see `calc_sc_type_scores`.
         cluster_col: Optional obs column with 0-based integer clusters.
         sctype_cell_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The per-cell calls. Without a neighbour graph it warns and scores
@@ -596,7 +599,7 @@ def build_symphony_ref(
     slim: bool = False,
     label_columns: Sequence[str] | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SymphonyReference:
     """Build a Symphony reference.
 
@@ -619,7 +622,8 @@ def build_symphony_ref(
         slim: Drop `z_orig` and `r`. `z_corr` is always kept.
         label_columns: obs columns to snapshot, in `cells_to_keep` order.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The reference.
@@ -804,7 +808,7 @@ def map_symphony_query(
     batch_column: str | None = None,
     additional_batch_columns: Sequence[str] | None = None,
     params: SymphonyMapParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Map a query onto a reference.
 
@@ -821,7 +825,8 @@ def map_symphony_query(
             correction, so `"symphony"` equals `"symphony_pca"`.
         additional_batch_columns: Further obs columns to correct for.
         params: The mapping parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If a batch column is missing or incomplete.
@@ -883,7 +888,7 @@ def transfer_labels_symphony(
     *,
     knn_params: KnnParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> pl.DataFrame:
     """kNN majority vote of reference labels onto a mapped query.
 
@@ -900,7 +905,8 @@ def transfer_labels_symphony(
         knn_params: The kNN parameters. `None` uses the defaults; distances
             on `z_corr` are typically Euclidean.
         seed: Seed for the index build.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         `predicted_<label_column>` and `confidence_<label_column>` (the

@@ -31,6 +31,7 @@ from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import (
     DialogueHlmParams,
     DialoguePmdParams,
@@ -499,7 +500,7 @@ def dialogue(
     pmd_params: DialoguePmdParams | None = None,
     hlm_params: DialogueHlmParams | None = None,
     refine_params: DialogueRefineParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> DialogueResult:
     """Multicellular programmes.
 
@@ -532,7 +533,8 @@ def dialogue(
         pmd_params: Stage one parameters. `None` uses the defaults.
         hlm_params: Stage two parameters. `None` uses the defaults.
         refine_params: Stage three parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `DialogueResult`.

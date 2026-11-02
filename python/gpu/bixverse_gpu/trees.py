@@ -15,6 +15,7 @@ from beartype import beartype
 from bixverse._core.metacells import MetaCells
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.trees import BonsaiTree, _bonsai
+from bixverse._validate import Verbose
 from bixverse.params import BonsaiParams
 from bixverse_gpu import _bixverse_gpu
 
@@ -29,7 +30,7 @@ def bonsai(
     *,
     hvg: np.ndarray | Sequence[int] | None = None,
     bonsai_params: BonsaiParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> BonsaiTree:
     """A Bonsai tree over the cells or meta cells with Sanity on the GPU.
 
@@ -37,7 +38,8 @@ def bonsai(
         sc: The experiment or meta cells.
         hvg: 0-based candidate genes. `None` takes every gene.
         bonsai_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `BonsaiTree`, leaves in the kept cell or meta cell order.

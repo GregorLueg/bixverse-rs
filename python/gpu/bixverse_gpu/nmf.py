@@ -23,6 +23,7 @@ from bixverse._core.nmf import (
     _stabilised_nmf,
 )
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import NmfConsensusParams, NmfHalsParams
 from bixverse_gpu import _bixverse_gpu
 
@@ -67,7 +68,7 @@ def nmf(
     use_second_layer: bool = True,
     nmf_hals_params: NmfHalsParams | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> NmfResult:
     """One HALS NMF run on the GPU.
 
@@ -80,7 +81,8 @@ def nmf(
         use_second_layer: Factorise the normalised rather than the raw counts.
         nmf_hals_params: The solver. `None` uses the defaults (NNDSVD).
         seed: Seed for a random initialisation.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `bixverse.nmf.NmfResult`.
@@ -116,7 +118,7 @@ def stabilised_nmf(
     nmf_hals_params: NmfHalsParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> StabilisedNmfResult:
     """Randomly initialised HALS NMF restarts on the GPU.
 
@@ -130,7 +132,8 @@ def stabilised_nmf(
         nmf_hals_params: The solver; `nmf_init` is ignored.
         n_runs: Number of restarts.
         seed: Base seed of the restarts.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `bixverse.nmf.StabilisedNmfResult`.
@@ -168,7 +171,7 @@ def consensus_nmf(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ConsensusNmfResult:
     """Consensus HALS NMF (cNMF) with the restarts on the GPU.
 
@@ -183,7 +186,8 @@ def consensus_nmf(
         nmf_consensus_params: The consensus step. `None` uses the defaults.
         n_runs: Number of restarts, at least 2.
         seed: Base seed of the restarts and the consensus k-means.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `bixverse.nmf.ConsensusNmfResult`.
@@ -226,7 +230,7 @@ def nmf_k_sweep(
     nmf_consensus_params: NmfConsensusParams | None = None,
     n_runs: int = 30,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> NmfKSweepResult:
     """Consensus NMF over a range of k with the restarts on the GPU.
 
@@ -241,7 +245,8 @@ def nmf_k_sweep(
         nmf_consensus_params: The consensus step. `None` uses the defaults.
         n_runs: Restarts per k, at least 2.
         seed: Base seed of the restarts and the consensus k-means.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `bixverse.nmf.NmfKSweepResult`.

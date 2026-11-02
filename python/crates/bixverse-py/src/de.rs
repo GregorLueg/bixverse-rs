@@ -160,7 +160,7 @@ fn one_vs_many_dict<'py>(py: Python<'py>, arm: DgeAurocMultiRes) -> PyResult<Bou
 ///
 /// See [mann_whitney_dict].
 #[pyfunction]
-#[pyo3(signature = (f_path_cell, cells_1, cells_2, min_prop, alternative, verbose = false))]
+#[pyo3(signature = (f_path_cell, cells_1, cells_2, min_prop, alternative, verbose = 1))]
 pub fn dge_mann_whitney<'py>(
     py: Python<'py>,
     f_path_cell: &str,
@@ -168,20 +168,13 @@ pub fn dge_mann_whitney<'py>(
     cells_2: PyReadonlyArray1<'py, u32>,
     min_prop: f32,
     alternative: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let (c1, c2) = (index_vec(&cells_1)?, index_vec(&cells_2)?);
     let reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
     let res = py
         .detach(|| {
-            calculate_dge_grps_mann_whitney(
-                &reader,
-                &c1,
-                &c2,
-                min_prop,
-                alternative,
-                verbose as usize,
-            )
+            calculate_dge_grps_mann_whitney(&reader, &c1, &c2, min_prop, alternative, verbose)
         })
         .map_err(BvErr::from)?;
     mann_whitney_dict(py, res)
@@ -203,26 +196,20 @@ pub fn dge_mann_whitney<'py>(
 ///
 /// One [mann_whitney_dict] per group, in group order.
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, cell_groups, min_prop, alternative, verbose = false))]
+#[pyo3(signature = (f_path_gene, cell_groups, min_prop, alternative, verbose = 1))]
 pub fn dge_one_vs_rest<'py>(
     py: Python<'py>,
     f_path_gene: &str,
     cell_groups: Vec<PyReadonlyArray1<'py, u32>>,
     min_prop: f32,
     alternative: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyList>> {
     let groups = group_lists(&cell_groups)?;
     let reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
     let arms = py
         .detach(|| {
-            calculate_dge_one_vs_rest_mann_whitney(
-                &reader,
-                &groups,
-                min_prop,
-                alternative,
-                verbose as usize,
-            )
+            calculate_dge_one_vs_rest_mann_whitney(&reader, &groups, min_prop, alternative, verbose)
         })
         .map_err(BvErr::from)?;
     let out = PyList::empty(py);
@@ -249,7 +236,7 @@ pub fn dge_one_vs_rest<'py>(
 ///
 /// One [one_vs_many_dict] per reference, in reference order.
 #[pyfunction]
-#[pyo3(signature = (f_path_gene, cell_groups, references, min_prop, alternative, verbose = false))]
+#[pyo3(signature = (f_path_gene, cell_groups, references, min_prop, alternative, verbose = 1))]
 pub fn dge_one_vs_many<'py>(
     py: Python<'py>,
     f_path_gene: &str,
@@ -257,7 +244,7 @@ pub fn dge_one_vs_many<'py>(
     references: PyReadonlyArray1<'py, u32>,
     min_prop: f32,
     alternative: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyList>> {
     let groups = group_lists(&cell_groups)?;
     let references = index_vec(&references)?;
@@ -270,7 +257,7 @@ pub fn dge_one_vs_many<'py>(
                 &references,
                 min_prop,
                 alternative,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -303,14 +290,14 @@ pub fn dge_one_vs_many<'py>(
 /// The `(n_groups, n_genes)` `float64` array, or `(data, indices, indptr)`
 /// of its CSR.
 #[pyfunction]
-#[pyo3(signature = (f_path_cell, cell_groups, assay, sparse = false, verbose = false))]
+#[pyo3(signature = (f_path_cell, cell_groups, assay, sparse = false, verbose = 1))]
 pub fn pseudobulk<'py>(
     py: Python<'py>,
     f_path_cell: &str,
     cell_groups: Vec<PyReadonlyArray1<'py, u32>>,
     assay: &str,
     sparse: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bulk_type = parse_pseudo_bulk(assay).ok_or_else(|| {
         PyValueError::new_err(format!("assay must be 'raw' or 'norm', got '{assay}'"))
@@ -319,9 +306,7 @@ pub fn pseudobulk<'py>(
     let reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
     if sparse {
         let csr = py
-            .detach(|| {
-                get_pseudo_bulked_counts_sparse(&reader, &groups, bulk_type, verbose as usize)
-            })
+            .detach(|| get_pseudo_bulked_counts_sparse(&reader, &groups, bulk_type, verbose))
             .map_err(BvErr::from)?;
         let indptr: Vec<u64> = csr.indptr.iter().map(|&i| i as u64).collect();
         let parts = (
@@ -332,7 +317,7 @@ pub fn pseudobulk<'py>(
         return Ok(parts.into_pyobject(py)?.into_any());
     }
     let dense = py
-        .detach(|| get_pseudo_bulked_counts_dense(&reader, &groups, bulk_type, verbose as usize))
+        .detach(|| get_pseudo_bulked_counts_dense(&reader, &groups, bulk_type, verbose))
         .map_err(BvErr::from)?;
     mat_f64(py, &dense)
 }
@@ -433,7 +418,7 @@ pub fn edger_ql<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cells_to_keep, gene_indices, subject_ids, design, params,
-    offset = None, verbose = false
+    offset = None, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nebula<'py>(
@@ -446,7 +431,7 @@ pub fn nebula<'py>(
     design: PyReadonlyArray2<'py, f64>,
     params: &Bound<'py, PyAny>,
     offset: Option<PyReadonlyArray1<'py, f64>>,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: NebulaScParams = from_py(params, "NEBULA params")?;
     let cells = index_vec(&cells_to_keep)?;
@@ -470,7 +455,7 @@ pub fn nebula<'py>(
                 n_coef,
                 offset.as_deref(),
                 &params,
-                verbose as usize,
+                verbose,
             )
         })
         .map_err(BvErr::from)?;
@@ -502,7 +487,7 @@ pub fn nebula<'py>(
 /// `n_cells`, `kth_distances`, `sample_counts` as `(n_nhoods, n_samples)`
 /// and `nhood_overlap`.
 #[pyfunction]
-#[pyo3(signature = (embd, knn_indices, sample_ids, n_samples, params, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, knn_indices, sample_ids, n_samples, params, seed = 42, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn milor_nhoods<'py>(
     py: Python<'py>,
@@ -512,24 +497,14 @@ pub fn milor_nhoods<'py>(
     n_samples: usize,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: MiloRParams = from_py(params, "MiloR params")?;
     let embd = mat_view(&embd)?;
     let knn = knn_rows(&knn_indices)?;
     let samples = index_vec(&sample_ids)?;
     let res = py
-        .detach(|| {
-            make_milor_nhoods(
-                embd,
-                &knn,
-                &samples,
-                n_samples,
-                &params,
-                seed,
-                verbose as usize,
-            )
-        })
+        .detach(|| make_milor_nhoods(embd, &knn, &samples, n_samples, &params, seed, verbose))
         .map_err(BvErr::from)?;
 
     let n_nhoods = res.index_cells.len();
@@ -592,7 +567,7 @@ pub fn spatial_fdr<'py>(
 /// Dict with `raw_scores` and `norm_scores`, `(n_cells, n_labels)`
 /// `float64`.
 #[pyfunction]
-#[pyo3(signature = (knn_indices, knn_dist, labels, n_labels, params, seed = 42, verbose = false))]
+#[pyo3(signature = (knn_indices, knn_dist, labels, n_labels, params, seed = 42, verbose = 1))]
 #[allow(clippy::too_many_arguments)]
 pub fn meld<'py>(
     py: Python<'py>,
@@ -602,24 +577,14 @@ pub fn meld<'py>(
     n_labels: usize,
     params: &Bound<'py, PyAny>,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: MeldParams = from_py(params, "MELD params")?;
     let knn = knn_rows(&knn_indices)?;
     let dist = dist_rows(&knn_dist, knn_indices.shape())?;
     let labels = index_vec(&labels)?;
     let (raw, norm) = py
-        .detach(|| {
-            meld_rs(
-                &knn,
-                &dist,
-                &labels,
-                n_labels,
-                &params,
-                seed,
-                verbose as usize,
-            )
-        })
+        .detach(|| meld_rs(&knn, &dist, &labels, n_labels, &params, seed, verbose))
         .map_err(BvErr::from)?;
 
     let out = PyDict::new(py);

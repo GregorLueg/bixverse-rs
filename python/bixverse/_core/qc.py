@@ -32,6 +32,7 @@ from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import SingleCells
+from bixverse._validate import Verbose
 
 ###########
 # Globals #
@@ -634,7 +635,7 @@ def gene_set_proportions(
     gene_set_list: Mapping[str, Sequence[str]],
     *,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Share of each kept cell's reads in each gene set.
 
@@ -647,7 +648,8 @@ def gene_set_proportions(
             ids warn and drop.
         streaming: Read the cells in batches. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` kept cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If no id of a set matches.
@@ -676,7 +678,7 @@ def top_genes_perc(
     *,
     top_n_vals: Sequence[int] = (25, 50, 100),
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """Share of each kept cell's reads in its top N genes.
 
@@ -688,7 +690,8 @@ def top_genes_perc(
         top_n_vals: The N values.
         streaming: Read the cells in batches. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` kept cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If `top_n_vals` is empty or holds a value below 1.

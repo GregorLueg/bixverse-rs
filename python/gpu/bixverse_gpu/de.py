@@ -15,6 +15,7 @@ from beartype import BeartypeConf, beartype
 from bixverse._core.de import ScNebula, _nebula
 from bixverse._core.single_cells import Selection
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import NebulaGpuParams
 
@@ -38,7 +39,7 @@ def nebula(
     cells_to_use: Sequence[str] | None = None,
     offset: np.ndarray | Sequence[float] | None = None,
     nebula_params: NebulaGpuParams | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScNebula:
     """NEBULA with the per-gene fits on the GPU.
 
@@ -56,7 +57,8 @@ def nebula(
         offset: Strictly positive scaling per cell. `None` uses the library
             sizes.
         nebula_params: The parameters. `None` uses the defaults.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScNebula`.

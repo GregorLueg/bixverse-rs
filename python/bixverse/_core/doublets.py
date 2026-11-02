@@ -37,6 +37,7 @@ from bixverse._core.ingest import _prepare
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, Selection, SingleCells
+from bixverse._validate import Verbose
 from bixverse.params import (
     BoostParams,
     CellsweepParams,
@@ -322,7 +323,7 @@ def _validate_group_sizes(groups: dict[str, np.ndarray]) -> None:
 
 
 @beartype
-def _streaming(n_cells: int, streaming: bool | None, verbose: bool) -> bool:
+def _streaming(n_cells: int, streaming: bool | None, verbose: Verbose) -> bool:
     """Resolve streaming from the cell count, logging when it is on."""
     res = _auto_streaming(n_cells, streaming)
     if res and verbose:
@@ -351,10 +352,14 @@ def _run_grouped(
     sc: SingleCells,
     group_by: str,
     cells: np.ndarray,
-    run: Callable[[np.ndarray], dict[str, Any]],
-    verbose: bool,
+    run: Callable[[np.ndarray, int], dict[str, Any]],
+    verbose: Verbose,
+    label: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """Split, validate and run per group.
+
+    Level `1` shows a progress bar over the groups and silences the runs, `2` keeps
+    the bar and runs each group at level `1`.
 
     Returns:
         Per group the Rust result and the cells, the order that puts the
@@ -363,11 +368,16 @@ def _run_grouped(
     """
     groups = _split_by_group(sc, group_by, cells)
     _validate_group_sizes(groups)
+    # Not at module level: in a notebook without ipywidgets the import warns, and
+    # that belongs on the first grouped run, not on `import bixverse`.
+    from tqdm.auto import tqdm
+
     results = {}
-    for g, group_cells in groups.items():
-        if verbose:
-            logger.info("Running group '%s'.", g)
-        results[g] = run(group_cells)
+    inner = max(0, verbose - 1)
+    with tqdm(groups.items(), desc=label, disable=not verbose) as bar:
+        for g, group_cells in bar:
+            bar.set_postfix_str(g)
+            results[g] = run(group_cells, inner)
     all_cells = np.concatenate(list(groups.values()))
     labels = np.concatenate(
         [np.full(len(c), g, dtype=object) for g, c in groups.items()]
@@ -405,7 +415,7 @@ def scrublet(
     group_by: str | None = None,
     return_combined_pca: bool = False,
     return_pairs: bool = False,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScrubletRes:
     """Scrublet doublet detection.
 
@@ -426,7 +436,10 @@ def scrublet(
         return_combined_pca: Also return the PCA of observed and simulated
             cells.
         return_pairs: Also return the parents of the simulated doublets.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+            With `group_by`, `1` shows a progress bar over the groups and `2`
+            also runs each group at level `1`.
 
     Returns:
         The `ScrubletRes`.
@@ -468,27 +481,27 @@ def _scrublet(
     group_by: str | None,
     return_combined_pca: bool,
     return_pairs: bool,
-    verbose: bool,
+    verbose: Verbose,
 ) -> ScrubletRes:
     """The body of `scrublet` over `to_rust(params)`, with the extension call
     `rust_fn` supplied, so the GPU twin shares it."""
     cells = _cells(sc, cells_to_use)
 
-    def run(c: np.ndarray) -> dict[str, Any]:
+    def run(c: np.ndarray, v: int) -> dict[str, Any]:
         return rust_fn(
             str(sc.genes_path),
             str(sc.cells_path),
             c,
             params,
             seed,
-            _streaming(len(c), streaming, verbose),
+            _streaming(len(c), streaming, v),
             return_combined_pca,
             return_pairs,
-            verbose,
+            v,
         )
 
     if group_by is None:
-        res = run(cells)
+        res = run(cells, verbose)
         return ScrubletRes(
             predicted_doublets=res["predicted_doublets"],
             doublet_scores_obs=res["doublet_scores_obs"],
@@ -505,7 +518,9 @@ def _scrublet(
             pair_2=res["pair_2"],
         )
 
-    results, groups, order, labels = _run_grouped(sc, group_by, cells, run, verbose)
+    results, groups, order, labels = _run_grouped(
+        sc, group_by, cells, run, verbose, "Running Scrublet per group"
+    )
     return ScrubletRes(
         predicted_doublets=_concat(results, "predicted_doublets", order),
         doublet_scores_obs=_concat(results, "doublet_scores_obs", order),
@@ -531,7 +546,7 @@ def call_doublets_manual(
     threshold: float,
     *,
     for_sample: str | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScrubletRes:
     """Re-call Scrublet doublets at a hand-picked threshold.
 
@@ -625,7 +640,7 @@ def doublet_detection_boost(
     group_by: str | None = None,
     seed: int = 42,
     streaming: bool | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> BoostRes:
     """Boosted doublet classification.
 
@@ -644,7 +659,10 @@ def doublet_detection_boost(
         seed: Seed.
         streaming: Stream the HVG pass. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` cells.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+            With `group_by`, `1` shows a progress bar over the groups and `2`
+            also runs each group at level `1`.
 
     Returns:
         The `BoostRes`.
@@ -660,19 +678,19 @@ def doublet_detection_boost(
     params = boost_params or BoostParams()
     cells = _cells(sc, cells_to_use)
 
-    def run(c: np.ndarray) -> dict[str, Any]:
+    def run(c: np.ndarray, v: int) -> dict[str, Any]:
         return _bixverse.boost(
             str(sc.genes_path),
             str(sc.cells_path),
             c,
             _with_centroids(params, len(c)),
             seed,
-            _streaming(len(c), streaming, verbose),
-            verbose,
+            _streaming(len(c), streaming, v),
+            v,
         )
 
     if group_by is None:
-        res = run(cells)
+        res = run(cells, verbose)
         return BoostRes(
             doublet=res["doublet"],
             doublet_score=res["doublet_score"],
@@ -680,7 +698,9 @@ def doublet_detection_boost(
             cell_indices=cells,
         )
 
-    results, groups, order, labels = _run_grouped(sc, group_by, cells, run, verbose)
+    results, groups, order, labels = _run_grouped(
+        sc, group_by, cells, run, verbose, "Running boost per group"
+    )
     return BoostRes(
         doublet=_concat(results, "doublet", order),
         doublet_score=_concat(results, "doublet_score", order),
@@ -722,7 +742,7 @@ def scdblfinder(
     group_by: str | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScDblFinderRes:
     """Cluster-aware doublet detection.
 
@@ -742,7 +762,10 @@ def scdblfinder(
         streaming: Stream the gene selection pass. `None` streams above
             `N_CELLS_STREAMING_THRESHOLD` cells.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+            With `group_by`, `1` shows a progress bar over the groups and `2`
+            also runs each group at level `1`.
 
     Returns:
         The `ScDblFinderRes`.
@@ -761,7 +784,7 @@ def scdblfinder(
     params = scdblfinder_params or ScdblfinderParams()
     cells = _cells(sc, cells_to_use)
 
-    def run(c: np.ndarray) -> dict[str, Any]:
+    def run(c: np.ndarray, v: int) -> dict[str, Any]:
         res = _bixverse.scdblfinder(
             str(sc.genes_path),
             str(sc.cells_path),
@@ -769,14 +792,14 @@ def scdblfinder(
             _with_centroids(params, len(c)),
             return_features,
             seed,
-            _streaming(len(c), streaming, verbose),
-            verbose,
+            _streaming(len(c), streaming, v),
+            v,
         )
         res["features"] = _feature_frame(sc, c, res)
         return res
 
     if group_by is None:
-        res = run(cells)
+        res = run(cells, verbose)
         return ScDblFinderRes(
             predicted_doublets=res["predicted_doublets"],
             doublet_score=res["doublet_scores"],
@@ -789,7 +812,9 @@ def scdblfinder(
             features=res["features"],
         )
 
-    results, groups, order, labels = _run_grouped(sc, group_by, cells, run, verbose)
+    results, groups, order, labels = _run_grouped(
+        sc, group_by, cells, run, verbose, "Running scDblFinder per group"
+    )
     clusters = np.concatenate(
         [
             np.asarray([f"{g}_{c}" for c in r["cluster_labels"].tolist()])
@@ -948,7 +973,7 @@ def infer_empty_droplets(
 
 @beartype
 def _resolve_empty_droplets(
-    obs: pl.DataFrame, empty_params: EmptyDropletsParams, verbose: bool
+    obs: pl.DataFrame, empty_params: EmptyDropletsParams, verbose: Verbose
 ) -> np.ndarray:
     """The empty droplet mask, from obs or inferred.
 
@@ -1019,7 +1044,7 @@ def cellsweep(
     cellsweep_params: CellsweepParams | None = None,
     qc: MinQualityParams | None = None,
     csc_mem_gb: float | None = None,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> SingleCells:
     """Remove ambient and bulk contamination with CellSweep.
 
@@ -1049,7 +1074,8 @@ def cellsweep(
         qc: Only `target_size` is used, to scale the normalised layer.
         csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
             `None` converts in one pass.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The denoised experiment.

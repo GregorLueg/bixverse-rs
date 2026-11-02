@@ -14,6 +14,7 @@ from beartype import beartype
 from bixverse._core.metacells import MetaCells
 from bixverse._core.metacells_generate import _generate_seacells
 from bixverse._core.subset import ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import SeacellsParams
 from bixverse_gpu import _bixverse_gpu
 
@@ -33,7 +34,7 @@ def generate_seacells(
     regenerate_knn: bool = False,
     target_size: float = 1e5,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> MetaCells:
     """SEACells with the fit on the GPU.
 
@@ -50,7 +51,8 @@ def generate_seacells(
         regenerate_knn: Build the kNN on the embedding.
         target_size: Library size to normalise the meta cells to.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is missing, or it or the kNN is stale.

@@ -105,7 +105,7 @@ fn load_mc(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    seed = 42, verbose = false
+    seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_single_sc<'py>(
@@ -118,7 +118,7 @@ pub fn nmf_single_sc<'py>(
     use_second_layer: bool,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -133,7 +133,7 @@ pub fn nmf_single_sc<'py>(
                     use_second_layer,
                     Some(opts),
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -153,7 +153,7 @@ pub fn nmf_single_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    n_runs, seed = 42, verbose = false
+    n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_multi_sc<'py>(
@@ -167,7 +167,7 @@ pub fn nmf_multi_sc<'py>(
     params: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -184,7 +184,7 @@ pub fn nmf_multi_sc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -204,7 +204,7 @@ pub fn nmf_multi_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k, preprocessing, use_second_layer, params,
-    consensus, n_runs, seed = 42, verbose = false
+    consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_consensus_sc<'py>(
@@ -219,7 +219,7 @@ pub fn nmf_consensus_sc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -238,7 +238,7 @@ pub fn nmf_consensus_sc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -258,7 +258,7 @@ pub fn nmf_consensus_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, gene_indices, cell_indices, k_range, preprocessing, use_second_layer,
-    params, consensus, n_runs, seed = 42, verbose = false
+    params, consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_k_sweep_sc<'py>(
@@ -273,7 +273,7 @@ pub fn nmf_k_sweep_sc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -292,7 +292,7 @@ pub fn nmf_k_sweep_sc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -325,7 +325,7 @@ pub fn nmf_k_sweep_sc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, seed = 42,
-    verbose = false
+    verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_single_mc<'py>(
@@ -339,7 +339,7 @@ pub fn nmf_single_mc<'py>(
     use_second_layer: bool,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -354,7 +354,7 @@ pub fn nmf_single_mc<'py>(
                     use_second_layer,
                     Some(opts),
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -374,7 +374,7 @@ pub fn nmf_single_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, n_runs,
-    seed = 42, verbose = false
+    seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_multi_mc<'py>(
@@ -389,7 +389,7 @@ pub fn nmf_multi_mc<'py>(
     params: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -406,7 +406,7 @@ pub fn nmf_multi_mc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -426,7 +426,7 @@ pub fn nmf_multi_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k, preprocessing, use_second_layer, params, consensus,
-    n_runs, seed = 42, verbose = false
+    n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_consensus_mc<'py>(
@@ -442,7 +442,7 @@ pub fn nmf_consensus_mc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -461,7 +461,7 @@ pub fn nmf_consensus_mc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })
@@ -481,7 +481,7 @@ pub fn nmf_consensus_mc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     data, indices, indptr, shape, k_range, preprocessing, use_second_layer, params,
-    consensus, n_runs, seed = 42, verbose = false
+    consensus, n_runs, seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn nmf_k_sweep_mc<'py>(
@@ -497,7 +497,7 @@ pub fn nmf_k_sweep_mc<'py>(
     consensus: &Bound<'py, PyAny>,
     n_runs: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let opts = hals_opts(params, seed)?;
@@ -516,7 +516,7 @@ pub fn nmf_k_sweep_mc<'py>(
                     n_runs,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })

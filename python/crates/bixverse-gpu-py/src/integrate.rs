@@ -31,14 +31,14 @@ use crate::error::GpuErr;
 ///
 /// The `(n_cells, n_pcs)` `float32` corrected embedding.
 #[pyfunction]
-#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = false))]
+#[pyo3(signature = (pca, params, batch_labels, seed = 42, verbose = 1))]
 pub fn harmony_v2<'py>(
     py: Python<'py>,
     pca: PyReadonlyArray2<'py, f32>,
     params: &Bound<'py, PyAny>,
     batch_labels: Vec<PyReadonlyArray1<'py, u32>>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     ensure_gpu()?;
     let params: HarmonyParamsV2Gpu = from_py(params, "GPU harmony v2 params")?;
@@ -49,9 +49,7 @@ pub fn harmony_v2<'py>(
     let view = mat_view(&pca)?;
     let res = py
         .detach(|| {
-            on_device(|device| {
-                harmony_v2_gpu(view, &labels, &params, seed, device, verbose as usize)
-            })
+            on_device(|device| harmony_v2_gpu(view, &labels, &params, seed, device, verbose))
         })
         .map_err(GpuErr::from)?;
     mat_array(py, &res)
@@ -72,7 +70,7 @@ pub fn harmony_v2<'py>(
 ///
 /// See [`bbknn_out`].
 #[pyfunction]
-#[pyo3(signature = (embd, batch_labels, params, k, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, batch_labels, params, k, seed = 42, verbose = 1))]
 pub fn bbknn_graph<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
@@ -80,16 +78,14 @@ pub fn bbknn_graph<'py>(
     params: &Bound<'py, PyAny>,
     k: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<BbknnOut<'py>> {
     ensure_gpu()?;
     let params: BbknnParamsGpu = from_py(params, "GPU bbknn params")?;
     let labels = index_vec(&batch_labels)?;
     let view = mat_view(&embd)?;
     let (distances, connectivities) = py
-        .detach(|| {
-            on_device(|device| bbknn_gpu(view, &labels, &params, seed, device, verbose as usize))
-        })
+        .detach(|| on_device(|device| bbknn_gpu(view, &labels, &params, seed, device, verbose)))
         .map_err(GpuErr::from)?;
     bbknn_out(py, &distances, &connectivities, k)
 }
@@ -108,23 +104,21 @@ pub fn bbknn_graph<'py>(
 ///
 /// The `(n_cells, n_dims)` `float32` corrected embedding.
 #[pyfunction]
-#[pyo3(signature = (embd, batch_labels, params, seed = 42, verbose = false))]
+#[pyo3(signature = (embd, batch_labels, params, seed = 42, verbose = 1))]
 pub fn fast_mnn<'py>(
     py: Python<'py>,
     embd: PyReadonlyArray2<'py, f32>,
     batch_labels: PyReadonlyArray1<'py, u32>,
     params: &Bound<'py, PyAny>,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     ensure_gpu()?;
     let params: FastMnnParamsGpu = from_py(params, "GPU fastmnn params")?;
     let labels = index_vec(&batch_labels)?;
     let view = mat_view(&embd)?;
     let res = py
-        .detach(|| {
-            on_device(|device| fast_mnn_gpu(view, &labels, &params, seed, device, verbose as usize))
-        })
+        .detach(|| on_device(|device| fast_mnn_gpu(view, &labels, &params, seed, device, verbose)))
         .map_err(GpuErr::from)?;
     mat_array(py, &res)
 }

@@ -15,6 +15,7 @@ from beartype import beartype
 
 from bixverse._core.scenic import ScenicGrn, _scenic_grn
 from bixverse._core.subset import ScOrMc
+from bixverse._validate import Verbose
 from bixverse.params import ScenicParams
 from bixverse_gpu import _bixverse_gpu
 
@@ -41,7 +42,7 @@ def scenic_grn(
     cells_to_take: Sequence[str] | None = None,
     streaming: bool | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> ScenicGrn:
     """GRN inference with the tree ensembles on the GPU.
 
@@ -56,7 +57,8 @@ def scenic_grn(
         streaming: Stream the targets. `None` decides by size; unused for
             meta cells.
         seed: Seed for the learners.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The `ScenicGrn`.

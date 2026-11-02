@@ -36,7 +36,7 @@ use crate::error::GpuErr;
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cell_indices, gene_indices, no_pcs, params, sparse = true,
-    seed = 42, verbose = false
+    seed = 42, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pca<'py>(
@@ -49,7 +49,7 @@ pub fn pca<'py>(
     params: &Bound<'py, PyAny>,
     sparse: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let _ = sparse;
     ensure_gpu()?;
@@ -76,7 +76,7 @@ pub fn pca<'py>(
                     &params,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                 )
             })
         })

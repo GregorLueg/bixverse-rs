@@ -37,6 +37,7 @@ from bixverse._core.multimodal import (
 from bixverse._core.single_cells import SingleCells
 from bixverse._core.state import CsrMatrix, KnnGraph
 from bixverse._core.subset import ScOrMc, ScOrScSubset
+from bixverse._validate import Verbose
 from bixverse.params import KnnGraphDefaults, to_rust
 from bixverse_gpu import _bixverse_gpu
 from bixverse_gpu.params import FastClusterGpuParams, KnnGpuDefaults
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 @beartype
 def _knn(
-    embd: np.ndarray, params: KnnGpuDefaults, seed: int, verbose: bool
+    embd: np.ndarray, params: KnnGpuDefaults, seed: int, verbose: Verbose
 ) -> KnnGraph:
     """`knn_with_dist` on the GPU over an embedding."""
     indices, distances = _bixverse_gpu.knn_with_dist(
@@ -81,7 +82,7 @@ def generate_knn(
     no_embd_to_use: int | None = None,
     knn_params: KnnGpuDefaults | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> KnnGraph | None:
     """A GPU kNN over an embedding, without touching the experiment.
 
@@ -98,7 +99,8 @@ def generate_knn(
         knn_params: The GPU kNN parameters, `k` included. `None` runs
             `"nndescent"` with the defaults.
         seed: Seed for the index build.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Returns:
         The kNN, indices into the rows used; `None` (with a warning) if the
@@ -129,7 +131,7 @@ def find_neighbours(
     knn_params: KnnGpuDefaults | None = None,
     graph_params: KnnGraphDefaults | None = None,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> None:
     """The GPU kNN and its neighbour graph over an embedding.
 
@@ -147,7 +149,8 @@ def find_neighbours(
             defaults.
         graph_params: How the kNN becomes a graph. `None` uses the defaults.
         seed: Seed for the index build.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is stale.
@@ -260,7 +263,7 @@ def fast_cluster(
     n_seeds: int = 1,
     return_kmeans: bool = False,
     seed: int = 42,
-    verbose: bool = False,
+    verbose: Verbose = True,
 ) -> FastClusters:
     """k-means coarsening on the GPU, a centroid graph and Louvain / Leiden
     on it.
@@ -279,7 +282,8 @@ def fast_cluster(
         n_seeds: Seeds per resolution; 1 skips the stability statistics.
         return_kmeans: Return the k-means assignments and centroids.
         seed: Seed.
-        verbose: Controls verbosity.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
 
     Raises:
         ValueError: If the embedding is absent, or on an empty resolution

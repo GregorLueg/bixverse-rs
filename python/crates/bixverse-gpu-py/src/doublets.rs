@@ -40,7 +40,7 @@ use crate::error::GpuErr;
 #[pyfunction]
 #[pyo3(signature = (
     f_path_gene, f_path_cell, cells, params, seed = 42, streaming = false,
-    return_combined_pca = false, return_pairs = false, verbose = false
+    return_combined_pca = false, return_pairs = false, verbose = 1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn scrublet<'py>(
@@ -53,7 +53,7 @@ pub fn scrublet<'py>(
     streaming: bool,
     return_combined_pca: bool,
     return_pairs: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     ensure_gpu()?;
     let spec: ScrubletGpuSpec = from_py(params, "GPU scrublet params")?;
@@ -81,7 +81,7 @@ pub fn scrublet<'py>(
                     streaming,
                     seed,
                     device,
-                    verbose as usize,
+                    verbose,
                     return_combined_pca,
                     return_pairs,
                 )
