@@ -847,11 +847,12 @@ def calculate_pca(
 
     sparse = True if sparse_svd is None else sparse_svd
     if sc.n_cells > N_CELLS_DENSE_PCA_LIMIT and not sparse:
-        logger.info(
-            "More than %i cells with sparse_svd=False. Setting it to True to avoid "
-            "high memory pressure.",
-            N_CELLS_DENSE_PCA_LIMIT,
-        )
+        if verbose:
+            logger.info(
+                "More than %i cells with sparse_svd=False. Setting it to True to avoid "
+                "high memory pressure.",
+                N_CELLS_DENSE_PCA_LIMIT,
+            )
         sparse = True
     if verbose:
         logger.info(

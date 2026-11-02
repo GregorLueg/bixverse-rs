@@ -222,12 +222,14 @@ def test_boost_record(sc):
 def test_fast_cluster_centroids_resolved():
     from bixverse._core.doublets import _with_centroids
 
-    assert _with_centroids(BoostParams(fast_cluster=True), 400)["n_centroids"] == 80
-    assert _with_centroids(BoostParams(), 400)["n_centroids"] is None
     assert (
-        _with_centroids(ScdblfinderParams(fast_cluster=True, n_centroids=7), 400)[
-            "n_centroids"
-        ]
+        _with_centroids(BoostParams(fast_cluster=True), 400, False)["n_centroids"] == 80
+    )
+    assert _with_centroids(BoostParams(), 400, False)["n_centroids"] is None
+    assert (
+        _with_centroids(
+            ScdblfinderParams(fast_cluster=True, n_centroids=7), 400, False
+        )["n_centroids"]
         == 7
     )
 

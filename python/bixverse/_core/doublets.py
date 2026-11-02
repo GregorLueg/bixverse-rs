@@ -333,17 +333,18 @@ def _streaming(n_cells: int, streaming: bool | None, verbose: Verbose) -> bool:
 
 @beartype
 def _with_centroids(
-    params: BoostParams | ScdblfinderParams, n_cells: int
+    params: BoostParams | ScdblfinderParams, n_cells: int, verbose: Verbose
 ) -> dict[str, object]:
     """`to_rust(params)`, with the fast clustering centroids filled in."""
     d = to_rust(params)
     if params.fast_cluster and params.n_centroids is None:
         d["n_centroids"] = int(math.sqrt(n_cells) * FAST_CLUSTER_CENTROIDS_PER_ROOT)
-        logger.info(
-            "Fast clustering activated without any n_centroids set. Setting "
-            "n_centroids to %i.",
-            d["n_centroids"],
-        )
+        if verbose:
+            logger.info(
+                "Fast clustering activated without any n_centroids set. Setting "
+                "n_centroids to %i.",
+                d["n_centroids"],
+            )
     return d
 
 
@@ -683,7 +684,7 @@ def doublet_detection_boost(
             str(sc.genes_path),
             str(sc.cells_path),
             c,
-            _with_centroids(params, len(c)),
+            _with_centroids(params, len(c), v),
             seed,
             _streaming(len(c), streaming, v),
             v,
@@ -789,7 +790,7 @@ def scdblfinder(
             str(sc.genes_path),
             str(sc.cells_path),
             c,
-            _with_centroids(params, len(c)),
+            _with_centroids(params, len(c), v),
             return_features,
             seed,
             _streaming(len(c), streaming, v),

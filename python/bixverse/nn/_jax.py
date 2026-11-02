@@ -25,10 +25,12 @@ import numpy as np
 import optax
 from beartype import beartype
 from jax.scipy.special import gammaln
+from tqdm.auto import tqdm
 
 from bixverse._core.repr import compact_repr
 
 from .._bixverse import CellReader
+from .._validate import Verbose
 from ._data import iterate_counts
 from ._params import (
     MIN_TRAIN_BATCH,
@@ -532,6 +534,7 @@ def train(
     params: ScviParams,
     device: str,
     seed: int,
+    verbose: Verbose,
 ) -> ScviFit:
     """Fit scVI on JAX with the same Adam loop as the torch backend.
 
@@ -548,6 +551,8 @@ def train(
         params: Hyperparameters.
         device: Device string, see `resolve_device`.
         seed: Seeds the initialisation, the sampling and the shuffle.
+        verbose: `0` (`False`) silent, `1` (`True`) a progress bar over the epochs,
+            `2` also logs the loss per epoch.
 
     Returns:
         The fitted model.
@@ -599,7 +604,8 @@ def train(
 
     n_epochs = resolve_max_epochs(params, len(cells))
     history = ScviHistory()
-    for epoch in range(n_epochs):
+    bar = tqdm(range(n_epochs), desc="Training scVI", disable=not verbose)
+    for epoch in bar:
         kl_w = kl_weight(epoch, params.n_epochs_kl_warmup)
         kl_w_arr = jax.device_put(jnp.float32(kl_w), dev)
         totals = jax.device_put(jnp.zeros(3), dev)
@@ -628,7 +634,9 @@ def train(
         history.reconstruction.append(recon)
         history.kl.append(kl)
         history.kl_weight.append(kl_w)
-        logger.info("epoch %d/%d: loss %.2f", epoch + 1, n_epochs, loss)
+        bar.set_postfix_str(f"loss={loss:.2f}")
+        if verbose > 1:
+            logger.info("epoch %d/%d: loss %.2f", epoch + 1, n_epochs, loss)
 
     return ScviFit(
         model=Vae(params=weights, state=bn_state, n_batch=model.n_batch),

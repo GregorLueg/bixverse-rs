@@ -15,6 +15,7 @@ takes the `bixverse.params` bundles. Probe the device with `gpu_available()`;
 the twins raise `bixverse.BixverseError` without one.
 """
 
+from bixverse._log import attach
 from bixverse_gpu import (
     de,
     doublets,
@@ -29,6 +30,8 @@ from bixverse_gpu import (
     trees,
 )
 from bixverse_gpu._bixverse_gpu import __version__, gpu_available, gpu_plane_ops
+
+attach("bixverse_gpu")
 
 __all__ = [
     "__version__",

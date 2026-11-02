@@ -8,6 +8,7 @@ import numpy as np
 from beartype import beartype
 
 from .._bixverse import CellReader
+from .._validate import Verbose
 from ._data import encode_batches, resolve_cells, resolve_genes
 from ._params import Backend, ScviFit, ScviParams
 
@@ -64,6 +65,7 @@ def train_scvi(
     backend: Backend = "torch",
     device: str = "auto",
     seed: int = 42,
+    verbose: Verbose = True,
 ) -> ScviFit:
     """Train scVI on raw counts streamed from a bixverse store.
 
@@ -80,6 +82,8 @@ def train_scvi(
             JAX a platform name (`"cpu"`, `"gpu"`), `"auto"` taking JAX's
             default. Ignored by MLX, which runs on the GPU.
         seed: Seeds initialisation, sampling and shuffling.
+        verbose: `0` (`False`) silent, `1` (`True`) a progress bar over the epochs,
+            `2` also logs the loss per epoch.
 
     Returns:
         The fitted model.
@@ -105,10 +109,18 @@ def train_scvi(
                 params=params,
                 device=device,
                 seed=seed,
+                verbose=verbose,
             )
         case "mlx":
             return mod.train(
-                reader, cells_, genes_, codes, categories, params=params, seed=seed
+                reader,
+                cells_,
+                genes_,
+                codes,
+                categories,
+                params=params,
+                seed=seed,
+                verbose=verbose,
             )
 
 

@@ -50,7 +50,10 @@ from ._core.multimodal import SingleCellsMultiModal
 from ._core.single_cells import Counts, SingleCells, get_counts
 from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
 from ._core.subset import SingleCellsSubset, merge_subset_obs
+from ._log import attach
 from .loader import Batch, CellLoader
+
+attach("bixverse")
 
 __all__ = [
     "Batch",
