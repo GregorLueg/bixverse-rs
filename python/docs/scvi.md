@@ -32,6 +32,9 @@ latent = bvnn.scvi_latent(fit, store, cells, batch)  # (n_cells, 10)
 same as scvi-tools' `get_latent_representation()`. Feed it to whatever builds
 your kNN graph.
 
+Training shows a tqdm bar over the epochs with the current loss. `verbose=2` also
+logs one line per epoch, `verbose=False` turns it all off.
+
 Want a held-out score? Train on a subset of the cells and score the rest:
 
 ```python

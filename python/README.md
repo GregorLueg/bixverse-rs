@@ -52,6 +52,11 @@ next to them and come back as polars frames. QC doesn't delete anything:
 `sc.set_cells_to_keep()` decides which cells every later step sees. Functions take
 the experiment first and write into it, and the cache tracks what has gone stale.
 
+Everything reports progress by default. `verbose` takes `0` (`False`) for silent,
+`1` (`True`) for progress and `2` for extra detail where the method has it.
+`logging.getLogger("bixverse").setLevel(logging.WARNING)` silences the Python log
+lines but not what Rust prints.
+
 ## What's in it
 
 | Module | Contents |

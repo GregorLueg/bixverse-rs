@@ -11,7 +11,9 @@ A Rust crate for computational biology: statistics, gene set enrichment, graph
 algorithms, matrix factorisation, ontologies and a full single cell suite. It is
 the numerical core underneath the
 [bixverse](https://github.com/GregorLueg/bixverse) R package, but it has no R
-dependency of its own and can be used as a plain Rust library.
+dependency of its own and can be used as a plain Rust library. The same single
+cell suite is also available in Python, see
+[Using it from Python](#using-it-from-python).
 
 The code originally lived in `src/Rust/` of that R package. Pulling it out into
 its own crate means the numerics get tested, benchmarked and versioned
@@ -162,22 +164,27 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 ## Using it from Python
 
 The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
-Python package wraps the single cell streaming engine with PyO3 and maturin.
-It depends on `bixverse-sc-data` alone, so the wheel needs no R install. It
-opens a bixverse binary store and streams shuffled minibatches out of it, with
-the decode in Rust and the GIL released, fast enough to keep a GPU training loop
-fed. First consumer is scVI in `bixverse.nn`, on torch, MLX or JAX, trained
-straight off the store.
+Python package is a port of the R single cell suite with PyO3 and maturin, built
+on `bixverse-core`, `bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`. No
+R install needed. It opens the same experiment directories as R, so a directory
+written on one side opens on the other, and parity tests compare it against the
+R package function by function. The
+[`bixverse-gpu`](https://github.com/GregorLueg/bixverse-rs/tree/main/python/gpu)
+wheel adds GPU twins on `bixverse-gpu` and `bixverse-sc-gpu`. On top sit a
+minibatch loader and scVI on torch, MLX or JAX, trained straight off the store.
 
 ```bash
-uv pip install bixverse            # numpy only
-uv pip install "bixverse[torch]"   # scVI on torch
-uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
-uv pip install "bixverse[jax]"     # scVI on JAX, the fast one on CPU
+uv pip install bixverse                  # the suite
+uv pip install "bixverse[embed,plots]"   # plus UMAP & co and matplotlib plots
+uv pip install "bixverse[gpu]"           # plus the GPU twins
+uv pip install "bixverse[torch]"         # scVI on torch; also [mlx], [jax]
 ```
 
-Docs live [here](https://gregorlueg.github.io/bixverse-rs/). The Python package
-is versioned on its own line, see its
+What's in each module is in the
+[Python README](https://github.com/GregorLueg/bixverse-rs/blob/main/python/README.md),
+with docs and 22 vignettes
+[here](https://gregorlueg.github.io/bixverse-rs/). The Python package is
+versioned on its own line, see its
 [changelog](https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md).
 
 ## Roadmap
@@ -213,6 +220,8 @@ is versioned on its own line, see its
 - [x] Data loader to pull the counts out of the binary files and expose them to
   Python-based deep learning frameworks (PyTorch, MLX, JAX).
 - [x] scVI trained straight off the binary files, on torch, MLX and JAX.
+- [x] The R single cell suite ported, with parity tests against the R package.
+- [x] GPU twins of the expensive methods in a separate wheel.
 
 ## Updates
 
