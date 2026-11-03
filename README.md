@@ -8,12 +8,13 @@
 ## Description
 
 A Rust crate for computational biology: statistics, gene set enrichment, graph
-algorithms, matrix factorisation, ontologies and a full single cell suite. It is
-the numerical core underneath the
-[bixverse](https://github.com/GregorLueg/bixverse) R package, but it has no R
-dependency of its own and can be used as a plain Rust library. The same single
-cell suite is also available in Python, see
-[Using it from Python](#using-it-from-python).
+algorithms, matrix factorisation, ontologies and a full single cell suite. It
+started out as the numerical core underneath the
+[bixverse](https://github.com/GregorLueg/bixverse) R package and primarily served
+that. Not any more: it now also sits under a Python package with about 70% of the
+R functionality, the single cell suite included, see
+[Using it from Python](#using-it-from-python). The crate itself depends on
+neither language and can be used as a plain Rust library.
 
 The code originally lived in `src/Rust/` of that R package. Pulling it out into
 its own crate means the numerics get tested, benchmarked and versioned
@@ -164,9 +165,10 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 ## Using it from Python
 
 The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
-Python package is a port of the R single cell suite with PyO3 and maturin, built
-on `bixverse-core`, `bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`. No
-R install needed. It opens the same experiment directories as R, so a directory
+Python package has about 70% of what the R package does, with the single cell
+suite as the bulk of it. It uses PyO3 and maturin, built on `bixverse-core`,
+`bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`. No R install needed. It
+opens the same experiment directories as R, so a directory
 written on one side opens on the other, and parity tests compare it against the
 R package function by function. The
 [`bixverse-gpu`](https://github.com/GregorLueg/bixverse-rs/tree/main/python/gpu)
