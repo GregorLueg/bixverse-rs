@@ -74,6 +74,26 @@ Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
 - `download_kang_pbmc()` and `download_thymus_ageing()` return h5ad files
   Python can load (R's are qs2 `SingleCellExperiment`s), and
   `download_pbmc_1k_5p()` fetches from the bixverse-data release first.
+- `verbose` takes levels and defaults to on across the Python API: `0`
+  (`False`) silent, `1` (`True`) progress, `2` extra detail where the method
+  has it. Grouped doublet runs (`group_by`) show a tqdm bar over the groups; at
+  `2` the per-group output prints as well. `calculate_integration_metrics`
+  gained `verbose`.
+- The package's log messages show without any logging setup, on stdout next to
+  what Rust prints, with warnings on stderr. The handler stands down when the
+  root logger has handlers, and
+  `logging.getLogger("bixverse").setLevel(logging.WARNING)` silences the INFO
+  lines (`"bixverse_gpu"` for the GPU wheel).
+- `bixverse.nn.train_scvi` takes `verbose` on all three backends: a tqdm bar
+  over the epochs with the current loss, and at `2` one logged line per epoch.
+
+**Notes**
+
+- `tqdm` is now a required dependency.
+- With `verbose` on by default, calls that used to be quiet now print. Pass
+  `verbose=False` to get the old behaviour back.
+- Rust progress output stays on `println!`, so the logging setup does not
+  capture it; `verbose=False` is what turns it off.
 
 ## 0.2.1
 
