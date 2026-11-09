@@ -1359,7 +1359,8 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -1505,8 +1506,8 @@ fn sparse_pca<S: SingleCellReading>(
 
 /// Calculate the PCs for single cell data (sparse)
 ///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory.
+/// Centring and scaling follow `mean_center` and `normalise_variance` and are
+/// applied implicitly inside the solver, so the matrix is never densified.
 ///
 /// ### Params
 ///
@@ -1518,7 +1519,8 @@ fn sparse_pca<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -1552,8 +1554,8 @@ pub fn pca_on_sc_sparse<S: SingleCellReading>(
 
 /// Calculate the PCs for single cell data (sparse)
 ///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory.
+/// Centring and scaling follow `mean_center` and `normalise_variance` and are
+/// applied implicitly inside the solver, so the matrix is never densified.
 ///
 /// ### Params
 ///
@@ -1565,7 +1567,8 @@ pub fn pca_on_sc_sparse<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///

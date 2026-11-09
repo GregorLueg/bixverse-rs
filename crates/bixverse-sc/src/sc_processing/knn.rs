@@ -887,19 +887,26 @@ pub fn generate_knn_with_dist(
     seed: usize,
     verbose: bool,
 ) -> ScKnnOptionVersion {
+    // By index, not position: with an exact duplicate at distance 0 the
+    // duplicate can sort ahead of self. Rows that miss self lose the furthest.
     fn remove_self(
         mut indices: Vec<Vec<usize>>,
-        distances: Option<Vec<Vec<f32>>>,
+        mut distances: Option<Vec<Vec<f32>>>,
+        k: usize,
     ) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
-        for idx_vec in indices.iter_mut() {
-            idx_vec.remove(0);
-        }
-        let distances = distances.map(|mut dists| {
-            for dist_vec in dists.iter_mut() {
-                dist_vec.remove(0);
+        for (i, idx_vec) in indices.iter_mut().enumerate() {
+            let pos = idx_vec.iter().position(|&j| j == i);
+            if let Some(p) = pos {
+                idx_vec.remove(p);
             }
-            dists
-        });
+            idx_vec.truncate(k);
+            if let Some(dists) = distances.as_mut() {
+                if let Some(p) = pos {
+                    dists[i].remove(p);
+                }
+                dists[i].truncate(k);
+            }
+        }
         (indices, distances)
     }
 
@@ -1047,7 +1054,7 @@ pub fn generate_knn_with_dist(
         }
     };
 
-    let (mut indices, mut distances) = remove_self(indices, distances);
+    let (mut indices, mut distances) = remove_self(indices, distances, knn_params.k);
     if knn_method == KnnSearch::NNDescent {
         top_up_short_rows(
             embd,
@@ -1574,6 +1581,42 @@ mod tests {
             }
         }
         assert_eq!(indices[9][0], 0);
+    }
+
+    /// Every cell has an exact duplicate, so self and its twin tie at distance
+    /// 0 and either can come first. Self has to go, the twin has to stay.
+    #[test]
+    fn test_remove_self_with_exact_duplicates() {
+        let (n, k) = (400usize, 5usize);
+        let base = clustered_data(n / 2, 8, 4);
+        let data = faer::Mat::<f32>::from_fn(n, 8, |i, j| base[(i / 2, j)]);
+
+        for method in ["exhaustive", "kmknn", "hnsw", "annoy", "ivf"] {
+            let params = KnnParams {
+                knn_method: method.to_string(),
+                ann_dist: "euclidean".to_string(),
+                k,
+                ..Default::default()
+            };
+            let (idx, dists) =
+                generate_knn_with_dist(data.as_ref(), &params, true, false, 42, false)
+                    .expect("the search must succeed");
+            let dists = dists.expect("distances were requested");
+
+            for (i, row) in idx.iter().enumerate() {
+                assert_eq!(row.len(), k, "{}: row {} length", method, i);
+                assert_eq!(dists[i].len(), k, "{}: row {} dist length", method, i);
+                assert!(!row.contains(&i), "{}: row {} contains itself", method, i);
+                if method == "exhaustive" || method == "kmknn" {
+                    assert!(
+                        row.contains(&(i ^ 1)),
+                        "{}: row {} lost its twin",
+                        method,
+                        i
+                    );
+                }
+            }
+        }
     }
 
     /// The indices-only graph path (no self-edge requested upstream) and the
