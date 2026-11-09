@@ -125,7 +125,7 @@ allowed-unresolved-imports = ["mlx.**"]
 [tool.ty.rules]
 # torch declares `nn.Module.forward` as a mutable `Callable` attribute, so every
 # module that defines `forward` trips this.
-invalid-mutable-override = "ignore"
+incompatible-mutable-override = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

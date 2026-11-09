@@ -651,7 +651,7 @@ def find_specific_markers(
     names = np.asarray(grp_names, dtype=object)
     summaries, comparisons = [], []
     for r, arm in zip(ref_idx, arms, strict=True):
-        rivals = np.asarray([k for k in range(len(grp_names)) if k != r])
+        rivals = np.asarray([k for k in range(len(grp_names)) if k != r], dtype=np.intp)
         summaries.append(
             pl.DataFrame(
                 {
