@@ -31,6 +31,12 @@ Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
 **Notes**
 
 - `duckdb`, `polars` and `tqdm` are now required dependencies.
+- Harmony v2 is the default: `bv.integrate.harmony`, `step_harmony` and
+  `build_symphony_ref` without `harmony_params` run it, and it lands under
+  `"harmony"`. The original is `harmony_v1` (`step_harmony_v1`, under
+  `"harmony_v1"`). The GPU twin is `bixverse_gpu.integrate.harmony`. In
+  bixverse 0.9.0 `harmony_sc` is still v1, so R's `"harmony"` is Python's
+  `"harmony_v1"`.
 
 ## 0.2.1
 
