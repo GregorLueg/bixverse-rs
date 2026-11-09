@@ -30,6 +30,8 @@ jobs:
     uses: GregorLueg/personal-actions/.github/workflows/python-maturin-test.yml@v1
     with:
       package: bixverse
+      # abi3-py311 and requires-python >=3.11: the shared default starts at 3.10.
+      python-versions: '["3.11","3.13"]'
       # scipy arrives via `--all-extras`; the loader tests rebuild each batch
       # into a CSR matrix to check it against the store they were written from.
       extra-deps: 'scipy'
