@@ -38,4 +38,6 @@ jobs:
       # CPU torch wheels: the default Linux resolution pulls multi-GB CUDA ones.
       # No `gpu` extra: it builds both wheels in release from source, and hosted
       # runners have no adapter, so test_gpu.py skips anyway.
+      # Cold macOS runs land close to the shared 30 min default.
+      timeout-minutes: 45
       install-args: '--extra sparse --extra torch --extra mlx --extra jax --extra embed --extra plots --torch-backend cpu'
