@@ -114,8 +114,9 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.12.0"
-source = "git+https://github.com/GregorLueg/ann-search-rs?branch=chore-clean-up#b78b89b682ed79b399a91e2a9930d5bbb43959ea"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "277e1b1e1ae3aff1ad937410e8f43891d5efaea2075b733ad1793164233ff315"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
@@ -724,7 +725,9 @@ dependencies = [
 
 [[package]]
 name = "bonsai-rs"
-version = "0.3.0"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db7663bbd438b78619fc428aec6213d2207738c77c4ae56f1b6d9ab933082f11"
 dependencies = [
  "ann-search-rs",
  "cubecl",
