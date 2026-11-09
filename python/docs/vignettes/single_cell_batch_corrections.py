@@ -342,14 +342,15 @@ plt.show()
 # number of clusters is set to one per 30 cells, capped at 100. Both versions
 # are supported and share one numerical core in Rust. They differ in the
 # diversity penalty, the ridge regression and how the ridge penalty gets set.
-# The intercept is never penalised in either. Let's start with the original:
+# The intercept is never penalised in either. `bv.integrate.harmony()` runs v2;
+# the original is `bv.integrate.harmony_v1()`. Let's start with the original:
 #
 # #### Version 1
 
 # %%
-bv.integrate.harmony(sc, "exp_id")
+bv.integrate.harmony_v1(sc, "exp_id")
 
-bv.graph.find_neighbours(sc, embd_to_use="harmony")
+bv.graph.find_neighbours(sc, embd_to_use="harmony_v1")
 
 # %% [markdown]
 # Let's calculate the batch correction-related scores.
@@ -359,7 +360,7 @@ metrics_df = pl.concat(
     [
         metrics_df,
         bv.integrate.calculate_integration_metrics(
-            sc, "exp_id", cell_type_column="cell_type", embd_to_use="harmony"
+            sc, "exp_id", cell_type_column="cell_type", embd_to_use="harmony_v1"
         ).with_columns(method=pl.lit("Harmony")),
     ]
 )
@@ -402,12 +403,12 @@ plt.show()
 # The paper's arrowhead matrix inversion for a single batch covariate is used
 # by both versions here, so v1 gets that speed-up too. v2 also runs only 4
 # k-means iterations per Harmony round versus 20 in v1. Unless you need to
-# reproduce an old v1 result, go with v2.
+# reproduce an old v1 result, go with v2, which is why it is the default.
 
 # %%
-bv.integrate.harmony_v2(sc, "exp_id")
+bv.integrate.harmony(sc, "exp_id")
 
-bv.graph.find_neighbours(sc, embd_to_use="harmony_v2")
+bv.graph.find_neighbours(sc, embd_to_use="harmony")
 
 # %% [markdown]
 # Let's calculate the batch correction-related scores.
@@ -417,7 +418,7 @@ metrics_df = pl.concat(
     [
         metrics_df,
         bv.integrate.calculate_integration_metrics(
-            sc, "exp_id", cell_type_column="cell_type", embd_to_use="harmony_v2"
+            sc, "exp_id", cell_type_column="cell_type", embd_to_use="harmony"
         ).with_columns(method=pl.lit("Harmony v2")),
     ]
 )
@@ -440,7 +441,7 @@ ax.set_title("Harmony (version 2) batch correction")
 plt.show()
 
 # %% [markdown]
-# Got a GPU? `bixverse_gpu.integrate.harmony_v2()` runs the same v2 algorithm
+# Got a GPU? `bixverse_gpu.integrate.harmony()` runs the same v2 algorithm
 # and stores the result as `"harmony_gpu"`. It takes a single batch column
 # only.
 #

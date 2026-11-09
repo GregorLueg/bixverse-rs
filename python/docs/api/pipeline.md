@@ -44,7 +44,7 @@ Worked through in [Sub-clustering and per-group pipelines](../vignettes/single_c
       heading_level: 3
       members:
         - step_harmony
-        - step_harmony_v2
+        - step_harmony_v1
         - step_bbknn
         - step_fast_mnn
 

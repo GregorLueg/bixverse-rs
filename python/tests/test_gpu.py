@@ -328,11 +328,11 @@ def test_fast_cluster_structure(sc):
 
 
 def test_harmony_v2_tracks_cpu(sc):
-    integrate.harmony_v2(sc, BATCH, harmony_params=HarmonyV2Params(k=10))
-    bg.integrate.harmony_v2(
+    integrate.harmony(sc, BATCH, harmony_params=HarmonyV2Params(k=10))
+    bg.integrate.harmony(
         sc, BATCH, harmony_params=HarmonyV2GpuParams(k=10, use_dynamic_lambda=True)
     )
-    want = sc.cache.embeddings["harmony_v2"]
+    want = sc.cache.embeddings["harmony"]
     got = sc.cache.embeddings["harmony_gpu"]
     assert got.shape == want.shape
     corr = [np.corrcoef(got[:, i], want[:, i])[0, 1] for i in range(got.shape[1])]

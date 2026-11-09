@@ -36,7 +36,7 @@ from bixverse._core.graph import (
     find_clusters,
     find_neighbours,
 )
-from bixverse._core.integrate import bbknn, fast_mnn, harmony, harmony_v2
+from bixverse._core.integrate import bbknn, fast_mnn, harmony, harmony_v1
 from bixverse._core.metacells import MetaCells, merge_meta_cells
 from bixverse._core.metacells_generate import (
     generate_bt_meta_cells,
@@ -581,7 +581,7 @@ def step_harmony(
     *,
     additional_batch_columns: Sequence[str] | None = None,
     modality: CacheModality = "rna",
-    harmony_params: HarmonyParams | None = None,
+    harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
     verbose: Verbose = True,
 ) -> Step:
@@ -612,16 +612,16 @@ def step_harmony(
 
 
 @beartype
-def step_harmony_v2(
+def step_harmony_v1(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
     modality: CacheModality = "rna",
-    harmony_params: HarmonyV2Params | None = None,
+    harmony_params: HarmonyParams | None = None,
     seed: int = 42,
     verbose: Verbose = True,
 ) -> Step:
-    """Pipeline step for `bixverse.integrate.harmony_v2`.
+    """Pipeline step for `bixverse.integrate.harmony_v1`.
 
     Args:
         batch_column: obs column with the primary batch, forwarded.
@@ -634,8 +634,8 @@ def step_harmony_v2(
             method has it, forwarded.
     """
     return Step(
-        "harmony_v2",
-        harmony_v2,
+        "harmony_v1",
+        harmony_v1,
         {
             "batch_column": batch_column,
             "additional_batch_columns": additional_batch_columns,

@@ -103,7 +103,7 @@ def test_step_arguments_bind_up_front():
         (pipeline.step_neighbours, graph.find_neighbours, ()),
         (pipeline.step_clusters, graph.find_clusters, ()),
         (pipeline.step_harmony, integrate.harmony, ()),
-        (pipeline.step_harmony_v2, integrate.harmony_v2, ()),
+        (pipeline.step_harmony_v1, integrate.harmony_v1, ()),
         (pipeline.step_bbknn, integrate.bbknn, ()),
         (pipeline.step_fast_mnn, integrate.fast_mnn, ()),
     ],

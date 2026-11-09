@@ -17,7 +17,7 @@ Worked through in [Batch correction with bixverse](../vignettes/single_cell_batc
       heading_level: 3
       members:
         - harmony
-        - harmony_v2
+        - harmony_v1
         - fast_mnn
         - seurat_cca
         - seurat_rpca

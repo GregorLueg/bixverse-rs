@@ -403,7 +403,7 @@
 # (~4 seconds):
 #
 # ```python
-# bv.integrate.harmony_v2(sc, "sample")
+# bv.integrate.harmony(sc, "sample")
 # ```
 #
 # If you have a GPU at hand, you can also just use the GPU version (also 4
@@ -414,7 +414,7 @@
 # `"harmony_gpu"` embedding.
 #
 # ```python
-# bvg.integrate.harmony_v2(sc, "sample")
+# bvg.integrate.harmony(sc, "sample")
 # ```
 #
 # We overwrite the kNN graph with the now batch-corrected embedding:
@@ -422,7 +422,7 @@
 # ```python
 # bvg.graph.find_neighbours(
 #     sc,
-#     embd_to_use="harmony_gpu",  # or harmony_v2 if you just did the CPU version
+#     embd_to_use="harmony_gpu",  # or harmony if you just did the CPU version
 #     knn_params=KnnGpuDefaults(knn_method="nndescent"),
 #     verbose=True,
 # )
@@ -453,7 +453,7 @@
 # ```python
 # fast_cluster_res = bv.graph.fast_cluster(
 #     sc,
-#     embd_to_use="harmony_gpu",  # or harmony_v2 if you just did the CPU version
+#     embd_to_use="harmony_gpu",  # or harmony if you just did the CPU version
 #     return_kmeans=False,
 #     n_seeds=10,
 #     verbose=True,

@@ -2,7 +2,7 @@
 
 The work runs in Rust; this layer reads the batch labels from obs by name
 and writes the corrected embeddings to `sc.cache.embeddings` (`"harmony"`,
-`"harmony_v2"`, `"mnn"`, `"cca"`, `"rpca"`), BBKNN's kNN and neighbour graph
+`"harmony_v1"`, `"mnn"`, `"cca"`, `"rpca"`), BBKNN's kNN and neighbour graph
 to `sc.cache.knn` and `sc.cache.connectivities`, each stamped with its
 parents. The metrics return records and leave the experiment alone.
 
@@ -383,13 +383,69 @@ def harmony(
     *,
     additional_batch_columns: Sequence[str] | None = None,
     modality: CacheModality = "rna",
+    harmony_params: HarmonyV2Params | None = None,
+    seed: int = 42,
+    verbose: Verbose = True,
+) -> None:
+    """Harmony (v2) on the PCA.
+
+    The corrected embedding goes to the modality's `embeddings["harmony"]`,
+    stamped as derived from `"pca"`. The original algorithm is `harmony_v1`.
+
+    Args:
+        sc: The experiment, with a PCA.
+        batch_column: obs column with the primary batch.
+        additional_batch_columns: Further obs columns to regress out.
+        modality: The PCA to correct and the cache to write: `"rna"`, or
+            `"adt"` on a `SingleCellsMultiModal`.
+        harmony_params: The parameters. `None` uses the defaults; a `None`
+            `k` becomes `min(round(n_cells / 30), 100)`.
+        seed: Seed.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+
+    Raises:
+        ValueError: If the PCA is stale, or a batch column is missing or
+            incomplete.
+
+    References:
+        Patikas, et al., bioRxiv, 2026.
+
+    Examples:
+        >>> bv.integrate.harmony(sc, "batch_index")
+        >>> bv.integrate.harmony(
+        ...     sc,
+        ...     "batch_index",
+        ...     harmony_params=bv.params.HarmonyV2Params(theta=(4.0,)),
+        ... )
+    """
+    _harmony(
+        sc,
+        batch_column,
+        additional_batch_columns,
+        harmony_params or HarmonyV2Params(),
+        "harmony",
+        _bixverse.harmony_v2,
+        modality,
+        seed,
+        verbose,
+    )
+
+
+@beartype
+def harmony_v1(
+    sc: ScOrScSubset,
+    batch_column: str,
+    *,
+    additional_batch_columns: Sequence[str] | None = None,
+    modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
     verbose: Verbose = True,
 ) -> None:
-    """Harmony on the PCA.
+    """The original Harmony (v1) on the PCA.
 
-    The corrected embedding goes to the modality's `embeddings["harmony"]`,
+    The corrected embedding goes to the modality's `embeddings["harmony_v1"]`,
     stamped as derived from `"pca"`.
 
     Args:
@@ -410,70 +466,14 @@ def harmony(
 
     References:
         Korsunsky, et al., Nat Methods, 2019.
-
-    Examples:
-        >>> bv.integrate.harmony(sc, "batch_index")
-        >>> bv.integrate.harmony(
-        ...     sc,
-        ...     "batch_index",
-        ...     harmony_params=bv.params.HarmonyParams(theta=(4.0,)),
-        ... )
     """
     _harmony(
         sc,
         batch_column,
         additional_batch_columns,
         harmony_params or HarmonyParams(),
-        "harmony",
+        "harmony_v1",
         _bixverse.harmony,
-        modality,
-        seed,
-        verbose,
-    )
-
-
-@beartype
-def harmony_v2(
-    sc: ScOrScSubset,
-    batch_column: str,
-    *,
-    additional_batch_columns: Sequence[str] | None = None,
-    modality: CacheModality = "rna",
-    harmony_params: HarmonyV2Params | None = None,
-    seed: int = 42,
-    verbose: Verbose = True,
-) -> None:
-    """Harmony v2 on the PCA.
-
-    The corrected embedding goes to the modality's `embeddings["harmony_v2"]`,
-    stamped as derived from `"pca"`.
-
-    Args:
-        sc: The experiment, with a PCA.
-        batch_column: obs column with the primary batch.
-        additional_batch_columns: Further obs columns to regress out.
-        modality: The PCA to correct and the cache to write: `"rna"`, or
-            `"adt"` on a `SingleCellsMultiModal`.
-        harmony_params: The parameters. `None` uses the defaults; a `None`
-            `k` becomes `min(round(n_cells / 30), 100)`.
-        seed: Seed.
-        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
-            method has it.
-
-    Raises:
-        ValueError: If the PCA is stale, or a batch column is missing or
-            incomplete.
-
-    References:
-        Patikas, et al., bioRxiv, 2026.
-    """
-    _harmony(
-        sc,
-        batch_column,
-        additional_batch_columns,
-        harmony_params or HarmonyV2Params(),
-        "harmony_v2",
-        _bixverse.harmony_v2,
         modality,
         seed,
         verbose,

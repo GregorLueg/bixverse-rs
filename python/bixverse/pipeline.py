@@ -48,7 +48,7 @@ bv.pipeline.apply_pipeline(bv.pipeline.step_hvg(hvg_no=500) >> gpu_pca, sc)
 fails there, and the class check runs before the first step does, so a bad
 chain fails before the expensive part. Order is on you otherwise: clusters and
 meta cells need `step_neighbours` first, which needs the PCA. The integration
-steps (`step_harmony`, `step_harmony_v2`, `step_bbknn`, `step_fast_mnn`) take a
+steps (`step_harmony`, `step_harmony_v1`, `step_bbknn`, `step_fast_mnn`) take a
 `SingleCells` or a subset, not `MetaCells`, so they go before `step_metacells`.
 `step_fast_mnn` wants the batch-aware HVGs from `bv.pp.find_hvg_batch_aware`.
 After `step_harmony`, point `step_neighbours` at it with
@@ -66,7 +66,7 @@ from bixverse._core.pipeline import (
     step_clusters,
     step_fast_mnn,
     step_harmony,
-    step_harmony_v2,
+    step_harmony_v1,
     step_hvg,
     step_metacells,
     step_neighbours,
@@ -84,7 +84,7 @@ __all__ = [
     "step_clusters",
     "step_fast_mnn",
     "step_harmony",
-    "step_harmony_v2",
+    "step_harmony_v1",
     "step_hvg",
     "step_metacells",
     "step_neighbours",

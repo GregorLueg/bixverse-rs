@@ -125,16 +125,17 @@ print(f"{qc.combined.sum()} of {qc.combined.size} cells flagged")
 # ### HVGs, PCA, Harmony v2
 #
 # This block is the Harmony v2 path of the batch correction vignette: pick HVGs,
-# run PCA, run Harmony v2. Version 1 is still available via
-# `bv.integrate.harmony()` and `HarmonyParams`, but v2 is preferable in most
-# settings (see the batch correction vignette for the reasoning).
+# run PCA, run Harmony v2, which is what `bv.integrate.harmony()` runs. Version
+# 1 is still available via `bv.integrate.harmony_v1()` and `HarmonyParams`, but
+# v2 is preferable in most settings (see the batch correction vignette for the
+# reasoning).
 
 # %%
 bv.pp.find_hvg(sc_ref, hvg_no=2000, verbose=True)
 
 bv.pp.calculate_pca(sc_ref, no_pcs=30)
 
-bv.integrate.harmony_v2(sc_ref, "exp_id", harmony_params=HarmonyV2Params())
+bv.integrate.harmony(sc_ref, "exp_id", harmony_params=HarmonyV2Params())
 
 # %% [markdown]
 # ## Which graph to cluster on
@@ -164,7 +165,7 @@ rows = []
 for graph_type in graph_types:
     bv.graph.find_neighbours(
         sc_ref,
-        embd_to_use="harmony_v2",
+        embd_to_use="harmony",
         neighbours_params=NeighboursParams(knn_sym=graph_type),
     )
     for res in resolutions:
@@ -191,11 +192,11 @@ n_clusters.pivot("graph", index="resolution", values="n_clusters")
 # %%
 bv.graph.find_neighbours(
     sc_ref,
-    embd_to_use="harmony_v2",
+    embd_to_use="harmony",
     neighbours_params=NeighboursParams(),
 )
 
-bv.embed.umap(sc_ref, embd_to_use="harmony_v2", slot_name="umap_harm_v2")
+bv.embed.umap(sc_ref, embd_to_use="harmony", slot_name="umap_harm_v2")
 
 # %% [markdown]
 # ## Clustering
@@ -329,14 +330,14 @@ fc_resolutions = (2.0, 1.5, 1.0, 0.5)
 
 fc_knn = bv.graph.fast_cluster(
     sc_ref,
-    embd_to_use="harmony_v2",
+    embd_to_use="harmony",
     resolutions=fc_resolutions,
     n_seeds=10,
 )
 
 fc_cell_med = bv.graph.fast_cluster(
     sc_ref,
-    embd_to_use="harmony_v2",
+    embd_to_use="harmony",
     resolutions=fc_resolutions,
     fc_params=FastClusterParams(cell_mediated=True),
     n_seeds=10,

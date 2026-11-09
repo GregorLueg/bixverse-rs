@@ -13,7 +13,7 @@ from bixverse import graph, integrate, pp
 from bixverse.params import (
     BbknnParams,
     FastmnnParams,
-    HarmonyParams,
+    HarmonyV2Params,
     MinQualityParams,
     SeuratRpcaParams,
     SyntheticDataParams,
@@ -60,18 +60,20 @@ def test_harmony_stamps_from_pca(sc):
     assert sc.cache.stamps["harmony"].parents == (sc.cache.stamps["pca"].id,)
     # the default k is min(round(n / 30), 100): same result when given
     auto = embd.copy()
-    integrate.harmony(sc, BATCH, harmony_params=HarmonyParams(k=round(sc.n_cells / 30)))
+    integrate.harmony(
+        sc, BATCH, harmony_params=HarmonyV2Params(k=round(sc.n_cells / 30))
+    )
     np.testing.assert_array_equal(sc.cache.embeddings["harmony"], auto)
 
 
 def test_harmony_feeds_find_neighbours(sc):
-    integrate.harmony_v2(sc, BATCH)
-    graph.find_neighbours(sc, embd_to_use="harmony_v2")
+    integrate.harmony_v1(sc, BATCH)
+    graph.find_neighbours(sc, embd_to_use="harmony_v1")
     ids = {a: s.id for a, s in sc.cache.stamps.items()}
-    assert sc.cache.stamps["knn"].parents == (ids["harmony_v2"],)
+    assert sc.cache.stamps["knn"].parents == (ids["harmony_v1"],)
     pp.calculate_pca(sc, 10)
     stale = sc.cache_status().filter(pl.col("stale"))["artefact"].to_list()
-    assert stale == ["harmony_v2", "knn", "connectivities"]
+    assert stale == ["harmony_v1", "knn", "connectivities"]
 
 
 def test_harmony_refuses_stale_pca(sc):

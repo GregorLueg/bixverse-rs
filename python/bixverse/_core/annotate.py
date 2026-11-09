@@ -614,8 +614,8 @@ def build_symphony_ref(
         hvg: 0-based HVG indices into the experiment's genes, e.g.
             `sc.map.hvg`.
         additional_batch_columns: Further obs columns to correct for.
-        harmony_params: `HarmonyParams` (v1) or `HarmonyV2Params` (v2).
-            `None` is v1 with the defaults; a `None` `k` becomes
+        harmony_params: `HarmonyV2Params` (v2) or `HarmonyParams` (v1).
+            `None` is v2 with the defaults; a `None` `k` becomes
             `min(round(n_cells / 30), 100)`.
         pca_params: The PCA parameters. `None` uses the defaults.
         no_pcs: Number of principal components.
@@ -642,7 +642,7 @@ def build_symphony_ref(
         Kang, et al., Nat Commun, 2021.
     """
     check_range("no_pcs", no_pcs, 1, None, False, True)
-    harmony_params = harmony_params or HarmonyParams()
+    harmony_params = harmony_params or HarmonyV2Params()
     version = "v2" if isinstance(harmony_params, HarmonyV2Params) else "v1"
     hvg_idx = np.asarray(hvg)
     if (

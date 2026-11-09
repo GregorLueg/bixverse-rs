@@ -4,7 +4,7 @@ Harmony and fastMNN write their corrected embedding as `"harmony_gpu"` and
 `"mnn_gpu"`, stamped as derived from `"pca"`; BBKNN writes
 the kNN and the connectivities as `bixverse.integrate.bbknn` does.
 
-    >>> harmony_v2(sc, "batch")
+    >>> harmony(sc, "batch")
     >>> bixverse_gpu.graph.find_neighbours(sc, embd_to_use="harmony_gpu")
 
 Unlike `bixverse.integrate.fast_mnn`, the GPU fastMNN corrects the PCA in the
@@ -30,14 +30,14 @@ from bixverse_gpu.params import BbknnGpuParams, FastmnnGpuParams, HarmonyV2GpuPa
 __all__ = [
     "bbknn",
     "fast_mnn",
-    "harmony_v2",
+    "harmony",
 ]
 
 logger = logging.getLogger(__name__)
 
 
 @beartype
-def harmony_v2(
+def harmony(
     sc: ScOrScSubset,
     batch_column: str,
     *,

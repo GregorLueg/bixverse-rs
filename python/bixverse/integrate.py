@@ -1,14 +1,15 @@
 """Batch correction and integration metrics.
 
-Pick a correction, then check it. `harmony` (and `harmony_v2`) correct the cached
-PCA. `fast_mnn`, `seurat_cca` and `seurat_rpca` work from the counts of the
-batch-aware HVGs, so run `bv.pp.find_hvg_batch_aware` first and hand them its
-`hvg_gene_idx`. `bbknn` skips the embedding and builds a batch-balanced kNN
-instead. The `calculate_*` functions score the result, and
-`calculate_integration_metrics` runs the lot and returns one row.
+Pick a correction, then check it. `harmony` (v2) and `harmony_v1` (the
+original) correct the cached PCA. `fast_mnn`, `seurat_cca` and `seurat_rpca`
+work from the counts of the batch-aware HVGs, so run
+`bv.pp.find_hvg_batch_aware` first and hand them its `hvg_gene_idx`. `bbknn`
+skips the embedding and builds a batch-balanced kNN instead. The `calculate_*`
+functions score the result, and `calculate_integration_metrics` runs the lot
+and returns one row.
 
 **What lands where.** Harmony, fastMNN, CCA and rPCA write a corrected
-embedding to `sc.cache.embeddings` under `"harmony"`, `"harmony_v2"`, `"mnn"`,
+embedding to `sc.cache.embeddings` under `"harmony"`, `"harmony_v1"`, `"mnn"`,
 `"cca"` and `"rpca"`. `bbknn` writes `sc.cache.knn` and
 `sc.cache.connectivities`, replacing what is there. All are stamped. The
 metrics return records (or a table) and leave the experiment alone. Everything
@@ -56,7 +57,7 @@ from bixverse._core.integrate import (
     calculate_pcr,
     fast_mnn,
     harmony,
-    harmony_v2,
+    harmony_v1,
     seurat_cca,
     seurat_rpca,
 )
@@ -78,7 +79,7 @@ __all__ = [
     "calculate_pcr",
     "fast_mnn",
     "harmony",
-    "harmony_v2",
+    "harmony_v1",
     "seurat_cca",
     "seurat_rpca",
 ]

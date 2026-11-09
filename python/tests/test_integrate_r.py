@@ -46,6 +46,8 @@ BATCH = "batch_index"
 CCA = SeuratCcaParams(num_cc=10, dims=10, k_filter=50, k_weight=50, n_top_features=50)
 RPCA = SeuratRpcaParams(dims=10, k_weight=50)
 MNN = FastmnnParams(no_pcs=15, k=10)
+# R's harmony_sc is still v1, so its "harmony" is our "harmony_v1"
+R_HARMONY = "harmony_v1"
 
 
 pytestmark = pytest.mark.skipif(not r_available(), reason=R_SKIP_REASON)
@@ -80,7 +82,7 @@ def sc(ref, tmp_path):
 def sc_corrected(ref, sc):
     """The experiment with R's metric inputs: Harmony, fastMNN and the
     default neighbours on the PCA."""
-    integrate.harmony(sc, BATCH)
+    integrate.harmony_v1(sc, BATCH)
     integrate.fast_mnn(sc, BATCH, ref["batch_hvg"], fastmnn_params=MNN)
     graph.find_neighbours(sc)
     return sc
@@ -126,32 +128,32 @@ def _close(got: object, want: object, rtol: float = RTOL_F64) -> None:
 ###########
 
 
-def test_harmony_matches_r(ref, sc):
-    integrate.harmony(sc, BATCH, seed=42)
-    _same_embedding(sc.cache.embeddings["harmony"], ref["harmony"])
+def test_harmony_v1_matches_r(ref, sc):
+    integrate.harmony_v1(sc, BATCH, seed=42)
+    _same_embedding(sc.cache.embeddings["harmony_v1"], ref["harmony"])
     status = sc.cache_status()
-    assert status["artefact"].to_list() == ["pca", "harmony"]
+    assert status["artefact"].to_list() == ["pca", "harmony_v1"]
     assert status["parents"].to_list()[1] == [sc.cache.stamps["pca"].id]
 
 
-def test_harmony_multi_covariate_matches_r(ref, sc):
-    integrate.harmony(
+def test_harmony_v1_multi_covariate_matches_r(ref, sc):
+    integrate.harmony_v1(
         sc,
         BATCH,
         additional_batch_columns=["sample_id"],
         harmony_params=HarmonyParams(k=12, theta=(2.0, 1.0), k_means_init="random"),
         seed=7,
     )
-    _same_embedding(sc.cache.embeddings["harmony"], ref["harmony_multi"])
+    _same_embedding(sc.cache.embeddings["harmony_v1"], ref["harmony_multi"])
 
 
 def test_harmony_v2_matches_r(ref, sc):
-    integrate.harmony_v2(sc, BATCH, seed=42)
-    _same_embedding(sc.cache.embeddings["harmony_v2"], ref["harmony_v2"])
+    integrate.harmony(sc, BATCH, seed=42)
+    _same_embedding(sc.cache.embeddings["harmony"], ref["harmony_v2"])
 
 
 def test_harmony_v2_fixed_lambda_matches_r(ref, sc):
-    integrate.harmony_v2(
+    integrate.harmony(
         sc,
         BATCH,
         harmony_params=HarmonyV2Params(
@@ -159,7 +161,7 @@ def test_harmony_v2_fixed_lambda_matches_r(ref, sc):
         ),
         seed=3,
     )
-    _same_embedding(sc.cache.embeddings["harmony_v2"], ref["harmony_v2_fixed"])
+    _same_embedding(sc.cache.embeddings["harmony"], ref["harmony_v2_fixed"])
 
 
 ###########
@@ -286,7 +288,7 @@ def test_lisi_matches_r(ref, sc_corrected, key, column, kwargs):
     ("key", "kwargs"),
     [
         ("batch_asw", {}),
-        ("batch_asw_sub", {"embd_to_use": "harmony", "max_cells": 300, "seed": 11}),
+        ("batch_asw_sub", {"embd_to_use": R_HARMONY, "max_cells": 300, "seed": 11}),
     ],
 )
 def test_batch_asw_matches_r(ref, sc_corrected, key, kwargs):
@@ -297,11 +299,11 @@ def test_batch_asw_matches_r(ref, sc_corrected, key, kwargs):
     _close(got.mean_asw, want["mean_asw"], RTOL_F32)
     _close(got.median_asw, want["median_asw"], RTOL_F32)
     assert got.n_batches == want["n_batches"]
-    assert got.embedding_used == want["embedding_used"]
+    assert got.embedding_used == want["embedding_used"].replace("harmony", R_HARMONY)
 
 
 @pytest.mark.parametrize(
-    ("key", "embd"), [("pcr_pca", "pca"), ("pcr_harmony", "harmony")]
+    ("key", "embd"), [("pcr_pca", "pca"), ("pcr_harmony", R_HARMONY)]
 )
 def test_pcr_matches_r(ref, sc_corrected, key, embd):
     want = ref[key]
@@ -341,7 +343,7 @@ def test_graph_connectivity_matches_r(ref, sc_corrected):
 @pytest.mark.parametrize(
     ("key", "kwargs"),
     [
-        ("summary", {"cell_type_column": "cell_grp", "embd_to_use": "harmony"}),
+        ("summary", {"cell_type_column": "cell_grp", "embd_to_use": R_HARMONY}),
         ("summary_no_embedding", {"embd_to_use": None}),
     ],
 )
@@ -352,7 +354,8 @@ def test_integration_metrics_match_r(ref, sc_corrected, key, kwargs):
         got = integrate.calculate_integration_metrics(sc_corrected, BATCH, **kwargs)
     assert got.columns == list(want)
     row = got.row(0, named=True)
-    assert row["embedding"] == want["embedding"]
+    want_embd = want["embedding"]
+    assert row["embedding"] == (want_embd and want_embd.replace("harmony", R_HARMONY))
     for col in got.columns[1:]:
         if want[col] is None:
             assert row[col] is None, col
