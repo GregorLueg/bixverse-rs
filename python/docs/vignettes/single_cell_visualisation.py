@@ -112,7 +112,7 @@ plt.show()
 # ## Violin QC plots
 #
 # `violin_plot()` shows the distribution of each QC metric as a violin, split by
-# donor (or any grouping variable stored in the `qc` object).
+# sample (or any grouping variable stored in the `qc` object).
 
 # %%
 bv.pl.violin_plot(qc, group_name="sample")
@@ -418,7 +418,8 @@ df.head()
 #
 # - **Dot size**: fraction of cells in the group expressing the gene (at least
 #   one count)
-# - **Dot colour**: mean (scaled) expression among expressing cells
+# - **Dot colour**: mean (scaled) expression over all cells of the group,
+#   zeros included
 
 # %%
 bv.pl.dot_plot(
@@ -441,7 +442,7 @@ plt.show()
 # | `features` | Ensembl IDs to plot |
 # | `feature_labels` | Display names shown on the axis |
 # | `grouping_variable` | Cell metadata column defining rows |
-# | `scale_exp` | Scale expression per gene (z-score) |
+# | `scale_exp` | Min-max scale the group means per gene |
 # | `feature_grouping` | Dict mapping gene to group label for the x-axis brackets |
 # | `cluster_groups` | Hierarchically cluster rows by expression profile |
 #

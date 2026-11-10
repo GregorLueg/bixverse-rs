@@ -279,7 +279,9 @@ scdblfinder = bv.doublets.scdblfinder(
 scdblfinder
 
 # %% [markdown]
-# The scores are similar to the other methods.
+# scDblFinder calls more doublets than the expected rate (16.4% against 12%).
+# Compared with the other methods its precision is lower (0.56) and its recall
+# higher (0.85), at a similar F1.
 
 # %%
 scdblfinder_df = with_calls(bv.doublets.get_data(scdblfinder))
@@ -333,9 +335,11 @@ pl.DataFrame({"weighted": weighted_scores, "cxds": cxds_scores}).describe()
 # ### Conclusion
 #
 # All methods can help to identify doublets in your data in a data-driven way.
-# In a comparison paper scDblFinder is the best across different benchmark data
-# sets, see [here](https://www.cell.com/cell-systems/fulltext/S2405-4712(20)30459-2).
-# Which one wins on this data set is in the metrics above.
+# In a later re-evaluation by Xi and Li, scDblFinder came out on top across
+# different benchmark data sets, see
+# [Germain et al., 2021](https://doi.org/10.12688/f1000research.73600.2). Here
+# it has the highest recall and the lowest precision of the five runs. Which
+# one wins on this data set is in the metrics above.
 #
 # ## Clean up
 

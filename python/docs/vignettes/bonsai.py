@@ -269,8 +269,8 @@ plt.show()
 
 # %% [markdown]
 # Every cell type gets its own subtree, and none of that was told to Bonsai: the
-# annotation only colours the leaves. The CD16+ monocytes sit inside the
-# monocyte subtree rather than next to it, and the NK cells branch off close to
+# annotation only colours the leaves. The CD16+ monocytes form their own
+# clump next to the CD14+ monocytes, and the NK cells branch off close to
 # the T cells, which is what you would expect from their biology. Branch length
 # is change, so the long isolated branches are cells that look like nothing
 # else in the data.
@@ -377,15 +377,15 @@ plt.show()
 # `bixverse_gpu.trees.bonsai()` takes the same arguments, returns the same
 # `BonsaiTree`, and runs Sanity on the device.
 #
-# On 10,000 simulated cells with all 16,974 genes as candidates (M1 Max, ten
-# cores):
+# On the 2,399 PBMCs of this vignette with every gene as a candidate (M1 Max,
+# ten cores, mean of two runs):
 #
 # | | Sanity | Bonsai search | total |
 # |---|---|---|---|
-# | CPU | 60 s | 80 s | 140 s |
-# | GPU | 5 s | 80 s | 65 s |
+# | CPU | 9.6 s | 14.6 s | 24.2 s |
+# | GPU | 1.0 s | 14.6 s | 15.6 s |
 #
-# Both kept the same 2,751 genes. With Sanity on the GPU the tree search is the
+# Both kept the same 348 genes. With Sanity on the GPU the tree search is the
 # clear cost, and that is where 100k cells will hurt. Metacells are the way
 # around it: compress first and the tree has a few thousand leaves instead of
 # 100k.

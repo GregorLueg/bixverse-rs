@@ -534,7 +534,9 @@ plt.show()
 # disproportionally samples the medium density regions of the manifold and is
 # basically proportion-based. SEACells on the other hand generates meta cells
 # that capture sparse (more heterogeneous) regions of the manifold. SuperCells
-# sits between the two methods. MetaCells2 looks a lot like hdWGCNA here, if
+# is closer to SEACells: few meta cells in the high density regions (13%) and a
+# large low density share (42%, against 51% and 23%), with its mid share (45%)
+# between the two. MetaCells2 looks a lot like hdWGCNA here, if
 # anything with a stronger pull towards the dense regions.
 #
 # ### Compactness and separation
@@ -961,8 +963,10 @@ print(f"stability: {mc_nmf_diag['stability']:.3f}")
 mc_nmf_diag["cluster_sizes"]
 
 # %% [markdown]
-# With 10 restarts, a cluster of 10 is a programme every run found. A thin one
-# is a programme only some initialisations saw.
+# With 10 restarts, a cluster of 10 is roughly a programme every run found. A
+# cluster above 10 (cluster 4 here) means a run contributed more than one
+# component to it, and a thin one (cluster 2) is a programme only some
+# initialisations saw.
 #
 # `w` (genes x k) and `h` (k x meta cells) come back in the same shape the
 # single-run `nmf()` gives you, so the activations drop straight onto the UMAP:

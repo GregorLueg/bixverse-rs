@@ -255,10 +255,9 @@ subset_hvg = t_cells.map.hvg
 len(np.intersect1d(global_hvg, subset_hvg))
 
 # %% [markdown]
-# Around a thousand of the 2000 genes are different, and the ones that dropped out
-# are the monocyte and B cell markers that were carrying the global PCA. The
-# subset PCA is built on genes that vary *within* T cells, which is the whole
-# point.
+# 984 of the 2000 genes are shared, so around half of the feature set is
+# different. The subset PCA is built on genes that vary *within* T cells, which
+# is the whole point.
 
 # %%
 bv.pl.embedding_plot(
@@ -400,8 +399,9 @@ b_cells
 # Sizing matters here. PCA with 20 components needs more than 20 cells, so a rare
 # population that the annotation happened to call will fall over and take the
 # whole run with it. Restrict the groups explicitly rather than hoping for the
-# best. On this data set the coarse annotation returned five lineages, and the
-# 24 DCs don't clear the bar, so they stay out.
+# best. On this data set the coarse annotation returned five lineages. The cell
+# below keeps groups with at least 100 cells, a safe margin over what the PCA
+# needs, so the 24 DCs stay out.
 
 # %%
 cell_counts = sc.obs(filtered=True)["cell_type"].value_counts(sort=True)

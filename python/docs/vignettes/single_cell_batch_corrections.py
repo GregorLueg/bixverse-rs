@@ -674,9 +674,10 @@ plt.show()
 # - **Harmony** is a good default. It is fast, operates on the PCA embedding
 #   directly, and handles multiple batch variables simultaneously. It tends to
 #   work well when batch effects are moderate and cell type composition is
-#   broadly similar across batches. Version 2 is quite an improvement: it
-#   needs the same cells across the batches less, and is substantially faster
-#   when you provide only one batch effect to regress out.
+#   broadly similar across batches. Version 2 prunes batches per cluster and sets
+#   the ridge penalty dynamically. On this data set it is not an improvement:
+#   v1 is ahead on kBET acceptance and PCR, the rest is tied, and v2 is only
+#   modestly faster (46 ms against 51 ms).
 # - **fastMNN** is worth considering when cell type composition differs
 #   substantially across batches. The mutual nearest neighbour approach is less
 #   sensitive to this because it only aligns cells that have a plausible

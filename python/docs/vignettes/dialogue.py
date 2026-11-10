@@ -38,8 +38,9 @@
 # > Because stage one works on per-sample averages, DIALOGUE needs **multiple
 # > samples and multiple cell types, with every cell type captured in every
 # > sample**. `bixverse` hard-errors below five samples present in all cell
-# > types, and drops samples that do not clear `abn_c` cells for a given cell
-# > type.
+# > types, and in stage two drops samples with fewer than
+# > `DialogueHlmParams.min_cells_per_sample` cells (default 2) for a cell type.
+# > (`abn_c` only gates the feature-level ANOVA.)
 # >
 # > This is the thing that catches people out. A beautiful 500k cell atlas from
 # > one donor is useless here. Ten scrappy biopsies are not.
@@ -389,8 +390,10 @@ quality_cor(score_lib, "mcp_00")
 # Much better. Two things to notice about what changed and what did not.
 #
 # The programme table and the p-values are **identical** to the first run. That
-# is not a bug: the quality covariate only enters stage two, so stage one's
-# decomposition and its permutation null never saw it.
+# is not a bug: the quality covariate does enter stage one (the provisional
+# signatures hold it fixed in a partial correlation) and residualises the
+# programme scores, but the programme table and its permutation p-values come
+# out quality-independent.
 
 # %%
 assert dlg_res.programmes.equals(dlg_lib.programmes)
@@ -433,7 +436,7 @@ per_sample_test(score_lib, "mcp_00")
 #   matching the original analysis. Using the biopsy instead (sample and
 #   `clinical_status` pasted together) would let the inflamed and non-inflamed
 #   samples from one patient separate, at the cost of samples that then fall
-#   below `abn_c`.
+#   below `min_cells_per_sample`.
 # - **Meta cells have to be built within samples.** Otherwise the random
 #   intercept has no well-defined level. `bv.metacells.meta_cells_per_group()`
 #   with `group_col` set to your sample column does exactly that, and

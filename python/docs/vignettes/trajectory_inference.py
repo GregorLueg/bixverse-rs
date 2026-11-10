@@ -505,7 +505,8 @@ fig.legend(
 plt.show()
 
 # %% [markdown]
-# `CD34` falls away from the root, `GATA1` climbs on the erythroid arm, `MPO` on
+# `CD34` peaks early on the DC and monocyte arms and then falls on all three,
+# `GATA1` climbs on the erythroid arm, `MPO` on
 # the monocyte one, `IRF8` on the dendritic one. Set `use_magic=True` to fit the
 # imputed layer instead, which is what the reference notebook does. Note that the
 # GP already smooths over pseudotime, so imputing first smooths twice.

@@ -329,7 +329,7 @@ sc.cache_status().select("artefact", "stale", "reason")
 # you assigned `sc.cache.pca_factors` yourself, which drops the stamp) report
 # as unstamped and pass, because nothing is known about them either way. And the
 # stamp tracks provenance, not parameters: a kNN built on the first 5 PCs and
-# one built on all 15 of the same PCA look identical to it. Neither of those can
+# one built on all 10 of the same PCA look identical to it. Neither of those can
 # produce an index mismatch, which is what this is here to stop.
 #
 # If you want to go back to a clean slate, `reset_cells_to_keep()` restores
@@ -371,8 +371,8 @@ print(type(csr))
 # Fewer than 50 rows? `get_counts` respects the cells to keep by default, so of
 # the first 50 store cells you only get the kept ones back (more on that below).
 # This is the smart way: rows are cells, so Rust ONLY loads the cells that are
-# needed. The stupid way is to pull everything and slice afterwards. The impact
-# of this can be seen here:
+# needed. The stupid way is to pull everything and slice afterwards. Timing
+# both on this toy data set:
 
 # %%
 n_rep = 10

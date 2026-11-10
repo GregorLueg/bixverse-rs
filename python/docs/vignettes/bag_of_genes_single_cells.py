@@ -213,8 +213,9 @@ sc.obs(filtered=True).head()
 #   the one to use for SCENIC.
 # - `"wilcox"` is the AUC from the Mann-Whitney U statistic over the full
 #   ranking. Its null sits at 0.5 whatever the gene set size, which makes it a
-#   safe pick for pathway activity, but the flatter score does not split into
-#   on/off populations.
+#   safe pick for pathway activity, but the flatter score splits less cleanly
+#   into on/off populations than `"recovery"` (the four lineage scores below
+#   still binarise as bimodal).
 # - `"ap"` is average precision. Most top-heavy of the three, but its null
 #   tracks gene set prevalence, so don't compare raw values across sets of
 #   different size unless you switch `standardise` on.
@@ -448,9 +449,10 @@ scenic_res
 # `importance score >= mean(importance_score) + n_sd * sd(importance_score)`
 # for that gene are kept. Note that `n_sd` should be adjusted depending on the
 # learner: RF and ExtraTrees spread importance more evenly across TFs than
-# GRNBoost2, so a lower threshold (e.g. `n_sd=1`) is appropriate, whereas
+# GRNBoost2, so a lower threshold keeps more TFs per gene, whereas
 # GRNBoost2 concentrates importance onto fewer TFs and tolerates `n_sd=1.5` or
-# even `n_sd=2`.
+# even `n_sd=2`. Below we use the strict `n_sd=2.0` on the random forest too,
+# which keeps only the strongest TFs per gene.
 
 # %%
 scenic_res = bv.pathways.identify_tf_to_genes(scenic_res, n_sd=2.0, verbose=True)
@@ -824,8 +826,8 @@ plt.show()
 # `density_threshold=2` turns the outlier filter off, since cosine distance
 # cannot exceed 2. Left on, components whose neighbours sit too far away get
 # dropped, and if fewer than `k` survive the fit errors instead of returning
-# something degenerate. Sensible on real data with enough restarts; with 8 it
-# fires more often than it should. `get_stability()` gives you the
+# something degenerate. Sensible on real data with enough restarts; with only a
+# handful of them it fires more often than it should. `get_stability()` gives you the
 # `local_density` values to pick a real threshold from.
 
 # %%

@@ -5,15 +5,15 @@
 #
 # ## Intro
 #
-# You have 3,000 monocytes from eight donors and you want to know which genes
+# You have 5,355 monocytes from eight donors and you want to know which genes
 # respond to a treatment. The obvious move is a Wilcoxon test over cells. It is
 # also the wrong one, and the reason is worth being precise about.
 #
-# Those 3,000 cells are not 3,000 independent observations. They came from eight
+# Those 5,355 cells are not 5,355 independent observations. They came from eight
 # people. Cells from the same donor are correlated, because donors differ in
 # genotype, in batch, in how the sample was handled, in everything. A test that
 # treats each cell as independent has an effective sample size of eight and
-# thinks it has 3,000, so its p-values are far too small. This is
+# thinks it has 5,355, so its p-values are far too small. This is
 # pseudoreplication, and in single cell data it is the default failure mode
 # rather than an exotic one.
 #
@@ -121,8 +121,8 @@ mono
 
 # %% [markdown]
 # Restricting to the highly variable genes is not just for speed. NEBULA fits an
-# optimiser per gene, and running it over 12,000 genes to find the 300 that
-# matter is a poor trade.
+# optimiser per gene, and running it over 12,000 genes when 500 highly variable
+# ones will do is a poor trade.
 #
 # ## The real contrast
 #
@@ -206,8 +206,8 @@ nebula_res.results.sort("p_value", maintain_order=True).select(
 # CXCL10, CCL8 and APOBEC3B at the top, IL8 down. That is the interferon
 # response, and it is reassuring rather than surprising.
 #
-# Note that the Wilcoxon test finds *fewer* genes here than the other two, not
-# more. Pseudoreplication inflates significance, but the Wilcoxon test is also
+# Note that the Wilcoxon test finds *fewer* genes here than the pseudobulk
+# test (144 against 247 at FDR 0.05), not more. Pseudoreplication inflates significance, but the Wilcoxon test is also
 # a rank test with an expression-proportion filter, and it is simply less
 # powerful for a large shift in mean. On a real, strong effect all three agree
 # the effect is there. The difference shows up somewhere else.

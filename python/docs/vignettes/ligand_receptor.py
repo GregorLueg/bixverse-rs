@@ -230,7 +230,7 @@ print(
 )
 
 # %% [markdown]
-# Second, the top of that list is dominated by clusters 5 and 6, the two
+# Second, the top five of that list all involve clusters 5 or 6, the two
 # smallest ones:
 
 # %%
