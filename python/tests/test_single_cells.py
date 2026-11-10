@@ -156,7 +156,8 @@ def test_add_obs_by_key_replaces_a_column_and_writes_enum(exp):
     path, _ = exp
     sc = bv.SingleCells(path)
     lab = pl.Series(["y", "x"], dtype=pl.Enum(["y", "x"]))
-    sc.add_obs(pl.DataFrame({"cell_idx": [0, 39], "grp": ["q", "r"], "lab": lab}))
+    with pytest.warns(UserWarning, match="Replacing column 'grp'"):
+        sc.add_obs(pl.DataFrame({"cell_idx": [0, 39], "grp": ["q", "r"], "lab": lab}))
     obs = sc.obs(cols=["grp", "lab"])
     assert obs["grp"].to_list()[0] == "q"
     assert obs["grp"].to_list()[1] is None

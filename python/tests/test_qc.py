@@ -299,3 +299,21 @@ def test_mad_outlier_matches_numpy(direction, r_standard):
         assert res.upper_threshold == pytest.approx(med + margin, rel=1e-6)
     if direction != "above":
         assert res.lower_threshold == pytest.approx(med - margin, rel=1e-6)
+
+
+def test_add_obs_warns_before_wiping_values_of_other_cells(exp):
+    # QC on the kept cells, a metric named after a column the loader wrote for
+    # every cell: writing it back used to NULL the excluded cells silently
+    sc, dense = exp
+    n = len(sc.obs())
+    sc.add_obs(pl.DataFrame({"cell_idx": np.arange(n), "lib_size": dense.sum(axis=1)}))
+    sc.set_cells_to_keep(np.arange(n // 2))
+    obs = sc.obs(filtered=True)
+    res = qc.run_cell_qc({"lib_size": obs["lib_size"].to_numpy()}, sc.cells_to_keep)
+    with pytest.warns(UserWarning, match=r"'lib_size'.*sets \d+ existing value"):
+        sc.add_obs(qc.get_data(res))
+    # a new column on the subset, or a column covering every row, stays quiet
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sc.add_obs(pl.DataFrame({"cell_idx": sc.cells_to_keep, "fresh": 1}))
+        sc.add_obs(pl.DataFrame({"cell_idx": np.arange(n), "lib_size": 1.0}))

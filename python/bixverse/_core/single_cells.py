@@ -321,7 +321,8 @@ class SingleCells(ScBase):
 
         With a 0-based `cell_idx` column the frame joins on it. Without one it
         must hold one row per kept cell, in ascending cell order. Cells the
-        frame does not cover get NULL.
+        frame does not cover get NULL; replacing a column that way warns when
+        it discards values.
         """
         if "cell_idx" not in frame.columns:
             if frame.height != self.n_cells:

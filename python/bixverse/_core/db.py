@@ -494,12 +494,31 @@ def _write_columns(
     """Write every non-key column of `frame` into `table`, matched on `key`.
 
     Each column is dropped if present, added, and filled
-    with one UPDATE. Rows without a match in `frame` end up NULL. `frame[key]`
-    must already be 1-based.
+    with one UPDATE. Rows without a match in `frame` end up NULL, with a
+    warning when that discards existing values. `frame[key]` must already be
+    1-based.
     """
     with _registered(con, "bixverse_new_data", frame):
         types = _column_types(con, "bixverse_new_data", frame)
         new_cols = [c for c in frame.columns if c != key]
+        existing = set(columns(con, table))
+        for col in new_cols:
+            if col not in existing:
+                continue
+            # replacing wipes the rows the frame does not cover: say so when
+            # that throws away values, e.g. QC metrics of filtered-out cells
+            row = con.execute(
+                f"SELECT count(*) FROM {_qi(table)} t WHERE t.{_qi(col)} IS NOT NULL "
+                f"AND t.{_qi(key)} NOT IN (SELECT {_qi(key)} FROM bixverse_new_data)"
+            ).fetchone()
+            lost = 0 if row is None else row[0]
+            if lost:
+                warnings.warn(
+                    f"Replacing column '{col}' in '{table}' sets {lost} existing "
+                    "value(s) to NULL: the new data does not cover those rows. "
+                    "Write it under another name to keep them.",
+                    stacklevel=4,
+                )
         for col in new_cols:
             con.execute(f"ALTER TABLE {_qi(table)} DROP COLUMN IF EXISTS {_qi(col)}")
             con.execute(f"ALTER TABLE {_qi(table)} ADD COLUMN {_qi(col)} {types[col]}")
