@@ -338,3 +338,54 @@ def test_meld_rows_are_likelihoods(sc):
     sums = res.norm_scores.drop("cell_id").sum_horizontal().to_numpy()
     np.testing.assert_allclose(sums, 1.0, rtol=1e-5)
     assert res.raw_scores.height == sc.n_cells
+
+
+########################
+# Independent oracles #
+########################
+
+
+def test_find_markers_matches_scipy(sc):
+    # tie-corrected normal approximation, no continuity correction (as scran),
+    # on the norm layer the test reads; BH over the tested genes
+    from scipy import stats
+
+    obs = sc.obs(filtered=True)
+    g1 = obs.filter(pl.col("cell_grp") == "cell_type_1")["cell_idx"].to_numpy()
+    g2 = obs.filter(pl.col("cell_grp") == "cell_type_2")["cell_idx"].to_numpy()
+    res = de.find_markers(sc, g1, g2, verbose=False)
+
+    genes = res["gene_id"].to_list()
+    x1 = bv.get_counts(sc, cells=g1, genes=genes, layer="norm").scipy_csr().toarray()
+    x2 = bv.get_counts(sc, cells=g2, genes=genes, layer="norm").scipy_csr().toarray()
+    n1, n2 = len(g1), len(g2)
+    p_want, z_want = [], []
+    for j in range(len(genes)):
+        u = stats.mannwhitneyu(
+            x1[:, j], x2[:, j], use_continuity=False, method="asymptotic"
+        )
+        p_want.append(u.pvalue)
+        ranks = stats.rankdata(np.concatenate([x1[:, j], x2[:, j]]))
+        _, t = np.unique(ranks, return_counts=True)
+        n = n1 + n2
+        var = n1 * n2 / 12 * ((n + 1) - (t**3 - t).sum() / (n * (n - 1)))
+        z_want.append((u.statistic - n1 * n2 / 2) / np.sqrt(var))
+
+    z_want = np.asarray(z_want)
+    np.testing.assert_allclose(res["z_scores"].to_numpy(), z_want, rtol=1e-6, atol=1e-9)
+    # scipy's own p rounds the deep tail to 0, so take the normal tail of the
+    # same z; bixverse holds 1e-10 relative above 1e-10 and ~1e-4 below
+    p_ref = 2 * stats.norm.sf(np.abs(z_want))
+    p = res["p_values"].to_numpy()
+    big = p_ref > 1e-10
+    np.testing.assert_allclose(p[big], np.asarray(p_want)[big], rtol=1e-6)
+    np.testing.assert_allclose(p, p_ref, rtol=1e-3)
+    np.testing.assert_allclose(
+        res["fdr"].to_numpy(), stats.false_discovery_control(p_ref), rtol=1e-3
+    )
+    np.testing.assert_allclose(
+        res["prop1"].to_numpy(), (x1 > 0).mean(axis=0), rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        res["prop2"].to_numpy(), (x2 > 0).mean(axis=0), rtol=1e-6
+    )

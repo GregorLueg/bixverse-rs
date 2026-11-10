@@ -315,3 +315,71 @@ def test_bindings_refuse_fortran_order(sc):
     codes = np.zeros(sc.n_cells, dtype=np.uint32) + 1
     with pytest.raises(ValueError, match="C-contiguous"):
         _bixverse.graph_connectivity(idx, codes)
+
+
+########################
+# Independent oracles #
+########################
+
+
+def _ilisi(sc) -> float:
+    lisi = integrate.calculate_lisi(sc, BATCH, verbose=False)
+    assert lisi is not None
+    return lisi.mean_lisi
+
+
+def test_corrections_mix_planted_batches(sc):
+    # strong planted batch effect: every method must mix the two batches
+    # better than the uncorrected PCA does (iLISI, 1 = separate, 2 = mixed)
+    graph.find_neighbours(sc)
+    base = _ilisi(sc)
+    assert base < 1.5
+
+    integrate.harmony(sc, BATCH, verbose=False)
+    graph.find_neighbours(sc, embd_to_use="harmony")
+    harmony = _ilisi(sc)
+
+    # on the cached PCA: fastMNN's own 30-PC PCA of 50 HVGs shrinks the
+    # corrected batch and re-separates it under euclidean neighbours
+    integrate.fast_mnn(sc, BATCH, sc.map.hvg, use_precomputed_pca=True, verbose=False)
+    graph.find_neighbours(sc, embd_to_use="mnn")
+    mnn = _ilisi(sc)
+
+    integrate.bbknn(sc, BATCH, no_neighbours_to_keep=15, verbose=False)
+    bbknn = _ilisi(sc)
+
+    for name, v in (("harmony", harmony), ("mnn", mnn), ("bbknn", bbknn)):
+        assert v > base + 0.2, (name, v, base)
+
+
+@pytest.fixture
+def toy(sc):
+    """Planted 10-D embeddings: one with the batches mixed, one with them
+    30 standard deviations apart."""
+    rng = np.random.default_rng(2)
+    batch = sc.obs(cols=[BATCH], filtered=True)[BATCH].to_numpy().astype(np.int64)
+    noise = rng.normal(size=(sc.n_cells, 10)).astype(np.float32)
+    sc.cache.embeddings["mixed"] = noise
+    sc.stamp("mixed")
+    shifted = noise.copy()
+    shifted[:, 0] += 30.0 * (batch - batch.min())
+    sc.cache.embeddings["apart"] = shifted
+    sc.stamp("apart")
+    return sc
+
+
+def test_batch_metrics_on_planted_embeddings(toy):
+    out = {}
+    for name in ("mixed", "apart"):
+        graph.find_neighbours(toy, embd_to_use=name)
+        kbet = integrate.calculate_kbet(toy, BATCH, verbose=False)
+        asw = integrate.calculate_batch_asw(toy, BATCH, embd_to_use=name, verbose=False)
+        assert kbet is not None and asw is not None
+        out[name] = (_ilisi(toy), kbet.kbet_score, asw.mean_asw)
+    (lisi_m, kbet_m, asw_m), (lisi_a, kbet_a, asw_a) = out["mixed"], out["apart"]
+    # two balanced batches: iLISI near 2 when mixed, 1 when apart
+    assert lisi_m > 1.8 and lisi_a < 1.05
+    # kBET rejection share: near the 5 % level when mixed, all when apart
+    assert kbet_m < 0.2 and kbet_a > 0.95
+    # raw silhouette by batch: near 0 when mixed, near 1 when apart
+    assert abs(asw_m) < 0.1 and asw_a > 0.8

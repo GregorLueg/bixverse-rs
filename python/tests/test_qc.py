@@ -270,3 +270,32 @@ def test_get_data_writes_into_obs(exp):
     got = sc.obs()
     assert got["global_outlier"].to_list() == res.combined.tolist()
     assert "lib_is_outlier" in got.columns
+
+
+########################
+# Independent oracles #
+########################
+
+
+@pytest.mark.parametrize("direction", ["twosided", "below", "above"])
+@pytest.mark.parametrize("r_standard", [True, False])
+def test_mad_outlier_matches_numpy(direction, r_standard):
+    from scipy import stats
+
+    rng = np.random.default_rng(4)
+    x = np.concatenate([rng.normal(10, 2, 500), [0.5, 30.0, -4.0, 25.0]])
+    res = qc.per_cell_qc_outlier(
+        x, threshold=2.5, direction=direction, r_standard=r_standard
+    )
+    med = np.median(x)
+    # the exact 1 / qnorm(0.75), not R's rounded 1.4826
+    scale = 1 / stats.norm.ppf(0.75) if r_standard else 1.0
+    margin = 2.5 * np.median(np.abs(x - med)) * scale
+    lo, hi = x < med - margin, x > med + margin
+    want = {"twosided": lo | hi, "below": lo, "above": hi}[direction]
+    np.testing.assert_array_equal(res.outlier, want)
+    assert res.median == pytest.approx(med)
+    if direction != "below":
+        assert res.upper_threshold == pytest.approx(med + margin, rel=1e-6)
+    if direction != "above":
+        assert res.lower_threshold == pytest.approx(med - margin, rel=1e-6)

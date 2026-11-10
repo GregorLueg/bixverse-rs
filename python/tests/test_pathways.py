@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import fields
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -439,3 +440,24 @@ def test_vision_kmeans_populates_every_cluster_with_tied_rows():
     for seed in range(50):
         labels = _kmeans(x, 5, np.random.default_rng(seed))
         assert np.unique(labels).size == 5, seed
+
+
+def test_aucell_recovery_matches_pyscenic(tmp_path):
+    # dev/gen_aucell_fixture.py: pySCENIC's aucell on tie-free cells
+    import scipy.sparse as sp
+
+    f = np.load(Path(__file__).parent / "fixtures" / "aucell_pyscenic.npz")
+    counts = f["counts"]
+    n, g = counts.shape
+    sc = bv.io.load_csr(
+        tmp_path / "sc",
+        sp.csr_matrix(counts),
+        pl.DataFrame({"cell_id": [f"cell_{i}" for i in range(n)]}),
+        pl.DataFrame({"gene_id": [f"gene_{j}" for j in range(g)]}),
+        qc=QC,
+    )
+    names = ["set_5", "set_15", "set_30"]
+    sets = {k: [f"gene_{j}" for j in f[k]] for k in names}
+    res = pathways.aucell(sc, sets)
+    assert res.cell_ids.tolist() == [f"cell_{i}" for i in range(n)]
+    np.testing.assert_allclose(res.values, f["auc"], atol=1e-6)

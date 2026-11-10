@@ -126,7 +126,8 @@ exclude = ["**/*.ipynb"]
 [tool.ty.analysis]
 # Optional extras and dev-only tooling that the type-check environment does not
 # install: mlx (Apple Silicon only), the torch and jax backends of `bixverse.nn`,
-# and the scVI validation scripts in `dev/` and `tests/test_scvi_parity.py`.
+# the scVI validation scripts in `dev/` and `tests/test_scvi_parity.py`, and
+# the fixture generators in `dev/` (anndata, pySCENIC).
 allowed-unresolved-imports = [
     "mlx.**",
     "torch.**",
@@ -136,6 +137,8 @@ allowed-unresolved-imports = [
     "anndata.**",
     "pandas.**",
     "sklearn.**",
+    "pyscenic.**",
+    "ctxcore.**",
 ]
 
 [tool.ty.rules]
