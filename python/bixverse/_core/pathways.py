@@ -484,8 +484,11 @@ def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
         0-based cluster per row, every cluster populated.
     """
     best, best_inertia = np.zeros(len(x), dtype=np.int64), np.inf
+    # starts from distinct rows, as R's kmeans does: signatures often share a
+    # (size, balance), and two identical starts leave a cluster empty for good
+    uniq = np.unique(x, axis=0)
     for _ in range(10):
-        centres = x[rng.choice(len(x), k, replace=False)]
+        centres = uniq[rng.choice(len(uniq), k, replace=False)]
         labels = np.full(len(x), -1, dtype=np.int64)
         for _ in range(100):
             d = ((x[:, None, :] - centres[None, :, :]) ** 2).sum(-1)

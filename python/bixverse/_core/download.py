@@ -119,8 +119,16 @@ def _fetch_tar(
     if out.exists():
         return out
     dest = _download(data_urls(url_file, ZENODO_MAIN), root / archive, quiet=quiet)
+    # extract into a staging dir and move the result's top directory in last,
+    # so an interrupted run leaves no half tree that passes the cache check
+    staging = root / f"{archive}.part"
+    shutil.rmtree(staging, ignore_errors=True)
     with tarfile.open(dest) as tar:
-        tar.extractall(root, filter="data")
+        tar.extractall(staging, filter="data")
+    top = Path(result).parts[0]
+    shutil.rmtree(root / top, ignore_errors=True)
+    (staging / top).replace(root / top)
+    shutil.rmtree(staging)
     return out
 
 
@@ -134,8 +142,12 @@ def _fetch_gz(
     if out.exists():
         return out
     dest = _download(data_urls(file, zenodo_record), root / file, quiet=quiet)
-    with gzip.open(dest, "rb") as src, out.open("wb") as dst:
+    # inflate next to it and rename, so an interrupted run leaves no truncated
+    # file that the cache check would take for the real one
+    part = out.with_name(out.name + ".part")
+    with gzip.open(dest, "rb") as src, part.open("wb") as dst:
         shutil.copyfileobj(src, dst)
+    part.replace(out)
     dest.unlink()
     return out
 

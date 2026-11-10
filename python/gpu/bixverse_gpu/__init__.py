@@ -2,8 +2,9 @@
 
 Each module mirrors its `bixverse` namesake (`bixverse_gpu.pp` for
 `bixverse.pp`, and so on) and its functions take the same experiment objects,
-write the same cache slots and obs columns and return the same result types as
-the CPU functions, so a pipeline swaps one import for the other:
+write the same cache slots (bar Harmony and fastMNN, which write `harmony_gpu`
+and `mnn_gpu`) and obs columns and return the same result types as the CPU
+functions, so a pipeline swaps one import for the other:
 
     >>> from bixverse import pp
     >>> from bixverse_gpu import pp as pp_gpu

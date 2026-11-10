@@ -87,4 +87,4 @@ def calculate_pca(
         seed,
         verbose,
     )
-    _set_pca(sc, scores, loadings, sv[:no_pcs])
+    _set_pca(sc, scores, loadings, sv[:no_pcs], selected)

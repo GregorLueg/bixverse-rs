@@ -686,7 +686,7 @@ def _calculate_pca_residual(
         seed,
         verbose,
     )
-    _set_pca(sc, scores, loadings, sv[:no_pcs], parents=("residuals",))
+    _set_pca(sc, scores, loadings, sv[:no_pcs], genes, parents=("residuals",))
 
 
 @beartype
@@ -695,12 +695,14 @@ def _set_pca(
     scores: np.ndarray,
     loadings: np.ndarray,
     singular_vals: np.ndarray,
+    genes: np.ndarray,
     *,
     parents: tuple[str, ...] = (),
 ) -> None:
-    """Cache a PCA and stamp it."""
+    """Cache a PCA, the genes its loadings rows belong to, and stamp it."""
     sc.cache.pca_factors = scores
     sc.cache.pca_loadings = loadings
+    sc.cache.pca_genes = np.asarray(genes, dtype=np.uint32)
     sc.cache.pca_singular_vals = singular_vals
     sc.stamp("pca", parents=parents)
 
@@ -738,7 +740,7 @@ def _calculate_pca_mc(
         scores, loadings, sv = _bixverse.mc_pca_residuals(
             *csr_args(mc.raw), fit.model, genes, no_pcs, to_rust(params), seed, verbose
         )
-        _set_pca(mc, scores, loadings, sv[:no_pcs], parents=("residuals",))
+        _set_pca(mc, scores, loadings, sv[:no_pcs], genes, parents=("residuals",))
         return
     offsets = _clr_offsets(mc) if params.clr else None
     scores, loadings, sv = _bixverse.mc_pca(
@@ -748,7 +750,7 @@ def _calculate_pca_mc(
         offsets,
         seed,
     )
-    _set_pca(mc, scores, loadings, sv[:no_pcs])
+    _set_pca(mc, scores, loadings, sv[:no_pcs], selected)
 
 
 @beartype
@@ -871,7 +873,7 @@ def calculate_pca(
         seed,
         verbose,
     )
-    _set_pca(sc, scores, loadings, sv[:no_pcs])
+    _set_pca(sc, scores, loadings, sv[:no_pcs], selected)
 
 
 #############

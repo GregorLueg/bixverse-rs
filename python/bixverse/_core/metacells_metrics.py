@@ -41,7 +41,7 @@ PurityInfo = Literal["none", "top_label", "top_two_labels"]
 @beartype
 def _purity_cols(
     mc: MetaCells,
-    original_cell_type: Sequence[str],
+    original_cell_type: Sequence[str | None],
     add_additional_info: PurityInfo,
     add_entropy: bool,
 ) -> dict[str, pl.Series]:
@@ -78,9 +78,15 @@ def _purity_cols(
             "unfiltered obs column, or the QC-passing one."
         )
 
-    codes, levels = _factor_codes(
-        pl.Series(list(original_cell_type), dtype=pl.String), "labels"
-    )
+    # only member cells need a label: cells outside every meta cell (QC drops,
+    # outliers) may well be NULL in an unfiltered obs column
+    labels = pl.Series(list(original_cell_type), dtype=pl.String)
+    used = np.unique(np.concatenate(rows)) if rows else np.zeros(0, dtype=np.int64)
+    if labels.gather(used).null_count():
+        raise ValueError("Column 'labels' holds missing values for meta cell members.")
+    present_codes, levels = _factor_codes(labels.drop_nulls(), "labels")
+    codes = np.full(len(labels), -1, dtype=np.int64)
+    codes[labels.is_not_null().to_numpy()] = present_codes
     n_labels = len(levels)
     counts = [np.bincount(codes[r], minlength=n_labels) for r in rows]
     sizes = np.array([len(r) for r in rows], dtype=np.float64)
@@ -122,7 +128,7 @@ def _purity_cols(
 @beartype
 def calc_meta_cell_purity(
     mc: MetaCells,
-    original_cell_type: Sequence[str],
+    original_cell_type: Sequence[str | None],
     *,
     add_additional_info: PurityInfo = "none",
     add_entropy: bool = False,
@@ -139,7 +145,8 @@ def calc_meta_cell_purity(
         mc: The meta cells.
         original_cell_type: Labels of the source cells, either one per obs
             row of the source (`sc.obs()`) or one per kept cell in
-            `cells_to_keep` order; the length decides which.
+            `cells_to_keep` order; the length decides which. Cells in no meta
+            cell may be missing (`None`).
         add_additional_info: `"none"`, `"top_label"` or `"top_two_labels"`.
         add_entropy: Add `mc_entropy`.
 
@@ -158,7 +165,7 @@ def calc_meta_cell_purity(
 @beartype
 def get_meta_cell_purity(
     mc: MetaCells,
-    original_cell_type: Sequence[str],
+    original_cell_type: Sequence[str | None],
     *,
     add_additional_info: PurityInfo = "none",
     add_entropy: bool = False,

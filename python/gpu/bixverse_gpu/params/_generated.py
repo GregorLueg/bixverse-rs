@@ -448,7 +448,7 @@ class HarmonyV2GpuParams:
     alpha: float = 0.2
     tau: float = 0.0
     batch_proportion_cutoff: float = 1e-05
-    use_dynamic_lambda: bool = False
+    use_dynamic_lambda: bool = True
     k_means_iter: int = 10
     k_means_init: str | None = None
     fixed: bool = False

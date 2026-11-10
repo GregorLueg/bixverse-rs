@@ -328,7 +328,7 @@ def load_csr(
         obs_f = obs.rename(dict(zip(obs.columns, _make_unique(names), strict=True)))
         names = _bixverse.snake_case(var.columns)
         names[0] = "gene_id"
-        var_f = var.rename(dict(zip(var.columns, names, strict=True)))
+        var_f = var.rename(dict(zip(var.columns, _make_unique(names), strict=True)))
         db.populate_from_frame(con, "obs", obs_f[res["cell_indices"].astype(np.int64)])
         db.populate_from_frame(con, "var", var_f[res["gene_indices"].astype(np.int64)])
 
@@ -622,10 +622,18 @@ def get_cell_ranger_params(
         )
 
     return MtxIoParams(
-        path_mtx=pick(("matrix.mtx", "mat.mtx"), "matrix"),
-        path_obs=pick(("barcodes.tsv", "barcodes.csv"), "barcode"),
+        # Cell Ranger v3+ gzips all three
+        path_mtx=pick(("matrix.mtx", "mat.mtx", "matrix.mtx.gz"), "matrix"),
+        path_obs=pick(("barcodes.tsv", "barcodes.csv", "barcodes.tsv.gz"), "barcode"),
         path_var=pick(
-            ("features.tsv", "features.csv", "genes.tsv", "genes.csv"), "feature"
+            (
+                "features.tsv",
+                "features.csv",
+                "genes.tsv",
+                "genes.csv",
+                "features.tsv.gz",
+            ),
+            "feature",
         ),
         cells_as_rows=cells_as_rows,
         has_hdr=has_hdr,

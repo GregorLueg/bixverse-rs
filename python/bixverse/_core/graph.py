@@ -600,6 +600,7 @@ def _fast_cluster(
         raise ValueError("resolutions must be non-empty")
     if n_seeds < 1:
         raise ValueError("n_seeds must be at least 1")
+    require_fresh(sc, [embd_to_use], "rna")
     embd = _embedding(sc, embd_to_use)
     if embd is None:
         raise ValueError(f"Embedding '{embd_to_use}' was not found.")

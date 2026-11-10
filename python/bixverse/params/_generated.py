@@ -2068,7 +2068,7 @@ class HvgParams:
         loess_span: The span parameter for the loess function that is used to
             standardise the variance for `method = "vst"`, and the lowess span of
             the trend for `method = "scran"`.
-        num_bin: Not yet implemented.
+        num_bin: Number of bins for the `meanvarbin` and `dispersion` methods.
         bin_method: The binning method.
         mean_filter: Shall genes below `min_mean` be left out of the trend fit.
         min_mean: Minimum mean log-expression for a gene to enter the trend fit.
@@ -3487,7 +3487,7 @@ class ScdblfinderParams:
             selection.
         include_pcs: Number of leading principal components to include as classifier
             features.
-        expected_doublet_rate: Expected doublet rate as a percentage. If not
+        expected_doublet_rate: Expected doublet rate as a fraction. If not
             provided, will be calculated internally.
         cxds_genes: Number of CXDS genes to consider. If not provided, defaults to
             `500`.

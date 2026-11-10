@@ -1280,7 +1280,7 @@ def heatmap_plot(
 
 @beartype
 def _point_density(x: np.ndarray, y: np.ndarray, smoothness: float) -> np.ndarray:
-    """2D KDE at every point: Gaussian kernel (bandwidths `sd * smoothness`,
+    """2D KDE at every point: Gaussian kernel (bandwidths `sd * smoothness / 4`,
     100 x 100 grid) read off bilinearly."""
     n = 100
     gx, gy = np.linspace(x.min(), x.max(), n), np.linspace(y.min(), y.max(), n)
@@ -1337,7 +1337,7 @@ def feature_scatter_plot(
         feature_2: y feature, as `feature_1`.
         geom: `"density"` (per-point 2D KDE) or `"hex"`.
         remove_zeros: Drop cells where both are zero.
-        smoothness: KDE bandwidth in standard deviations.
+        smoothness: KDE bandwidth, in quarters of a standard deviation.
         bins: Hexagons across x.
         modality: Fallback modality for unsuffixed features.
         point_size: Point size in mm.

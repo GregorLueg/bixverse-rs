@@ -227,6 +227,9 @@ class KnnGraph:
         _check_array(self.distances, "distances", dtypes=(np.float32,), ndim=2)
         if self.indices.shape != self.distances.shape:
             raise ValueError("indices and distances must have the same shape")
+        # the bindings read rows from the flat buffer, so hold them in C order
+        object.__setattr__(self, "indices", np.ascontiguousarray(self.indices))
+        object.__setattr__(self, "distances", np.ascontiguousarray(self.distances))
 
 
 @beartype
@@ -347,6 +350,7 @@ class ScCache:
         pca_factors: `(n_kept, n_pcs)` `float32` cell scores.
         pca_loadings: `(n_genes_used, n_pcs)` `float32` loadings.
         pca_singular_vals: `float32` singular values.
+        pca_genes: `uint32` 0-based gene index of each loadings row.
         embeddings: Other embeddings by name, e.g. `"umap"`.
         knn: The kNN graph.
         connectivities: The neighbour graph.
@@ -359,6 +363,7 @@ class ScCache:
     pca_factors: np.ndarray | None = None
     pca_loadings: np.ndarray | None = None
     pca_singular_vals: np.ndarray | None = None
+    pca_genes: np.ndarray | None = None
     embeddings: dict[str, np.ndarray] = field(default_factory=dict)
     knn: KnnGraph | None = None
     connectivities: CsrMatrix | None = None
@@ -465,7 +470,12 @@ class ScCache:
 # Persistence #
 ###############
 
-_PLAIN_SLOTS: tuple[str, ...] = ("pca_factors", "pca_loadings", "pca_singular_vals")
+_PLAIN_SLOTS: tuple[str, ...] = (
+    "pca_factors",
+    "pca_loadings",
+    "pca_singular_vals",
+    "pca_genes",
+)
 
 
 @beartype
@@ -502,6 +512,10 @@ def cache_payload(
             "The residual model is not persisted yet; it will be absent on load.",
             stacklevel=3,
         )
+    # the residual model is not saved, but what was built from it stays valid:
+    # cut it out of the parents, or every child loads as stale
+    residual = present.get("residuals")
+    dropped = {residual.id} if residual is not None else set()
     meta = {
         "embeddings": list(cache.embeddings),
         "knn_dist_metric": None if cache.knn is None else cache.knn.dist_metric,
@@ -510,7 +524,11 @@ def cache_payload(
         ),
         # only stamps of present artefacts; a dropped payload's stamp is dead
         "stamps": {
-            label: {"cells": s.cells, "id": s.id, "parents": list(s.parents)}
+            label: {
+                "cells": s.cells,
+                "id": s.id,
+                "parents": [p for p in s.parents if p not in dropped],
+            }
             for label, s in present.items()
             if s is not None and label != "residuals"
         },

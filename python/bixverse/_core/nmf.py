@@ -748,6 +748,9 @@ def _consensus_nmf(
                 verbose,
             )
     except _bixverse.BixverseError as e:
+        # only the consensus failures want the advice; IO or device errors pass
+        if not str(e).startswith("Consensus NMF"):
+            raise
         raise ValueError(f"{e}{CONSENSUS_ADVICE}") from e
     params = _base_params(hals, k, preprocessing, use_second_layer, seed)
     params.update({"nmf_consensus_params": cons, "n_runs": n_runs})

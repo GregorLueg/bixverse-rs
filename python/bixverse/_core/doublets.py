@@ -285,6 +285,13 @@ def _split_by_group(
         )
     obs = sc.obs(cols=["cell_idx", group_by], filtered=True)
     obs = obs.filter(pl.Series(np.isin(obs["cell_idx"].to_numpy(), cells)))
+    if obs.height < len(cells):
+        # without group_by these cells would run; say so rather than drop them
+        warnings.warn(
+            f"{len(cells) - obs.height} of the {len(cells)} requested cells are not "
+            f"kept and are left out of the grouped run on '{group_by}'.",
+            stacklevel=3,
+        )
     labels = _as_character(obs[group_by])
     n_missing = sum(v is None for v in labels)
     if n_missing:

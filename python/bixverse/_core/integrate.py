@@ -1141,7 +1141,8 @@ def calculate_graph_connectivity(
         cell_type_column: obs column with the cell types.
 
     Returns:
-        The scores; `None` (with a warning) without a kNN.
+        The scores; `None` (with a warning) without a kNN or with a single
+        cell type.
 
     Raises:
         ValueError: If the cell type column is missing or incomplete, or the
@@ -1154,6 +1155,12 @@ def calculate_graph_connectivity(
         >>> conn = bv.integrate.calculate_graph_connectivity(sc, "cell_grp")
     """
     codes, levels = _labels(sc, cell_type_column)
+    if len(levels) < 2:
+        warnings.warn(
+            "The cell type column only has one cell type. Returning None",
+            stacklevel=2,
+        )
+        return None
     knn = _knn_for_metric(sc, len(codes), "connectivity")
     if knn is None:
         return None

@@ -182,7 +182,8 @@ def _export_cache(
     """The cached embeddings and graph.
 
     PCA factors go to `obsm/X_pca`, the loadings (padded out to every gene
-    through the HVGs) to `varm/PCs`, every other embedding to
+    from the genes the PCA ran on, and only with a fresh `X_pca`) to
+    `varm/PCs`, every other embedding to
     `obsm/X_<name>`, the neighbour graph to `obsp/connectivities` with the
     `uns/neighbors` block ScanPy looks for. Cached rows follow
     `cells_to_keep`; they are reordered to the ascending cell order of the
@@ -210,17 +211,17 @@ def _export_cache(
         if _fresh(sc, name, emb.shape[0], n_cells):
             obsm[f"X_{name}"] = np.asarray(emb, dtype=np.float64)[order]
 
-    if c.pca_loadings is not None:
-        hvg = sc.map.hvg
-        if hvg is not None and len(hvg) == c.pca_loadings.shape[0]:
+    if c.pca_loadings is not None and "X_pca" in obsm:
+        # the genes the PCA ran on, not the current HVGs, which may have moved
+        genes = c.pca_genes
+        if genes is not None and len(genes) == c.pca_loadings.shape[0]:
             padded = np.zeros((n_genes, c.pca_loadings.shape[1]), dtype=np.float64)
-            padded[hvg] = c.pca_loadings
+            padded[genes] = c.pca_loadings
             varm["PCs"] = padded
         else:
             warnings.warn(
-                f"The cached PCA loadings cover {c.pca_loadings.shape[0]} genes but "
-                f"{0 if hvg is None else len(hvg)} HVGs are set. Skipping varm/PCs "
-                "in the h5ad export.",
+                "The cached PCA loadings do not record the genes they cover. "
+                "Skipping varm/PCs in the h5ad export; re-run calculate_pca.",
                 stacklevel=2,
             )
 

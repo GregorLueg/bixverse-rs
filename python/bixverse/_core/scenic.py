@@ -361,6 +361,8 @@ def _scenic_grn(
 
     gene_idx = _gene_idx(sc, targets)
     if isinstance(sc, MetaCells):
+        # by design, as in R: meta cell GRNs fit on the summed raw counts, which
+        # the binding hands over as both layers, not on a normalised layer
         m = csr_subset(sc.raw, cells, gene_idx)
         pos = {g: i for i, g in enumerate(targets)}
         tf_cols = np.asarray([pos[t] for t in tfs], dtype=np.uint32)
