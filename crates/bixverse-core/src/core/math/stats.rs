@@ -1072,7 +1072,8 @@ pub fn parse_outlier_type(s: &str) -> Option<OutlierDirection> {
 /// * `threshold` - Number of (scaled or raw) MADs to accept as not being an
 ///   outlier.
 /// * `direction` - Direction to check for outliers (below, above, or both).
-/// * `r_standard` - Scale the MAD by [`MAD_SCALE`] like R's `mad()`.
+/// * `r_standard` - Scale the MAD by [`MAD_SCALE`], the exact constant R's
+///   `mad()` rounds to 1.4826.
 ///
 /// ### Returns
 ///

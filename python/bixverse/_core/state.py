@@ -195,7 +195,7 @@ class ScMap:
 @beartype
 @dataclass(frozen=True, repr=False)
 class KnnGraph:
-    """A kNN result.
+    """A kNN result. Both arrays are held in C order (copied if needed).
 
     Attributes:
         indices: `(n, k)` `uint32` neighbour indices into the cells the kNN

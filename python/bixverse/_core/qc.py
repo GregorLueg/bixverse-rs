@@ -161,7 +161,8 @@ def per_cell_qc_outlier(
         metric: The metric.
         threshold: MADs from the median beyond which a value is an outlier.
         direction: Which tail(s) to flag.
-        r_standard: Scale the MAD by 1.4826, so `threshold`
+        r_standard: Scale the MAD by `1 / qnorm(0.75)` (1.48260..., the exact
+            constant R's `mad()` rounds to 1.4826), so `threshold`
             counts standard deviations under normality. `False` uses the raw
             MAD.
 
@@ -322,7 +323,8 @@ def run_cell_qc(
         hard_thresholds: Optional metric name to `{"lower": .., "upper": ..}`
             (either or both), applied regardless of groups.
         mad: Run MAD. `False` needs `hard_thresholds`.
-        r_standard: Scale the MAD by 1.4826, see `per_cell_qc_outlier`.
+        r_standard: Scale the MAD by `1 / qnorm(0.75)`, see
+            `per_cell_qc_outlier`.
 
     Returns:
         The calls.

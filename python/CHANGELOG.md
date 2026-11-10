@@ -43,7 +43,20 @@ Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
   `"harmony"`. The original is `harmony_v1` (`step_harmony_v1`, under
   `"harmony_v1"`). The GPU twin is `bixverse_gpu.integrate.harmony`. In
   bixverse 0.9.0 `harmony_sc` is still v1, so R's `"harmony"` is Python's
-  `"harmony_v1"`.
+  `"harmony_v1"`. Both v2s estimate lambda per cluster by default
+  (`use_dynamic_lambda=True`); bixverse.gpu's R spec still says `FALSE`.
+- Every binding takes NumPy input in C order only and raises `ValueError` on a
+  Fortran-ordered array, which was read silently transposed. `KnnGraph` copies
+  its arrays to C order, so a hand-built graph needs no care.
+- `save_h5ad` writes `varm/PCs` on the genes the PCA ran on (the cache keeps
+  them as `pca_genes`), and only with a fresh `X_pca`; it used to place the
+  loadings on the current HVGs.
+- `add_obs` / `add_var` warn when replacing a column would set values of rows
+  the new frame does not cover to NULL, e.g. writing QC metrics of the kept
+  cells back over a column every cell had.
+- `io.save` drops the residual model (it is not persisted yet) but keeps what
+  was built from it valid on load: a residual PCA and its kNN no longer come
+  back stale.
 
 ## 0.2.1
 

@@ -70,7 +70,8 @@ fn f64_list<'py>(py: Python<'py>, res: Vec<Vec<f32>>) -> PyResult<Bound<'py, PyL
 /// * `x` - The metric
 /// * `threshold` - MADs from the median that are acceptable
 /// * `direction` - `"twosided"`, `"below"` or `"above"`
-/// * `r_standard` - Scale the MAD by 1.4826 like R's `mad()`
+/// * `r_standard` - Scale the MAD by `1 / qnorm(0.75)`, the exact constant R's
+///   `mad()` rounds to 1.4826
 ///
 /// ### Returns
 ///

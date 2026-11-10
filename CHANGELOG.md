@@ -77,6 +77,21 @@
 - CPU Scrublet returns `InvalidArgument` when `no_pcs` is 0 or exceeds
   `min(genes, cells)` instead of a faer assertion.
 - Hotspot's `Default` model is `"danb"`, matching the R spec.
+- Single cell PCA asked for more components than the data's rank (e.g. 30 PCs
+  on 25 cells, or as many PCs as cells under Lanczos) panicked on the output
+  slice. It returns `ScErrors::PcaTooFewComponents` now, on every solver,
+  sparse and dense.
+- SuperCells on a disconnected kNN graph panicked when walktrap ended with more
+  communities than `ceil(n / graining_factor)`. It returns one meta cell per
+  community now, so possibly more than requested.
+- Harmony v1, v2 and the GPU v2 asserted on a `theta` or `sigma` of the wrong
+  length. They return `ScErrors::HarmonyParamLength` now
+  (`broadcast_param()`).
+- The h5ad and 10x h5 quality passes counted a chunk whose HDF5 read failed as
+  empty, so its cells could silently fail the library size and gene filters.
+  The read error propagates now.
+- Verbose loaders printed the library size range cut to one character; the
+  in-memory CSR loader no longer says "R sparse matrix".
 
 - IVF in `dispatch_knn()` and `batch_knn_search()` passed `n_list` as
   `n_probe`, so it probed every list. It uses `n_probe` now.

@@ -339,8 +339,9 @@ def test_corrections_mix_planted_batches(sc):
     graph.find_neighbours(sc, embd_to_use="harmony")
     harmony = _ilisi(sc)
 
-    # on the cached PCA: fastMNN's own 30-PC PCA of 50 HVGs shrinks the
-    # corrected batch and re-separates it under euclidean neighbours
+    # on the cached 10-PC PCA: with 30 PCs of 50 HVGs the corrected batch
+    # shrinks and re-separates under euclidean neighbours, in batchelor too
+    # (reducedMNN and fastMNN, checked against 1.28.0)
     integrate.fast_mnn(sc, BATCH, sc.map.hvg, use_precomputed_pca=True, verbose=False)
     graph.find_neighbours(sc, embd_to_use="mnn")
     mnn = _ilisi(sc)
