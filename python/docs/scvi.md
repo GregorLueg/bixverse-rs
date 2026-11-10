@@ -90,7 +90,8 @@ three seeds each, all in one sitting on an M1 Max:
 Means over three seeds. Held-out ELBO is the per-cell negative ELBO on the
 held-out cells, every arm scored by the same code (scvi-tools weights loaded
 into ours); its seed-to-seed range is up to about 2. kBET and iLISI come from
-bixverse's `calculate_integration_metrics_sc` and `calculate_lisi_sc`.
+bixverse's `bv.integrate.calculate_integration_metrics` and
+`bv.integrate.calculate_lisi`.
 
 The last three columns compare each arm against scvi-tools on cpu: Procrustes
 disparity (0 is identical), the mean Jaccard of each cell's 15 nearest

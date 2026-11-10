@@ -17,8 +17,9 @@ GPU den-SNE or ForceAtlas2; use the `bixverse.embed` ones.
 
 Each module mirrors its `bixverse` namesake: `pp`, `graph`, `embed`,
 `integrate`, `de`, `doublets`, `metacells`, `nmf`, `pathways` and `trees`. The
-functions take the same `SingleCells` objects, write the same cache slots and
-obs columns and return the same result types, so a pipeline swaps one import
+functions take the same `SingleCells` objects, write the same cache slots (bar
+Harmony and fastMNN, which write `harmony_gpu` and `mnn_gpu`) and obs columns
+and return the same result types, so a pipeline swaps one import
 for the other. GPU-specific knobs live in `bixverse_gpu.params`; everything
 else takes the `bixverse.params` bundles.
 

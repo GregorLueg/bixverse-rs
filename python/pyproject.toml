@@ -28,7 +28,7 @@ Repository = "https://github.com/GregorLueg/bixverse-rs"
 Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"
 
 [project.optional-dependencies]
-# `scipy_csr` on a batch, and nothing else.
+# The `scipy_csr` exports (batches, `CsrMatrix`, `SingleCells`), nothing else.
 sparse = ["scipy>=1.9"]
 # `bixverse.nn` on torch: scVI and the `IterableDataset` adapter.
 torch = ["torch>=2.4"]

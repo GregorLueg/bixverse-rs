@@ -73,6 +73,7 @@ cargo test -p bixverse-rs --features sc-gpu,hdf5-static
 cargo check -p <member> --no-default-features --all-targets
 
 # The slow asserting gates. Release, or the CPU reference solves dominate.
+# Not routine: only when asked (see "Expensive tests").
 cargo test --release -p bixverse-rs --features sc-gpu,multi-modal,large-test
 
 # MLX backend (Apple Silicon, needs mlx-c installed)
@@ -164,7 +165,7 @@ The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaul
 
 Anything that takes more than a second or two goes behind a feature, placed directly after `#[test]` with a one-line comment giving the problem size. Which feature depends on whether it can fail:
 
-- `large-test` if it asserts. These are real gates and are worth running on a schedule.
+- `large-test` if it asserts. These are real gates and are worth running on a schedule, but never routinely: they exist for catastrophic cancellation and other failures that only show at massive scale. Do not run them as part of a review, a baseline or a pre-commit check unless the user asks.
 - `large_scale_diagnostics` if it only prints for a human to read. Running these in CI buys nothing, since they cannot fail.
 
 If you are adding a sweep that computes a difference against a reference, assert on it and use `large-test`. A sweep that prints a number it never checks is not a test.

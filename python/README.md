@@ -16,7 +16,7 @@ uv pip install bixverse                         # the suite
 uv pip install "bixverse[embed,plots]"          # plus UMAP & co and matplotlib plots
 uv pip install "bixverse[gpu]"                  # plus the GPU twins
 uv pip install "bixverse[torch]"                # scVI on torch; also [mlx], [jax]
-uv pip install "bixverse[sparse]"               # scipy, for Batch.scipy_csr
+uv pip install "bixverse[sparse]"               # scipy, for the scipy_csr exports
 ```
 
 ## Use
@@ -85,7 +85,8 @@ go through the same functions.
 ## GPU
 
 `bixverse-gpu` is its own wheel, on wgpu. Each module mirrors its CPU namesake,
-takes the same objects and writes the same cache slots, so a pipeline swaps one
+takes the same objects and writes the same cache slots (bar Harmony and
+fastMNN, which write `harmony_gpu` and `mnn_gpu`), so a pipeline swaps one
 import for the other:
 
 ```python
