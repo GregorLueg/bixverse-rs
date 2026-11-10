@@ -9,8 +9,9 @@ cell methods, on wgpu, in Rust. Import it as `bixverse_gpu`.
 uv pip install "bixverse[gpu]"
 ```
 
-This pulls `bixverse` and `manifolds-rs` (GPU UMAP and t-SNE run there). For
-the UMAP and t-SNE twins you'll want `bixverse[gpu,embed]`.
+This pulls `bixverse` and `manifolds-rs` (the GPU UMAP, densMAP, t-SNE and
+PHATE run there). For those twins you'll want `bixverse[gpu,embed]`. There is no
+GPU den-SNE or ForceAtlas2; use the `bixverse.embed` ones.
 
 ## Layout
 

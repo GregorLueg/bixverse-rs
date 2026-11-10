@@ -31,6 +31,13 @@ Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
 **Notes**
 
 - `duckdb`, `polars` and `tqdm` are now required dependencies.
+- The 2D embeddings need `manifolds-rs` 0.6.0. UMAP and densMAP take its
+  `optimiser="sgd_parallel"` (lock-free SGD, not reproducible run to run), and
+  `n_epochs` defaults to `None`: 500, or 200 for the SGD optimisers above
+  10,000 cells. A cached kNN wider than `n_neighbors` is cut to it. PHATE runs
+  its own `6k + 5` wide search by default (`use_knn=False`), so it no longer
+  matches R's PHATE, which reuses the cached kNN.
+- `bixverse_gpu.embed` has `umap`, `densmap`, `tsne` and `phate`.
 - Harmony v2 is the default: `bv.integrate.harmony`, `step_harmony` and
   `build_symphony_ref` without `harmony_params` run it, and it lands under
   `"harmony"`. The original is `harmony_v1` (`step_harmony_v1`, under
