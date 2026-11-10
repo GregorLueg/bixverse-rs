@@ -414,6 +414,10 @@ groups_to_run
 per_group = apply_pipeline_per_group(
     subcluster_pipeline, sc, "cell_type", groups=groups_to_run
 )
+subsets = {
+    name: x for name, x in per_group.items() if isinstance(x, bv.SingleCellsSubset)
+}
+assert len(subsets) == len(per_group)
 
 pl.DataFrame(
     [
@@ -423,7 +427,7 @@ pl.DataFrame(
             "n_subclusters": x.obs()["subcluster"].n_unique(),
             "hvg_shared_with_global": len(np.intersect1d(x.map.hvg, global_hvg)),
         }
-        for name, x in per_group.items()
+        for name, x in subsets.items()
     ]
 ).sort("n_cells", descending=True)
 
@@ -439,7 +443,7 @@ pl.DataFrame(
 # %%
 bv.merge_subset_obs(
     sc,
-    list(per_group.values()),
+    list(subsets.values()),
     cols=["subcluster"],
     new_names=["fine_label"],
     prefix_values=True,

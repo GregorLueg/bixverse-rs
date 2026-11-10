@@ -13,6 +13,7 @@ from bixverse import nmf as bvnmf
 from bixverse.params import (
     BtMetacellsParams,
     MinQualityParams,
+    NeighboursParams,
     NmfConsensusParams,
     NmfHalsParams,
     SyntheticDataParams,
@@ -34,7 +35,7 @@ def sc(tmp_path_factory):
     sc.set_cells_to_keep(sc.cell_ids()[5:])
     pp.find_hvg(sc, hvg_no=30)
     pp.calculate_pca(sc, 8)
-    bv.graph.find_neighbours(sc, neighbours_params=bv.params.NeighboursParams(k=10))
+    bv.graph.find_neighbours(sc, neighbours_params=NeighboursParams(k=10))
     return sc
 
 

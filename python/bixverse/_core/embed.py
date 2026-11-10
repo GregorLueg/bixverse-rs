@@ -51,13 +51,17 @@ def _nn_defaults() -> mf.NeighbourParams:
 
 @beartype
 def umap_defaults() -> mf.UMAP:
-    """UMAP set to the package defaults."""
+    """UMAP set to the package defaults.
+
+    `n_epochs=None` follows the optimiser: 500, or 200 for `"sgd"` and
+    `"sgd_parallel"` above 10,000 cells, as umap-learn does.
+    """
     return mf.UMAP(
         n_components=2,
         n_neighbors=15,
         min_dist=0.5,
         spread=1.0,
-        n_epochs=500,
+        n_epochs=None,
         learning_rate=1.0,
         init="spectral",
         ann="kmknn",
@@ -92,7 +96,7 @@ def tsne_defaults() -> mf.TSNE:
         init="pca",
         ann="kmknn",
         approx="bh",
-        randomised_init=True,
+        randomised=True,
         seed=42,
         nn_params=_nn_defaults(),
         optim_params=mf.TsneOptim(
@@ -118,7 +122,8 @@ def densne_defaults() -> mf.DensNE:
 def phate_defaults() -> mf.PHATE:
     """PHATE set to the package defaults.
 
-    `randomised` and `mds_iter` are not set here; the estimator's own apply.
+    `randomised`, `mds_iter` and `thresh` are not set here; the estimator's
+    own apply.
     """
     return mf.PHATE(
         n_components=2,
@@ -126,16 +131,13 @@ def phate_defaults() -> mf.PHATE:
         decay=40.0,
         t=None,
         gamma=1.0,
+        n_landmarks=2048,
+        landmark_method="spectral",
         mds="sgd_dense",
         ann="kmknn",
         seed=42,
         nn_params=_nn_defaults(),
-        diffusion_params=mf.PhateDiffusion(
-            graph_symmetry="additive",
-            n_landmarks=2048,
-            landmark_method="spectral",
-            t_max=100,
-        ),
+        diffusion_params=mf.PhateDiffusion(graph_symmetry="additive", t_max=100),
     )
 
 
@@ -150,7 +152,7 @@ def forceatlas2_defaults() -> mf.ForceAtlas2:
         lin_log=False,
         init="spectral",
         ann="kmknn",
-        randomised_init=False,
+        randomised=False,
         seed=42,
         nn_params=_nn_defaults(),
         graph_params=mf.UmapGraph(bandwidth=1e-5, local_connectivity=1.0),
@@ -249,7 +251,13 @@ def umap(
 
     With `use_knn` the cached kNN (`find_neighbours`) is reused and the
     neighbour search knobs in `params` do not apply; without one cached, a
-    warning and a search over the embedding.
+    warning and a search over the embedding. A cached kNN wider than
+    `n_neighbors` is cut to it (manifolds-rs warns on stderr); a narrower one
+    is used as it is.
+
+    `optimiser="sgd_parallel"` runs umap-learn's SGD lock-free over all
+    threads (Hogwild!). Fast, but a fixed seed no longer gives the same
+    embedding twice.
 
     Args:
         sc: The experiment.
@@ -271,6 +279,8 @@ def umap(
         >>> bv.embed.umap(sc)
         >>> umap_params = bv.embed.umap_defaults().set_params(n_neighbors=30)
         >>> bv.embed.umap(sc, slot_name="umap_30", params=umap_params)
+        >>> hogwild = bv.embed.umap_defaults().set_params(optimiser="sgd_parallel")
+        >>> bv.embed.umap(sc, slot_name="umap_sgd", params=hogwild)
     """
     _embed(
         sc,
@@ -418,7 +428,7 @@ def densne(
 def phate(
     sc: ScOrMc,
     *,
-    use_knn: bool = True,
+    use_knn: bool = False,
     embd_to_use: str = "pca",
     slot_name: str = "phate",
     no_embd_to_use: int | None = None,
@@ -427,7 +437,10 @@ def phate(
 ) -> None:
     """PHATE.
 
-    Inputs are handled as in `umap`.
+    Off by default, `use_knn` reuses the cached kNN. PHATE searches `6k + 5`
+    neighbours (35 at the default `k=5`) because its kernel keeps points past
+    the `k`-th; a cached graph narrower than that is used as it is, so keep
+    its k at that width if you reuse it.
 
     Args:
         sc: The experiment.

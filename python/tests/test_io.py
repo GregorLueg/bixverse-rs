@@ -87,8 +87,10 @@ def test_h5ad_round_trip_and_auto_slot(data, tmp_path):
     bv.io.write_h5ad_sc(f, data.counts, data.obs, data.var)
     assert bv.io.detect_raw_count_slot(f) == "X"
     meta = bv.io.read_h5ad_metadata(f)
+    obs = meta["obs"]
+    assert isinstance(obs, pl.DataFrame)
     assert meta["dims"] == (120, 40)
-    assert meta["obs"]["cell_id"].to_list() == data.obs["cell_id"].to_list()
+    assert obs["cell_id"].to_list() == data.obs["cell_id"].to_list()
     sc = bv.io.load_h5ad(tmp_path / "sc", f, qc=QC)
     np.testing.assert_array_equal(_dense(sc), _truth(data))
     with pytest.raises(FileExistsError):
@@ -136,7 +138,9 @@ def test_tenx_v2_round_trip(data, tmp_path):
     meta = bv.io.read_tenx_h5_metadata(f)
     assert meta["version"] == "v2"
     assert meta["feature_types"] is None
-    assert meta["var"][".id"].to_list() == data.var["gene_id"].to_list()
+    var = meta["var"]
+    assert isinstance(var, pl.DataFrame)
+    assert var[".id"].to_list() == data.var["gene_id"].to_list()
     sc = bv.io.load_tenx_h5(tmp_path / "sc", f, qc=QC)
     np.testing.assert_array_equal(_dense(sc), _truth(data))
 
@@ -191,10 +195,14 @@ def test_h5ad_column_encoding_follows_r():
         name: (kind, payload)
         for name, kind, payload in h5ad_columns(frame, factorise=True)
     }
-    kind, (codes, levels) = cols["grp"]
+    kind, payload = cols["grp"]
+    assert isinstance(payload, tuple)
+    codes, levels = payload
     assert (kind, codes.tolist(), levels) == ("categorical", [1, 0, 1], ["a", "b"])
     assert cols["uniq"] == ("string", ["x", "NA", "z"])
-    assert cols["n"][0] == "float" and np.isnan(cols["n"][1][1])
+    n_kind, n_payload = cols["n"]
+    assert isinstance(n_payload, list | np.ndarray)
+    assert n_kind == "float" and np.isnan(n_payload[1])
     assert cols["flag"][0] == "bool"
     # repeated values factorise, but there is no level to write
     assert cols["empty"] == ("string", ["NA", "NA", "NA"])

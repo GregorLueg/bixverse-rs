@@ -104,6 +104,7 @@ bv.graph.find_neighbours(
 
 # we need the kNN graph for the diffusion maps
 knn = sc.cache.knn
+assert knn is not None
 
 # %% [markdown]
 # ## Generating meta cells
@@ -131,6 +132,7 @@ hdwgcna = bv.metacells.generate_bt_meta_cells(
     regenerate_knn=True,
     verbose=True,
 )
+assert hdwgcna is not None
 
 hdwgcna
 
@@ -280,6 +282,7 @@ supercells = bv.metacells.generate_supercells(
     params=SupercellParams(graining_factor=30),
     verbose=True,
 )
+assert supercells is not None
 
 supercells
 
@@ -362,6 +365,7 @@ plt.show()
 
 # %%
 mc2_cell_info = metacells2.other_data["cell_info"]
+assert isinstance(mc2_cell_info, pl.DataFrame)
 
 print(f"{metacells2.original_assignment.n_unassigned} cells unassigned")
 
@@ -448,7 +452,9 @@ def violin_by_method(
     data = [df.filter(pl.col("method") == m)[value].to_numpy() for m in methods]
     parts = ax.violinplot(data, showextrema=False)
     for body, colour in zip(
-        parts["bodies"], bv.pl.bx_colors("main", n=len(methods)), strict=True
+        parts["bodies"],  # ty: ignore[invalid-argument-type] # matplotlib stubs type the violin parts as bare Collection
+        bv.pl.bx_colors("main", n=len(methods)),
+        strict=True,
     ):
         body.set_facecolor(colour)
         body.set_alpha(0.6)
@@ -684,7 +690,7 @@ plt.show()
 # assignment with the same meta cell sizes.
 
 # %%
-dcs = seacells.other_data["dcs"]
+dcs = np.asarray(seacells.other_data["dcs"])
 cell_ids = sc.obs(cols=["cell_idx", "cell_id"])
 
 # what an external tool would hand you: cell id -> meta cell
@@ -841,6 +847,7 @@ scenic_res = bv.pathways.tf_to_genes_correlations(scenic_res, seacells, verbose=
 
 # no motif filter here, so the leading edge column does not exist yet
 tf_to_gene = bv.pathways.build_regulons(scenic_res, use_leading_edge=False)
+assert tf_to_gene is not None
 
 len(tf_to_gene)
 

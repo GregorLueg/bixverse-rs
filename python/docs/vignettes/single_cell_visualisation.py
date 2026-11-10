@@ -13,6 +13,7 @@
 # %%
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -83,7 +84,7 @@ metrics = {
     "MT": qc_df["MT"].to_numpy(),
 }
 
-directions = {
+directions: dict[str, Literal["twosided", "below", "above"]] = {
     "log10_lib_size": "twosided",
     "log10_nnz": "twosided",
     "MT": "above",
@@ -319,8 +320,8 @@ df.head()
 
 # %%
 bv.embed.densmap(sc)
-bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(approx="fft_3k"))
-bv.embed.densne(sc, params=bv.embed.densne_defaults().set_params(approx="fft_3k"))
+bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(approx="fft_3k"))  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
+bv.embed.densne(sc, params=bv.embed.densne_defaults().set_params(approx="fft_3k"))  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 
 # %% [markdown]
 # UMAP and t-SNE (left) next to their density-preserving versions (right),

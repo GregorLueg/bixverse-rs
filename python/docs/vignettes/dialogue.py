@@ -156,6 +156,7 @@ for ct in cell_types:
 
     # PCA rows follow the subset's kept cells
     pcs = sub.cache.pca_factors
+    assert pcs is not None
     features[ct] = pl.DataFrame(
         {
             "cell_id": sub.cell_ids(filtered=True),
@@ -356,7 +357,7 @@ donor_lib = obs.group_by("sample", "pathology").agg(pl.col("lib_size").mean())
 lib_groups = donor_lib.partition_by("pathology", as_dict=True)
 
 {
-    "mean_lib_size": {k[0]: round(g["lib_size"].mean()) for k, g in lib_groups.items()},
+    "mean_lib_size": {k[0]: round(g["lib_size"].mean()) for k, g in lib_groups.items()},  # ty: ignore[invalid-argument-type] # polars types Series.mean as a wide union
     "p": float(
         mannwhitneyu(*(g["lib_size"].to_numpy() for g in lib_groups.values())).pvalue
     ),

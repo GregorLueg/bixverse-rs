@@ -120,7 +120,9 @@ def _same_bbknn(sc: bv.SingleCells, want: dict) -> None:
 
 
 def _close(got: object, want: object, rtol: float = RTOL_F64) -> None:
-    np.testing.assert_allclose(np.asarray(got, dtype=np.float64), want, rtol=rtol)
+    np.testing.assert_allclose(
+        np.asarray(got, dtype=np.float64), np.asarray(want, dtype=np.float64), rtol=rtol
+    )
 
 
 ###########

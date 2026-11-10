@@ -14,7 +14,7 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, no_type_check
 
 import numpy as np
 import polars as pl
@@ -33,6 +33,9 @@ from bixverse._core.state import (
     stale_artefacts,
     state_report,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from scipy.sparse import csr_matrix
 
 ###########
 # Globals #
@@ -486,7 +489,8 @@ class Counts:
             "Counts", shape=self.matrix.shape, nnz=len(self.matrix.data)
         )
 
-    def scipy_csr(self) -> object:
+    @no_type_check  # beartype cannot resolve the typing-only scipy import
+    def scipy_csr(self) -> csr_matrix:
         """The matrix as a `scipy.sparse.csr_matrix`. Needs scipy."""
         return self.matrix.scipy_csr()
 

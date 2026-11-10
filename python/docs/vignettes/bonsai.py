@@ -231,10 +231,10 @@ def plot_tree(tree, colour_by=None, point_size=2.0, size_by_cells=False, ax=None
     else:
         segs = np.stack([child, parent], 1)
         ax.set_aspect("equal")
-    ax.add_collection(LineCollection(segs, colors="grey", linewidths=0.2))
+    ax.add_collection(LineCollection(list(segs), colors="grey", linewidths=0.2))
 
     leaves = nodes.filter(pl.col("is_leaf"))
-    sizes = point_size
+    sizes: float | np.ndarray = point_size
     if size_by_cells:
         n = leaves["n_cells"].to_numpy()
         sizes = point_size * (1 + 4 * (n - n.min()) / max(n.max() - n.min(), 1))
@@ -246,7 +246,7 @@ def plot_tree(tree, colour_by=None, point_size=2.0, size_by_cells=False, ax=None
         palette = bv.pl.bx_colors("main", n=len(groups))
         for i, grp in enumerate(groups):
             m = colour_by == grp
-            s = sizes[m] if size_by_cells else sizes
+            s = sizes[m] if isinstance(sizes, np.ndarray) else sizes
             ax.scatter(
                 leaves["x"].to_numpy()[m],
                 leaves["y"].to_numpy()[m],
@@ -257,7 +257,7 @@ def plot_tree(tree, colour_by=None, point_size=2.0, size_by_cells=False, ax=None
             )
         legend = ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1, 0.5))
         for handle in legend.legend_handles:
-            handle.set_sizes([20])
+            handle.set_sizes([20])  # ty: ignore[missing-union-attribute] # matplotlib stubs type legend handles as Artist
     ax.set_axis_off()
     return ax
 
@@ -333,6 +333,7 @@ plt.show()
 
 # %%
 supercells = bv.metacells.generate_supercells(sc)
+assert supercells is not None
 
 bv.metacells.calc_meta_cell_purity(
     supercells, cell_type.tolist(), add_additional_info="top_label"

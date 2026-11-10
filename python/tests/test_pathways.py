@@ -23,6 +23,7 @@ from bixverse.params import (
     HotspotParams,
     LmActivityParams,
     MinQualityParams,
+    NeighboursParams,
     ScenicExtraTreesDefaults,
     ScenicGradientBoostingDefaults,
     ScenicParams,
@@ -56,7 +57,7 @@ def sc(tmp_path_factory):
     sc.set_cells_to_keep(sc.cell_ids()[10:])
     pp.find_hvg(sc, hvg_no=30)
     pp.calculate_pca(sc, 8)
-    bv.graph.find_neighbours(sc, neighbours_params=bv.params.NeighboursParams(k=10))
+    bv.graph.find_neighbours(sc, neighbours_params=NeighboursParams(k=10))
     return sc
 
 
@@ -68,7 +69,7 @@ def mc(sc):
     assert mc is not None
     pp.find_hvg(mc, hvg_no=30)
     pp.calculate_pca(mc, 5)
-    bv.graph.find_neighbours(mc, neighbours_params=bv.params.NeighboursParams(k=6))
+    bv.graph.find_neighbours(mc, neighbours_params=NeighboursParams(k=6))
     return mc
 
 
@@ -351,7 +352,9 @@ def test_hotspot_round_trip(sc):
     m = pathways.get_hotspot_membership(hs)
     assert m is not None and m.height == 20
     assert "n_modules=None" not in repr(hs)
-    assert pathways.get_params(hs)["used_cells"] == tuple(sc.cell_ids(filtered=True))
+    params = pathways.get_params(hs)
+    assert isinstance(params, dict)
+    assert params["used_cells"] == tuple(sc.cell_ids(filtered=True))
 
 
 def test_hotspot_cell_subset_drops_the_cached_knn(sc):
@@ -405,4 +408,4 @@ def test_meta_cell_twins_run(mc):
     )
     assert auto.height == 10
     with pytest.raises(BeartypeCallHintParamViolation):
-        pathways.module_scores(mc, GS)  # ty: ignore[invalid-argument-type]
+        pathways.module_scores(mc, GS)

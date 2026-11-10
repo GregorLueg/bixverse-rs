@@ -38,7 +38,7 @@ mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # `bixverse.nn` on JAX, CPU or CUDA (`jax[cuda12]` on top for the latter).
 jax = ["jax>=0.5", "optax>=0.2"]
 # `bixverse.embed`: UMAP, t-SNE, PHATE and friends.
-embed = ["manifolds-rs>=0.5.0"]
+embed = ["manifolds-rs>=0.6.0"]
 # The `bixverse.pl` plots. The `extract_*` plot data functions need nothing.
 plots = ["matplotlib>=3.8"]
 # `bixverse_gpu`: the GPU twins, a separate wheel built from `gpu/`.
@@ -51,7 +51,7 @@ dev = [
     "ruff>=0.9",
     "ty>=0.0.1",
     "scipy>=1.9",
-    "manifolds-rs>=0.5.0",
+    "manifolds-rs>=0.6.0",
     "matplotlib>=3.8",
 ]
 # mkdocstrings reads the installed package, so a docs build needs the compiled
@@ -118,9 +118,25 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["bixverse", "bixverse_gpu"]
 
+[tool.ty.src]
+# The executed notebooks are generated from the jupytext sources next to them,
+# so checking both reports every diagnostic twice.
+exclude = ["**/*.ipynb"]
+
 [tool.ty.analysis]
-# The mlx extra only installs on Apple Silicon, so Linux CI never sees it.
-allowed-unresolved-imports = ["mlx.**"]
+# Optional extras and dev-only tooling that the type-check environment does not
+# install: mlx (Apple Silicon only), the torch and jax backends of `bixverse.nn`,
+# and the scVI validation scripts in `dev/` and `tests/test_scvi_parity.py`.
+allowed-unresolved-imports = [
+    "mlx.**",
+    "torch.**",
+    "jax.**",
+    "optax.**",
+    "scvi.**",
+    "anndata.**",
+    "pandas.**",
+    "sklearn.**",
+]
 
 [tool.ty.rules]
 # torch declares `nn.Module.forward` as a mutable `Callable` attribute, so every

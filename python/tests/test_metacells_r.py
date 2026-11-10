@@ -151,6 +151,9 @@ def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
 
 
 def _check_pca(mc: metacells.MetaCells, want: dict) -> None:
+    assert mc.cache.pca_singular_vals is not None
+    assert mc.cache.pca_factors is not None
+    assert mc.cache.pca_loadings is not None
     np.testing.assert_allclose(
         mc.cache.pca_singular_vals, want["singular_values"], rtol=RTOL
     )
@@ -188,7 +191,7 @@ def test_seacells_matches_r(ref, sc):
     )
     want = ref["sea"]
     _check_mc(mc, want)
-    np.testing.assert_allclose(mc.other_data["rss"], want["rss"], rtol=RTOL)
+    np.testing.assert_allclose(np.asarray(mc.other_data["rss"]), want["rss"], rtol=RTOL)
     np.testing.assert_array_equal(mc.other_data["archetypes"], want["archetypes"])
 
 
@@ -335,7 +338,7 @@ def test_diffusion_and_manifold_match_r(ref, sc, chain):
     assert isinstance(dcs, np.ndarray)
     _same_columns(dcs, np.array(want["dcs"]), "dcs")
     np.testing.assert_allclose(
-        mc.other_data["density_dist"], want["density_dist"], rtol=RTOL
+        np.asarray(mc.other_data["density_dist"]), want["density_dist"], rtol=RTOL
     )
     assert mc.other_data["regions"] == want["regions"]
     obs = mc.obs()

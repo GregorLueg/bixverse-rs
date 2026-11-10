@@ -92,10 +92,12 @@ def cs(ref, tmp_path_factory):
 
 
 def _close(got: object, want: object) -> None:
-    np.testing.assert_allclose(np.asarray(got, dtype=np.float64), want, rtol=RTOL)
+    np.testing.assert_allclose(
+        np.asarray(got, dtype=np.float64), np.asarray(want, dtype=np.float64), rtol=RTOL
+    )
 
 
-def _scalar(got: object, want: object) -> None:
+def _scalar(got: object, want: dict | list) -> None:
     """R hands a scalar as a one-element list, a named vector as a dict."""
     if isinstance(want, dict):
         assert isinstance(got, dict) and list(got) == list(want)

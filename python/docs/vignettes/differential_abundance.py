@@ -161,6 +161,7 @@ milo = bv.de.get_milor_abundances(
     milor_params=bv.de.MiloRParams(prop=0.1),
     verbose=True,
 )
+assert milo is not None
 
 print(milo.sample_counts.shape)
 print(milo.sample_counts.sum(axis=1).mean())
@@ -206,6 +207,7 @@ milo = bv.de.test_nhoods(
 )
 
 da_res = bv.de.get_differential_abundance_res(milo)
+assert da_res is not None
 
 da_res.filter(pl.col("SpatialFDR") <= 0.1).height
 
@@ -222,6 +224,7 @@ da_res.sort("PValue").select("Nhood", "logFC", "F", "PValue", "FDR", "SpatialFDR
 # %%
 milo = bv.de.add_nhoods_info(milo, cell_info=obs["cluster_annot"])
 da_res = bv.de.get_differential_abundance_res(milo)
+assert da_res is not None
 
 sig = da_res.filter(pl.col("SpatialFDR") <= 0.1).with_columns(
     direction=pl.when(pl.col("logFC") > 0)
@@ -314,6 +317,7 @@ pl.DataFrame(
 
 # %%
 meld_res = bv.de.meld(sc, "age")
+assert meld_res is not None
 
 print(meld_res.norm_scores.shape)
 meld_res.norm_scores.head(4).with_columns(pl.selectors.numeric().round(3))

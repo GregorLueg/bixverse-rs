@@ -20,6 +20,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -115,6 +116,9 @@ def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
 
 
 def _same_pca(sc: bv.SingleCells, want: dict, name: str) -> None:
+    assert sc.cache.pca_singular_vals is not None
+    assert sc.cache.pca_factors is not None
+    assert sc.cache.pca_loadings is not None
     np.testing.assert_allclose(
         sc.cache.pca_singular_vals,
         want["singular_values"],
@@ -174,7 +178,9 @@ def test_find_hvg_batch_aware_scran_matches_r(ref, sc):
     _same_frame(res.hvg_data, want["hvg_data"])
 
 
-PCA_RUNS = {
+PCA_RUNS: dict[
+    str, tuple[Literal["auto", "covariance", "randomised", "exact"], bool, bool]
+] = {
     "dense_covariance": ("covariance", False, False),
     "dense_exact": ("exact", False, False),
     "dense_randomised": ("randomised", False, False),

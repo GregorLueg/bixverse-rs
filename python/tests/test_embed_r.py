@@ -172,9 +172,8 @@ def test_defaults_match_r(ref):
         um["init"],
         um["randomised"],
     )
-    # R's NULL is 500 under adam_parallel
     assert um["n_epochs"] is None
-    assert u.n_epochs == 500
+    assert u.n_epochs is None
     for f in ("local_connectivity", "bandwidth", "mix_weight"):
         assert getattr(u.graph_params, f) == um[f], f
     for f in ("neg_sample_rate", "gamma"):
@@ -197,7 +196,7 @@ def test_defaults_match_r(ref):
         top["knn_method"],
         top["seed"],
     )
-    assert (t.learning_rate, t.n_epochs, t.init, t.randomised_init) == (
+    assert (t.learning_rate, t.n_epochs, t.init, t.randomised) == (
         ts["lr"],
         ts["n_epochs"],
         ts["init"],
@@ -243,7 +242,7 @@ def test_defaults_match_r(ref):
         fa.gravity,
         fa.lin_log,
         fa.init,
-        fa.randomised_init,
+        fa.randomised,
     ) == (
         f2["n_epochs"],
         f2["scaling_ratio"],

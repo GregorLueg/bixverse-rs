@@ -124,6 +124,7 @@ def main() -> None:
                 case "scvi_torch":
                     import scvi
 
+                    assert adata is not None
                     scvi.settings.seed = seed
                     a_train = adata[train_pos].copy()
                     scvi.model.SCVI.setup_anndata(a_train, batch_key="exp_id")
@@ -145,6 +146,7 @@ def main() -> None:
                 case "scvi_mlx":
                     import scvi
 
+                    assert adata is not None
                     scvi.settings.seed = seed
                     a_train = adata[train_pos].copy()
                     scvi.model.mlxSCVI.setup_anndata(a_train, batch_key="exp_id")

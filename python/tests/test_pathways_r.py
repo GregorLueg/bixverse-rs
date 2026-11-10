@@ -98,16 +98,16 @@ def _frame(d: dict) -> pl.DataFrame:
 
 
 def _check_links(got: pl.DataFrame, want: dict, name: str) -> None:
-    want = _frame(want)
-    assert got["tf"].to_list() == want["tf"].to_list(), name
-    assert got["gene"].to_list() == want["gene"].to_list(), name
+    want_df = _frame(want)
+    assert got["tf"].to_list() == want_df["tf"].to_list(), name
+    assert got["gene"].to_list() == want_df["gene"].to_list(), name
     for col in ("importance", "pairwise_cor"):
-        if col in want.columns:
-            _close(got[col].to_numpy(), want[col].to_list(), f"{name} {col}")
-    if "cor_sign" in want.columns:
-        assert got["cor_sign"].to_list() == want["cor_sign"].to_list(), name
-    if "in_leading_edge" in want.columns:
-        assert got["in_leading_edge"].to_list() == want["in_leading_edge"].to_list()
+        if col in want_df.columns:
+            _close(got[col].to_numpy(), want_df[col].to_list(), f"{name} {col}")
+    if "cor_sign" in want_df.columns:
+        assert got["cor_sign"].to_list() == want_df["cor_sign"].to_list(), name
+    if "in_leading_edge" in want_df.columns:
+        assert got["in_leading_edge"].to_list() == want_df["in_leading_edge"].to_list()
 
 
 def _scenic(
@@ -308,10 +308,10 @@ def test_lm_activity_coef_matches_r(ref, sc):
 
 
 def _check_hs_autocor(got: pl.DataFrame, want: dict, name: str) -> None:
-    want = _frame(want)
-    assert got["gene_id"].to_list() == want["gene_id"].to_list(), name
+    want_df = _frame(want)
+    assert got["gene_id"].to_list() == want_df["gene_id"].to_list(), name
     for col in ("gearys_c", "z_score", "pval", "fdr"):
-        _close(got[col].to_numpy(), want[col].to_list(), f"{name} {col}")
+        _close(got[col].to_numpy(), want_df[col].to_list(), f"{name} {col}")
 
 
 def test_hotspot_autocor_matches_r(ref, sc):
@@ -401,13 +401,13 @@ CIS = CistargetParams(nes_threshold=1, auc_threshold=0.2)
 
 
 def _check_cis(got: pl.DataFrame, want: dict) -> None:
-    want = _frame(want)
+    want_df = _frame(want)
     for col in ("motif", "gs_name", "rank_at_max", "n_enriched", "leading_edge_genes"):
-        assert got[col].to_list() == want[col].to_list(), col
+        assert got[col].to_list() == want_df[col].to_list(), col
     for col in ("TF_highConf", "TF_lowConf"):
-        assert got[col].to_list() == want[col].to_list(), col
-    _close(got["nes"].to_numpy(), want["nes"].to_list(), "nes")
-    _close(got["auc"].to_numpy(), want["auc"].to_list(), "auc")
+        assert got[col].to_list() == want_df[col].to_list(), col
+    _close(got["nes"].to_numpy(), want_df["nes"].to_list(), "nes")
+    _close(got["auc"].to_numpy(), want_df["auc"].to_list(), "auc")
 
 
 def test_run_cistarget_matches_r(ref, sc):

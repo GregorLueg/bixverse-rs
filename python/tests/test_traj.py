@@ -323,7 +323,7 @@ def test_relayout_keeps_the_leaves(tree):
     )
     assert res.nodes.height == tree.nodes.height
     np.testing.assert_allclose(
-        res.nodes["branch"].sum(), tree.nodes["branch"].sum(), rtol=1e-12
+        float(res.nodes["branch"].sum()), float(tree.nodes["branch"].sum()), rtol=1e-12
     )
 
 

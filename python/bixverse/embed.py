@@ -23,14 +23,20 @@ bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(perplexity=20.0))
 umap_xy = sc.cache.embeddings["umap"]
 ```
 
-**Gotchas.** With `use_knn=True` (the default for everything but t-SNE and
-den-SNE) the cached kNN is reused and the neighbour search settings in `params`
-don't apply, so `n_neighbors` follows the `k` you built the graph with. With no
-kNN cached you get a warning and a fresh search. t-SNE and den-SNE search
-afresh unless you ask for the cached kNN; if you do, keep its `k` near three
-times the perplexity. A stale input raises, and so does a `slot_name` that is
-reserved (the PCA, kNN and so on). ForceAtlas2 lays out the fuzzy kNN graph;
-laying out a graph you supply is not possible.
+UMAP and densMAP take `optimiser="sgd_parallel"`, umap-learn's SGD run
+lock-free over all threads (Hogwild!). It is fast and not reproducible: the
+same seed gives a different embedding each run. `n_epochs` defaults to `None`,
+which is 500, or 200 for the SGD optimisers above 10,000 cells.
+
+**Gotchas.** With `use_knn=True` (the default for UMAP, densMAP and
+ForceAtlas2) the cached kNN is reused and the neighbour search settings in
+`params` don't apply. A graph wider than `n_neighbors` is cut to it, with a
+warning on stderr; a narrower one is used as it is. With no kNN cached you get
+a warning and a fresh search. t-SNE, den-SNE and PHATE search afresh unless you
+ask for the cached kNN; if you do, keep its `k` near three times the perplexity
+for t-SNE, and at `6k + 5` (35 by default) for PHATE. A stale input raises, and
+so does a `slot_name` that is reserved (the PCA, kNN and so on). ForceAtlas2
+lays out the fuzzy kNN graph; laying out a graph you supply is not possible.
 """
 
 try:

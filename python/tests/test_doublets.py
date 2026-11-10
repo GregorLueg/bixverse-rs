@@ -90,6 +90,7 @@ def test_scrublet_optional_outputs(sc):
         sc, scrublet_params=SCRUBLET, return_combined_pca=True, return_pairs=True
     )
     assert isinstance(res.pca, np.ndarray) and isinstance(res.pair_1, np.ndarray)
+    assert isinstance(res.pair_2, np.ndarray)
     n_sim = len(res.doublet_scores_sim)
     assert res.pca.shape == (sc.n_cells + n_sim, SCRUBLET.no_pcs)
     assert res.pair_1.shape == res.pair_2.shape == (n_sim,)
@@ -253,6 +254,7 @@ def test_scdblfinder_grouped_prefixes_clusters(sc):
     params = ScdblfinderParams(no_pcs=10, n_genes=40, cxds_genes=40)
     with pytest.warns(UserWarning):
         res = doublets.scdblfinder(sc, scdblfinder_params=params, group_by="sample_id")
+    assert res.cell_groups is not None
     assert all(
         str(c).startswith(f"{g}_")
         for c, g in zip(res.cluster_labels, res.cell_groups, strict=True)

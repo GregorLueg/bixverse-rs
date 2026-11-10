@@ -85,9 +85,9 @@ def test_cached_knn_is_reused(sc):
 def test_missing_knn_warns_and_searches(sc):
     sc.cache.knn = None
     with pytest.warns(UserWarning, match="No kNN data found"):
-        embed.phate(sc)
-    assert sc.cache.embeddings["phate"].shape == (sc.n_cells, 2)
-    assert sc.cache.stamps["phate"].parents == (sc.cache.stamps["pca"].id,)
+        embed.umap(sc, params=_fast_umap())
+    assert sc.cache.embeddings["umap"].shape == (sc.n_cells, 2)
+    assert sc.cache.stamps["umap"].parents == (sc.cache.stamps["pca"].id,)
 
 
 def test_missing_embedding_raises(sc):
@@ -134,6 +134,20 @@ def test_every_function_runs(sc):
 
 def test_defaults_are_fresh_objects():
     assert embed.umap_defaults() is not embed.umap_defaults()
+
+
+def test_umap_sgd_parallel_runs(sc):
+    p = embed.umap_defaults().set_params(optimiser="sgd_parallel", n_epochs=50)
+    embed.umap(sc, slot_name="umap_sgd", params=p)
+    got = sc.cache.embeddings["umap_sgd"]
+    assert got.shape == (sc.n_cells, 2)
+    assert np.isfinite(got).all()
+
+
+def test_phate_searches_afresh_by_default(sc):
+    embed.phate(sc)
+    assert sc.cache.embeddings["phate"].shape == (sc.n_cells, 2)
+    assert sc.cache.stamps["phate"].parents == (sc.cache.stamps["pca"].id,)
 
 
 #############

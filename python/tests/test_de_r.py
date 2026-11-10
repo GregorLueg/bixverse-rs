@@ -27,6 +27,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -367,7 +368,7 @@ def test_add_nhoods_info_matches_r(ref, sc, milo, design_df):
 
 
 def test_meld_matches_r(ref, sc):
-    for key, col, kwargs in (
+    cases: tuple[tuple[str, str, dict[str, Any]], ...] = (
         ("meld", "sample_id", {}),
         (
             "meld_lap",
@@ -382,7 +383,8 @@ def test_meld_matches_r(ref, sc):
                 "seed": 3,
             },
         ),
-    ):
+    )
+    for key, col, kwargs in cases:
         got = de.meld(sc, col, **kwargs)
         assert got is not None
         want = ref[key]

@@ -163,7 +163,7 @@ def test_subset_processing_leaves_the_parent(sc):
 def test_subset_is_not_persisted(sc):
     sub = bv.SingleCellsSubset(sc, *GROUP)
     with pytest.raises(BeartypeCallHintParamViolation):
-        bv.io.save(sub)  # type: ignore[arg-type]
+        bv.io.save(sub)  # ty: ignore[invalid-argument-type] # wrong type on purpose
 
 
 ###########

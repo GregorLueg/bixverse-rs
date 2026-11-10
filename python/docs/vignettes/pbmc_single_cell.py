@@ -12,6 +12,7 @@
 # %%
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -95,7 +96,7 @@ metrics = {
     "MT": qc_df["MT"].to_numpy(),
 }
 
-directions = {
+directions: dict[str, Literal["twosided", "below", "above"]] = {
     "log10_lib_size": "twosided",
     "log10_nnz": "twosided",
     "MT": "above",
@@ -201,6 +202,7 @@ fast_cluster_res.memberships.head()
 
 # %%
 centroids = fast_cluster_res.centroids
+assert centroids is not None
 kmeans_membership = fast_cluster_res.k_means_cluster
 
 centroids.shape

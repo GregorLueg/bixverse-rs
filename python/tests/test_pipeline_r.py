@@ -84,6 +84,9 @@ def _same_columns(got: np.ndarray, want: np.ndarray, err_msg: str) -> None:
 
 
 def _check_pca(obj: bv.SingleCells | bv.SingleCellsSubset | bv.MetaCells, want):
+    assert obj.cache.pca_singular_vals is not None
+    assert obj.cache.pca_factors is not None
+    assert obj.cache.pca_loadings is not None
     np.testing.assert_allclose(
         obj.cache.pca_singular_vals, want["singular_values"], rtol=RTOL_F32
     )
@@ -160,6 +163,7 @@ def test_per_group_pipeline_matches_r(ref, sc):
     by_batch = pipeline.apply_pipeline_per_group(p, sc, "batch_index")
     assert list(by_batch) == ref["batches"]
     for g, sub in by_batch.items():
+        assert isinstance(sub, bv.SingleCellsSubset)
         assert sub.map.hvg is not None
         assert sub.map.hvg.tolist() == ref["per_batch_hvg"][g], g
 

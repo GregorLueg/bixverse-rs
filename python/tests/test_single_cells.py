@@ -330,7 +330,8 @@ def test_filter_change_flags_stamped_artefacts_without_deleting(exp):
     assert sc.cache.pca_factors is not None
     report = sc.cache_status()
     assert report["stale"].to_list() == [True, True]
-    assert "cell set changed" in sc.check_state(["umap"])
+    state = sc.check_state(["umap"])
+    assert isinstance(state, str) and "cell set changed" in state
 
 
 def test_recomputing_a_parent_makes_children_stale(exp):
@@ -412,11 +413,14 @@ def test_save_and_load_round_trip(exp):
         warnings.simplefilter("error")
         back = bv.io.load_existing(path)
     assert back.cells_to_keep.tolist() == [1, 2, 5, 9]
+    assert back.map.hvg is not None
     assert back.map.hvg.tolist() == [3, 0]
     np.testing.assert_array_equal(
         back.cache.embeddings["umap"], sc.cache.embeddings["umap"]
     )
+    assert back.cache.connectivities is not None
     assert back.cache.connectivities.indptr.dtype == np.uint64
+    assert back.cache.magic is not None
     assert back.cache.magic.features.tolist() == ["g1", "g2"]
     assert back.cache.stamps == sc.cache.stamps
     assert back.check_state(["pca", "umap"]) is True

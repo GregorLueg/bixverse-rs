@@ -23,6 +23,8 @@ headroom for another device:
   preservation instead.
 """
 
+from typing import Any
+
 import numpy as np
 import polars as pl
 import pytest
@@ -136,7 +138,7 @@ def _ari(a: np.ndarray, b: np.ndarray) -> float:
     """Adjusted Rand index."""
     _, ai = np.unique(np.asarray(a), return_inverse=True)
     _, bi = np.unique(np.asarray(b), return_inverse=True)
-    table = np.zeros((ai.max() + 1, bi.max() + 1))
+    table = np.zeros((int(np.amax(ai)) + 1, int(np.amax(bi)) + 1))
     np.add.at(table, (ai, bi), 1)
 
     def pairs(x: np.ndarray) -> float:
@@ -420,7 +422,11 @@ def test_seacells_matches_cpu(sc):
         got.obs()["original_cell_idx"].to_list()
         == want.obs()["original_cell_idx"].to_list()
     )
-    np.testing.assert_allclose(got.other_data["rss"], want.other_data["rss"], rtol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(got.other_data["rss"]),
+        np.asarray(want.other_data["rss"]),
+        rtol=1e-4,
+    )
 
 
 #########
@@ -498,7 +504,7 @@ def test_scenic_tracks_cpu(sc, mc):
 def test_nebula_matches_cpu(sc):
     # a per-cell covariate, so the fits do not collapse onto the CPU's
     # zero-count tables and stage two runs on the device
-    kw = {"genes_to_use": list(range(30))}
+    kw: dict[str, Any] = {"genes_to_use": list(range(30))}
     want = de.nebula(sc, "sample_id", "~ condition + score", **kw)
     got = bg.de.nebula(sc, "sample_id", "~ condition + score", **kw)
     assert got.results["gene_id"].to_list() == want.results["gene_id"].to_list()
@@ -547,5 +553,21 @@ def test_umap_and_tsne_preserve_neighbours(sc):
             sc.cache.stamps["pca"].id,
             *((sc.cache.stamps["knn"].id,) if gpu == "umap_gpu" else ()),
         )
+        want = _knn_preserved(sc.cache.embeddings[cpu], ref.indices)
+        assert _knn_preserved(got, ref.indices) >= 0.8 * want
+
+
+def test_densmap_and_phate_preserve_neighbours(sc):
+    graph.find_neighbours(sc)
+    ref = sc.cache.knn
+    assert ref is not None
+    embed.densmap(sc)
+    bg.embed.densmap(sc, slot_name="densmap_gpu")
+    embed.phate(sc)
+    bg.embed.phate(sc, slot_name="phate_gpu")
+    for cpu, gpu in (("densmap", "densmap_gpu"), ("phate", "phate_gpu")):
+        got = sc.cache.embeddings[gpu]
+        assert got.shape == (sc.n_cells, 2)
+        assert np.isfinite(got).all()
         want = _knn_preserved(sc.cache.embeddings[cpu], ref.indices)
         assert _knn_preserved(got, ref.indices) >= 0.8 * want

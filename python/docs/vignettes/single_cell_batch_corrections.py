@@ -70,6 +70,7 @@
 # %%
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -77,6 +78,7 @@ import polars as pl
 
 import bixverse as bv
 import bixverse.embed
+import bixverse.params
 
 # %% [markdown]
 # ## Preparing the data
@@ -117,9 +119,11 @@ sc
 
 # %%
 h5_metadata = bv.io.read_h5ad_metadata(h5ad_paths["pbmc3k"])
+h5_var = h5_metadata["var"]
+assert isinstance(h5_var, pl.DataFrame)
 
 var = sc.var().join(
-    h5_metadata["var"].select(
+    h5_var.select(
         pl.col("ensembl_id").alias("gene_id"),
         pl.col("symbol_tenx").alias("gene_symbol"),
     ),
@@ -143,7 +147,7 @@ metrics = {
     "MT": qc_df["MT"].to_numpy(),
 }
 
-directions = {
+directions: dict[str, Literal["twosided", "below", "above"]] = {
     "log10_lib_size": "twosided",
     "log10_nnz": "twosided",
     "MT": "above",
@@ -247,7 +251,7 @@ obs["cell_type"].value_counts(sort=True)
 # optimiser.
 
 # %%
-bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(approx="qd"))
+bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(approx="qd"))  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 
 # %% [markdown]
 # tSNE plot (tSNEs usually look prettier... It's anyway not a good way to
@@ -265,6 +269,7 @@ plt.show()
 
 # %%
 kbet = bv.integrate.calculate_kbet(sc, "exp_id")
+assert kbet is not None
 
 print(
     f"kBET rejection rate: {kbet.kbet_score:.3f} over {kbet.n_batches} batches "
@@ -325,7 +330,7 @@ bv.embed.tsne(
     sc,
     slot_name="tsne_mnn",
     use_knn=True,
-    params=bv.embed.tsne_defaults().set_params(approx="qd"),
+    params=bv.embed.tsne_defaults().set_params(approx="qd"),  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 )
 
 # %%
@@ -375,7 +380,7 @@ bv.embed.tsne(
     sc,
     slot_name="tsne_harm",
     use_knn=True,
-    params=bv.embed.tsne_defaults().set_params(approx="qd"),
+    params=bv.embed.tsne_defaults().set_params(approx="qd"),  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 )
 
 # %%
@@ -430,7 +435,7 @@ bv.embed.tsne(
     sc,
     slot_name="tsne_harm_v2",
     use_knn=True,
-    params=bv.embed.tsne_defaults().set_params(approx="qd"),
+    params=bv.embed.tsne_defaults().set_params(approx="qd"),  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 )
 
 # %%
@@ -495,7 +500,7 @@ bv.embed.tsne(
     sc,
     slot_name="tsne_cca",
     use_knn=True,
-    params=bv.embed.tsne_defaults().set_params(approx="qd"),
+    params=bv.embed.tsne_defaults().set_params(approx="qd"),  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 )
 
 # %%
@@ -538,7 +543,7 @@ bv.embed.tsne(
     sc,
     slot_name="tsne_rpca",
     use_knn=True,
-    params=bv.embed.tsne_defaults().set_params(approx="qd"),
+    params=bv.embed.tsne_defaults().set_params(approx="qd"),  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 )
 
 # %%
@@ -589,7 +594,7 @@ metrics_df = pl.concat(
 metrics_df.filter(pl.col("method") == "BBKNN")
 
 # %%
-bv.embed.tsne(sc, use_knn=True, params=bv.embed.tsne_defaults().set_params(approx="qd"))
+bv.embed.tsne(sc, use_knn=True, params=bv.embed.tsne_defaults().set_params(approx="qd"))  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 
 # %%
 ax = bv.pl.embedding_plot(sc, "tsne", "exp_id", label_by="exp_id", discrete=True)

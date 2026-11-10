@@ -25,7 +25,7 @@ import dataclasses
 import logging
 import re
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Literal
@@ -740,7 +740,7 @@ def get_marker_comparisons(x: ScSpecificMarkers) -> pl.DataFrame:
 @beartype(conf=_CONF)
 def get_pseudobulked(
     sc: ScOrScSubset,
-    cell_list: dict[str, Selection],
+    cell_list: Mapping[str, Selection],
     *,
     return_format: Literal["dense", "sparse"] = "dense",
     assay: Literal["raw", "norm"] = "raw",
@@ -875,7 +875,7 @@ def run_edger_ql(
 @beartype(conf=_CONF)
 def pseudobulk_dge(
     sc: ScOrScSubset,
-    cell_list: dict[str, Selection],
+    cell_list: Mapping[str, Selection],
     design: np.ndarray | pl.DataFrame,
     *,
     coef: Coef | None = None,

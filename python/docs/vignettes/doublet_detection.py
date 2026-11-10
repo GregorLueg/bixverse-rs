@@ -99,11 +99,11 @@ def with_calls(res_df: pl.DataFrame) -> pl.DataFrame:
 
 
 def doublet_metrics(predicted: pl.Series, actual: pl.Series) -> dict[str, float]:
-    predicted = predicted.to_numpy()
-    actual = (actual == "DBL").to_numpy()
-    tp = np.sum(predicted & actual)
-    fp = np.sum(predicted & ~actual)
-    fn = np.sum(~predicted & actual)
+    pred = predicted.to_numpy()
+    act = (actual == "DBL").to_numpy()
+    tp = np.sum(pred & act)
+    fp = np.sum(pred & ~act)
+    fn = np.sum(~pred & act)
     precision = tp / (tp + fp)
     recall = tp / (tp + fn)
     f1 = 2 * (precision * recall) / (precision + recall)

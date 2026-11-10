@@ -112,7 +112,7 @@ def test_find_neighbours_writes_and_stamps(sc):
     assert knn is not None
     assert g is not None
     assert g.shape == (sc.n_cells, sc.n_cells)
-    dense = g.scipy_csr().toarray()  # ty: ignore[unresolved-attribute]
+    dense = g.scipy_csr().toarray()
     np.testing.assert_array_equal(dense, dense.T)
     assert sc.cache.stamps["knn"].parents == (sc.cache.stamps["pca"].id,)
     assert sc.cache.stamps["connectivities"].parents == (sc.cache.stamps["knn"].id,)
@@ -181,7 +181,7 @@ def test_find_clusters_writes_obs(sc):
     col = sc.obs()["clusters"]
     assert col.dtype == pl.Int32
     counts = np.bincount(col.to_numpy())
-    assert counts.min() > 0
+    assert np.min(counts) > 0
     assert np.all(np.diff(counts) <= 0)  # 0 is the largest
 
 

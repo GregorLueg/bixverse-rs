@@ -32,6 +32,7 @@
 # %%
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -82,9 +83,11 @@ sc_ref
 # the gene symbols come from one of the h5ad files: the multi file import
 # keeps only gene_id in var
 h5_metadata = bv.io.read_h5ad_metadata(h5ad_paths["pbmc3k"])
+h5_var = h5_metadata["var"]
+assert isinstance(h5_var, pl.DataFrame)
 
 var_ref = sc_ref.var().join(
-    h5_metadata["var"].select("gene_id", pl.col("symbol_tenx").alias("gene_symbol")),
+    h5_var.select("gene_id", pl.col("symbol_tenx").alias("gene_symbol")),
     on="gene_id",
 )
 
@@ -158,7 +161,7 @@ bv.integrate.harmony(sc_ref, "exp_id", harmony_params=HarmonyV2Params())
 # nothing.
 
 # %%
-graph_types = ["snn", "umap", "knn"]
+graph_types: list[Literal["snn", "umap", "knn"]] = ["snn", "umap", "knn"]
 resolutions = [0.5, 1.0, 1.5, 2.0]
 
 rows = []
@@ -265,8 +268,8 @@ def plot_overlap(a, b, name_a, name_b, title):
     # light text on the dark end of viridis, dark text on the yellow end
     for i, j, f in zip(ai, bi, df["frac"].to_numpy(), strict=True):
         ax.text(
-            j,
-            i,
+            float(j),
+            float(i),
             f"{f:.2f}",
             ha="center",
             va="center",
@@ -334,6 +337,7 @@ fc_knn = bv.graph.fast_cluster(
     resolutions=fc_resolutions,
     n_seeds=10,
 )
+assert fc_knn is not None
 
 fc_cell_med = bv.graph.fast_cluster(
     sc_ref,
@@ -342,6 +346,7 @@ fc_cell_med = bv.graph.fast_cluster(
     fc_params=FastClusterParams(cell_mediated=True),
     n_seeds=10,
 )
+assert fc_cell_med is not None
 
 # %% [markdown]
 # The stats help to pick a resolution: high ARI means the partition barely
@@ -349,6 +354,8 @@ fc_cell_med = bv.graph.fast_cluster(
 # separated in the centroid graph.
 
 # %%
+assert fc_knn.stats is not None and fc_cell_med.stats is not None
+
 fc_stats = pl.concat(
     [
         fc_knn.stats.with_columns(graph=pl.lit("centroid kNN")),
@@ -491,6 +498,7 @@ sctype_cells = bv.annotate.assign_sc_type(
     sctype_scores,
     cluster_col="leiden_clusters",
 )
+assert sctype_cells is not None
 
 sc_ref.add_obs(
     pl.DataFrame(
@@ -510,6 +518,8 @@ sctype_cells
 # one cell type. The mixed ones:
 
 # %%
+assert sctype_cells.composition is not None
+
 sctype_cells.composition.filter(pl.col("cluster_mixed")).select(
     "cluster_id", "n_cells", "dominant", "purity", "second", "second_fraction"
 )
@@ -607,6 +617,7 @@ plt.show()
 # %%
 # 0-based HVG indices, as stored on the experiment
 hvg_indices = sc_ref.map.hvg
+assert hvg_indices is not None
 
 symphony_ref = bv.annotate.build_symphony_ref(
     sc_ref,
@@ -803,7 +814,7 @@ values = [g["confidence_sc_type_hybrid"].to_numpy() for g in groups]
 rng = np.random.default_rng(42)
 fig, ax = plt.subplots(figsize=(7, 4), layout="constrained")
 parts = ax.violinplot(values, showextrema=False, widths=0.8)
-for body in parts["bodies"]:
+for body in parts["bodies"]:  # ty: ignore[not-iterable] # matplotlib stubs type the violin parts as bare Collection
     body.set_facecolor("lightgrey")
     body.set_alpha(1)
 for i, v in enumerate(values, start=1):

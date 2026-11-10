@@ -15,6 +15,7 @@ from bixverse import graph, metacells, pp
 from bixverse.params import (
     BtMetacellsParams,
     MinQualityParams,
+    NeighboursParams,
     SupercellParams,
     SyntheticDataParams,
 )
@@ -86,7 +87,7 @@ def test_generator_on_a_subset_stays_in_the_subset(sc):
     sub = bv.SingleCellsSubset(sc, "cell_grp", "cell_type_1")
     pp.find_hvg(sub, hvg_no=30)
     pp.calculate_pca(sub, 6)
-    graph.find_neighbours(sub, neighbours_params=bv.params.NeighboursParams(k=5))
+    graph.find_neighbours(sub, neighbours_params=NeighboursParams(k=5))
     mc = metacells.generate_supercells(
         sub, params=SupercellParams(graining_factor=5.0, k=5)
     )
@@ -101,7 +102,7 @@ def test_stale_knn_is_refused(sc, mc):
     sub = bv.SingleCellsSubset(sc, "cell_grp", "cell_type_2")
     pp.find_hvg(sub, hvg_no=30)
     pp.calculate_pca(sub, 6)
-    graph.find_neighbours(sub, neighbours_params=bv.params.NeighboursParams(k=5))
+    graph.find_neighbours(sub, neighbours_params=NeighboursParams(k=5))
     pp.calculate_pca(sub, 5)
     with pytest.raises(ValueError, match="stale"):
         metacells.generate_bt_meta_cells(sub, params=BT)
@@ -143,7 +144,7 @@ def test_chain_on_metacells_stamps_and_clusters(mc):
     assert m.hvg is not None and len(m.hvg) == 20
     assert "var_std" in m.var().columns
     pp.calculate_pca(m, 4)
-    graph.find_neighbours(m, neighbours_params=bv.params.NeighboursParams(k=4))
+    graph.find_neighbours(m, neighbours_params=NeighboursParams(k=4))
     graph.find_clusters(m, name="cl")
     assert m.obs()["cl"].null_count() == 0
     status = m.cache_status()
@@ -250,7 +251,7 @@ def test_save_load_round_trip(tmp_path, sc, mc):
     m = _copy(mc)
     pp.find_hvg(m, hvg_no=20)
     pp.calculate_pca(m, 4)
-    graph.find_neighbours(m, neighbours_params=bv.params.NeighboursParams(k=4))
+    graph.find_neighbours(m, neighbours_params=NeighboursParams(k=4))
     metacells.calc_diffusion_coordinates(m, sc.cache.knn, n_dcs=4, k_density=10)
     m.other_data["table"] = pl.DataFrame({"a": [1, 2]})
     metacells.save_metacells(m, tmp_path / "mc")
@@ -266,7 +267,9 @@ def test_save_load_round_trip(tmp_path, sc, mc):
     np.testing.assert_array_equal(back.cache.knn.indices, m.cache.knn.indices)
     assert back.cache_status().equals(m.cache_status())
     assert back.other_data["regions"] == m.other_data["regions"]
-    assert back.other_data["table"].equals(m.other_data["table"])
+    table = back.other_data["table"]
+    assert isinstance(table, pl.DataFrame)
+    assert table.equals(m.other_data["table"])
     np.testing.assert_array_equal(
         back.original_assignment.cells_to_keep, m.original_assignment.cells_to_keep
     )

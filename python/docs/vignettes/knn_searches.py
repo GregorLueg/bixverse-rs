@@ -14,6 +14,7 @@
 # %%
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -65,7 +66,7 @@ metrics = {
     "MT": qc_df["MT"].to_numpy(),
 }
 
-directions = {
+directions: dict[str, Literal["twosided", "below", "above"]] = {
     "log10_lib_size": "twosided",
     "log10_nnz": "twosided",
     "MT": "above",
@@ -158,6 +159,7 @@ bv.graph.find_neighbours(
 exhaustive_knn = bv.graph.generate_knn(
     sc, neighbours_params=NeighboursParams(knn_method="exhaustive")
 )
+assert exhaustive_knn is not None
 
 print(
     f"KnnGraph: {exhaustive_knn.indices.shape[0]} cells, "
@@ -170,6 +172,7 @@ print(
 
 # %%
 exhaustive_knn_obj = sc.cache.knn
+assert exhaustive_knn_obj is not None
 
 assert np.array_equal(exhaustive_knn.indices, exhaustive_knn_obj.indices)
 assert np.array_equal(exhaustive_knn.distances, exhaustive_knn_obj.distances)
@@ -182,6 +185,7 @@ assert np.array_equal(exhaustive_knn.distances, exhaustive_knn_obj.distances)
 annoy_knn = bv.graph.generate_knn(
     sc, neighbours_params=NeighboursParams(knn_method="annoy"), verbose=True
 )
+assert annoy_knn is not None
 
 # %% [markdown]
 # The approximate versions have the option to test the index against a subset of
@@ -208,6 +212,7 @@ annoy_knn_less_trees = bv.graph.generate_knn(
     neighbours_params=NeighboursParams(knn_method="annoy", n_trees=1),
     verbose=True,
 )
+assert annoy_knn_less_trees is not None
 
 # %% [markdown]
 # With one tree, we can appreciate that the Recall is dropping. Let's get some
@@ -230,6 +235,7 @@ print(
 nndescent_knn = bv.graph.generate_knn(
     sc, neighbours_params=NeighboursParams(knn_method="nndescent"), verbose=True
 )
+assert nndescent_knn is not None
 
 # %% [markdown]
 # And benchmark it:

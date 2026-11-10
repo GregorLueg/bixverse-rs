@@ -145,6 +145,7 @@ plt.show()
 bv.pp.run_magic(sc, markers)
 
 magic = sc.cache.magic
+assert magic is not None
 
 print(f"{magic.data.shape[0]} cells x {magic.data.shape[1]} genes: {magic.features}")
 
@@ -181,6 +182,7 @@ sc.cache_status()
 
 # %%
 paga_res = bv.traj.run_paga(sc, "leiden_clusters")
+assert paga_res is not None
 
 paga_res
 
@@ -275,6 +277,7 @@ palantir_res = bv.traj.run_palantir(
     palantir_params=PalantirParams(n_eigs=10, knn=30),
     seed=42,
 )
+assert palantir_res is not None
 
 palantir_res
 
@@ -427,6 +430,7 @@ palantir_auto = bv.traj.run_palantir(
     palantir_params=PalantirParams(n_eigs=10, knn=30, use_early_cell_as_start=True),
     seed=42,
 )
+assert palantir_auto is not None
 
 palantir_auto.terminal_states
 
@@ -622,6 +626,7 @@ palantir_gap = bv.traj.run_palantir(
     palantir_params=PalantirParams(knn=30),
     seed=42,
 )
+assert palantir_gap is not None
 
 rows = []
 for label, res in [("eigengap", palantir_gap), ("n_eigs = 10", palantir_res)]:

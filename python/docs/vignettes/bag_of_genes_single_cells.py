@@ -310,11 +310,12 @@ hotspot_cor
 # Let's pull out the genes:
 
 # %%
-membership = (
-    bv.pathways.get_hotspot_membership(hotspot_cor)
-    .with_columns(gene_symbol=pl.col("gene_id").replace_strict(ensembl_to_symbol))
-    .drop_nulls("cluster_member")
-)
+hotspot_membership = bv.pathways.get_hotspot_membership(hotspot_cor)
+assert hotspot_membership is not None
+
+membership = hotspot_membership.with_columns(
+    gene_symbol=pl.col("gene_id").replace_strict(ensembl_to_symbol)
+).drop_nulls("cluster_member")
 
 membership.sort("cluster_member").head(20)
 
@@ -519,6 +520,7 @@ tf_gene_df.sort("importance", descending=True).head(5)
 
 # %%
 regulons = bv.pathways.build_regulons(scenic_res, use_leading_edge=False)
+assert regulons is not None
 
 regulon_sizes = pl.Series("size", [len(g) for g in regulons.values()])
 
@@ -593,6 +595,7 @@ lm_net.head()
 ulm_scores = bv.pathways.lm_activity(
     sc, lm_net, lm_params=LmActivityParams(method="ulm")
 )
+assert isinstance(ulm_scores, bv.pathways.ScMatrixRes)
 
 ulm_scores.shape
 
@@ -617,6 +620,7 @@ plt.show()
 mlm_scores = bv.pathways.lm_activity(
     sc, lm_net, lm_params=LmActivityParams(method="mlm")
 )
+assert isinstance(mlm_scores, bv.pathways.ScMatrixRes)
 
 spi1 = ulm_scores.columns.index("SPI1")
 np.corrcoef(ulm_scores.values[:, spi1], mlm_scores.values[:, spi1])[0, 1]
@@ -723,7 +727,9 @@ t_cell_nmf_results
 bv.nmf.get_w(t_cell_nmf_results)[:5, :6]
 
 # %%
-bv.nmf.get_h(t_cell_nmf_results)[:5, :5]
+t_cell_h = bv.nmf.get_h(t_cell_nmf_results)
+assert isinstance(t_cell_h, np.ndarray)
+t_cell_h[:5, :5]
 
 # %% [markdown]
 # ### Running multiple NMF runs
@@ -851,7 +857,9 @@ consensus_diag["cluster_sizes"]
 # and you can go back to the raw restarts behind any cluster.
 
 # %%
-consensus_diag["clusters"].head()
+consensus_clusters = consensus_diag["clusters"]
+assert isinstance(consensus_clusters, pl.DataFrame)
+consensus_clusters.head()
 
 # %% [markdown]
 # With 10 restarts, a cluster holding 10 components is a programme every run

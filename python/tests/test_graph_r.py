@@ -21,6 +21,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -87,7 +88,7 @@ def _same_knn(got: bv.KnnGraph, want: dict, *, exact: bool = True) -> None:
     else:
         recall = np.mean(
             [
-                len(set(a) & set(b)) / len(a)
+                len(set(a.tolist()) & set(b.tolist())) / len(a)
                 for a, b in zip(got.indices, wi, strict=True)
             ]
         )
@@ -187,7 +188,7 @@ def test_calc_knn_metrics_matches_r(ref):
 # Graphs #
 ##########
 
-GRAPH_RUNS = {
+GRAPH_RUNS: dict[str, dict[str, Any]] = {
     "snn_jaccard": {"knn_sym": "snn", "snn_similarity": "jaccard"},
     "snn_rank": {"knn_sym": "snn", "snn_similarity": "rank", "pruning": 0.1},
     "snn_no_rescue": {"knn_sym": "snn", "rescue": False, "pruning": 0.2},
@@ -223,7 +224,7 @@ def test_find_neighbours_default_matches_r(ref, sc):
 # Clusters #
 ############
 
-CLUSTER_RUNS = {
+CLUSTER_RUNS: dict[str, dict[str, Any]] = {
     "leiden": {"cluster_algorithm": "leiden", "res": 1.0, "seed": 42},
     "leiden_hi": {"cluster_algorithm": "leiden", "res": 2.0, "seed": 7},
     "louvain": {"cluster_algorithm": "louvain", "res": 1.0, "seed": 42},

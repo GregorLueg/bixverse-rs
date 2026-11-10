@@ -19,12 +19,16 @@ import warnings
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, no_type_check
 
 import numpy as np
 import polars as pl
 from beartype import beartype
 
 from bixverse._core.repr import compact_repr
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from scipy.sparse import csr_matrix
 
 ###########
 # Globals #
@@ -260,7 +264,8 @@ class CsrMatrix:
         if not len(self.data) == len(self.indices) == int(self.indptr[-1]):
             raise ValueError("data, indices and indptr[-1] must agree")
 
-    def scipy_csr(self) -> object:
+    @no_type_check  # beartype cannot resolve the typing-only scipy import
+    def scipy_csr(self) -> csr_matrix:
         """The matrix as a `scipy.sparse.csr_matrix`, sharing the buffers.
 
         Needs scipy (the `sparse` extra).

@@ -86,6 +86,7 @@ h5ad_paths = {
 h5_tasks = bv.io.prescan_h5ad_files(h5ad_paths)
 
 sc = bv.io.load_multi_h5ad(Path(tempdir_resid.name) / "residuals", h5_tasks)
+assert sc is not None
 
 # %% [markdown]
 # Standard QC before anything else. A residual model fitted on debris is a model
@@ -93,9 +94,11 @@ sc = bv.io.load_multi_h5ad(Path(tempdir_resid.name) / "residuals", h5_tasks)
 
 # %%
 h5_metadata = bv.io.read_h5ad_metadata(h5ad_paths["pbmc3k"])
+h5_var = h5_metadata["var"]
+assert isinstance(h5_var, pl.DataFrame)
 
 var = sc.var().join(
-    h5_metadata["var"].select("gene_id", pl.col("symbol_tenx").alias("gene_symbol")),
+    h5_var.select("gene_id", pl.col("symbol_tenx").alias("gene_symbol")),
     on="gene_id",
 )
 
@@ -141,6 +144,7 @@ sc
 bv.pp.fit_residuals(sc, method="analytic_pearson", verbose=True)
 
 fit = sc.cache.residual_fit
+assert isinstance(fit, bv.pp.ResidualFit)
 
 print(
     f"{fit.method}: {fit.n_groups} model(s), {fit.genes.size} genes, "
@@ -168,6 +172,8 @@ bv.pp.find_hvg(
     hvg_params=HvgParams(method="residual"),
     verbose=True,
 )
+
+assert sc.map.hvg is not None
 
 sc.map.hvg.size
 
@@ -199,10 +205,12 @@ plt.show()
 # residual one back afterwards.
 
 # %%
+assert sc.map.hvg is not None
 hvg_residual = sc.map.hvg.copy()
 
 bv.pp.find_hvg(sc, hvg_no=2000, hvg_params=HvgParams(method="vst"))
 
+assert sc.map.hvg is not None
 hvg_vst = sc.map.hvg.copy()
 
 sc.map.hvg = hvg_residual
@@ -242,6 +250,8 @@ bv.pp.calculate_pca(
     residuals=True,
     verbose=True,
 )
+
+assert sc.cache.pca_factors is not None
 
 sc.cache.pca_factors.shape
 
@@ -299,6 +309,7 @@ bv.pp.fit_residuals(
 )
 
 fit_grouped = sc.cache.residual_fit
+assert isinstance(fit_grouped, bv.pp.ResidualFit)
 
 print(
     f"{fit_grouped.method}: {fit_grouped.n_groups} model(s), "
@@ -322,6 +333,8 @@ bv.pp.find_hvg(
     hvg_params=HvgParams(method="residual"),
     verbose=True,
 )
+
+assert sc.map.hvg is not None
 
 sc.map.hvg.size
 
@@ -347,6 +360,8 @@ bv.pp.fit_residuals(
     covariate_columns=["MT"],
     verbose=True,
 )
+
+assert isinstance(sc.cache.residual_fit, bv.pp.ResidualFit)
 
 sc.cache.residual_fit.covariate_names
 
@@ -394,6 +409,8 @@ corrected
 # ungrouped fit, so the two happen to match:
 
 # %%
+assert isinstance(corrected, bv.SingleCells)
+
 print(f"source: {sc.var().height} genes, corrected: {corrected.var().height} genes")
 
 # %% [markdown]

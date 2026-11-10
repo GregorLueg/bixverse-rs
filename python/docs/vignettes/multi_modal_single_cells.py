@@ -23,6 +23,7 @@
 import re
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -163,7 +164,9 @@ metrics = {
     "log10_adt_nnz": np.log10(qc_df["adt_nnz"].to_numpy()),
 }
 
-directions = dict.fromkeys(metrics, "twosided")
+directions: dict[str, Literal["twosided", "below", "above"]] = dict.fromkeys(
+    metrics, "twosided"
+)
 
 qc = bv.qc.run_cell_qc(
     metrics,
@@ -235,10 +238,13 @@ plt.show()
 # for RNA, with `modality="adt"` doing the routing.
 
 # %%
+adt_names = bv.mm.get_adt_names(sc)
+assert adt_names is not None
+
 bv.mm.calculate_pca_adt(
     sc,
     no_pcs=15,
-    features=[f for f in bv.mm.get_adt_names(sc) if f not in iso],
+    features=[f for f in adt_names if f not in iso],
 )
 
 # the data is so tiny that exhaustive kNN search is faster than building
