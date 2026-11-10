@@ -59,6 +59,18 @@ jobs:
       # install has been shown to work.
       sdist: false
 
+  # The `bixverse-gpu` wheel. Same workspace version as `bixverse`, so the same
+  # `py-v` tag: the call above owns it and this one only builds. Its ref is the
+  # triggering commit until the tag exists, which is the commit the tag gets.
+  build-gpu:
+    uses: GregorLueg/personal-actions/.github/workflows/python-maturin-release.yml@v1
+    with:
+      working-directory: python/gpu
+      publish: true
+      tag: false
+      repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi') && 'https://test.pypi.org/legacy/' || '' }}
+      sdist: false
+
   # The upload lives here rather than in the reusable workflow, and has to.
   # PyPI's trusted publishing matches the OIDC token's `job_workflow_ref`, which
   # for a reusable workflow points at the *other* repository, and the publisher
@@ -68,15 +80,17 @@ jobs:
   # So the trusted publisher on PyPI must be configured as:
   #   owner GregorLueg, repo bixverse-rs, workflow python-release.yml,
   #   environment pypi
+  # once for `bixverse` and once for `bixverse-gpu`.
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, build-gpu]
     # ARMED. `should-build` is false when the version is already on PyPI, so an
     # ordinary push to main reaches here, finds nothing to do and stops. A
     # version bump is what makes this fire. The `pypi` environment still holds
     # it for a review before the upload, which is the last reversible moment.
     if: >-
-      needs.build.outputs.should-build == 'true' &&
+      (needs.build.outputs.should-build == 'true' ||
+       needs.build-gpu.outputs.should-build == 'true') &&
       (github.event_name == 'workflow_dispatch' && inputs.publish
        || github.event_name != 'workflow_dispatch')
     runs-on: ubuntu-latest
