@@ -8,8 +8,14 @@ description = "Single-cell streaming and numerics for Python, in Rust."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Gregor Lueg", email = "gregorlueg@me.com" }]
-requires-python = ">=3.10"
-dependencies = ["numpy>=1.23", "beartype>=0.19"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.23",
+    "beartype>=0.19",
+    "duckdb>=2.0",
+    "polars>=2.0.0",
+    "tqdm>=4.66",
+]
 dynamic = ["version"]
 classifiers = [
     "Programming Language :: Rust",
@@ -22,13 +28,21 @@ Repository = "https://github.com/GregorLueg/bixverse-rs"
 Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"
 
 [project.optional-dependencies]
-# `scipy_csr` on a batch, and nothing else.
+# The `scipy_csr` exports (batches, `CsrMatrix`, `SingleCells`), nothing else.
 sparse = ["scipy>=1.9"]
 # `bixverse.nn` on torch: scVI and the `IterableDataset` adapter.
 torch = ["torch>=2.4"]
 # `bixverse.nn` on MLX. Apple Silicon only, so the marker keeps
 # `--all-extras` installable everywhere else.
 mlx = ["mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# `bixverse.nn` on JAX, CPU or CUDA (`jax[cuda12]` on top for the latter).
+jax = ["jax>=0.5", "optax>=0.2"]
+# `bixverse.embed`: UMAP, t-SNE, PHATE and friends.
+embed = ["manifolds-rs>=0.6.0"]
+# The `bixverse.pl` plots. The `extract_*` plot data functions need nothing.
+plots = ["matplotlib>=3.8"]
+# `bixverse_gpu`: the GPU twins, a separate wheel built from `gpu/`.
+gpu = ["bixverse-gpu"]
 
 [dependency-groups]
 dev = [
@@ -37,24 +51,36 @@ dev = [
     "ruff>=0.9",
     "ty>=0.0.1",
     "scipy>=1.9",
+    "manifolds-rs>=0.6.0",
+    "matplotlib>=3.8",
 ]
 # mkdocstrings reads the installed package, so a docs build needs the compiled
 # extension present: `maturin develop --release` before `mkdocs build`.
 docs = [
     "mkdocs>=1.6",
+    "mkdocs-jupyter>=0.25",
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.27",
 ]
 # The scVI reference oracle. Never a runtime dependency, and not installed by
 # CI: the parity tests skip without it. `uv sync --group validation`.
 validation = [
-    # 1.5.1 needs Python 3.12; the marker keeps the lock solvable for 3.10.
+    # 1.5.1 needs Python 3.12; the marker keeps the lock solvable for 3.11.
     "scvi-tools==1.5.1; python_version >= '3.12'",
     "anndata>=0.10",
 ]
+# Executes `docs/vignettes/*.py` into their `.ipynb` twins: `dev/vignettes.py`.
+# The vignettes import the `embed` and `plots` extras, so `dev` comes too.
+vignettes = [
+    "click>=8.1",
+    "ipykernel>=6.29",
+    "jupytext>=1.16",
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+]
 
 [tool.maturin]
-manifest-path = "Cargo.toml"
+manifest-path = "crates/bixverse-py/Cargo.toml"
 module-name = "bixverse._bixverse"
 python-source = "."
 strip = true
@@ -62,24 +88,63 @@ include = ["bixverse/py.typed", "bixverse/*.pyi"]
 # A local build otherwise packs whatever bytecode the dev venv left behind.
 exclude = ["**/__pycache__/**"]
 
+# The GPU wheel is a workspace member, so the extra resolves to the checkout.
+# Its build command is in `gpu/pyproject.toml`.
+[tool.uv.workspace]
+members = ["gpu"]
+
+[tool.uv.sources]
+bixverse-gpu = { workspace = true }
+
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# The rules take `object` (the generated classes import this module), so
+# attribute access would not type-check; getattr is deliberate.
+"bixverse/params/_extras.py" = ["B009"]
+"gpu/bixverse_gpu/params/_extras.py" = ["B009"]
+# Generated docstrings and checks run long; the generator owns the layout.
+"bixverse/params/_generated.py" = ["E501"]
+"gpu/bixverse_gpu/params/_generated.py" = ["E501"]
+# A bare expression at the end of a notebook cell is its displayed output;
+# markdown tables cannot wrap.
+"docs/vignettes/*.py" = ["B018", "E501"]
+
 [tool.ruff.lint.isort]
-known-first-party = ["bixverse"]
+known-first-party = ["bixverse", "bixverse_gpu"]
+
+[tool.ty.src]
+# The executed notebooks are generated from the jupytext sources next to them,
+# so checking both reports every diagnostic twice.
+exclude = ["**/*.ipynb"]
 
 [tool.ty.analysis]
-# The mlx extra only installs on Apple Silicon, so Linux CI never sees it.
-allowed-unresolved-imports = ["mlx.**"]
+# Optional extras and dev-only tooling that the type-check environment does not
+# install: mlx (Apple Silicon only), the torch and jax backends of `bixverse.nn`,
+# the scVI validation scripts in `dev/` and `tests/test_scvi_parity.py`, and
+# the fixture generators in `dev/` (anndata, pySCENIC).
+allowed-unresolved-imports = [
+    "mlx.**",
+    "torch.**",
+    "jax.**",
+    "optax.**",
+    "scvi.**",
+    "anndata.**",
+    "pandas.**",
+    "sklearn.**",
+    "pyscenic.**",
+    "ctxcore.**",
+]
 
 [tool.ty.rules]
 # torch declares `nn.Module.forward` as a mutable `Callable` attribute, so every
 # module that defines `forward` trips this.
-invalid-mutable-override = "ignore"
+incompatible-mutable-override = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,6 +8,7 @@ use faer::{Accum, Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::cmp::Ordering;
 use std::time::Instant;
@@ -34,6 +35,18 @@ use bixverse_core::utils::simd::{
 /// Gene batch size for Hotspot streaming
 const GENE_BATCH_SIZE: usize = 1000;
 
+/// Gene batch size of the streaming gene-gene path, as the R binding uses it
+pub const PAIR_STREAM_BATCH_SIZE: usize = 1000;
+
+/// Working memory one resident gene costs per cell in the streaming pair
+/// path: the centred counts and their graph product in f32, plus headroom
+/// for the per-gene scratch. Not tuned.
+const PANEL_BYTES_PER_GENE_PER_CELL: f64 = 20.0;
+
+/// Smallest resident panel the streaming pair path is given, so a tight
+/// budget still makes progress in reasonably sized steps. Not tuned.
+const MIN_PANEL_GENES: usize = 512;
+
 ///////////
 // Types //
 ///////////
@@ -46,17 +59,37 @@ type PanelData = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 ////////////
 
 /// HotSpot parameters
+///
+/// Deserialises from the flat R `params_sc_hotspot()` list, the kNN and graph
+/// keys included; missing keys take the defaults, which follow the R
+/// constructor (`model = "danb"`).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct HotSpotParams {
     /// The model to use for modelling the GEX. Choice of `"danb"`,
-    /// `"bernoulli"` or `"normal"`.
+    /// `"bernoulli"`, `"normal"` or `"none"`.
+    #[serde(deserialize_with = "de_gex_model")]
     pub model: String,
     /// Shall the data be normalised
     pub normalise: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
     /// How the kNN distances become edge weights, see [HotSpotGraphParams]
+    #[serde(flatten)]
     pub graph_params: HotSpotGraphParams,
+}
+
+impl Default for HotSpotParams {
+    fn default() -> Self {
+        Self {
+            model: "danb".to_string(),
+            normalise: true,
+            knn_params: KnnParams::default(),
+            graph_params: HotSpotGraphParams::default(),
+        }
+    }
 }
 
 /// How the kNN distances are turned into edge weights.
@@ -64,14 +97,36 @@ pub struct HotSpotParams {
 /// Mirrors `Hotspot.create_knn_graph` in the reference implementation, right
 /// down to the default: upstream ships `weighted_graph=False`, so every
 /// retained edge weighs one and the distances only decide who is a neighbour.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct HotSpotGraphParams {
     /// Apply the Gaussian kernel of [`knn_distance_weights`] to the neighbour
     /// distances. `false` gives every edge a weight of one.
     pub weighted_graph: bool,
     /// Kernel width is the `ceil(k / neighborhood_factor)`-th neighbour
     /// distance. Only read when `weighted_graph` is `true`.
+    #[serde(deserialize_with = "de_neighborhood_factor")]
     pub neighborhood_factor: f32,
+}
+
+/// Deserialise the kernel width divisor, which must be positive
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a number
+///
+/// ### Returns
+///
+/// The divisor, or an error if it is not strictly positive.
+pub fn de_neighborhood_factor<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    let v = f32::deserialize(d)?;
+    if v > 0.0 {
+        Ok(v)
+    } else {
+        Err(D::Error::custom(format!(
+            "neighborhood_factor must be positive, got {v}"
+        )))
+    }
 }
 
 impl Default for HotSpotGraphParams {
@@ -140,6 +195,47 @@ pub fn parse_gex_model(s: &str) -> Option<GexModel> {
         "none" => Some(GexModel::PreStandardised),
         _ => None,
     }
+}
+
+/// Deserialise the expression model name, checked through [parse_gex_model]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_gex_model<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_gex_model(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "model must be 'danb', 'bernoulli', 'normal' or 'none', got '{s}'"
+        ))),
+    }
+}
+
+/// Resident gene panel size for the streaming pair path
+///
+/// Converts a working memory budget into how many genes' dense columns the
+/// streaming gene-gene path may keep at once. The two dense output matrices
+/// are not part of the budget.
+///
+/// ### Params
+///
+/// * `working_mem_gb` - Memory budget in GB
+/// * `n_cells` - Cells in the analysis
+/// * `n_genes` - Genes in the analysis
+///
+/// ### Returns
+///
+/// The panel size, at least `min(512, n_genes)` and at most `n_genes`.
+pub fn panel_size_from_mem(working_mem_gb: f64, n_cells: usize, n_genes: usize) -> usize {
+    let budget = working_mem_gb * (1u64 << 30) as f64;
+    let raw = (budget / (PANEL_BYTES_PER_GENE_PER_CELL * n_cells.max(1) as f64)).floor() as usize;
+    let lo = MIN_PANEL_GENES.min(n_genes.max(1));
+    raw.clamp(lo, n_genes.max(1))
 }
 
 /////////////
@@ -271,12 +367,11 @@ fn row_dot<const SQUARED: bool>(weights: &[f32], indices: &[u32], c: &[f32]) -> 
         if SQUARED { w * w * x } else { w * x }
     };
 
-    let w_chunks = weights.chunks_exact(4);
-    let i_chunks = indices.chunks_exact(4);
-    let (w_rem, i_rem) = (w_chunks.remainder(), i_chunks.remainder());
+    let (w_chunks, w_rem) = weights.as_chunks::<4>();
+    let (i_chunks, i_rem) = indices.as_chunks::<4>();
 
     let mut acc = [0.0_f32; 4];
-    for (w, idx) in w_chunks.zip(i_chunks) {
+    for (w, idx) in w_chunks.iter().zip(i_chunks) {
         for lane in 0..4 {
             acc[lane] += term(w[lane], idx[lane]);
         }
@@ -2696,8 +2791,8 @@ mod tests {
                 }
             }
 
-            let cj_genes: Vec<usize> = clusters[cj].drain(..).collect();
-            clusters[ci].extend(cj_genes);
+            let moved = std::mem::take(&mut clusters[cj]);
+            clusters[ci].extend(moved);
             sizes[ci] = new_size;
 
             for &gene in &clusters[ci] {

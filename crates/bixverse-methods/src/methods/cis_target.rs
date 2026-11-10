@@ -3,6 +3,7 @@
 
 use faer::MatRef;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::prelude::*;
 use bixverse_core::core::math::vector_helpers::standard_deviation;
@@ -547,6 +548,67 @@ where
                 n_enriched,
                 enriched_gene_indices,
             }
+        })
+        .collect()
+}
+
+/// Run [process_gene_set] over many gene sets, in parallel
+///
+/// The gene sets are independent, so they fan out over rayon; with `verbose`
+/// the progress is printed in steps of ten percent.
+///
+/// ### Params
+///
+/// * `matrix` - Genes x motifs ranks
+/// * `gene_sets` - 0-based gene (row) indices per gene set
+/// * `auc_threshold` - Maximum rank to consider for the AUC
+/// * `nes_threshold` - Minimum NES for a motif to be reported
+/// * `max_rank` - Maximum rank to consider for the recovery curves
+/// * `method` - How the recovery curve thresholds are derived
+/// * `n_mean` - Smoothing window of the approximate method
+/// * `verbose` - Print the progress
+///
+/// ### Returns
+///
+/// The significant motifs per gene set, in input order.
+#[allow(clippy::too_many_arguments)]
+pub fn cistarget_gene_sets<T>(
+    matrix: MatRef<'_, i32>,
+    gene_sets: &[Vec<usize>],
+    auc_threshold: i32,
+    nes_threshold: T,
+    max_rank: i32,
+    method: &RccType,
+    n_mean: usize,
+    verbose: bool,
+) -> Vec<Vec<MotifEnrichment<T>>>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let total = gene_sets.len();
+    let done = AtomicUsize::new(0);
+    let last_decile = AtomicUsize::new(0);
+
+    gene_sets
+        .par_iter()
+        .map(|gs| {
+            let res = process_gene_set(
+                matrix,
+                gs,
+                auc_threshold,
+                nes_threshold,
+                max_rank,
+                method,
+                n_mean,
+            );
+            if verbose {
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let decile = (n * 10) / total;
+                if decile > last_decile.swap(decile, Ordering::Relaxed) {
+                    println!(" cistarget: {}% ({}/{})", decile * 10, n, total);
+                }
+            }
+            res
         })
         .collect()
 }

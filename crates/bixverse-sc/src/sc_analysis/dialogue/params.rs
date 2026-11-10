@@ -4,6 +4,8 @@
 //! `DLG.get.param` except where that function has a bug; those cases are called
 //! out on the field.
 
+use serde::{Deserialize, Deserializer, de::Error as _};
+
 use crate::prelude::*;
 
 ////////////
@@ -48,12 +50,31 @@ pub fn parse_averaging(s: &str) -> Option<Averaging> {
     }
 }
 
+/// Deserialise an [Averaging] through [parse_averaging]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The averaging, or an error naming the unrecognised value.
+pub fn de_averaging<'de, D: Deserializer<'de>>(d: D) -> Result<Averaging, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_averaging(&s)
+        .ok_or_else(|| D::Error::custom(format!("averaging must be 'median' or 'mean', got '{s}'")))
+}
+
 ///////////////
 // PmdParams //
 ///////////////
 
 /// Stage one: penalised matrix decomposition and the programme scores.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_dialogue_pmd()` list; missing
+/// keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct PmdParams {
     /// Number of multicellular programmes to extract.
     pub k: usize,
@@ -85,6 +106,7 @@ pub struct PmdParams {
     ///
     /// Upstream exposes this argument and then ignores it, hard-coding column
     /// medians. The knob works here; the default is what upstream actually did.
+    #[serde(deserialize_with = "de_averaging")]
     pub averaging: Averaging,
     /// Empirical p below which a cell-type pair counts as connected when
     /// deciding which cell types a programme spans.
@@ -181,7 +203,11 @@ impl Default for PmdParams {
 /// them: stage three works from the full association table instead. The filter
 /// is not reproduced here, because reproducing it would mean reproducing
 /// something that never had an effect.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_dialogue_hlm()` list; missing
+/// keys take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct HlmParams {
     /// Minimum cells a sample must contribute, in *both* cell types of a pair,
     /// before it takes part in that pair's models.
@@ -246,7 +272,11 @@ impl Default for HlmParams {
 //////////////////
 
 /// Stage three: cross-partner meta-analysis and the non-negative refit.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_dialogue_refine()` list;
+/// missing keys take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct RefineParams {
     /// Adjusted p below which one partner counts as supporting a gene.
     pub support_p: f64,

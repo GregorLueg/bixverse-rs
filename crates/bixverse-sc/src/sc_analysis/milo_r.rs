@@ -18,7 +18,10 @@ use ann_search_rs::cpu::{
 };
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use faer::MatRef;
+use rand::prelude::*;
+use rand::rngs::StdRng;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::prelude::*;
 use bixverse_core::core::math::vector_helpers::median;
@@ -27,7 +30,51 @@ use bixverse_core::core::math::vector_helpers::median;
 // Helpers //
 /////////////
 
+/// Deserialise a refinement strategy name, checked through
+/// [parse_refinement_strategy]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_refinement_strategy<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_refinement_strategy(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "refinement_strategy must be one of 'approximate', 'bruteforce' or 'index', \
+             got '{s}'"
+        ))),
+    }
+}
+
+/// Deserialise a kNN index type name, checked through [parse_index_type]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The name as given, or an error naming the unrecognised value.
+pub fn de_index_type<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_index_type(&s) {
+        Some(_) => Ok(s),
+        None => Err(D::Error::custom(format!(
+            "index_type must be one of 'exhaustive', 'annoy', 'hnsw' or 'nndescent', \
+             got '{s}'"
+        ))),
+    }
+}
+
 /// Structure for MiloR algorithm parameters
+///
+/// Deserialises from the flat R `params_sc_miloR()` list, the kNN keys
+/// included; missing keys take the R constructor's defaults.
 ///
 /// ### Fields
 ///
@@ -39,6 +86,8 @@ use bixverse_core::core::math::vector_helpers::median;
 ///   (`"approximate"`, `"bruteforce"`, or `"index"`)
 /// * `index_type` - Type of kNN index to use (`"annoy"` or `"hnsw"`)
 /// * `knn_params` - The knnParams via the `KnnParams` structure.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct MiloRParams {
     /// Proportion of cells to sample as neighbourhood indices
     pub prop: f64,
@@ -46,13 +95,55 @@ pub struct MiloRParams {
     pub k_refine: usize,
     /// Strategy for refining sampled indices (`"approximate"`, `"bruteforce"`,
     /// or `"index"`)
+    #[serde(deserialize_with = "de_refinement_strategy")]
     pub refinement_strategy: String,
     /// Type of kNN index to use (`"annoy"`, `"hnsw"` or `"nndescent"`)
+    #[serde(deserialize_with = "de_index_type")]
     pub index_type: String,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs. `self.knn_params.knn_method` is ignored in favour of
     /// `self.index_type`.
+    #[serde(flatten)]
     pub knn_params: KnnParams,
+}
+
+impl Default for MiloRParams {
+    /// The R `params_sc_miloR()` defaults.
+    fn default() -> Self {
+        Self {
+            prop: 0.2,
+            k_refine: 20,
+            refinement_strategy: "index".to_string(),
+            index_type: "nndescent".to_string(),
+            knn_params: KnnParams::default(),
+        }
+    }
+}
+
+/// The neighbourhoods of a [make_milor_nhoods] run
+///
+/// The membership matrix is a COO over cells x neighbourhoods; each
+/// neighbourhood's entries are contiguous.
+#[derive(Clone, Debug)]
+pub struct MiloRNhoods {
+    /// The cells the neighbourhoods are centred on, ascending
+    pub index_cells: Vec<usize>,
+    /// Cell per non-zero of the membership matrix, the index cell included
+    pub nhoods_i: Vec<usize>,
+    /// Neighbourhood per non-zero
+    pub nhoods_j: Vec<usize>,
+    /// Value per non-zero, always `1.0`
+    pub nhoods_x: Vec<f64>,
+    /// Number of cells, the rows of the membership matrix
+    pub n_cells: usize,
+    /// Euclidean (not squared) distance of each index cell to its last kNN
+    /// neighbour, the `"k-distance"` weighting of the spatial FDR
+    pub kth_distances: Vec<f64>,
+    /// Cells per neighbourhood and sample, row-major `n_nhoods * n_samples`
+    pub sample_counts: Vec<f64>,
+    /// Cells each neighbourhood shares with all the others, the
+    /// `"graph-overlap"` weighting of the spatial FDR
+    pub nhood_overlap: Vec<f64>,
 }
 
 /// Enum specifying which kNN index type to use
@@ -113,12 +204,15 @@ impl KnnIndex {
                 Dist::default()
             });
 
+        let verbosity = verbosity_from_flag(verbose);
+
         match index_type {
             KnnIndexType::AnnoyIndex => Ok(KnnIndex::Annoy(AnnoyIndex::new(
                 embd,
                 knn_params.n_tree,
                 dist,
                 seed,
+                verbosity,
             )?)),
             KnnIndexType::HnswIndex => Ok(KnnIndex::Hnsw(HnswIndex::build(
                 embd,
@@ -126,7 +220,7 @@ impl KnnIndex {
                 knn_params.ef_construction,
                 &dist,
                 seed,
-                verbose,
+                verbosity,
             ))),
             KnnIndexType::NNDescentIndex => Ok(KnnIndex::NNDescent(NNDescent::new(
                 embd,
@@ -138,11 +232,11 @@ impl KnnIndex {
                 knn_params.delta,
                 knn_params.diversify_prob,
                 seed,
-                verbose,
+                verbosity,
             )?)),
-            KnnIndexType::ExhaustiveIndex => {
-                Ok(KnnIndex::Exhaustive(ExhaustiveIndex::new(embd, dist)))
-            }
+            KnnIndexType::ExhaustiveIndex => Ok(KnnIndex::Exhaustive(ExhaustiveIndex::new(
+                embd, dist, verbosity,
+            ))),
         }
     }
 
@@ -497,6 +591,123 @@ pub fn build_nhood_matrix(
     let values = vec![1.0; row_indices.len()];
 
     (row_indices, col_indices, values)
+}
+
+/// Sample, refine and count the Milo neighbourhoods
+///
+/// Draws `floor(prop * n_cells)` cells at random, moves each to the cell
+/// nearest the median position of its first `k_refine` neighbours (by
+/// `refinement_strategy`), deduplicates, builds the membership matrix with
+/// [build_nhood_matrix] and takes everything the test needs from it: the
+/// counts per sample and both spatial FDR weightings.
+///
+/// ### Params
+///
+/// * `embd` - The embedding the kNN graph was built on, cells x features
+/// * `knn_indices` - The kNN graph, one row per cell, without self
+/// * `sample_ids` - Sample label per cell, values in `0..n_samples`
+/// * `n_samples` - Number of samples
+/// * `params` - See [MiloRParams]
+/// * `seed` - Seed for the sampling and the index build
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
+///
+/// ### Returns
+///
+/// The [MiloRNhoods], or an error on an unknown strategy or index type, an
+/// empty graph, or labels out of range.
+///
+/// ### References
+///
+/// Dann et al., Nature Biotechnology 40, 245, 2022
+pub fn make_milor_nhoods(
+    embd: MatRef<f32>,
+    knn_indices: &[Vec<usize>],
+    sample_ids: &[usize],
+    n_samples: usize,
+    params: &MiloRParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<MiloRNhoods, ScErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let n_cells = embd.nrows();
+    if knn_indices.len() != n_cells || knn_indices.first().is_none_or(|r| r.is_empty()) {
+        return Err(CoreErrors::InvalidArgument(format!(
+            "the kNN graph needs one non-empty row per cell ({n_cells})."
+        ))
+        .into());
+    }
+
+    let strategy = parse_refinement_strategy(&params.refinement_strategy).ok_or_else(|| {
+        CoreErrors::InvalidArgument(format!(
+            "unknown refinement strategy '{}'.",
+            params.refinement_strategy
+        ))
+    })?;
+    let knn_idx = match strategy {
+        RefinementStrategy::IndexBased => {
+            let index_type = parse_index_type(&params.index_type).ok_or_else(|| {
+                CoreErrors::InvalidArgument(format!("unknown index type '{}'.", params.index_type))
+            })?;
+            Some(KnnIndex::new(
+                embd,
+                index_type,
+                &params.knn_params,
+                seed,
+                verbosity.detailed_verbosity(),
+            )?)
+        }
+        _ => None,
+    };
+
+    let n_sample = ((n_cells as f64) * params.prop).floor() as usize;
+    let mut rng = StdRng::seed_from_u64(seed as u64);
+    let mut random_indices: Vec<usize> = (0..n_cells).collect();
+    random_indices.shuffle(&mut rng);
+    random_indices.truncate(n_sample);
+
+    if verbosity.normal_verbosity() {
+        println!("Sampled {} vertices from {} cells", n_sample, n_cells);
+    }
+
+    let mut index_cells = refine_sampling_with_strategy(
+        embd,
+        knn_indices,
+        &random_indices,
+        params.k_refine,
+        &params.knn_params,
+        &strategy,
+        knn_idx.as_ref(),
+        verbose,
+    )?;
+    index_cells.sort_unstable();
+    index_cells.dedup();
+    let n_nhoods = index_cells.len();
+
+    if verbosity.normal_verbosity() {
+        println!("Refined to {} unique neighbourhood indices", n_nhoods);
+    }
+
+    let (nhoods_i, nhoods_j, nhoods_x) = build_nhood_matrix(knn_indices, &index_cells);
+    let kth_distances = compute_kth_distances_from_matrix(
+        embd,
+        knn_indices,
+        &index_cells,
+        knn_indices[0].len() - 1,
+    );
+    let sample_counts = count_nhood_cells(&nhoods_i, &nhoods_j, sample_ids, n_nhoods, n_samples)?;
+    let nhood_overlap = nhood_overlap(&nhoods_i, &nhoods_j, n_nhoods, n_cells)?;
+
+    Ok(MiloRNhoods {
+        index_cells,
+        nhoods_i,
+        nhoods_j,
+        nhoods_x,
+        n_cells,
+        kth_distances,
+        sample_counts,
+        nhood_overlap,
+    })
 }
 
 /////////////////////////

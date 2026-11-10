@@ -126,7 +126,7 @@ mod tests {
     /// `psi(1) = -gamma` and `psi(0.5) = -gamma - 2 ln 2`, the two closed forms.
     #[test]
     fn test_digamma_known_values() {
-        const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
+        const EULER_MASCHERONI: f64 = std::f64::consts::EULER_GAMMA;
         assert_relative_eq!(digamma(1.0), -EULER_MASCHERONI, max_relative = 1e-14);
         assert_relative_eq!(
             digamma(0.5),

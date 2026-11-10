@@ -11,9 +11,11 @@ use ann_search_rs::utils::dist::SimdDistance;
 use faer::MatRef;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
+use crate::sc_batch_correction::batch_utils::cosine_normalise;
 use bixverse_methods::graph::knn_graph::*;
 
 ////////////////////
@@ -35,6 +37,9 @@ pub enum SigmaMethod {
 
 /// Parse the sigma method
 ///
+/// Takes the `params_sc_wnn()` choices (`"snn_farthest"`, `"sigma_idx"`) and
+/// the short forms `"snn"` and `"sigma"`.
+///
 /// ### Params
 ///
 /// * `s` - The string to parse
@@ -44,10 +49,28 @@ pub enum SigmaMethod {
 /// The option of the [SigmaMethod].
 pub fn parse_sigma_method(s: &str) -> Option<SigmaMethod> {
     match s.to_lowercase().as_str() {
-        "snn" => Some(SigmaMethod::SnnFarthest),
-        "sigma" => Some(SigmaMethod::SigmaIdx),
+        "snn" | "snn_farthest" => Some(SigmaMethod::SnnFarthest),
+        "sigma" | "sigma_idx" => Some(SigmaMethod::SigmaIdx),
         _ => None,
     }
+}
+
+/// Deserialise a sigma method name, checked through [parse_sigma_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The [SigmaMethod], or an error naming the unrecognised value.
+fn de_sigma_method<'de, D: Deserializer<'de>>(d: D) -> Result<SigmaMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_sigma_method(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "sigma_method must be one of 'snn_farthest' or 'sigma_idx', got '{s}'"
+        ))
+    })
 }
 
 /// Per-modality input. Embedding ideally L2-normalised; kNN must have self
@@ -117,7 +140,11 @@ pub struct WnnResult {
 ////////////
 
 /// WNN parameters.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_wnn()` list: the WNN keys plus the
+/// kNN keys of `params_knn_defaults()`. Missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct WnnParams {
     /// Final number of multimodal neighbours per cell.
     pub k_nn: usize,
@@ -125,6 +152,7 @@ pub struct WnnParams {
     /// at least this many neighbours.
     pub knn_range: usize,
     /// Bandwidth method.
+    #[serde(deserialize_with = "de_sigma_method")]
     pub sigma_method: SigmaMethod,
     /// `SigmaIdx` only: 0-based kNN index for bandwidth. Default k_nn - 1.
     pub sigma_idx: usize,
@@ -139,7 +167,9 @@ pub struct WnnParams {
     /// Min sigma value (avoids div by zero).
     pub sigma_floor: f32,
     /// [KnnParams] for the various approximate nearest neighbour searches in
-    /// ann-search-rs
+    /// ann-search-rs. Its `k` is ignored: the per-modality searches return
+    /// `knn_range` neighbours.
+    #[serde(flatten)]
     pub knn_params: KnnParams,
 }
 
@@ -632,6 +662,78 @@ pub fn compute_wnn(
     })
 }
 
+/// Run WNN from the two embeddings
+///
+/// Both embeddings are L2-normalised per cell, a kNN graph with `knn_range`
+/// neighbours (self excluded) is built per modality, rows a search left short
+/// are padded by repeating their last neighbour, and [compute_wnn] fuses the
+/// two.
+///
+/// ### Params
+///
+/// * `emb_one` - Embedding of the first modality, cells x dimensions
+/// * `emb_two` - Embedding of the second modality, same cells in the same
+///   order
+/// * `params` - The WNN parameters
+/// * `seed` - Seed for the kNN index builds
+/// * `verbose` - `0` silent, `1` normal, `2` detailed verbosity
+///
+/// ### Returns
+///
+/// The [WnnResult].
+///
+/// ### References
+///
+/// Hao et al., Cell, 2021
+pub fn run_wnn(
+    emb_one: MatRef<f32>,
+    emb_two: MatRef<f32>,
+    params: &WnnParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<WnnResult, ScErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let k_min = params.knn_range;
+    let mut knn_params = params.knn_params.clone();
+    knn_params.k = k_min;
+
+    let embs = [
+        cosine_normalise(&emb_one.to_owned()),
+        cosine_normalise(&emb_two.to_owned()),
+    ];
+
+    let mut knns = Vec::with_capacity(2);
+    for (r, emb) in embs.iter().enumerate() {
+        if verbosity.normal_verbosity() {
+            println!(
+                "Running the kNN generation for modality {} with {} neighbours.",
+                r + 1,
+                k_min
+            );
+        }
+        let (mut indices, dist) = generate_knn_with_dist(
+            emb.as_ref(),
+            &knn_params,
+            true,
+            false,
+            seed,
+            verbosity.detailed_verbosity(),
+        )?;
+        let mut dist = dist.expect("return_dist = true always yields distances");
+        pad_knn_rows(&mut indices, Some(&mut dist), k_min);
+        knns.push((indices, dist));
+    }
+
+    compute_wnn(
+        [
+            ModalityInput::new(embs[0].as_ref(), &knns[0].0, &knns[0].1),
+            ModalityInput::new(embs[1].as_ref(), &knns[1].0, &knns[1].1),
+        ],
+        params,
+        verbose,
+    )
+}
+
 ///////////
 // Tests //
 ///////////
@@ -660,6 +762,14 @@ mod tests {
         ));
         assert!(matches!(
             parse_sigma_method("sigma"),
+            Some(SigmaMethod::SigmaIdx)
+        ));
+        assert!(matches!(
+            parse_sigma_method("snn_farthest"),
+            Some(SigmaMethod::SnnFarthest)
+        ));
+        assert!(matches!(
+            parse_sigma_method("sigma_idx"),
             Some(SigmaMethod::SigmaIdx)
         ));
         assert!(parse_sigma_method("nope").is_none());

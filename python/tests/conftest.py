@@ -1,5 +1,9 @@
 """Shared fixtures. Every store is generated, never checked in."""
 
+import functools
+import shutil
+import subprocess
+
 import numpy as np
 import pytest
 
@@ -9,6 +13,21 @@ N_CELLS = 200
 N_GENES = 50
 DENSITY = 0.3
 SEED = 42
+
+R_BIXVERSE = "0.9.0"
+R_SKIP_REASON = f"needs Rscript and bixverse >= {R_BIXVERSE}"
+
+
+@functools.cache
+def r_available() -> bool:
+    """Whether the R package the parity fixtures are written for is installed."""
+    if shutil.which("Rscript") is None:
+        return False
+    check = (
+        'quit(status = !(requireNamespace("bixverse", quietly = TRUE) && '
+        f'packageVersion("bixverse") >= "{R_BIXVERSE}"))'
+    )
+    return subprocess.run(["Rscript", "-e", check], capture_output=True).returncode == 0
 
 
 @pytest.fixture(scope="session")

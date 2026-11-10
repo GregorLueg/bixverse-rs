@@ -14,6 +14,7 @@
 
 use faer::{Mat, MatRef, Side};
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::prelude::*;
 use bixverse_core::core::math::distributions::t_pval_two_sided;
@@ -92,16 +93,52 @@ pub fn parse_lm_stat(s: &str) -> Option<LmStat> {
     }
 }
 
+/// Deserialise a linear model, checked through [parse_lm_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"ulm"` or `"mlm"`
+///
+/// ### Returns
+///
+/// The [LmMethod], or an error naming the unrecognised value.
+pub fn de_lm_method<'de, D: Deserializer<'de>>(d: D) -> Result<LmMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_lm_method(&s)
+        .ok_or_else(|| D::Error::custom(format!("method must be 'ulm' or 'mlm', got '{s}'")))
+}
+
+/// Deserialise the reported statistic, checked through [parse_lm_stat]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"t"` or `"coef"`
+///
+/// ### Returns
+///
+/// The [LmStat], or an error naming the unrecognised value.
+pub fn de_lm_stat<'de, D: Deserializer<'de>>(d: D) -> Result<LmStat, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_lm_stat(&s)
+        .ok_or_else(|| D::Error::custom(format!("stat must be 't' or 'coef', got '{s}'")))
+}
+
 ////////////
 // Params //
 ////////////
 
 /// Parameters for the linear model activity scores
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// Deserialises from the R `params_lm_activity()` list; missing keys take the
+/// defaults and `tmin`, which only the network preparation reads, is ignored.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct LmActivityParams {
     /// ULM or MLM.
+    #[serde(deserialize_with = "de_lm_method")]
     pub method: LmMethod,
     /// Statistic reported as the score.
+    #[serde(deserialize_with = "de_lm_stat")]
     pub stat: LmStat,
     /// Also return two-sided p-values from the t distribution. Off by default:
     /// they treat the features as independent draws, which they are not, and

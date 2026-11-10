@@ -7,12 +7,13 @@ use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::Deserialize;
 use std::time::Instant;
 
 use crate::prelude::*;
 use crate::sc_analysis::fast_clusters::*;
 use crate::sc_processing::knn::generate_knn_with_dist;
-use crate::sc_processing::pca::{PcaSolver, solve_dense_pca};
+use crate::sc_processing::pca::{PcaSolver, de_pca_solver, solve_dense_pca};
 use crate::sc_processing::utils_doublets::*;
 use crate::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
@@ -28,7 +29,12 @@ use bixverse_methods::graph::knn_graph::*;
 ///
 /// Controls preprocessing, simulation, clustering, classification and
 /// iterative refinement.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_scdblfinder()` list: the kNN, fast
+/// cluster and k-means keys are read from the same level. Missing keys take
+/// [`ScDblFinderParams::default`]. `return_features` is set by the caller.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct ScDblFinderParams {
     // -- Preprocessing --
     /// Whether to log-transform counts after normalisation.
@@ -50,12 +56,14 @@ pub struct ScDblFinderParams {
     /// Fraction of pairs forced to be from different clusters (0.0-1.0).
     pub heterotypic_bias: f32,
     /// Parameters for the doublet simulation
+    #[serde(skip)]
     pub sim_params: ScDblSimParams,
 
     // -- PCA --
     /// Number of principal components.
     pub no_pcs: usize,
     /// Which PCA solver to use, see [PcaSolver].
+    #[serde(deserialize_with = "de_pca_solver")]
     pub svd_solver: PcaSolver,
 
     // -- Clustering --
@@ -66,14 +74,17 @@ pub struct ScDblFinderParams {
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
     /// The k-means for the fast clustering path, standard or mini-batch
+    #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
     /// distance and Louvain iterations are set from the fields above.
+    #[serde(flatten)]
     pub fast_cluster_params: FastClusterParams,
 
     // -- kNN --
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
 
     // -- Iteration --

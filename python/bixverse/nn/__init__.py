@@ -1,9 +1,9 @@
 """Neural network models trained straight off a bixverse store.
 
-scVI (Lopez et al., 2018) for batch correction, on torch or on MLX. Counts
+scVI (Lopez et al., 2018) for batch correction, on torch, MLX or JAX. Counts
 stream from the store through the Rust loader; nothing goes through AnnData.
-Importing this module needs neither framework; training on one needs its
-extra, `bixverse[torch]` or `bixverse[mlx]`.
+Importing this module needs no framework; training on one needs its extra,
+`bixverse[torch]`, `bixverse[mlx]` or `bixverse[jax]`.
 
     >>> import bixverse.nn as bvnn
     >>> fit = bvnn.train_scvi("counts_cells.bin", cells, hvg, batch)

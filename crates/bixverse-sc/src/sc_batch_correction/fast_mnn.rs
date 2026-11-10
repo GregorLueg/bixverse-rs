@@ -5,6 +5,7 @@
 
 use faer::{Col, Mat, MatMut, MatRef};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -32,7 +33,11 @@ const MIN_DIST: f32 = 1e-15;
 ////////////
 
 /// Parameters for fastMNN batch correction
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_fastmnn()` list: its own keys plus
+/// the kNN and PCA keys; missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct FastMnnParams {
     /// Number of median distances for tricube kernel bandwidth (default 3.0)
     pub ndist: f32,
@@ -44,10 +49,26 @@ pub struct FastMnnParams {
     pub sparse_svd: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
     /// [SingleCellPcaParams] specifying the to-be-applied normalisations and
     /// the PCA solver.
+    #[serde(flatten)]
     pub pca_params: SingleCellPcaParams,
+}
+
+/// Defaults, the fallbacks of the R list conversion
+impl Default for FastMnnParams {
+    fn default() -> Self {
+        Self {
+            ndist: 3.0,
+            cos_norm: true,
+            no_pcs: 30,
+            sparse_svd: true,
+            knn_params: KnnParams::default(),
+            pca_params: SingleCellPcaParams::default(),
+        }
+    }
 }
 
 /////////////
@@ -764,6 +785,55 @@ pub fn fast_mnn_main<S: SingleCellReading>(
         params.ndist,
         &search,
         verbose,
+    )
+}
+
+/// fastMNN over an on-disk experiment.
+///
+/// Opens the gene-major store, loads the CLR offsets from the cell-major one
+/// when `params.pca_params.clr` asks for the `PFlogPF` transformation, and
+/// runs [`fast_mnn_main`].
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file, read only for the
+///   CLR offsets
+/// * `cell_indices` - Indices of cells to include
+/// * `gene_indices` - Indices of genes to include
+/// * `batch_indices` - 0-based batch per cell in `cell_indices`
+/// * `pre_computed_pca` - Pre-computed PCA matrix (optional)
+/// * `params` - FastMNN parameters
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+/// * `seed` - Random seed for reproducibility
+///
+/// ### Returns
+///
+/// Batch-corrected PCA matrix (cells x n_pcs) in `cell_indices` order.
+#[allow(clippy::too_many_arguments)]
+pub fn fast_mnn_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    batch_indices: &[usize],
+    pre_computed_pca: Option<Mat<f32>>,
+    params: &FastMnnParams,
+    verbose: usize,
+    seed: usize,
+) -> Result<Mat<f32>, ScErrors> {
+    let offsets = clr_offsets_on_store(f_path_cell, cell_indices, params.pca_params.clr, verbose)?;
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    fast_mnn_main(
+        &reader,
+        cell_indices,
+        gene_indices,
+        batch_indices,
+        pre_computed_pca,
+        offsets.as_deref(),
+        params,
+        verbose,
+        seed,
     )
 }
 

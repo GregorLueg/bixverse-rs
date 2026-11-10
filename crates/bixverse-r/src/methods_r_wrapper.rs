@@ -367,7 +367,7 @@ where
         let n_neighbours = params
             .get("n_neighbours")
             .and_then(robj_to_count)
-            .and_then(|v| if v > 0 { Some(v) } else { None })
+            .filter(|&v| v > 0)
             .or(defaults.n_neighbours);
 
         let density_threshold = match params.get("density_threshold").and_then(robj_to_f64) {

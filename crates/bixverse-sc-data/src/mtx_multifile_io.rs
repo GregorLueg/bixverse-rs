@@ -3,6 +3,7 @@
 //! multi-loader design.
 
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +19,9 @@ use crate::prelude::*;
 ////////////////
 
 /// Per-file task descriptor for multi-mtx loading
+///
+/// Deserialises from the keys the R `load_multi_mtx()` hands Rust per file.
+#[derive(Deserialize)]
 pub struct MtxFileTask {
     /// Experimental identifier
     pub exp_id: String,

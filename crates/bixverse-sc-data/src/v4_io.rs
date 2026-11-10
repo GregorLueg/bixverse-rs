@@ -99,6 +99,24 @@ pub enum ChunkCodec {
     Zstd,
 }
 
+/// Parse a codec name
+///
+/// ### Params
+///
+/// * `s` - One of `"lz4"`, `"zstd"` or `"none"`
+///
+/// ### Returns
+///
+/// The [ChunkCodec], or `None` for anything else.
+pub fn parse_chunk_codec(s: &str) -> Option<ChunkCodec> {
+    match s {
+        "lz4" => Some(ChunkCodec::Lz4),
+        "zstd" => Some(ChunkCodec::Zstd),
+        "none" => Some(ChunkCodec::None),
+        _ => None,
+    }
+}
+
 impl ChunkCodec {
     /// The byte stored in the chunk header.
     ///
@@ -768,8 +786,10 @@ pub(crate) fn decode_v4_into(
         let stored_norm = rest.get(raw_len..raw_len + n * 2).ok_or_else(truncated)?;
         norm.extend(
             stored_norm
-                .chunks_exact(2)
-                .map(|c| F16::from_le_bytes([c[0], c[1]]).to_f32()),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| F16::from_le_bytes(c).to_f32()),
         );
     } else if ctx.is_cell {
         let lib = h.aux as f32;

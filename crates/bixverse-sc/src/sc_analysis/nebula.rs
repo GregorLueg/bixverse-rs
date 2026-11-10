@@ -21,6 +21,7 @@ use edge_rs::sc::nebula::{NebulaFit, NebulaMethod, NebulaParams, nebula_sparse};
 use edge_rs::sc::shrink::{sc_residual_df, shrink_sc_dispersion};
 use edge_rs::sc::test::{ScTested, glm_sc_test};
 use indexmap::IndexSet;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -61,12 +62,31 @@ pub fn parse_nebula_method(s: &str) -> Option<NebulaMethod> {
     }
 }
 
+/// Deserialise the NEBULA variant, checked through [parse_nebula_method]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"ln"` or `"hl"`
+///
+/// ### Returns
+///
+/// The [NebulaMethod], or an error naming the unrecognised value.
+pub fn de_nebula_method<'de, D: Deserializer<'de>>(d: D) -> Result<NebulaMethod, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_nebula_method(&s)
+        .ok_or_else(|| D::Error::custom(format!("nebula_method must be 'ln' or 'hl', got '{s}'")))
+}
+
 ////////////
 // Params //
 ////////////
 
 /// Parameters for [run_nebula].
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_nebula()` list plus `coef` or
+/// `contrast`, see [`NebulaScParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "NebulaScParamsSpec")]
 pub struct NebulaScParams {
     /// The upstream knobs, defaulting to the R package's own.
     pub nebula: NebulaParams,
@@ -91,6 +111,112 @@ impl Default for NebulaScParams {
             shrink_dispersion: true,
             tested: ScTested::Coef(0),
         }
+    }
+}
+
+/// The keys a [`NebulaScParams`] deserialises from, as its R list
+/// conversion reads them; missing keys take the `nebula` package's defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct NebulaScParamsSpec {
+    /// Which variant to run
+    #[serde(deserialize_with = "de_nebula_method")]
+    pub nebula_method: NebulaMethod,
+    /// Lower bound on the subject-level overdispersion
+    pub min_sigma: f64,
+    /// Lower bound on the cell-level overdispersion
+    pub min_phi: f64,
+    /// Upper bound on the subject-level overdispersion
+    pub max_sigma: f64,
+    /// Upper bound on the cell-level overdispersion
+    pub max_phi: f64,
+    /// Refit both overdispersions below this cells-per-subject times `phi`
+    pub cutoff_cell: f64,
+    /// Threshold on `kappa_obs` above which stage one's sigma is kept
+    pub kappa: f64,
+    /// Drop a gene whose mean count per cell is at most this
+    pub cpc: f64,
+    /// Drop a gene expressed in fewer than this many cells
+    pub mincp: usize,
+    /// Drop a gene that fewer than this many subjects express; `0` is off
+    pub min_subjects: usize,
+    /// Restricted maximum likelihood
+    pub reml: bool,
+    /// Optimiser stopping tolerance
+    pub eps: f64,
+    /// Genes read and fitted per batch
+    pub gene_batch_size: usize,
+    /// Empirical Bayes shrinkage of the cell-level overdispersions
+    pub shrink_dispersion: bool,
+    /// 0-based coefficient the Wald test reports
+    pub coef: Option<usize>,
+    /// One weight per coefficient; wins over `coef`, as in the R conversion
+    pub contrast: Option<Vec<f64>>,
+}
+
+impl Default for NebulaScParamsSpec {
+    fn default() -> Self {
+        let d = NebulaScParams::default();
+        Self {
+            nebula_method: d.nebula.method,
+            min_sigma: d.nebula.min.0,
+            min_phi: d.nebula.min.1,
+            max_sigma: d.nebula.max.0,
+            max_phi: d.nebula.max.1,
+            cutoff_cell: d.nebula.cutoff_cell,
+            kappa: d.nebula.kappa,
+            cpc: d.nebula.cpc,
+            mincp: d.nebula.mincp,
+            min_subjects: d.nebula.min_subjects,
+            reml: d.nebula.reml,
+            eps: d.nebula.eps,
+            gene_batch_size: d.gene_batch_size,
+            shrink_dispersion: d.shrink_dispersion,
+            coef: None,
+            contrast: None,
+        }
+    }
+}
+
+impl TryFrom<NebulaScParamsSpec> for NebulaScParams {
+    type Error = String;
+
+    /// Assemble the parameters and resolve what is tested.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`NebulaScParams`], or an error if neither `coef` nor `contrast`
+    /// is given: which effect to report is the question the caller came to
+    /// ask, so there is no default.
+    fn try_from(s: NebulaScParamsSpec) -> Result<Self, String> {
+        let tested = match (s.contrast, s.coef) {
+            (Some(contrast), _) => ScTested::Contrast(contrast),
+            (None, Some(coef)) => ScTested::Coef(coef),
+            (None, None) => {
+                return Err("NEBULA needs either `coef` or `contrast` to know what to test".into());
+            }
+        };
+        Ok(Self {
+            nebula: NebulaParams {
+                min: (s.min_sigma, s.min_phi),
+                max: (s.max_sigma, s.max_phi),
+                method: s.nebula_method,
+                cutoff_cell: s.cutoff_cell,
+                kappa: s.kappa,
+                cpc: s.cpc,
+                mincp: s.mincp,
+                min_subjects: s.min_subjects,
+                reml: s.reml,
+                eps: s.eps,
+            },
+            gene_batch_size: s.gene_batch_size,
+            shrink_dispersion: s.shrink_dispersion,
+            tested,
+        })
     }
 }
 

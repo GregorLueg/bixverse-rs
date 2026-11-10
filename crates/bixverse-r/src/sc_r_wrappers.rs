@@ -12,6 +12,7 @@ use crate::r_rust_interface::{
 };
 use crate::{FromRList, FromRMap, ToRList};
 use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
+use bixverse_rs::graph::leiden::parse_community_algorithm;
 use bixverse_rs::ml::clustering::hierarchical::parse_linkage_method;
 use bixverse_rs::ml::clustering::k_means::{KMeansParamsWrappers, KMeansType, parse_k_means};
 use bixverse_rs::ml::gp::LandmarkGpParams;
@@ -36,12 +37,14 @@ use bixverse_rs::single_cell::sc_analysis::{
     },
     vision::SignatureGenes,
 };
-use bixverse_rs::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use bixverse_rs::single_cell::sc_processing::magic::MagicParams;
+pub use bixverse_rs::single_cell::sc_processing::magic::parse_magic_layer;
 use bixverse_rs::single_cell::sc_processing::residuals::{
     assert_ascending, validate_clip_range, validate_groups,
 };
+pub use bixverse_rs::single_cell::sc_trajectory::gene_trends::parse_branch_weighting;
 use bixverse_rs::single_cell::sc_trajectory::gene_trends::{
-    BranchSelectionParams, BranchWeighting, GeneTrendsParams,
+    BranchSelectionParams, GeneTrendsParams,
 };
 use bixverse_rs::single_cell::sc_trajectory::palantir::PalantirParams;
 
@@ -73,7 +76,7 @@ use bixverse_rs::single_cell::sc_processing::sctransform::model::{
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::SctGroupedFit;
 use bixverse_rs::single_cell::sc_processing::{
     cellsweep::{
-        CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
+        CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, EmptyDropletCallSpec,
     },
     doublet_detection::BoostParams,
     hvg::ScranTrendParams,
@@ -349,10 +352,6 @@ impl FromRList for KnnParams {
             .unwrap_or(0.001) as f32;
 
         let ef_budget = r_list_count(&params_list, "ef_budget")?;
-        let extract_knn = params_list
-            .get("extract_knn")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
         // hnsw
         let m = r_list_count(&params_list, "m")?.unwrap_or(16);
@@ -373,7 +372,6 @@ impl FromRList for KnnParams {
             n_tree,
             search_budget,
             ef_budget,
-            extract_knn,
             diversify_prob,
             delta,
             m,
@@ -826,7 +824,7 @@ impl FromRList for ScDblFinderParams {
                 .unwrap_or(defaults.n_iterations as i32) as usize,
             // Classification
             gbm_n_trees: map
-                .get("n_trees")
+                .get("gbm_n_trees")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.gbm_n_trees as i32) as usize,
             max_depth: map
@@ -930,15 +928,11 @@ impl FromRList for FastClusterParams {
 
         let mut community = defaults.community;
         if let Some(a) = params.get("algorithm").and_then(|v| v.as_str()) {
-            community.refine = match a.to_lowercase().as_str() {
-                "louvain" => false,
-                "leiden" => true,
-                other => {
-                    return Err(Error::Other(format!(
-                        "Unknown algorithm '{other}'; expected 'louvain' or 'leiden'"
-                    )));
-                }
-            };
+            community.refine = parse_community_algorithm(a).ok_or_else(|| {
+                Error::Other(format!(
+                    "Unknown algorithm '{a}'; expected 'louvain' or 'leiden'"
+                ))
+            })?;
         }
         community.beta = r_list_real(&params, "beta")?.unwrap_or(community.beta);
         community.n_iterations =
@@ -2699,23 +2693,6 @@ impl FromRList for SelectParams {
 // SimilarityParams //
 //////////////////////
 
-/// Parse a MetaCells2 similarity method.
-///
-/// ### Params
-///
-/// * `s` - `"abs_pearson"` or `"pearson"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The method, or `None` if unrecognised.
-fn parse_similarity_method(s: &str) -> Option<SimilarityMethod> {
-    match s.to_lowercase().as_str() {
-        "abs_pearson" => Some(SimilarityMethod::AbsPearson),
-        "pearson" => Some(SimilarityMethod::Pearson),
-        _ => None,
-    }
-}
-
 impl FromRList for SimilarityParams {
     /// Generate SimilarityParams from an R list, falling back to defaults.
     fn from_r_list(r_list: List) -> Result<Self> {
@@ -3107,26 +3084,6 @@ impl FromRList for DacParams {
 ////////////////
 // RareParams //
 ////////////////
-
-/// Parse a MetaCells2 rare gene similarity method.
-///
-/// ### Params
-///
-/// * `s` - `"pearson"`, `"abs_pearson"`, `"repeated_pearson"` or
-///   `"repeated_abs_pearson"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The method, or `None` if unrecognised.
-fn parse_rare_similarity_method(s: &str) -> Option<RareSimilarityMethod> {
-    match s.to_lowercase().as_str() {
-        "pearson" => Some(RareSimilarityMethod::Pearson),
-        "abs_pearson" => Some(RareSimilarityMethod::AbsPearson),
-        "repeated_pearson" => Some(RareSimilarityMethod::RepeatedPearson),
-        "repeated_abs_pearson" => Some(RareSimilarityMethod::RepeatedAbsPearson),
-        _ => None,
-    }
-}
 
 impl FromRList for RareParams {
     /// Generate RareParams from a flat R list, falling back to defaults. Keys
@@ -3689,23 +3646,6 @@ impl FromRList for MagicParams {
     }
 }
 
-/// Parse the R-side layer string into a [MagicLayer].
-///
-/// ### Params
-///
-/// * `s` - The layer name, `"norm"` or `"raw"`, case-insensitive.
-///
-/// ### Returns
-///
-/// The matching layer, or `None` if the string is not recognised.
-pub fn parse_magic_layer(s: &str) -> Option<MagicLayer> {
-    match s.to_lowercase().as_str() {
-        "norm" | "normalised" | "normalized" => Some(MagicLayer::Norm),
-        "raw" | "counts" => Some(MagicLayer::Raw),
-        _ => None,
-    }
-}
-
 /////////////////
 // Gene trends //
 /////////////////
@@ -3832,26 +3772,6 @@ impl FromRList for GeneTrendsParams {
     }
 }
 
-/// Parse the R-side weighting string into a [BranchWeighting].
-///
-/// ### Params
-///
-/// * `s` - The weighting name, `"hard_mask"` or `"fate_probability"`,
-///   case-insensitive.
-///
-/// ### Returns
-///
-/// The matching weighting, or `None` if the string is not recognised.
-pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
-    match s.to_lowercase().as_str() {
-        "hard_mask" | "hardmask" | "mask" => Some(BranchWeighting::HardMask),
-        "fate_probability" | "fateprobability" | "fate_prob" => {
-            Some(BranchWeighting::FateProbability)
-        }
-        _ => None,
-    }
-}
-
 //////////////
 // DIALOGUE //
 //////////////
@@ -3928,10 +3848,11 @@ impl FromRMap for PmdParams {
             .and_then(|v| v.as_real())
             .unwrap_or(defaults.mcp_assignment_p);
 
-        // u64 — read as real to dodge R's i32 limit.
+        // u64: a double dodges R's i32 limit, but `params_dialogue_pmd()`
+        // hands over an integer, which `as_real` alone would drop.
         let seed = params
             .get("seed")
-            .and_then(|v| v.as_real())
+            .and_then(|v| v.as_real().or_else(|| v.as_integer().map(f64::from)))
             .map(|v| v as u64)
             .unwrap_or(defaults.seed);
 
@@ -4282,11 +4203,8 @@ impl FromRList for CellSweepParams {
 
 /// Resolve the empty droplet calling strategy from an R list.
 ///
-/// The method name and its numeric argument arrive as separate list entries,
-/// so the variant is parsed first and then filled in. An unrecognised method
-/// errors rather than falling back, and so does a method whose argument is
-/// missing: a silent zero cutoff would call nothing empty and the model would
-/// then fail much further downstream.
+/// Reads the keys of [EmptyDropletCallSpec], which checks the method and its
+/// argument.
 ///
 /// ### Params
 ///
@@ -4299,34 +4217,16 @@ impl FromRList for CellSweepParams {
 pub fn empty_droplet_call_from_r_list(r_list: List) -> Result<EmptyDropletCall> {
     let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
-    let method = params
-        .get("method")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Other("Empty droplet params need a 'method' entry.".to_string()))?;
+    let spec = EmptyDropletCallSpec {
+        method: params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        umi_cutoff: r_list_count(&params, "umi_cutoff")?.map(|x| x as u32),
+        expected_cells: r_list_count(&params, "expected_cells")?,
+    };
 
-    let call = parse_empty_droplet_call(method).ok_or_else(|| {
-        Error::Other(format!(
-            "'{method}' is not a known empty droplet method. Use one of 'supplied', 'umi_cutoff', 'expected_cells', 'knee'."
-        ))
-    })?;
-
-    Ok(match call {
-        EmptyDropletCall::UmiCutoff(_) => {
-            let cutoff = r_list_count(&params, "umi_cutoff")?.ok_or_else(|| {
-                Error::Other("method = 'umi_cutoff' needs a 'umi_cutoff' entry.".to_string())
-            })?;
-            EmptyDropletCall::UmiCutoff(cutoff as u32)
-        }
-        EmptyDropletCall::ExpectedCells(_) => {
-            let expected = r_list_count(&params, "expected_cells")?.ok_or_else(|| {
-                Error::Other(
-                    "method = 'expected_cells' needs an 'expected_cells' entry.".to_string(),
-                )
-            })?;
-            EmptyDropletCall::ExpectedCells(expected)
-        }
-        other => other,
-    })
+    EmptyDropletCall::try_from(spec).map_err(Error::Other)
 }
 
 /// Generate a CellSweepSample from an R list
@@ -5081,10 +4981,7 @@ impl FromRList for AprGroupedFit {
 
 #[cfg(feature = "bonsai")]
 mod bonsai_wrappers {
-    use bonsai_rs::bonsai::StartTree;
     use bonsai_rs::sanity_sc_rs::config::VarianceRule;
-    use bonsai_rs::search::nni::NniSearch;
-    use bonsai_rs::search::spr::SprSearch;
     use bonsai_rs::tree::NO_NODE;
     use extendr_api::*;
     use std::collections::HashMap;
@@ -5093,6 +4990,9 @@ mod bonsai_wrappers {
     use crate::r_rust_interface::r_list_to_map;
     use bixverse_rs::single_cell::sc_analysis::bonsai::{
         BonsaiScParams, BonsaiScResult, parse_bonsai_layout,
+    };
+    pub use bixverse_rs::single_cell::sc_analysis::bonsai::{
+        parse_nni_search, parse_spr_search, parse_start_tree, parse_variance_rule,
     };
 
     impl FromRList for BonsaiScParams {
@@ -5168,77 +5068,6 @@ mod bonsai_wrappers {
             }
 
             Ok(out)
-        }
-    }
-
-    /// Parse a Sanity variance rule other than `"fixed"`, which needs a value.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"marginalise"`, `"posterior_mean"` or `"max_posterior"`
-    ///
-    /// ### Returns
-    ///
-    /// The rule, or `None` if the name is not recognised.
-    pub fn parse_variance_rule(s: &str) -> Option<VarianceRule> {
-        match s {
-            "marginalise" => Some(VarianceRule::Marginalise),
-            "posterior_mean" => Some(VarianceRule::PosteriorMean),
-            "max_posterior" => Some(VarianceRule::MaxPosterior),
-            _ => None,
-        }
-    }
-
-    /// Parse the Bonsai start tree.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"linkage"` or `"greedy_merge"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The start tree, or `None` if the name is not recognised.
-    pub fn parse_start_tree(s: &str) -> Option<StartTree> {
-        match s.to_lowercase().as_str() {
-            "linkage" => Some(StartTree::Linkage),
-            "greedy_merge" => Some(StartTree::GreedyMerge),
-            _ => None,
-        }
-    }
-
-    /// Parse the SPR search mode.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"approximate"` (upstream's default approximations) or
-    ///   `"exact"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The search mode, or `None` if the name is not recognised.
-    pub fn parse_spr_search(s: &str) -> Option<SprSearch> {
-        match s.to_lowercase().as_str() {
-            "approximate" => Some(SprSearch::default()),
-            "exact" => Some(SprSearch::Exact),
-            _ => None,
-        }
-    }
-
-    /// Parse the NNI search mode.
-    ///
-    /// ### Params
-    ///
-    /// * `s` - `"approximate"` (upstream's default approximations) or
-    ///   `"exact"`, case-insensitive
-    ///
-    /// ### Returns
-    ///
-    /// The search mode, or `None` if the name is not recognised.
-    pub fn parse_nni_search(s: &str) -> Option<NniSearch> {
-        match s.to_lowercase().as_str() {
-            "approximate" => Some(NniSearch::default()),
-            "exact" => Some(NniSearch::Exact),
-            _ => None,
         }
     }
 

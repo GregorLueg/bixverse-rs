@@ -32,7 +32,9 @@ use faer::MatRef;
 use crate::prelude::*;
 
 pub use hlm::{DialogueStep2Result, GeneAssociation};
-pub use params::{Averaging, DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging};
+pub use params::{
+    Averaging, DialogueParams, HlmParams, PmdParams, RefineParams, de_averaging, parse_averaging,
+};
 pub use pmd::{DialogueStep1Result, ProgrammeSignature};
 pub use refine::{DialogueResult, GeneVerdict};
 

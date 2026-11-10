@@ -3,11 +3,12 @@
 //! are filtered out here.
 
 use hdf5::{
-    Container, File,
+    Container, File, Group,
     types::{FixedAscii, FixedUnicode, TypeDescriptor, VarLenAscii, VarLenUnicode},
 };
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
@@ -245,6 +246,21 @@ pub fn parse_tenx_version(s: &str) -> Option<TenxVersion> {
         "v3" => Some(TenxVersion::V3),
         _ => None,
     }
+}
+
+/// Deserialise a [TenxVersion] through [parse_tenx_version]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The version, or an error naming the unrecognised value.
+pub fn de_tenx_version<'de, D: Deserializer<'de>>(d: D) -> Result<TenxVersion, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_tenx_version(&s)
+        .ok_or_else(|| D::Error::custom(format!("version must be 'v2' or 'v3', got '{s}'")))
 }
 
 /// Read the matrix dimensions from a 10x file
@@ -612,15 +628,11 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_cell + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<usize>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<usize>(data_start..data_end)?;
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;
@@ -648,9 +660,9 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; n_cells];
     let mut cell_lib_size = vec![0.0f32; n_cells];
@@ -751,4 +763,195 @@ pub fn write_h5_tenx_streaming<P: AsRef<Path>>(
         lib_size,
         nnz,
     })
+}
+
+/////////////////
+// File writer //
+/////////////////
+
+/// The features of a 10x h5 file
+pub struct TenxFeatures<'a> {
+    /// Feature identifiers (`features/id`, `genes` in v2)
+    pub ids: &'a [String],
+    /// Feature names (`features/name`, `gene_names` in v2)
+    pub names: &'a [String],
+    /// Feature types (`features/feature_type`), v3 only; `None` writes
+    /// `"Gene Expression"` for every feature
+    pub feature_types: Option<&'a [String]>,
+}
+
+/// Write a string dataset as variable-length UTF-8
+///
+/// ### Params
+///
+/// * `group` - Where to create it
+/// * `name` - Dataset name
+/// * `xs` - The strings
+///
+/// ### Returns
+///
+/// `Ok(())`, or an error for a string HDF5 cannot hold (an interior NUL).
+fn write_vlen_strings(group: &Group, name: &str, xs: &[String]) -> Result<(), ScDataErrors> {
+    let data = xs
+        .iter()
+        .map(|x| {
+            x.parse::<VarLenUnicode>()
+                .map_err(|e| ScDataErrors::InvalidArgument(format!("string '{x}': {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    group.new_dataset_builder().with_data(&data).create(name)?;
+    Ok(())
+}
+
+/// Write a `u32` buffer as an `int32` dataset, as rhdf5 and CellRanger do
+///
+/// ### Params
+///
+/// * `group` - Where to create it
+/// * `name` - Dataset name
+/// * `xs` - The values
+///
+/// ### Returns
+///
+/// `Ok(())`, or [ScDataErrors::InvalidArgument] for a value beyond `i32`.
+fn write_i32(group: &Group, name: &str, xs: &[u32]) -> Result<(), ScDataErrors> {
+    let data = xs
+        .iter()
+        .map(|&x| {
+            i32::try_from(x).map_err(|_| {
+                ScDataErrors::InvalidArgument(format!("{name} value {x} exceeds int32"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    group.new_dataset_builder().with_data(&data).create(name)?;
+    Ok(())
+}
+
+/// Write a cells x features count matrix as a CellRanger style h5 file
+///
+/// Mirrors `write_tenx_h5_sc()` in R. A cells x features CSR matrix has the
+/// buffers of the features x cells CSC matrix 10x stores, so they are written
+/// as they are. Counts, indices, pointers and shape go out as `int32`,
+/// strings as variable-length UTF-8, as h5py writes them.
+///
+/// ### Params
+///
+/// * `h5_path` - Path of the file to create. An existing file is truncated.
+/// * `version` - Layout to write, see [TenxVersion]
+/// * `counts` - CSR matrix, rows are cells, columns features
+/// * `barcodes` - One barcode per cell
+/// * `features` - One id, name and optional type per feature
+///
+/// ### Returns
+///
+/// `Ok(())`, or [ScDataErrors::InvalidArgument] if the matrix is not CSR or
+/// the lengths disagree.
+pub fn write_tenx_h5<P: AsRef<Path>>(
+    h5_path: P,
+    version: TenxVersion,
+    counts: &CompressedSparseData2<u32>,
+    barcodes: &[String],
+    features: &TenxFeatures,
+) -> Result<(), ScDataErrors> {
+    let (n_cells, n_features) = counts.shape;
+    if !matches!(counts.cs_type, CompressedSparseFormat::Csr) {
+        return Err(ScDataErrors::InvalidArgument(
+            "the 10x writer takes a cells x features CSR matrix".to_string(),
+        ));
+    }
+    let check = |what: &str, got: usize, want: usize| {
+        if got == want {
+            Ok(())
+        } else {
+            Err(ScDataErrors::InvalidArgument(format!(
+                "{what} has length {got}, expected {want}"
+            )))
+        }
+    };
+    check("barcodes", barcodes.len(), n_cells)?;
+    check("feature ids", features.ids.len(), n_features)?;
+    check("feature names", features.names.len(), n_features)?;
+    if let Some(types) = features.feature_types {
+        check("feature types", types.len(), n_features)?;
+    }
+    let shape = [n_features, n_cells].map(|x| u32::try_from(x).unwrap_or(u32::MAX));
+
+    let file = File::create(h5_path)?;
+    let root = match version {
+        TenxVersion::V3 => file.create_group("matrix")?,
+        TenxVersion::V2 => file.group("/")?,
+    };
+
+    write_i32(&root, "data", &counts.data)?;
+    write_i32(&root, "indices", &counts.indices)?;
+    write_i32(&root, "indptr", &counts.indptr)?;
+    write_i32(&root, "shape", &shape)?;
+    write_vlen_strings(&root, "barcodes", barcodes)?;
+
+    match version {
+        TenxVersion::V3 => {
+            let feat = root.create_group("features")?;
+            write_vlen_strings(&feat, "id", features.ids)?;
+            write_vlen_strings(&feat, "name", features.names)?;
+            let types = match features.feature_types {
+                Some(t) => t.to_vec(),
+                None => vec!["Gene Expression".to_string(); n_features],
+            };
+            write_vlen_strings(&feat, "feature_type", &types)?;
+        }
+        TenxVersion::V2 => {
+            write_vlen_strings(&root, "genes", features.ids)?;
+            write_vlen_strings(&root, "gene_names", features.names)?;
+        }
+    }
+
+    Ok(())
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_tenx_h5_round_trips_layout() {
+        // 2 cells x 3 features
+        let counts =
+            CompressedSparseData2::<u32>::new_csr(&[1, 4, 2], &[0, 2, 1], &[0, 2, 3], None, (2, 3));
+        let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let (ids, names) = (s(&["g1", "g2", "g3"]), s(&["A", "B", "C"]));
+        let features = TenxFeatures {
+            ids: &ids,
+            names: &names,
+            feature_types: None,
+        };
+        for version in [TenxVersion::V3, TenxVersion::V2] {
+            let path = std::env::temp_dir().join(format!(
+                "bixverse_tenx_writer_{}_{version:?}.h5",
+                std::process::id()
+            ));
+            write_tenx_h5(&path, version, &counts, &s(&["c1", "c2"]), &features).unwrap();
+
+            assert_eq!(detect_tenx_version(&path).unwrap(), version);
+            assert_eq!(get_tenx_dimensions(&path, None).unwrap(), (2, 3));
+            let file = File::open(&path).unwrap();
+            // 10x is feature-major CSC: one indptr slot per barcode, feature
+            // indices within; cell 0 holds g1 = 1 and g3 = 4, cell 1 g2 = 2
+            let arr = |name: &str| file.dataset(name).unwrap().read_raw::<i32>().unwrap();
+            assert_eq!(arr(version.get_data()), vec![1, 4, 2]);
+            assert_eq!(arr(version.get_indices()), vec![0, 2, 1]);
+            assert_eq!(arr(version.get_indptr()), vec![0, 2, 3]);
+            assert_eq!(arr(version.get_shape()), vec![3, 2]);
+            let got = read_string_dataset(&file.dataset(version.get_feature_id()).unwrap());
+            assert_eq!(got.unwrap(), ids);
+            if let Some(ft) = version.get_feature_type() {
+                let types = read_string_dataset(&file.dataset(ft).unwrap()).unwrap();
+                assert!(types.iter().all(|t| t == "Gene Expression"));
+            }
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

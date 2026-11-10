@@ -1,0 +1,18 @@
+[package]
+name = "py-common"
+description = "What the bixverse and bixverse-gpu extensions share: error mapping, NumPy conversions and result dicts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bixverse-methods.workspace = true
+bixverse-sc = { workspace = true, features = ["bonsai"] }
+bixverse-sc-data.workspace = true
+faer.workspace = true
+numpy.workspace = true
+pyo3.workspace = true
+pythonize.workspace = true
+serde.workspace = true

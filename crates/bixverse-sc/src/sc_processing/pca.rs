@@ -6,6 +6,7 @@
 use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -91,17 +92,17 @@ pub type SingleCellPcaResStats =
 /// Which solver the single cell PCA uses
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PcaSolver {
+    #[default]
+    /// Lanczos on the sparse path, the covariance solver on the dense one:
+    /// the fastest exact option on each.
+    Auto,
     /// Exact PCA via the feature x feature cross-product and a symmetric
     /// eigendecomposition. Cheap for a few thousand features, e.g. HVGs.
-    #[default]
     Covariance,
     /// Randomised SVD. Approximate, the trailing components the least so.
     Randomised,
     /// Full thin SVD on the dense path, Lanczos on the sparse one.
     Exact,
-    /// Lanczos on the sparse path, the covariance solver on the dense one:
-    /// the fastest exact option on each.
-    Auto,
 }
 
 /// Parse the PCA solver
@@ -115,23 +116,46 @@ pub enum PcaSolver {
 /// Option of the [PcaSolver]
 pub fn parse_pca_solver(s: &str) -> Option<PcaSolver> {
     match s.to_lowercase().as_str() {
+        "auto" => Some(PcaSolver::Auto),
         "covariance" => Some(PcaSolver::Covariance),
         "randomised" => Some(PcaSolver::Randomised),
         "exact" => Some(PcaSolver::Exact),
-        "auto" => Some(PcaSolver::Auto),
         _ => None,
     }
 }
 
+/// Deserialise a [PcaSolver] through [parse_pca_solver]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The solver, or an error naming the unrecognised value.
+pub fn de_pca_solver<'de, D: Deserializer<'de>>(d: D) -> Result<PcaSolver, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_pca_solver(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "svd_solver must be one of 'auto', 'covariance', 'randomised' or 'exact', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for the main single cell PCA around normalisations and which
 /// solver to use.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_pca()` list; missing keys
+/// take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SingleCellPcaParams {
     /// Mean center the data
     pub mean_center: bool,
     /// Normalise the variance
     pub normalise_variance: bool,
     /// Which solver to use
+    #[serde(deserialize_with = "de_pca_solver")]
     pub svd_solver: PcaSolver,
     /// Apply the CLR transformation
     pub clr: bool,
@@ -206,7 +230,7 @@ pub(crate) fn solve_dense_pca(
     seed: usize,
 ) -> SingleCellPcaRes {
     let (n_cells, n_genes) = (scaled.nrows(), scaled.ncols());
-    let res: RandomSvdResults<f64> = match solver {
+    let mut res: RandomSvdResults<f64> = match solver {
         PcaSolver::Covariance | PcaSolver::Auto => dense_covariance_svd(scaled, no_pcs)?,
         PcaSolver::Randomised => randomised_svd(
             scaled,
@@ -226,6 +250,17 @@ pub(crate) fn solve_dense_pca(
             }
         }
     };
+    // every solver clamps to the rank
+    if res.s.len() < no_pcs {
+        return Err(ScErrors::PcaTooFewComponents {
+            requested: no_pcs,
+            found: res.s.len(),
+            n_cells,
+            n_genes,
+        });
+    }
+    // here rather than in `randomised_svd`, which ICA, NMF and rPCA call too
+    res.flip_signs();
     let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
     let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
     let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
@@ -636,6 +671,119 @@ pub fn sparse_csc_column_stds(
         .collect();
 
     Ok(res)
+}
+
+/// Column means and standard deviations of a CSR sparse matrix.
+///
+/// The CSR twin of [`sparse_csc_column_means`] and [`sparse_csc_column_stds`],
+/// with the same definitions, so a matrix read straight into CSR needs no
+/// transpose for its statistics. Two passes over the rows, each folding into
+/// per-thread column accumulators; only the summation order differs from the
+/// CSC versions.
+///
+/// ### Params
+///
+/// * `csr` - The CSR sparse matrix.
+/// * `use_second_layer` - Whether to use the second layer of data.
+/// * `row_offsets` - Optional per-row offsets used by the shifted CLR
+///   transformation.
+///
+/// ### Returns
+///
+/// Tuple of (column means, column standard deviations), both on the CLR scale
+/// when `row_offsets` is set.
+fn sparse_csr_column_stats(
+    csr: &CompressedSparseData2<f32>,
+    use_second_layer: bool,
+    row_offsets: Option<&[f64]>,
+) -> Result<(Vec<f64>, Vec<f64>), ScErrors> {
+    if !csr.cs_type.is_csr() {
+        return Err(CoreErrors::SparseLayoutMismatch {
+            expected: CompressedSparseFormat::Csr,
+            got: csr.cs_type,
+        }
+        .into());
+    }
+
+    let (n, m) = csr.shape;
+    let n_f = n as f64;
+    let values: &[f32] = if use_second_layer {
+        csr.data_2
+            .as_ref()
+            .ok_or(CoreErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        &csr.data
+    };
+    let row = |i: usize| {
+        let (s, e) = (csr.indptr[i] as usize, csr.indptr[i + 1] as usize);
+        (&csr.indices[s..e], &values[s..e])
+    };
+    let add = |mut a: Vec<f64>, b: Vec<f64>| {
+        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+        a
+    };
+
+    // pass 1: column sums of A, and the nnz per column
+    let sums = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0; 2 * m],
+            |mut acc, i| {
+                let (idx, val) = row(i);
+                for (&j, &x) in idx.iter().zip(val) {
+                    acc[j as usize] += x as f64;
+                    acc[m + j as usize] += 1.0;
+                }
+                acc
+            },
+        )
+        .reduce(|| vec![0.0; 2 * m], add);
+    let mu_a: Vec<f64> = sums[..m].iter().map(|&s| s / n_f).collect();
+
+    let (m_bar, var_m, m_centered) = if let Some(off) = row_offsets {
+        let m_bar = off.iter().sum::<f64>() / n_f;
+        let m_centered: Vec<f64> = off.iter().map(|&v| v - m_bar).collect();
+        let var_m = m_centered.iter().map(|&v| v * v).sum::<f64>() / (n_f - 1.0);
+        (m_bar, var_m, Some(m_centered))
+    } else {
+        (0.0, 0.0, None)
+    };
+
+    // pass 2: squared deviations of the non-zeros, and the CLR cross term
+    let dev = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0; 2 * m],
+            |mut acc, i| {
+                let (idx, val) = row(i);
+                let mc = m_centered.as_ref().map_or(0.0, |mc| mc[i]);
+                for (&j, &x) in idx.iter().zip(val) {
+                    let (j, x) = (j as usize, x as f64);
+                    let d = x - mu_a[j];
+                    acc[j] += d * d;
+                    acc[m + j] += x * mc;
+                }
+                acc
+            },
+        )
+        .reduce(|| vec![0.0; 2 * m], add);
+
+    let means = mu_a.iter().map(|&mu| mu - m_bar).collect();
+    let stds = (0..m)
+        .map(|j| {
+            let ss_zeros = (n_f - sums[m + j]) * mu_a[j] * mu_a[j];
+            let var_a = (dev[j] + ss_zeros) / (n_f - 1.0);
+            let variance = if m_centered.is_some() {
+                var_a - (2.0 / (n_f - 1.0)) * dev[m + j] + var_m
+            } else {
+                var_a
+            };
+            variance.max(0.0).sqrt().max(f64::EPSILON)
+        })
+        .collect();
+
+    Ok((means, stds))
 }
 
 ///////////////
@@ -1220,7 +1368,8 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -1259,13 +1408,19 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_reading = Instant::now();
 
-    let mut csc: CompressedSparseData2<f32> =
-        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?;
+    // every solver works on the long-major orientation, so read it directly:
+    // CSR when there are at least as many cells as genes, which never holds
+    // a CSC next to its transpose
+    let mut matrix: CompressedSparseData2<f32> = if cell_set.len() >= gene_indices.len() {
+        reader.read_genes_sparse_csr(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?
+    } else {
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &DataLayerReturn::Norm)?
+    };
 
     if params_pca.clr {
         let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
         clr_rescale(
-            csc.data_2.as_mut().expect("norm layer requested"),
+            matrix.data_2.as_mut().expect("norm layer requested"),
             size_factor,
         );
     }
@@ -1278,8 +1433,13 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_data_prep = Instant::now();
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, clr_offsets)?;
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, clr_offsets)?;
+    let (col_means, col_stds): (Vec<f64>, Vec<f64>) = if matrix.cs_type.is_csr() {
+        sparse_csr_column_stats(&matrix, true, clr_offsets)?
+    } else {
+        let means = sparse_csc_column_means(&matrix, true, clr_offsets)?;
+        let stds = sparse_csc_column_stds(&matrix, &means, true, clr_offsets)?;
+        (means, stds)
+    };
 
     let end_data_prep = start_data_prep.elapsed();
 
@@ -1298,10 +1458,10 @@ fn sparse_pca<S: SingleCellReading>(
 
     let svd_res = match params_pca.svd_solver {
         PcaSolver::Covariance => {
-            sparse_covariance_svd::<f32, f64>(csc, no_pcs, true, centre, scale, clr_offsets)?
+            sparse_covariance_svd::<f32, f64>(matrix, no_pcs, true, centre, scale, clr_offsets)?
         }
         PcaSolver::Randomised => randomised_sparse_svd::<f32, f64>(
-            csc,
+            matrix,
             no_pcs,
             seed as u64,
             true,
@@ -1313,7 +1473,7 @@ fn sparse_pca<S: SingleCellReading>(
         )?,
         PcaSolver::Exact | PcaSolver::Auto => {
             let res = sparse_svd_lanczos::<f32, f32, f64>(
-                &csc,
+                &matrix,
                 no_pcs,
                 seed as u64,
                 true,
@@ -1328,6 +1488,15 @@ fn sparse_pca<S: SingleCellReading>(
             }
         }
     };
+    // every solver clamps to the rank, and Lanczos also drops zero Ritz values
+    if svd_res.s().len() < no_pcs {
+        return Err(ScErrors::PcaTooFewComponents {
+            requested: no_pcs,
+            found: svd_res.s().len(),
+            n_cells: cell_set.len(),
+            n_genes: gene_indices.len(),
+        });
+    }
     let scores_f64 = compute_pc_scores(&svd_res);
     let scores = Mat::<f32>::from_fn(cell_set.len(), no_pcs, |i, j| scores_f64[(i, j)] as f32);
     let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
@@ -1355,8 +1524,8 @@ fn sparse_pca<S: SingleCellReading>(
 
 /// Calculate the PCs for single cell data (sparse)
 ///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory.
+/// Centring and scaling follow `mean_center` and `normalise_variance` and are
+/// applied implicitly inside the solver, so the matrix is never densified.
 ///
 /// ### Params
 ///
@@ -1368,7 +1537,8 @@ fn sparse_pca<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -1402,8 +1572,8 @@ pub fn pca_on_sc_sparse<S: SingleCellReading>(
 
 /// Calculate the PCs for single cell data (sparse)
 ///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory.
+/// Centring and scaling follow `mean_center` and `normalise_variance` and are
+/// applied implicitly inside the solver, so the matrix is never densified.
 ///
 /// ### Params
 ///
@@ -1415,7 +1585,8 @@ pub fn pca_on_sc_sparse<S: SingleCellReading>(
 ///   [SingleCellPcaParams].
 /// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
 ///   transformation here.
-/// * `seed` - Seed for randomised SVD.
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -1570,4 +1741,146 @@ pub fn sparse_pca_accelerator_input<S: SingleCellReading>(
     }
 
     Ok((csc, col_means, col_stds))
+}
+
+///////////////////////
+// Store entry point //
+///////////////////////
+
+/// The per-cell CLR offsets from the cell-major store, if `clr` asks for them.
+///
+/// Every store entry point that may recompute a PCA with the `PFlogPF`
+/// transformation reads them here.
+///
+/// ### Params
+///
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The cells, 0-based, in output row order
+/// * `clr` - Whether the `PFlogPF` transformation was requested
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The offsets aligned to `cell_indices`, or `None` without `clr`.
+pub fn clr_offsets_on_store(
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    clr: bool,
+    verbose: usize,
+) -> Result<Option<Vec<f64>>, ScErrors> {
+    if !clr {
+        return Ok(None);
+    }
+    if parse_verbosity_level(verbose).normal_verbosity() {
+        println!("PFlogPF-transformation requested. Loading offsets from disk.")
+    }
+    let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+    Ok(Some(cell_reader.get_clr_offsets(cell_indices, None)?))
+}
+
+/// PCA over a cell and gene selection of an on-disk experiment.
+///
+/// Loads the CLR offsets from the cell-major store when `params_pca.clr` asks
+/// for the `PFlogPF` transformation, then runs [`pca_on_sc_sparse`] or the
+/// dense [`pca_on_sc`].
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file, read only for the
+///   CLR offsets
+/// * `cell_indices` - The cells, 0-based, in output row order
+/// * `gene_indices` - The genes, 0-based, in loading row order
+/// * `no_pcs` - Number of principal components
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `sparse` - Solve on the sparse matrix rather than the densified one
+/// * `seed` - Seed for the randomised SVD
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The [SingleCellPcaRes].
+///
+/// ### References
+///
+/// Booeshaghi, et al., bioRxiv, 2026 (`PFlogPF`)
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    sparse: bool,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaRes {
+    let offsets = clr_offsets_on_store(f_path_cell, cell_indices, params_pca.clr, verbose)?;
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let offsets = offsets.as_deref();
+    if sparse {
+        pca_on_sc_sparse(
+            &reader,
+            cell_indices,
+            gene_indices,
+            no_pcs,
+            params_pca,
+            offsets,
+            seed,
+            verbose,
+        )
+    } else {
+        let (scores, loadings, s, _) = pca_on_sc(
+            &reader,
+            cell_indices,
+            gene_indices,
+            no_pcs,
+            params_pca,
+            offsets,
+            seed,
+            false,
+            verbose,
+        )?;
+        Ok((scores, loadings, s))
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CSR statistics equal the CSC ones on the same matrix, with and
+    /// without CLR offsets, including an all-zero column.
+    #[test]
+    fn test_sparse_csr_column_stats_match_csc() {
+        let (n, m) = (37, 6);
+        let value = |i: usize, j: usize| -> f32 {
+            if j == 4 || (i * 7 + j * 3) % 5 < 2 {
+                0.0
+            } else {
+                ((i * 13 + j * 29) % 11) as f32 * 0.37
+            }
+        };
+        let csr =
+            CompressedSparseData2::<f32>::from_entry_fn(n, m, CompressedSparseFormat::Csr, value);
+        let csc =
+            CompressedSparseData2::<f32>::from_entry_fn(n, m, CompressedSparseFormat::Csc, value);
+        let offsets: Vec<f64> = (0..n).map(|i| 0.1 + (i % 4) as f64 * 0.05).collect();
+
+        for off in [None, Some(offsets.as_slice())] {
+            let (means, stds) = sparse_csr_column_stats(&csr, false, off).expect("csr stats");
+            let want_means = sparse_csc_column_means(&csc, false, off).expect("csc means");
+            let want_stds =
+                sparse_csc_column_stds(&csc, &want_means, false, off).expect("csc stds");
+            for j in 0..m {
+                assert!((means[j] - want_means[j]).abs() <= 1e-12 * want_means[j].abs().max(1.0));
+                assert!((stds[j] - want_stds[j]).abs() <= 1e-12 * want_stds[j].abs().max(1.0));
+            }
+        }
+    }
 }

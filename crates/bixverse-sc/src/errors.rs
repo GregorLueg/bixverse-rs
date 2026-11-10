@@ -125,6 +125,17 @@ pub enum ScErrors {
     #[error("Harmony: sigma length must match number of clusters")]
     HarmonySigmaLengthUnequalCluster,
 
+    /// A per-cluster or per-variable parameter has the wrong length
+    #[error("Harmony: {param} has length {got}, must be 1 or {expected}")]
+    HarmonyParamLength {
+        /// Parameter name
+        param: &'static str,
+        /// Length given
+        got: usize,
+        /// Length expected besides 1
+        expected: usize,
+    },
+
     // -- PCA --
     /// Error if user wants CLR-normalised PCA, but did not provide the offsets
     #[error(
@@ -141,6 +152,23 @@ pub enum ScErrors {
         len_offset: usize,
         /// Number of cells provided
         n_cells: usize,
+    },
+
+    /// The solver returned fewer components than requested, the data having
+    /// lower rank
+    #[error(
+        "PCA: requested {requested} components, but the data ({n_cells} cells x {n_genes} genes) \
+         only supports {found}. Lower no_pcs."
+    )]
+    PcaTooFewComponents {
+        /// Components requested
+        requested: usize,
+        /// Components the solver returned
+        found: usize,
+        /// Number of cells
+        n_cells: usize,
+        /// Number of genes
+        n_genes: usize,
     },
 
     // -- HVG --
@@ -279,6 +307,38 @@ pub enum ScErrors {
     DiffusionKernelNotFinite {
         /// Cells in the kNN graph
         n_cells: usize,
+    },
+
+    // -- Meta cell generation --
+    /// The cell mapping disagrees with the embedding or kNN graph it describes.
+    #[error(
+        "Meta cells: 'cells_to_keep' has {n_keep} entries but the embedding / kNN graph has {n_rows} rows."
+    )]
+    MetaCellMappingMismatch {
+        /// Entries in `cells_to_keep`
+        n_keep: usize,
+        /// Rows of the embedding or kNN graph
+        n_rows: usize,
+    },
+
+    /// None of the requested cells is part of the working set.
+    #[error("Meta cells: none of the requested 'cells_to_use' are part of 'cells_to_keep'.")]
+    MetaCellNoCellsToUse,
+
+    /// A supplied kNN graph does not cover the embedding row for row.
+    #[error("Meta cells: the kNN graph has {knn_rows} rows but the embedding has {embd_rows}.")]
+    MetaCellKnnEmbeddingMismatch {
+        /// Rows of the kNN graph
+        knn_rows: usize,
+        /// Rows of the embedding
+        embd_rows: usize,
+    },
+
+    /// An input a generator needs was not given.
+    #[error("Meta cells: {what}.")]
+    MetaCellMissingInput {
+        /// What is missing, as a sentence fragment
+        what: &'static str,
     },
 
     // -- MELD --
@@ -1157,6 +1217,27 @@ pub enum ScErrors {
         /// The underlying error, rendered
         reason: String,
     },
+
+    /// A fitted residual model is used on a different cell selection.
+    ///
+    /// The per-cell offsets and group labels are aligned to the fitted cells
+    /// by position, so any other selection, reordering included, would score
+    /// cells under another cell's parameters.
+    #[error(
+        "The residual model was fitted on {fitted} cell(s) that are not the {given} cell(s) given here. Refit after changing the cell selection."
+    )]
+    ResidualFitCellMismatch {
+        /// Cells the model was fitted on
+        fitted: usize,
+        /// Cells given now
+        given: usize,
+    },
+
+    /// Corrected counts were asked of an analytic Pearson fit.
+    #[error(
+        "Corrected counts need a scTransform fit; the analytic Pearson model has no corrected-count equivalent."
+    )]
+    ResidualCorrectedCountsNeedSct,
 
     /// The covariates supplied are not the ones the model was fitted with.
     ///

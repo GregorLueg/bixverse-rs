@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::prelude::*;
 use crate::sc_processing::knn::knn_distance_weights;
+use bixverse_core::core::math::stats::p_adjust_fdr;
 use bixverse_core::core::math::vector_helpers::rank_vector;
 
 ////////////
@@ -415,6 +416,119 @@ pub fn calc_autocorr_with_clusters(
     }
 
     (pathway_consistency, p_vals)
+}
+
+/// VISION scores of a set of signatures with their local autocorrelation
+#[derive(Clone, Debug)]
+pub struct VisionAutocorRes {
+    /// The scores, one row per cell, one value per signature
+    pub scores: Vec<Vec<f32>>,
+    /// Consistency (`1 - Geary's C`) per signature
+    pub auto_cor: Vec<f64>,
+    /// Empirical p-value per signature against the permuted signatures of
+    /// its cluster
+    pub p_val: Vec<f64>,
+    /// Benjamini-Hochberg adjusted `p_val`
+    pub fdr: Vec<f64>,
+}
+
+/// Score signatures and test their autocorrelation on a kNN graph
+///
+/// The driver behind VISION with autocorrelation: score the signatures and
+/// every permuted signature with the same scorer, then measure Geary's C of
+/// each over the kNN graph and rank it against the permuted signatures of
+/// its size and balance cluster. The scorer abstracts over where the counts
+/// come from (a store, in memory or streamed, or meta cells).
+///
+/// ### Params
+///
+/// * `score` - Scores a slice of signatures, returning one row per cell
+/// * `signatures` - The signatures to test
+/// * `random_by_cluster` - Permuted signatures, one vector per cluster
+/// * `cluster_membership` - 0-based cluster of each signature
+/// * `knn` - `(indices, distances)` over the scored cells, self excluded
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// The [VisionAutocorRes], or an error if a signature points at a cluster
+/// that does not exist or the scorer fails.
+///
+/// ### References
+///
+/// DeTomaso, et al., Nat. Commun., 2019
+pub fn vision_with_autocorrelation<F>(
+    score: F,
+    signatures: &[SignatureGenes],
+    random_by_cluster: &[Vec<SignatureGenes>],
+    cluster_membership: &[usize],
+    knn: (Vec<Vec<usize>>, Vec<Vec<f32>>),
+    verbose: usize,
+) -> Result<VisionAutocorRes, ScErrors>
+where
+    F: Fn(&[SignatureGenes]) -> Result<Vec<Vec<f32>>, ScErrors>,
+{
+    let verbosity = parse_verbosity_level(verbose);
+    if cluster_membership.len() != signatures.len() {
+        return Err(CoreErrors::InvalidArgument(format!(
+            "{} cluster memberships for {} signatures",
+            cluster_membership.len(),
+            signatures.len()
+        ))
+        .into());
+    }
+    if let Some(&c) = cluster_membership
+        .iter()
+        .find(|&&c| c >= random_by_cluster.len())
+    {
+        return Err(CoreErrors::SliceIndexOutOfBounds {
+            index: c,
+            len: random_by_cluster.len(),
+        }
+        .into());
+    }
+
+    if verbosity.normal_verbosity() {
+        println!("Calculating the VISION scores of the actual gene sets.");
+    }
+    let scores = score(signatures)?;
+
+    if verbosity.normal_verbosity() {
+        println!("Calculating the VISION scores of the permuted gene sets.");
+    }
+    let random_scores = random_by_cluster
+        .iter()
+        .enumerate()
+        .map(|(i, sigs)| {
+            let res = score(sigs);
+            if verbosity.normal_verbosity() {
+                println!(
+                    "Completed random signatures for cluster {} / {}",
+                    i + 1,
+                    random_by_cluster.len()
+                );
+            }
+            res
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let (indices, distances) = knn;
+    let (auto_cor, p_val) = calc_autocorr_with_clusters(
+        &scores,
+        &random_scores,
+        cluster_membership,
+        indices,
+        distances,
+        verbose,
+    );
+    let fdr = p_adjust_fdr(&p_val);
+
+    Ok(VisionAutocorRes {
+        scores,
+        auto_cor,
+        p_val,
+        fdr,
+    })
 }
 
 ///////////

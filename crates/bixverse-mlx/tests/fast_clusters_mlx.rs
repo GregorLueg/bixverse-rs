@@ -109,10 +109,12 @@ fn test_mlx_top_m_matches_cpu() {
         .unwrap();
     let cpu = top_m_cpu(data.as_ref(), centroids.as_ref(), 5, "euclidean");
     let mismatch = mlx
-        .chunks_exact(5)
-        .zip(cpu.chunks_exact(5))
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .zip(cpu.as_chunks::<5>().0)
         .filter(|(a, b)| {
-            let (mut a, mut b) = (a.to_vec(), b.to_vec());
+            let (mut a, mut b) = (**a, **b);
             a.sort_unstable();
             b.sort_unstable();
             a != b

@@ -1,109 +1,162 @@
 # bixverse
 
-Python bindings for [`bixverse-rs`](https://github.com/GregorLueg/bixverse-rs).
-The crate does the work: this is a thin layer that opens a bixverse binary
-sparse store and streams minibatches out of it fast enough to keep a GPU
-training loop fed.
+A single cell suite for Python, with the numerics in Rust
+([`bixverse-rs`](https://github.com/GregorLueg/bixverse-rs)).
 
-The first consumer is scVI, which ships in `bixverse.nn` (torch or MLX) and
-trains straight off the store, shuffled, without ever materialising the
-experiment in memory. Decoding never leaves Rust, and the GIL is released
-while it happens.
+It works on the store, not in memory, so it scales past what fits in RAM. On top
+sit a minibatch loader and a barebone scVI that train straight off that store,
+and a separate wheel with GPU twins of the expensive methods.
+
+Docs, API reference and 22 vignettes: <https://gregorlueg.github.io/bixverse-rs/>
 
 ## Install
 
 ```bash
-uv pip install bixverse            # numpy only
-uv pip install "bixverse[sparse]"  # adds scipy, for Batch.scipy_csr
-uv pip install "bixverse[torch]"   # scVI on torch
-uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
+uv pip install bixverse                         # the suite
+uv pip install "bixverse[embed,plots]"          # plus UMAP & co and matplotlib plots
+uv pip install "bixverse[gpu]"                  # plus the GPU twins
+uv pip install "bixverse[torch]"                # scVI on torch; also [mlx], [jax]
+uv pip install "bixverse[sparse]"               # scipy, for the scipy_csr exports
 ```
 
 ## Use
 
 ```python
-import bixverse as bv
+from pathlib import Path
 
-reader = bv.CellReader("counts.bin")
+import bixverse as bv
+import bixverse.embed
+
+sc = bv.io.load_mtx(
+    Path("experiments/pbmc3k"),
+    bv.io.get_cell_ranger_params(bv.io.download_pbmc3k()),
+)
+
+bv.pp.find_hvg(sc, hvg_no=2000)
+bv.pp.calculate_pca(sc, no_pcs=30)
+bv.graph.find_neighbours(sc)
+bv.graph.find_clusters(sc, res=1.0, name="leiden_clusters")
+bv.embed.umap(sc)
+
+bv.pl.embedding_plot(sc, "umap", "leiden_clusters", discrete=True)
+markers = bv.de.find_all_markers(sc, "leiden_clusters")
+
+bv.io.save(sc)
+sc = bv.io.load_existing("experiments/pbmc3k")
+```
+
+An experiment is a directory and `SingleCells` a handle on it. Counts sit in two
+compressed binary files, cell-major and gene-major, memory-mapped on read, so
+each method pulls what it needs from the right one. obs and var live in a DuckDB
+next to them and come back as polars frames. QC doesn't delete anything:
+`sc.set_cells_to_keep()` decides which cells every later step sees. Functions take
+the experiment first and write into it, and the cache tracks what has gone stale.
+
+Everything reports progress by default. `verbose` takes `0` (`False`) for silent,
+`1` (`True`) for progress and `2` for extra detail where the method has it.
+`logging.getLogger("bixverse").setLevel(logging.WARNING)` silences the Python log
+lines but not what Rust prints.
+
+## What's in it
+
+| Module | Contents |
+| --- | --- |
+| `bv.io` | h5ad, 10x h5, MTX and in-memory loaders, saving, h5ad and Cell Ranger writers, archives, example data |
+| `bv.qc` | gene set proportions, MAD outlier calls, fixed thresholds |
+| `bv.pp` | HVGs, PCA, Pearson residuals and scTransform, MAGIC |
+| `bv.graph` | kNN (the `ann-search-rs` indices), neighbour graphs, Leiden and Louvain, fast clustering |
+| `bv.embed` | UMAP, t-SNE, PHATE, densMAP, den-SNE, ForceAtlas2 (`embed` extra) |
+| `bv.integrate` | fastMNN, Harmony v1 and v2, Seurat CCA and RPCA, BBKNN, kBET and friends |
+| `bv.doublets` | Scrublet, boosted doublet detection, scDblFinder, empty droplets, CellSweep |
+| `bv.de` | markers, pseudobulk with edgeR QL, NEBULA, Milo, MELD |
+| `bv.annotate` | scType, Symphony reference mapping |
+| `bv.metacells` | SEACells, SuperCells, hdWGCNA-style and MetaCells2 meta cells |
+| `bv.traj`, `bv.trees` | Palantir, PAGA, gene trends; Bonsai cell trees |
+| `bv.pathways`, `bv.nmf` | module scores, AUCell, VISION, Hotspot, SCENIC, decoupler-style activities; consensus NMF |
+| `bv.mm` | ADT counts, DSB and CLR, WNN |
+| `bv.lr`, `bv.dialogue` | CellPhoneDB, NicheNet-style ligand-receptor; DIALOGUE |
+| `bv.pl` | matplotlib plots (`plots` extra) and the `extract_*` frames behind them |
+| `bv.pipeline` | chained steps with `>>`, per-group pipelines |
+| `bv.params` | every parameter set as a frozen dataclass |
+
+`SingleCellsSubset` handles sub-clustering, `MetaCells` and `SingleCellsMultiModal`
+go through the same functions.
+
+## GPU
+
+`bixverse-gpu` is its own wheel, on wgpu. Each module mirrors its CPU namesake,
+takes the same objects and writes the same cache slots (bar Harmony and
+fastMNN, which write `harmony_gpu` and `mnn_gpu`), so a pipeline swaps one
+import for the other:
+
+```python
+import bixverse_gpu as bvg
+
+bvg.pp.calculate_pca(sc, 30)
+bvg.graph.find_neighbours(sc)
+```
+
+`bvg.gpu_available()` probes for an adapter. Without one the twins raise
+`bixverse.BixverseError`.
+
+## Loader and scVI
+
+`CellLoader` streams shuffled minibatches off the cell-major store. A feeder thread
+decodes ahead of your training step with the GIL released, and nothing gets
+materialised in memory.
+
+```python
+reader = bv.CellReader(str(sc.cells_path))
 loader = bv.CellLoader(reader, batch_size=256, layer="norm", seed=42)
 
 for batch in loader:
     x = batch.scipy_csr()  # (256, n_genes) CSR
 ```
 
-Pass an index array to iterate a subset, which is how a train/validation split
-gets expressed:
+Pass an index array for a train / validation split and `genes=` to subset or
+reorder the columns. `cell_ids` on a batch joins per-cell covariates back on after
+the shuffle. Batches are sparse by default and you want that: a dense batch pays a
+zero-fill and a scatter over `batch_size * n_genes` floats, however few counts it
+holds. A few things to watch:
 
-```python
-import numpy as np
+- Cell-major stores only. A gene-major file raises on construction.
+- `Ctrl-C` can't interrupt a batch mid-decode, because the GIL is released while
+  the feeder works.
+- The reader hints random access: right for a shuffled loader, wrong for a
+  sequential full scan.
 
-rng = np.random.default_rng(0)
-perm = rng.permutation(reader.total_cells)
-train = bv.CellLoader(reader, perm[:180_000], batch_size=256)
-val = bv.CellLoader(reader, perm[180_000:], batch_size=256, shuffle=False)
-```
-
-Each pass over a loader reshuffles and spawns its own feeder thread, so two
-concurrent passes don't share state. The seed is mixed with the epoch counter:
-same seed means the same sequence of epochs, not the same epoch twice.
-
-## Batches
-
-A `Batch` is a `NamedTuple` of `(raw, norm, indices, indptr, shape, cell_ids)`.
-The layer you didn't ask for is `None`. `cell_ids` is the store index of each
-row, which is how per-cell covariates get joined back on after the shuffle.
-`CellLoader(genes=...)` restricts and reorders the columns.
-
-| Field | Sparse | Dense |
-| --- | --- | --- |
-| `raw` / `norm` | CSR-ordered `float32` | `(n_cells, n_genes)` `float32` |
-| `indices` / `indptr` | `uint32` CSR components | `None` |
-| `shape` | `(n_cells, n_genes)` | same |
-
-`batch.values()` returns the single requested layer, `batch.scipy_csr()`
-rebuilds a `scipy.sparse.csr_matrix` sharing the same buffers.
-
-## scVI
+`bixverse.nn` trains scVI off the same store on torch, MLX or JAX, with scvi-tools
+1.5.1's defaults, and a trained scvi-tools module loads into it and reproduces its
+loss.
 
 ```python
 import bixverse.nn as bvnn
 
-fit = bvnn.train_scvi("counts.bin", cells, hvg, batch, backend="torch")
-latent = bvnn.scvi_latent(fit, "counts.bin", cells, batch)
+fit = bvnn.train_scvi(reader, cells, hvg, batch, backend="torch")
+latent = bvnn.scvi_latent(fit, reader, cells, batch)
 ```
 
-scvi-tools 1.5.1's defaults, NB or ZINB, and a trained scvi-tools module loads
-into it and reproduces its loss. See the docs for the validation against
-scvi-tools.
+The docs have the [validation against scvi-tools](https://gregorlueg.github.io/bixverse-rs/scvi/).
 
-## Sparse by default
+## Vignettes
 
-`sparse=True` is the default and you want it. A dense batch pays a zero-fill
-and a scatter over `batch_size * n_genes` floats regardless of how few counts
-it actually holds. At droplet sparsity that's roughly twenty times the memory
-traffic for the same information, on the feeder thread, every batch. Build the
-dense tensor on the GPU instead if you need one.
+22 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
+`docs/vignettes/` with its executed `.ipynb` next to it, and the data sets download
+themselves on first use.
 
-## Layers
-
-`"raw"` gives the counts. `"norm"` gives `log1p(count / library_size *
-target_size)`, computed at write time and stored as `float16`, so expect
-agreement with a recomputation to about three decimal places rather than to
-machine precision. `"both"` returns the two together over one sparsity pattern.
-
-## Caveats
-
-- Cell-major stores only. A gene-major file raises on construction.
-- `Ctrl-C` can't interrupt a batch mid-decode: the GIL is released while the
-  feeder works, and Python signal handlers only run while it's held.
-- The store is memory-mapped and the reader hints random access, which is right
-  for a shuffled loader and wrong for a sequential full scan.
+```bash
+uv sync --group dev --group vignettes
+uv run python dev/vignettes.py execute                   # all of them
+uv run python dev/vignettes.py execute pbmc_single_cell  # or by name
+```
 
 ## Development
 
 ```bash
-uv venv
-uv pip install "maturin>=1.15,<2" numpy scipy pytest beartype
-maturin develop --release
-pytest tests -q
+uv sync --group dev
+uv run maturin develop --release
+uv run pytest tests -q
 ```
+
+The `tests/*_r.py` parity tests run `dev/sc_*_fixtures.R` and skip without Rscript
+and bixverse 0.9.0 or later. The GPU wheel builds from `gpu/`.

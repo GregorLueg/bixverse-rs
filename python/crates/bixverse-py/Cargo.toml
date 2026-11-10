@@ -1,0 +1,40 @@
+[package]
+name = "bixverse-py"
+description = "Python bindings for bixverse-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_bixverse"
+crate-type = ["cdylib"]
+
+[dependencies]
+py-common.workspace = true
+# The single cell crates, no extendr, so no libR on the link line. Python
+# extras cannot switch Rust features, so the wheel carries every sc feature.
+bixverse-sc = { workspace = true, features = ["multi-modal", "bonsai"] }
+# `hdf5-static` compiles the bundled HDF5 C library instead of linking a
+# system one, so the wheel loads without an HDF5 install. `parquet` hands the
+# h5ad / 10x obs and var to DuckDB.
+bixverse-sc-data = { workspace = true, features = ["hdf5-static", "parquet"] }
+# the neighbour graph and Leiden, and the edgeR chain behind pseudobulk and Milo
+bixverse-methods = { workspace = true, features = ["dge"] }
+# `mad_outlier` for the QC calls; the macOS table below adds Accelerate.
+bixverse-core.workspace = true
+crossbeam-channel.workspace = true
+edge-rs.workspace = true
+faer.workspace = true
+numpy.workspace = true
+pyo3.workspace = true
+pythonize.workspace = true
+rand.workspace = true
+scx-core.workspace = true
+serde_json.workspace = true
+sprs.workspace = true
+
+# Accelerate GEMM on macOS, as the R package builds it.
+[target.'cfg(target_os = "macos")'.dependencies]
+bixverse-core = { workspace = true, features = ["accelerate"] }

@@ -8,12 +8,14 @@ from typing import Any, Literal
 import numpy as np
 from beartype import beartype
 
+from bixverse._core.repr import compact_repr
+
 ###########
 # Globals #
 ###########
 
 Likelihood = Literal["nb", "zinb"]
-Backend = Literal["torch", "mlx"]
+Backend = Literal["torch", "mlx", "jax"]
 
 #: scvi-tools' epoch heuristic: the cap, and the cell count it starts decaying at.
 EPOCHS_CAP: int = 400
@@ -61,7 +63,7 @@ class ScviParams:
     max_epochs: int | None = None
 
 
-@dataclass
+@dataclass(repr=False)
 class ScviHistory:
     """Per-epoch training means, one entry per epoch.
 
@@ -77,29 +79,48 @@ class ScviHistory:
     kl: list[float] = field(default_factory=list)
     kl_weight: list[float] = field(default_factory=list)
 
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ScviHistory",
+            n_epochs=len(self.loss),
+            final_loss=round(self.loss[-1], 4) if self.loss else None,
+        )
 
-@dataclass
+
+@dataclass(repr=False)
 class ScviFit:
     """A trained scVI model plus what is needed to use it again.
 
     Attributes:
-        model: The backend module (`torch.nn.Module` or `mlx.nn.Module`).
+        model: The backend model (`torch.nn.Module`, `mlx.nn.Module` or the
+            JAX `Vae` record).
         backend: Which backend `model` belongs to.
         params: The hyperparameters it was trained with.
         genes: Store gene indices the model was trained on, in column order.
         batch_categories: Batch labels, in the order of the one-hot columns.
-        device: Torch device string, or `"gpu"` for MLX.
+        device: Torch device string, `"gpu"` for MLX, or the JAX platform.
         history: Per-epoch training means. Empty for a fit wrapped around
             weights trained elsewhere.
     """
 
-    model: Any  # torch.nn.Module or mlx.nn.Module; neither is importable here
+    model: Any  # torch, MLX or JAX model; none is importable here
     backend: Backend
     params: ScviParams
     genes: np.ndarray
     batch_categories: np.ndarray
     device: str
     history: ScviHistory = field(default_factory=ScviHistory)
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "ScviFit",
+            backend=self.backend,
+            device=self.device,
+            n_genes=len(self.genes),
+            n_batches=len(self.batch_categories),
+            n_latent=self.params.n_latent,
+            n_epochs=len(self.history.loss),
+        )
 
 
 @beartype

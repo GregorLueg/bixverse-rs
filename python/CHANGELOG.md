@@ -3,6 +3,61 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.3.0
+
+Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,
+`bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`, plus `bixverse-gpu` and
+`bixverse-sc-gpu` for the GPU wheel. R parity is tested against bixverse 0.9.0.
+
+**Features**
+
+- The single cell suite of the bixverse R package, ported, from loading and QC
+  through integration, DE, meta cells, trajectories and pathways. `SingleCells`
+  opens the same experiment directories as R, and parity is tested function by
+  function. The README lists what each module holds.
+- `bixverse-gpu`, a separate wheel (`gpu` extra) with GPU twins under the same
+  module names.
+- `bixverse.nn` on JAX (`bixverse[jax]`, `backend="jax"`): the same scVI as the
+  torch and MLX backends. On 5963 PBMC cells x 2000 HVGs, 400 epochs on an M1
+  Max: JAX on CPU 106 s against 202 s for torch on CPU, with the same held-out
+  ELBO.
+- `train_scvi` takes `verbose`: a tqdm bar over the epochs with the current loss,
+  and at `2` one logged line per epoch.
+- Log messages show without any logging setup, unless the root logger has
+  handlers. `logging.getLogger("bixverse").setLevel(logging.WARNING)` silences
+  them.
+- 22 vignettes as executed notebooks, API reference pages and a rewritten README.
+
+**Notes**
+
+- `duckdb`, `polars` and `tqdm` are now required dependencies.
+- The 2D embeddings need `manifolds-rs` 0.6.0. UMAP and densMAP take its
+  `optimiser="sgd_parallel"` (lock-free SGD, not reproducible run to run), and
+  `n_epochs` defaults to `None`: 500, or 200 for the SGD optimisers above
+  10,000 cells. A cached kNN wider than `n_neighbors` is cut to it. PHATE runs
+  its own `6k + 5` wide search by default (`use_knn=False`), so it no longer
+  matches R's PHATE, which reuses the cached kNN.
+- `bixverse_gpu.embed` has `umap`, `densmap`, `tsne` and `phate`.
+- Harmony v2 is the default: `bv.integrate.harmony`, `step_harmony` and
+  `build_symphony_ref` without `harmony_params` run it, and it lands under
+  `"harmony"`. The original is `harmony_v1` (`step_harmony_v1`, under
+  `"harmony_v1"`). The GPU twin is `bixverse_gpu.integrate.harmony`. In
+  bixverse 0.9.0 `harmony_sc` is still v1, so R's `"harmony"` is Python's
+  `"harmony_v1"`. Both v2s estimate lambda per cluster by default
+  (`use_dynamic_lambda=True`); bixverse.gpu's R spec still says `FALSE`.
+- Every binding takes NumPy input in C order only and raises `ValueError` on a
+  Fortran-ordered array, which was read silently transposed. `KnnGraph` copies
+  its arrays to C order, so a hand-built graph needs no care.
+- `save_h5ad` writes `varm/PCs` on the genes the PCA ran on (the cache keeps
+  them as `pca_genes`), and only with a fresh `X_pca`; it used to place the
+  loadings on the current HVGs.
+- `add_obs` / `add_var` warn when replacing a column would set values of rows
+  the new frame does not cover to NULL, e.g. writing QC metrics of the kept
+  cells back over a column every cell had.
+- `io.save` drops the residual model (it is not persisted yet) but keeps what
+  was built from it valid on load: a residual PCA and its kNN no longer come
+  back stale.
+
 ## 0.2.1
 
 Requires `bixverse-sc-data` 0.9.1.

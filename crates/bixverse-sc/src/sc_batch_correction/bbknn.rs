@@ -8,6 +8,7 @@ use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use ann_search_rs::*;
 use faer::MatRef;
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use crate::sc_batch_correction::batch_utils::process_batch_labels;
@@ -23,8 +24,16 @@ use bixverse_core::core::math::sparse::*;
 const SMOOTH_K_TOLERANCE: f32 = 1e-5;
 const MIN_K_DIST_SCALE: f32 = 1e-3;
 
+/// Default trim as a multiple of `neighbours_within_batch`, the BBKNN
+/// reference's `trim = 10 * neighbors_within_batch`.
+const BBKNN_TRIM_FACTOR: usize = 10;
+
 /// Structure to store the BBKNN pamareters
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_bbknn()` list, see
+/// [`BbknnParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "BbknnParamsSpec")]
 pub struct BbknnParams {
     /// How many neighbours per batch to identify
     pub neighbours_within_batch: usize,
@@ -39,6 +48,62 @@ pub struct BbknnParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+}
+
+/// The keys a [`BbknnParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take its fallbacks.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct BbknnParamsSpec {
+    /// How many neighbours per batch to identify
+    pub neighbours_within_batch: usize,
+    /// Mixing ratio between union (1.0) and intersection (0.0)
+    pub set_op_mix_ratio: f32,
+    /// How many nearest neighbours of each cell are assumed to be fully
+    /// connected
+    pub local_connectivity: f32,
+    /// Trim to these many top connectivities; `None` is
+    /// `10 * neighbours_within_batch`
+    pub trim: Option<usize>,
+    /// The kNN keys
+    #[serde(flatten)]
+    pub knn_params: KnnParams,
+}
+
+impl Default for BbknnParamsSpec {
+    fn default() -> Self {
+        Self {
+            neighbours_within_batch: 3,
+            set_op_mix_ratio: 1.0,
+            local_connectivity: 1.0,
+            trim: None,
+            knn_params: KnnParams::default(),
+        }
+    }
+}
+
+impl From<BbknnParamsSpec> for BbknnParams {
+    /// Resolve the trim default.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`BbknnParams`], always with a trim.
+    fn from(s: BbknnParamsSpec) -> Self {
+        Self {
+            neighbours_within_batch: s.neighbours_within_batch,
+            set_op_mix_ratio: s.set_op_mix_ratio,
+            local_connectivity: s.local_connectivity,
+            trim: Some(
+                s.trim
+                    .unwrap_or(BBKNN_TRIM_FACTOR * s.neighbours_within_batch),
+            ),
+            knn_params: s.knn_params,
+        }
+    }
 }
 
 ///////////////////
@@ -107,6 +172,8 @@ fn get_batch_balanced_knn(
     verbose: usize,
 ) -> ScKnnResults {
     let verbosity = parse_verbosity_level(verbose);
+    // The index builds and queries only print at detailed verbosity here.
+    let ann_verbosity = verbosity_from_flag(verbosity.detailed_verbosity());
 
     let n_cells = mat.nrows();
 
@@ -171,6 +238,7 @@ fn get_batch_balanced_knn(
                     &bbknn_params.knn_params.ann_dist,
                     bbknn_params.knn_params.n_tree,
                     seed,
+                    ann_verbosity,
                 )?;
                 query_annoy_index(
                     mat,
@@ -178,7 +246,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.search_budget,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             KnnSearch::Hnsw => {
@@ -189,17 +257,19 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_construction,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbosity.detailed_verbosity(),
-                );
+                    ann_verbosity,
+                )?;
                 query_hnsw_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_search,
                     true,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
+            // A graph-only build cannot answer a cross-query, so NNDescent
+            // builds and searches the index here.
             KnnSearch::NNDescent => {
                 let index = build_nndescent_index(
                     sub_matrix.as_ref(),
@@ -211,7 +281,7 @@ fn get_batch_balanced_knn(
                     None,
                     None,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_nndescent_index(
@@ -220,19 +290,22 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_budget,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::Exhaustive => {
-                let index =
-                    build_exhaustive_index(sub_matrix.as_ref(), &bbknn_params.knn_params.ann_dist);
+                let index = build_exhaustive_index(
+                    sub_matrix.as_ref(),
+                    &bbknn_params.knn_params.ann_dist,
+                    ann_verbosity,
+                );
 
                 query_exhaustive_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::Ivf => {
@@ -242,7 +315,7 @@ fn get_batch_balanced_knn(
                     None,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_ivf_index(
@@ -251,7 +324,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.n_probe,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
             &KnnSearch::KmKnn => {
@@ -261,7 +334,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.n_list,
                     None,
                     seed,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?;
 
                 query_kmknn_index(
@@ -269,7 +342,7 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbosity.detailed_verbosity(),
+                    ann_verbosity,
                 )?
             }
         };
@@ -752,4 +825,65 @@ pub fn bbknn(
         bbknn_params.trim,
         verbose,
     )
+}
+
+/// The `k` nearest neighbours of each cell in the distance CSR from [`bbknn`].
+///
+/// The CSR rows are sorted by column index, so each row is reordered by
+/// distance (ties by index) before the first `k` are taken. Zero distances are
+/// not stored in the CSR, so a cell with duplicates can come back with a
+/// shorter row.
+///
+/// ### Params
+///
+/// * `distances` - The distance CSR from [`bbknn`]
+/// * `k` - Neighbours to keep per row
+///
+/// ### Returns
+///
+/// `(indices, distances)` per cell, nearest first, each row at most `k` long.
+pub fn bbknn_nearest_neighbours(
+    distances: &CompressedSparseData2<f32>,
+    k: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    (0..distances.shape.0)
+        .into_par_iter()
+        .map(|i| {
+            let start = distances.indptr[i] as usize;
+            let end = distances.indptr[i + 1] as usize;
+            let mut row: Vec<(usize, f32)> = distances.indices[start..end]
+                .iter()
+                .zip(&distances.data[start..end])
+                .map(|(&j, &d)| (j as usize, d))
+                .collect();
+            row.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            row.truncate(k);
+            row.into_iter().unzip()
+        })
+        .unzip()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bbknn_nearest_neighbours_sorts_by_distance() {
+        // Row 0 stores its neighbours by column index with descending
+        // distances; row 1 has a tie broken by index.
+        let csr: CompressedSparseData2<f32> = CompressedSparseData2::new_csr(
+            &[3.0, 2.0, 1.0, 0.5, 0.5],
+            &[1, 2, 3, 2, 0],
+            &[0, 3, 5],
+            None,
+            (2, 4),
+        );
+        let (idx, dist) = bbknn_nearest_neighbours(&csr, 2);
+        assert_eq!(idx, vec![vec![3, 2], vec![0, 2]]);
+        assert_eq!(dist, vec![vec![1.0, 2.0], vec![0.5, 0.5]]);
+    }
 }

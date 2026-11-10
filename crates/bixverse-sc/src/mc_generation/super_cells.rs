@@ -5,6 +5,7 @@
 
 use ann_search_rs::utils::dist::SimdDistance;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::coo_to_csr;
@@ -34,7 +35,11 @@ use bixverse_methods::graph::knn_graph::*;
 /// **General kNN params**
 ///
 /// * `knn_params` - All of the kNN parameters
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_supercell()` list, the kNN keys
+/// included; missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SuperCellParams {
     /// Walk length for the Walktrap algorithm
     pub walk_length: usize,
@@ -52,7 +57,22 @@ pub struct SuperCellParams {
     pub max_support: Option<usize>,
     /// [`crate::prelude::KnnParams`] for the various approximate nearest
     /// neighbour searches in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
+}
+
+impl Default for SuperCellParams {
+    /// The fallbacks of the R list conversion.
+    fn default() -> Self {
+        Self {
+            walk_length: 3,
+            graining_factor: 50.0,
+            use_kernel: true,
+            k_ith: None,
+            max_support: None,
+            knn_params: KnnParams::default(),
+        }
+    }
 }
 
 /////////////

@@ -9,6 +9,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use bixverse_core::core::math::pca_svd::SvdResults;
@@ -262,6 +263,69 @@ where
             check_every: 10,
             init: NmfInit::Nndsvd,
         }
+    }
+}
+
+/// The keys of the R `params_nmf_hals()` list a [HalsOpts] is built from.
+///
+/// The random initialisation needs the run seed, which arrives separately, so
+/// this deserialises first and [HalsOptsSpec::into_opts] finishes the job.
+/// Missing keys take the [HalsOpts] defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HalsOptsSpec {
+    /// Maximum number of outer iterations
+    pub max_iter: usize,
+    /// Relative objective decrease below which the solver stops
+    pub tol: f64,
+    /// Floor applied to W and H entries on every sweep
+    pub eps: f64,
+    /// Cadence (in iterations) for evaluating the objective
+    pub check_every: usize,
+    /// `"nndsvd"`, `"svd"` or `"random"`, see [parse_nmf_init]
+    pub nmf_init: String,
+}
+
+impl Default for HalsOptsSpec {
+    fn default() -> Self {
+        let d = HalsOpts::<f64>::default();
+        Self {
+            max_iter: d.max_iter,
+            tol: d.tol,
+            eps: d.eps,
+            check_every: d.check_every,
+            nmf_init: "nndsvd".to_string(),
+        }
+    }
+}
+
+impl HalsOptsSpec {
+    /// Resolve the keys into solver options.
+    ///
+    /// Unlike the R binding, an unrecognised `nmf_init` is an error rather
+    /// than a silent fall back to NNDSVD.
+    ///
+    /// ### Params
+    ///
+    /// * `seed` - Seed for the random initialisation
+    ///
+    /// ### Returns
+    ///
+    /// The [HalsOpts], or an error naming an unrecognised `nmf_init`.
+    pub fn into_opts<F: BixverseFloat>(self, seed: usize) -> Result<HalsOpts<F>, MethodsErrors> {
+        let init = parse_nmf_init(&self.nmf_init, seed).ok_or_else(|| {
+            CoreErrors::InvalidArgument(format!(
+                "nmf_init must be 'nndsvd', 'svd' or 'random', got '{}'",
+                self.nmf_init
+            ))
+        })?;
+        Ok(HalsOpts::new(
+            self.max_iter,
+            F::from_f64(self.tol).unwrap(),
+            F::from_f64(self.eps).unwrap(),
+            self.check_every,
+            init,
+        ))
     }
 }
 

@@ -1,99 +1,193 @@
 # News
 
+## 0.10.0
+
+### Breaking
+
+- `ann-search-rs` 0.12. Its `Verbosity` is now the one verbosity enum: the
+  preludes re-export `ann_search_rs::Verbosity` and `parse_verbosity_level`
+  maps to `parse_annsearch_verbosity`. `bixverse_sparse::verbosity` is gone.
+  `verbosity_from_flag()` maps a `verbose: bool` onto it.
+- `extract_knn` is gone from `KnnParams` and `KnnParamsGpu`, and
+  `generate_knn_nndescent()` lost the argument. `knn_method = "nndescent"` is
+  graph-only on every backend now (see Features), and the beam search on the GPU
+  and MLX is opt-in through `"cagra"`. `warn_unsupported_extract()` is gone with it.
+- `bbknn_first_neighbours()` is now `bbknn_nearest_neighbours()`: each
+  batch-balanced row is sorted by distance (ties by index) before taking k, so
+  the stored kNN holds the k nearest rather than the k lowest-index entries. The
+  connectivity graph is unchanged; kBET and LISI computed after BBKNN change.
+- Every single cell PCA solver on the counts now fixes its signs with `flip_signs`
+  (largest-magnitude loading positive): Lanczos, randomised and covariance on the CPU,
+  sparse and dense, exact on the CPU, and Lanczos and randomised in `bixverse-gpu` and
+  `bixverse-mlx`. Stored PCA factors can change sign against 0.9.4. The rule is the same
+  everywhere, but an approximate solver can still pick the other sign from an exact one
+  where a component is weakly resolved, because its largest entry differs.
+  `randomised_svd()` itself is unchanged for its other callers (ICA, NMF, rPCA).
+- Symphony: `knn_majority_vote()` gives ties to the lowest label, as documented
+  (was the highest). `build_symphony_reference()`, `symphony_map_query()` and
+  `symphony_map_query_parts()` return errors on mismatched batch or gene map
+  lengths instead of panicking.
+- Plot extractors z-score by the sample SD on the store path too
+  (`extract_norm_counts()`, `extract_norm_counts_multi()`), as the in-memory paths
+  do. Scaled values shift by `sqrt(n/(n-1)) - 1`. Fewer than two values stay
+  unscaled.
+- `bixverse-r`: scDblFinder reads `gbm_n_trees` for the GBM rounds, not the Annoy
+  `n_trees`, so the effective default goes from 50 rounds to the spec's 200.
+  `parse_sigma_method()` accepts `snn_farthest` / `sigma_idx` and an unknown value
+  errors; `sigma_idx` used to fall back silently to the SNN bandwidth, so WNN
+  weights change for anyone who set it. DIALOGUE reads an integer `seed`; every run
+  used 1234 before, so any non-default seed changes results.
+- `parse_leiden_iterations()`, `parse_community_algorithm()`, `parse_magic_layer()`,
+  the Bonsai parsers and the MetaCells2 similarity parsers moved out of `bixverse-r`
+  into the crates that own the params.
+
+### Features
+
+- `"nndescent"` on the CPU, the GPU and MLX is the NN-Descent kNN graph built
+  graph-only through `build_knn_graph_nndescent()` /
+  `build_knn_graph_nndescent_gpu()`, with no index kept and no search run.
+  The GPU one goes through the clustered build, so datasets past the
+  per-binding limit work. Self-kNN only; the cross-queries (BBKNN, Symphony,
+  fastMNN, `batch_knn_search()`) run it as NN-Descent / CAGRA.
+  `generate_knn_nndescent_graph()` and `knn_graph_to_rows()` are the CPU
+  entry points.
+- `"cagra"` kNN method on the GPU and MLX, the graph with a beam search over it.
+- MLX kNN dispatch: `dispatch_knn_mlx()`, `knn_with_dist_mlx()`, `knn_query_mlx()`.
+- `SingleCellReading::read_genes_sparse_csr()`: genes from a gene-major store
+  straight into CSR, without holding the CSC next to its transpose. Default
+  method, so every reader has it.
+- Logic lifted out of the R shell so every front end calls the same function:
+  `hvg_on_store()`, `pca_on_store()`, `fit_residuals_on_store()` and the residual
+  twins, the meta cell generators, `build_symphony_reference_on_store()`,
+  `make_milor_nhoods()`, `fast_mnn_on_store()`, `seurat_cca_on_store()`,
+  `seurat_rpca_on_store()`, `compare_knn()`, `pad_knn_rows()`, `run_wnn()`,
+  `adt_clr()`, `cellphonedb_run()`, `vision_with_autocorrelation()`,
+  `max_symmetrise_to_sparse_graph()`, `seacells_on_store_with()`,
+  `knn_with_dist_gpu()`. `bixverse_sc_data::h5_scan` reads h5ad dimensions and
+  detects the raw count slot, `h5_10x_io::write_tenx_h5()` writes 10x h5.
+- serde `Deserialize` on the single cell params structs, with renames matching the
+  R keys, so a front end needs one key map. This is what the Python wheels use.
+
+### Fixes
+
+- `meld` checked labels with `l > n_groups`, so a label equal to `n_groups`
+  panicked. Now `>=`.
+- `extract_grouped_gene_stats()` returns `InvalidArgument` on a length mismatch or
+  an out-of-range group id instead of panicking.
+- CPU Scrublet returns `InvalidArgument` when `no_pcs` is 0 or exceeds
+  `min(genes, cells)` instead of a faer assertion.
+- Hotspot's `Default` model is `"danb"`, matching the R spec.
+- Single cell PCA asked for more components than the data's rank (e.g. 30 PCs
+  on 25 cells, or as many PCs as cells under Lanczos) panicked on the output
+  slice. It returns `ScErrors::PcaTooFewComponents` now, on every solver,
+  sparse and dense.
+- SuperCells on a disconnected kNN graph panicked when walktrap ended with more
+  communities than `ceil(n / graining_factor)`. It returns one meta cell per
+  community now, so possibly more than requested.
+- Harmony v1, v2 and the GPU v2 asserted on a `theta` or `sigma` of the wrong
+  length. They return `ScErrors::HarmonyParamLength` now
+  (`broadcast_param()`).
+- The h5ad and 10x h5 quality passes counted a chunk whose HDF5 read failed as
+  empty, so its cells could silently fail the library size and gene filters.
+  The read error propagates now.
+- Verbose loaders printed the library size range cut to one character; the
+  in-memory CSR loader no longer says "R sparse matrix".
+
+- IVF in `dispatch_knn()` and `batch_knn_search()` passed `n_list` as
+  `n_probe`, so it probed every list. It uses `n_probe` now.
+- `CompressedSparseData2::transform()` panicked on a matrix without its first
+  layer, i.e. anything read with `DataLayerReturn::Norm`. The empty layer now
+  stays empty.
+
+### Dependencies
+
+- `ann-search-rs` 0.12, `bonsai-rs` 0.3.1, `edge-rs` 0.3.2.
+
+### Performance
+
+- `sparse_svd_lanczos()` holds one f32 copy of the matrix instead of a CSR, a
+  CSC and two f64 casts: lower peak memory. Results differ from 0.9.4 at
+  round-off.
+- `compute_largest_eigenpairs_lanczos()` no longer clones its input or holds an
+  f64 copy: lower peak memory.
+- `sparse_covariance_svd()` builds one shared `m x m` accumulator instead of
+  one per thread, drops the input CSC after the transpose and writes U
+  directly: lower peak memory and faster. Results differ from 0.9.4 at
+  round-off.
+- The sparse PCA (`pca_on_sc_sparse()` and the `_stats` twin) reads the HVGs
+  straight into CSR through `read_genes_sparse_csr()` when there are at least
+  as many cells as genes, so none of its solvers transposes any more. Lower
+  peak memory on large data, on macOS and Linux. Column statistics may differ
+  from 0.9.4 at round-off.
+- `read_genes_sparse()` and `read_cells_sparse()` free each per-thread
+  fragment as it is copied into the output instead of holding them all to the
+  end: lower peak memory on every sparse read, including the input of the
+  GPU and MLX sparse PCA.
+- The MLX sparse SVDs (`sparse_svd_lanczos_mlx()`,
+  `randomised_sparse_svd_mlx()`) consume the value layer instead of copying
+  it: lower peak memory.
+
 ## 0.9.4
 
 ### Breaking
 
-- `GENE_FILE_BYTES_PER_NNZ` drops from 10 to 8: the CSR to CSC conversion no
-  longer carries the norm layer. A phase budget derived from it (the R side's
-  `csc_mem_gb`) now holds 25% more non-zeros per phase.
-- `MtxReader::parse_mtx_quality()` returns `Result<_, ScDataErrors>`.
-  `process_mtx_and_write_bin()` runs the streaming write, which now rejects a
-  `cells_to_keep` that is not ascending. Bucket files default to the system
-  temp directory; `MtxReader::with_temp_dir()` puts them elsewhere.
-- MTX values that are not non-negative integral counts error with
-  `MtxNotACount`, and `complex`, `array` or non-`general` files with
-  `MtxUnsupported`. Both used to load silently wrong.
-- The parallel h5ad and 10x quality passes error when a dataset fails to open,
-  instead of counting zeros for that chunk.
+- `GENE_FILE_BYTES_PER_NNZ` is 8 (was 10); budgets derived from it hold 25%
+  more non-zeros per phase.
+- `MtxReader::parse_mtx_quality()` returns `Result`; the streaming write
+  rejects a non-ascending `cells_to_keep`; bucket files go to the system temp
+  directory (`MtxReader::with_temp_dir()` to change it).
+- Non-count MTX values error with `MtxNotACount`, `complex`, `array` and
+  non-`general` files with `MtxUnsupported`.
+- The h5ad and 10x quality passes error when a dataset fails to open.
 
 ### Feature
 
-- New `parquet` feature on `bixverse-sc-data` (forwarded by the facade and
-  `bixverse-r`): `h5ad_frame_to_parquet()` and `tenx_frame_to_parquet()` write
-  the h5ad obs / var frames and the 10x barcodes and features to Parquet for
-  DuckDB's `read_parquet`. Handles `_index`, categoricals (old and new style),
-  nullable columns, numerics, booleans and strings, with the kept-row filter
-  applied. No arrow.
-- `CompressedSparseData2` and `SparseGraph` get `to_bytes()` / `from_bytes()`
-  (bincode behind a magic and a format version); `SparseGraph` gains
-  `to_edge_pairs()` and `get_edge_number()`. Lets a caller hold the sNN graph
-  in Rust and persist it without going through an edge list.
-- MTX input can be gzipped (detected by magic bytes, multi-member included),
-  inflated in Rust with `flate2` on `zlib-rs`. `real` and `pattern` fields are
-  supported.
-- `SingleCellReading::read_gene_parallel_raw()` decodes raw counts and indices
-  only; it falls back to `read_gene_parallel()` for readers without a cheaper
-  path.
+- `parquet` feature: h5ad obs / var and 10x barcodes / features to Parquet
+  (`h5ad_frame_to_parquet()`, `tenx_frame_to_parquet()`), no arrow.
+- `to_bytes()` / `from_bytes()` on `CompressedSparseData2` and `SparseGraph`;
+  `SparseGraph::to_edge_pairs()` and `get_edge_number()`.
+- Gzipped MTX input; `real` and `pattern` fields.
+- `SingleCellReading::read_gene_parallel_raw()` for raw counts only.
 
 ### Performance
 
-Against 0.9.3 on a 4.7M cell Tahoe plate (MTX: Parse PBMC 1M):
-
-- h5ad and 10x h5 count reads: 5x.
-- CSR to CSC conversion: 2x.
-- HVG (VST): 2x.
-- MTX loading: 2x.
+- h5ad and 10x h5 reads 5x faster; CSR to CSC, HVG and MTX loading 2x.
 
 ### Fix
 
-- `real` MTX values were truncated to their integer part and `pattern` files
-  loaded as an empty matrix.
-- Fixed-length HDF5 strings longer than 63 bytes were truncated or failed.
-- The multi-MTX scans allocated a cell-sized vector per 64 MB chunk; library
-  sizes now accumulate as `u64`.
+- `real` MTX values were truncated and `pattern` files loaded empty.
+- Fixed-length HDF5 strings over 63 bytes were truncated or failed.
+- Multi-MTX scans allocated a cell-sized vector per chunk.
 
 ## 0.9.3
 
 ### Breaking
 
-- `mad_outlier()` takes an `r_standard` flag. With `true` the MAD is scaled by
-  `MAD_SCALE` like R's `mad()`, so `threshold` counts standard deviations
-  under normality and the margins are 1.48x wider than before. `false` keeps
-  the old raw MAD.
+- `mad_outlier()` takes an `r_standard` flag; `true` scales the MAD like R's
+  `mad()`, `false` keeps the raw MAD.
 
 ## 0.9.2
 
 ### Breaking
 
-- MetaCells2 parameters follow upstream metacells 0.9.5: `SimilarityMethod` is
-  `AbsPearson` (default) | `Pearson` plus a `log_data` flag, the kNN factors
-  are `f64`, `DeviantsParams` drops `max_gene_fraction` and gains the noisy-gene
-  fields, and `MetacellsParams::random_seed` is gone (the seed is an argument).
+- MetaCells2 parameters follow metacells 0.9.5 (`SimilarityMethod`,
+  `DeviantsParams`, no `MetacellsParams::random_seed`).
 - `select_features()`, `choose_seeds()`, `compute_candidate_metacells()` and
   `find_deviant_cells()` return `Result`; `dissolve_metacells()` takes a mass
-  vector; `Pile` gains `mass_per_cell` and `Pile::from_raw()`.
+  vector.
 
 ### Feature
 
-- MetaCells2 divide and conquer (`compute_dac_metacells()`, `DacParams`),
-  including rare gene modules (`RareParams`, on by default), streaming piles
-  from the cell store.
-- Hierarchical clustering matching SciPy's `linkage` (ward, complete, average,
-  weighted) in `ml::clustering::hierarchical`.
-- decoupler ULM and MLM activity scores in `enrichment::lm_activity`, dense,
-  on the cell store (`calculate_lm_activity()`) and on metacells
-  (`calculate_lm_activity_metacells()`). Matches decoupler 2.2.1.
-- `bixverse-r`: `FromRList` for the MetaCells2, divide-and-conquer, rare-module
-  and `LmActivityParams` params, and `r_list_to_feature_set_weights()`.
+- MetaCells2 divide and conquer with rare gene modules
+  (`compute_dac_metacells()`).
+- Hierarchical clustering matching SciPy's `linkage`.
+- decoupler ULM and MLM activity scores, matching decoupler 2.2.1.
+- `bixverse-r`: `FromRList` for the new params.
 
 ### Fix
 
-- The direct MetaCells2 pipeline now matches metacells 0.9.5 (parity tests on
-  every deterministic stage). Among others: min-cut strength, similarity
-  transform, kNN ranks and degree retry, deviant gap skip, top-3 statistic,
-  relative-variance window and the candidates loop. Deviants no longer build
-  dense cells x genes matrices.
+- The MetaCells2 pipeline matches metacells 0.9.5 stage by stage; deviants no
+  longer build dense matrices.
 
 ## 0.9.1
 

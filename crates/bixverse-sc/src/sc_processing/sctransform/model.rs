@@ -20,10 +20,11 @@
 //! Biology, 2022
 
 use crate::errors::ScErrors;
-use crate::sc_processing::residuals::validate_residual_row_inputs;
+use crate::sc_processing::residuals::{validate_clip_range, validate_residual_row_inputs};
 use bixverse_core::core::base::kernel_smooth::{bw_sj, ksmooth_normal};
 use bixverse_core::core::math::stats::is_outlier;
 use bixverse_core::core::math::vector_helpers::median;
+use serde::Deserialize;
 
 use super::nb_fit::{LOG_UMI_COEF, NbOffsetFit};
 use bixverse_core::errors::CoreErrors;
@@ -55,7 +56,11 @@ const UMI_MEDIAN_DIVISOR: f64 = 5.0;
 /// The defaults are sctransform's own with `vst.flavor = "v2"` applied, which
 /// fixes `n_cells` at 2000 and turns on Poisson exclusion and the UMI-median
 /// variance floor.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_sctransform()` list through
+/// [`SctParamsSpec`].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "SctParamsSpec")]
 pub struct SctParams {
     /// Genes sampled for the step-1 fit, by inverse density over
     /// `log10(geometric mean)`.
@@ -109,6 +114,84 @@ impl SctParams {
         self.clip_range.unwrap_or_else(|| {
             let c = (n_cells as f64).sqrt();
             (-c, c)
+        })
+    }
+}
+
+/// [`SctParams`] as the R `params_sc_sctransform()` list spells it, with the
+/// clipping range as two optional bounds. Missing keys take the defaults.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct SctParamsSpec {
+    /// See [`SctParams::n_genes`].
+    pub n_genes: usize,
+    /// See [`SctParams::n_cells`].
+    pub n_cells: usize,
+    /// See [`SctParams::min_cells`].
+    pub min_cells: usize,
+    /// See [`SctParams::bw_adjust`].
+    pub bw_adjust: f64,
+    /// See [`SctParams::gmean_eps`].
+    pub gmean_eps: f64,
+    /// See [`SctParams::outlier_th`].
+    pub outlier_th: f64,
+    /// See [`SctParams::poisson_diff_theta`].
+    pub poisson_diff_theta: f64,
+    /// Lower clipping bound.
+    pub clip_min: Option<f64>,
+    /// Upper clipping bound.
+    pub clip_max: Option<f64>,
+}
+
+impl Default for SctParamsSpec {
+    fn default() -> Self {
+        let d = SctParams::default();
+        Self {
+            n_genes: d.n_genes,
+            n_cells: d.n_cells,
+            min_cells: d.min_cells,
+            bw_adjust: d.bw_adjust,
+            gmean_eps: d.gmean_eps,
+            outlier_th: d.outlier_th,
+            poisson_diff_theta: d.poisson_diff_theta,
+            clip_min: None,
+            clip_max: None,
+        }
+    }
+}
+
+impl TryFrom<SctParamsSpec> for SctParams {
+    type Error = ScErrors;
+
+    /// Resolve the clipping bounds into a range.
+    ///
+    /// Both ends or neither: half a clipping range is meaningless, so a spec
+    /// carrying only one is treated as carrying none, as on the R side.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The deserialised spec
+    ///
+    /// ### Returns
+    ///
+    /// The parameters, or [`ScErrors::ResidualInvalidClipRange`].
+    fn try_from(spec: SctParamsSpec) -> Result<Self, ScErrors> {
+        let clip_range = match (spec.clip_min, spec.clip_max) {
+            (Some(lo), Some(hi)) => {
+                validate_clip_range((lo, hi))?;
+                Some((lo, hi))
+            }
+            _ => None,
+        };
+        Ok(Self {
+            n_genes: spec.n_genes,
+            n_cells: spec.n_cells,
+            min_cells: spec.min_cells,
+            bw_adjust: spec.bw_adjust,
+            gmean_eps: spec.gmean_eps,
+            outlier_th: spec.outlier_th,
+            poisson_diff_theta: spec.poisson_diff_theta,
+            clip_range,
         })
     }
 }

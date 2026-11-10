@@ -6,6 +6,7 @@
 
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::f32::consts::PI;
 use std::time::Instant;
 use thousands::Separable;
@@ -84,7 +85,44 @@ pub fn parse_lap_type(s: &str) -> Option<LaplacianType> {
     }
 }
 
+/// Deserialise a MELD filter family, checked through [parse_meld_filter]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"heat"` or `"laplacian"`
+///
+/// ### Returns
+///
+/// The [MeldFilter], or an error naming the unrecognised value.
+pub fn de_meld_filter<'de, D: Deserializer<'de>>(d: D) -> Result<MeldFilter, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_meld_filter(&s)
+        .ok_or_else(|| D::Error::custom(format!("filter must be 'heat' or 'laplacian', got '{s}'")))
+}
+
+/// Deserialise a Laplacian type, checked through [parse_lap_type]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"combinatorial"` or `"normalised"`
+///
+/// ### Returns
+///
+/// The [LaplacianType], or an error naming the unrecognised value.
+pub fn de_lap_type<'de, D: Deserializer<'de>>(d: D) -> Result<LaplacianType, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_lap_type(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "lap_type must be 'combinatorial' or 'normalised', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for MELD.
+///
+/// Deserialises from the flat R `params_meld()` list, the kNN keys included;
+/// missing keys take the defaults.
+///
 /// * `order` - Filter falloff sharpness. Larger values approach a square
 ///   low-pass.
 /// * `filter` - Filter family ([`MeldFilter::Heat`] or
@@ -98,7 +136,8 @@ pub fn parse_lap_type(s: &str) -> Option<LaplacianType> {
 ///   are comparable regardless of cells-per-condition.
 /// * `knn_params` - kNN parameters used by the landmark variant for the
 ///   landmark-landmark kNN.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct MeldParams {
     /// Smoothing strength. Larger values produce smoother densities. Reference
     /// default: 60.
@@ -108,10 +147,12 @@ pub struct MeldParams {
     /// Filter falloff sharpness. Larger values approach a square low-pass.
     pub order: f32,
     /// Filter type, i.e. [MeldFilter]
+    #[serde(deserialize_with = "de_meld_filter")]
     pub filter: MeldFilter,
     /// Number of Chebyshev coefficients (polynomial terms). Must be >= 2.
     pub chebyshev_order: usize,
     /// The [LaplacianType] type enum indicating which Laplacian to use.
+    #[serde(deserialize_with = "de_lap_type")]
     pub lap_type: LaplacianType,
     /// If true, each column of the indicator matrix is divided by its column
     /// sum before filtering, so cross-condition densities are comparable
@@ -119,6 +160,7 @@ pub struct MeldParams {
     pub normalise_indicators: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    #[serde(flatten)]
     pub knn_params: KnnParams,
 }
 
@@ -170,7 +212,7 @@ fn build_indicator_matrix(
     let n = labels.len();
     let mut counts = vec![0_usize; n_groups];
     for &l in labels {
-        if l > n_groups {
+        if l >= n_groups {
             return Err(ScErrors::MELDLabelOutOfRange { label: l, n_groups });
         }
         counts[l] += 1;
@@ -626,4 +668,25 @@ pub fn meld(
     }
 
     Ok((densities.clone(), l1_normalise(&densities)))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_indicator_matrix_rejects_label_at_n_groups() {
+        let res = build_indicator_matrix(&[0, 1, 2], 2, false);
+        assert!(matches!(
+            res,
+            Err(ScErrors::MELDLabelOutOfRange {
+                label: 2,
+                n_groups: 2
+            })
+        ));
+    }
 }

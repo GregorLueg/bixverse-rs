@@ -67,7 +67,9 @@ const K: usize = 15;
 fn read_indices(path: &Path) -> Vec<usize> {
     std::fs::read(path)
         .unwrap()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
         .collect()
 }

@@ -3268,20 +3268,16 @@ fn exp_poly_f32(x: f32) -> f32 {
 #[inline(always)]
 fn exp_shift_sum_poly_f32(src: &[f32], shift: f32, dst: &mut [f32]) -> f32 {
     let mut acc = [0.0f32; EXP_LANES];
-    let mut src_chunks = src.chunks_exact(EXP_LANES);
-    let mut dst_chunks = dst.chunks_exact_mut(EXP_LANES);
-    for (d, s) in (&mut dst_chunks).zip(&mut src_chunks) {
+    let (src_chunks, src_rem) = src.as_chunks::<EXP_LANES>();
+    let (dst_chunks, dst_rem) = dst.as_chunks_mut::<EXP_LANES>();
+    for (d, s) in dst_chunks.iter_mut().zip(src_chunks) {
         for j in 0..EXP_LANES {
             d[j] = exp_poly_f32(s[j] - shift);
             acc[j] += d[j];
         }
     }
     let mut total: f32 = acc.iter().sum();
-    for (d, &x) in dst_chunks
-        .into_remainder()
-        .iter_mut()
-        .zip(src_chunks.remainder())
-    {
+    for (d, &x) in dst_rem.iter_mut().zip(src_rem) {
         *d = exp_poly_f32(x - shift);
         total += *d;
     }

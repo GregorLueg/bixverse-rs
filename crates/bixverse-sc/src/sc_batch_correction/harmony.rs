@@ -3,6 +3,7 @@
 
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::time::Instant;
 use thousands::*;
 
@@ -12,10 +13,10 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
 use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
-    HARMONY_KMEANS_ITERS, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
-    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
-    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
-    window_converged,
+    HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
+    centroids_from_r, distances_and_base, kmeans_centroids, normalise_rows_into, objective,
+    observed_counts, r_to_mat, ridge_correction, row_major_to_mat, to_row_major,
+    update_assignments, window_converged,
 };
 
 ////////////
@@ -23,6 +24,11 @@ use super::harmony_core::{
 ////////////
 
 /// Parameters for Harmony batch correction.
+///
+/// Deserialises from the flat R `params_sc_harmony()` list with `k` resolved,
+/// see [`HarmonyParamsSpec`].
+#[derive(Deserialize)]
+#[serde(try_from = "HarmonyParamsSpec")]
 pub struct HarmonyParams {
     /// Number of clusters
     pub k: usize,
@@ -64,6 +70,84 @@ impl Default for HarmonyParams {
             window_size: 3,
             kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
         }
+    }
+}
+
+/// The keys a [`HarmonyParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take the [`HarmonyParams`] defaults.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct HarmonyParamsSpec {
+    /// Number of clusters
+    pub k: usize,
+    /// Per-cluster diversity weights (length 1 or K)
+    pub sigma: Vec<f32>,
+    /// Per-variable diversity penalties (length 1 or n_variables)
+    pub theta: Vec<f32>,
+    /// Ridge penalty (length 1, broadcast to all design matrix columns)
+    pub lambda: Vec<f32>,
+    /// Fraction of cells to update per block (0.0-1.0)
+    pub block_size: f32,
+    /// Maximum iterations for the k-means clustering
+    pub max_iter_kmeans: usize,
+    /// Maximum Harmony outer iterations
+    pub max_iter_harmony: usize,
+    /// K-means clustering convergence threshold
+    pub epsilon_kmeans: f32,
+    /// Harmony convergence threshold
+    pub epsilon_harmony: f32,
+    /// Window size for convergence checking
+    pub window_size: usize,
+    /// The k-means keys
+    #[serde(flatten)]
+    pub kmeans: HarmonyKMeansSpec,
+}
+
+impl Default for HarmonyParamsSpec {
+    fn default() -> Self {
+        let d = HarmonyParams::default();
+        Self {
+            k: d.k,
+            sigma: d.sigma,
+            theta: d.theta,
+            lambda: d.lambda,
+            block_size: d.block_size,
+            max_iter_kmeans: d.max_iter_kmeans,
+            max_iter_harmony: d.max_iter_harmony,
+            epsilon_kmeans: d.epsilon_kmeans,
+            epsilon_harmony: d.epsilon_harmony,
+            window_size: d.window_size,
+            kmeans: HarmonyKMeansSpec::default(),
+        }
+    }
+}
+
+impl TryFrom<HarmonyParamsSpec> for HarmonyParams {
+    type Error = String;
+
+    /// Assemble the parameters, checking the k-means initialisation.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`HarmonyParams`], or an error naming an unknown initialisation.
+    fn try_from(s: HarmonyParamsSpec) -> Result<Self, String> {
+        Ok(Self {
+            k: s.k,
+            sigma: s.sigma,
+            theta: s.theta,
+            lambda: s.lambda,
+            block_size: s.block_size,
+            max_iter_kmeans: s.max_iter_kmeans,
+            max_iter_harmony: s.max_iter_harmony,
+            epsilon_kmeans: s.epsilon_kmeans,
+            epsilon_harmony: s.epsilon_harmony,
+            window_size: s.window_size,
+            kmeans_params: s.kmeans.try_into()?,
+        })
     }
 }
 
@@ -220,6 +304,33 @@ pub fn compute_cosine_distances(centroids: MatRef<f32>, data_cos: MatRef<f32>) -
     dist
 }
 
+/// Broadcast a length 1 parameter to `n`, or check it already has length `n`
+///
+/// ### Params
+///
+/// * `values` - The parameter values
+/// * `n` - The target length
+/// * `param` - Name for the error
+///
+/// ### Returns
+///
+/// The values at length `n`, or [ScErrors::HarmonyParamLength].
+pub fn broadcast_param(
+    values: &[f32],
+    n: usize,
+    param: &'static str,
+) -> Result<Vec<f32>, ScErrors> {
+    match values.len() {
+        1 => Ok(vec![values[0]; n]),
+        len if len == n => Ok(values.to_vec()),
+        got => Err(ScErrors::HarmonyParamLength {
+            param,
+            got,
+            expected: n,
+        }),
+    }
+}
+
 /// Initialise soft cluster assignments from distances.
 ///
 /// Converts distances to probabilistic cluster assignments using exponential
@@ -315,23 +426,8 @@ pub fn harmony_with_state(
         }
     }
 
-    let sigma = if params.sigma.len() == 1 {
-        vec![params.sigma[0]; k]
-    } else {
-        assert_eq!(params.sigma.len(), k, "sigma must be length 1 or K");
-        params.sigma.clone()
-    };
-
-    let theta = if params.theta.len() == 1 {
-        vec![params.theta[0]; n_vars]
-    } else {
-        assert_eq!(
-            params.theta.len(),
-            n_vars,
-            "theta must be length 1 or n_variables"
-        );
-        params.theta.clone()
-    };
+    let sigma = broadcast_param(&params.sigma, k, "sigma")?;
+    let theta = broadcast_param(&params.theta, n_vars, "theta")?;
     let theta_levels: Vec<Vec<f32>> = batch_infos
         .iter()
         .zip(&theta)

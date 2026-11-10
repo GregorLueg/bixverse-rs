@@ -1,5 +1,5 @@
 site_name: bixverse
-site_description: Stream single-cell stores into neural network training, in Rust.
+site_description: A single cell suite for Python with the numerics in Rust, plus a minibatch loader, scVI and a GPU wheel.
 site_url: https://gregorlueg.github.io/bixverse-rs/
 repo_url: https://github.com/GregorLueg/bixverse-rs
 repo_name: GregorLueg/bixverse-rs
@@ -35,10 +35,77 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - scVI: scvi.md
+  - Vignettes:
+      - Getting started:
+          - Design choices: vignettes/design_single_cell.ipynb
+          - Thinking the bixverse way: vignettes/thinking_single_cell.ipynb
+          - Data I/O: vignettes/single_cell_io.ipynb
+          - Analysing PBMCs: vignettes/pbmc_single_cell.ipynb
+          - Plotting: vignettes/single_cell_visualisation.ipynb
+          - Scaling to millions of cells: vignettes/single_cell_big_data.ipynb
+      - Core workflow:
+          - kNN searches: vignettes/knn_searches.ipynb
+          - Pearson residuals and scTransform: vignettes/single_cell_residuals.ipynb
+          - Doublet detection: vignettes/doublet_detection.ipynb
+          - Ambient RNA removal: vignettes/cell_sweep.ipynb
+          - Batch correction: vignettes/single_cell_batch_corrections.ipynb
+          - Clustering and annotation: vignettes/cell_type_annotation.ipynb
+          - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
+          - Meta cells: vignettes/meta_cells.ipynb
+          - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
+      - Methods:
+          - Differential expression: vignettes/differential_expression.ipynb
+          - Differential abundance: vignettes/differential_abundance.ipynb
+          - Gene sets, regulons and NMF: vignettes/bag_of_genes_single_cells.ipynb
+          - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
+          - DIALOGUE: vignettes/dialogue.ipynb
+          - Trajectory inference: vignettes/trajectory_inference.ipynb
+          - Cell trees with Bonsai: vignettes/bonsai.ipynb
   - API reference:
-      - Top level: api/toplevel.md
-      - Loader: api/loader.md
-      - Neural networks: api/nn.md
+      - Core: api/core.md
+      - I/O and QC:
+          - Input and output: api/io.md
+          - Quality control: api/qc.md
+          - Doublets and ambient RNA: api/doublets.md
+      - Preprocessing and graphs:
+          - Preprocessing: api/pp.md
+          - Neighbours and clusters: api/graph.md
+          - Embeddings: api/embed.md
+      - Integration and annotation:
+          - Batch correction: api/integrate.md
+          - Annotation: api/annotate.md
+          - Multi-modal: api/mm.md
+      - Differential testing:
+          - Differential expression and abundance: api/de.md
+      - Methods:
+          - Meta cells: api/metacells.md
+          - Trajectories: api/traj.md
+          - Cell trees: api/trees.md
+          - Gene sets and regulons: api/pathways.md
+          - NMF: api/nmf.md
+          - Ligand-receptor: api/lr.md
+          - DIALOGUE: api/dialogue.md
+      - Plots and pipelines:
+          - Plots: api/pl.md
+          - Pipelines: api/pipeline.md
+      - Parameters: api/params.md
+      - Training:
+          - Store reader: api/toplevel.md
+          - Loader: api/loader.md
+          - Neural networks: api/nn.md
+      - GPU:
+          - Overview: api/gpu/index.md
+          - Preprocessing: api/gpu/pp.md
+          - Neighbours and clusters: api/gpu/graph.md
+          - Embeddings: api/gpu/embed.md
+          - Batch correction: api/gpu/integrate.md
+          - Doublets: api/gpu/doublets.md
+          - Differential expression: api/gpu/de.md
+          - Meta cells: api/gpu/metacells.md
+          - NMF: api/gpu/nmf.md
+          - Pathways: api/gpu/pathways.md
+          - Cell trees: api/gpu/trees.md
+          - Parameters: api/gpu/params.md
 
 markdown_extensions:
   - admonition
@@ -55,11 +122,16 @@ markdown_extensions:
 
 plugins:
   - search
+  # The `.ipynb` carry their outputs (`dev/vignettes.py execute`); the `.py`
+  # sources stay out of the site.
+  - mkdocs-jupyter:
+      execute: false
+      include: ["vignettes/*.ipynb"]
   - mkdocstrings:
       handlers:
         python:
-          # `bixverse` sits next to mkdocs.yml, not under `docs/`.
-          paths: ["."]
+          # `bixverse` sits next to mkdocs.yml, `bixverse_gpu` under `gpu/`.
+          paths: [".", "gpu"]
           options:
             docstring_style: google
             # The `Args:` sections carry one row per parameter, which is the
@@ -83,3 +155,7 @@ plugins:
 # `mkdocs serve` picks up a docstring edit without a restart.
 watch:
   - bixverse
+  - gpu/bixverse_gpu
+
+exclude_docs: |
+  vignettes/*.py

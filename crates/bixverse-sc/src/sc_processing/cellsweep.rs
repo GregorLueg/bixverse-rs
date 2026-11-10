@@ -33,6 +33,7 @@
 use ann_search_rs::utils::dist::SimdDistance;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -80,7 +81,11 @@ const KNEE_MIN_COUNTS: u32 = 10;
 //////////////////////
 
 /// How the empty droplets are identified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Deserialises from the R `params_sc_empty_droplets()` list, see
+/// [`EmptyDropletCallSpec`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "EmptyDropletCallSpec")]
 pub enum EmptyDropletCall {
     /// The caller supplies the mask, e.g. from a CellRanger filtered barcode
     /// list. Nothing is inferred.
@@ -114,8 +119,67 @@ pub fn parse_empty_droplet_call(s: &str) -> Option<EmptyDropletCall> {
     }
 }
 
+/// The keys an [`EmptyDropletCall`] deserialises from. The method name and
+/// its numeric argument arrive as separate entries; `is_empty_column` is the
+/// caller's business and ignored here.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct EmptyDropletCallSpec {
+    /// `"supplied"`, `"umi_cutoff"`, `"expected_cells"` or `"knee"`
+    pub method: Option<String>,
+    /// Library size below which a barcode is empty, for `"umi_cutoff"`
+    pub umi_cutoff: Option<u32>,
+    /// Number of real cells expected, for `"expected_cells"`
+    pub expected_cells: Option<usize>,
+}
+
+impl TryFrom<EmptyDropletCallSpec> for EmptyDropletCall {
+    type Error = String;
+
+    /// Parse the method and fill in its argument.
+    ///
+    /// An unknown method errors rather than falling back, and so does a
+    /// method whose argument is missing: a silent zero cutoff would call
+    /// nothing empty and the model would then fail much further downstream.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`EmptyDropletCall`], or an error naming the missing or unknown
+    /// entry.
+    fn try_from(spec: EmptyDropletCallSpec) -> Result<Self, String> {
+        let method = spec
+            .method
+            .ok_or_else(|| "Empty droplet params need a 'method' entry.".to_string())?;
+        let call = parse_empty_droplet_call(&method).ok_or_else(|| {
+            format!(
+                "'{method}' is not a known empty droplet method. Use one of 'supplied', \
+                 'umi_cutoff', 'expected_cells', 'knee'."
+            )
+        })?;
+        Ok(match call {
+            EmptyDropletCall::UmiCutoff(_) => EmptyDropletCall::UmiCutoff(
+                spec.umi_cutoff
+                    .ok_or("method = 'umi_cutoff' needs a 'umi_cutoff' entry.")?,
+            ),
+            EmptyDropletCall::ExpectedCells(_) => EmptyDropletCall::ExpectedCells(
+                spec.expected_cells
+                    .ok_or("method = 'expected_cells' needs an 'expected_cells' entry.")?,
+            ),
+            other => other,
+        })
+    }
+}
+
 /// Parameters for the CellSweep EM fit.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the R `params_sc_cellsweep()` list; missing keys take
+/// [`CellSweepParams::default`].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct CellSweepParams {
     // -- model structure --
     /// Keep the contamination fraction of empty droplets pinned at 1 rather
@@ -271,7 +335,7 @@ impl CellSweepParams {
 ///
 /// Indices are positions in the underlying store, so they survive unchanged
 /// into the parent object's index space.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CellSweepSample {
     /// Identifier of the sample, used in progress output and errors.
     pub sample_id: String,

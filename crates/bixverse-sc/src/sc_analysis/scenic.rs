@@ -18,6 +18,8 @@ use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
+use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
@@ -2931,7 +2933,7 @@ fn batch_genes_correlated<S: SingleCellReading>(
         &Dist::SquaredEuclidean,
         Some(k_means_params.get_data()),
         seed,
-        verbosity.detailed_verbosity(),
+        verbosity_from_flag(verbosity.detailed_verbosity()),
     )?;
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
@@ -2961,7 +2963,7 @@ fn batch_genes_correlated<S: SingleCellReading>(
 
     let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
     for (i, &cluster_id) in assignments.iter().enumerate() {
-        clusters[cluster_id].push(gene_indices[i]);
+        clusters[cluster_id as usize].push(gene_indices[i]);
     }
 
     let mut rng = SmallRng::seed_from_u64(seed.wrapping_add(1) as u64);
@@ -3696,6 +3698,11 @@ fn run_scenic_gbm_streaming<S: SingleCellReading>(
 ////////////
 
 /// Defines the parameters to run SCENIC within the bixverse-rs implementation
+///
+/// Deserialises from the flat R `params_scenic()` list, see
+/// [ScenicParamsSpec].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "ScenicParamsSpec")]
 pub struct ScenicParams {
     /// Min total counts that a gene needs to reach to be included
     pub min_counts: usize,
@@ -3729,6 +3736,250 @@ impl Default for ScenicParams {
             n_subsample: 100_000,
         }
     }
+}
+
+/// The keys a [ScenicParams] deserialises from: the flat R `params_scenic()`
+/// list, the learner block of `learner_type` spliced in.
+///
+/// The learner keys are the union over the three learners; each learner reads
+/// its own and ignores the rest. Missing keys take the defaults of
+/// [ScenicParams] and of the learner's config. Unlike the R binding, an
+/// unrecognised `learner_type` is an error rather than a random forest.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct ScenicParamsSpec {
+    /// Min total counts of a gene
+    pub min_counts: usize,
+    /// Min proportion of cells expressing a gene
+    pub min_cells: f32,
+    /// `"randomforest"`, `"extratrees"` or `"grnboost2"`, see
+    /// [parse_regression_learner]
+    pub learner_type: String,
+    /// Gene batch strategy, `"correlated"` or `"random"`
+    pub gene_batch_strategy: String,
+    /// Optional gene batch size
+    pub gene_batch_size: Option<usize>,
+    /// PCs for the correlated gene batch strategy
+    pub n_pcs: usize,
+    /// Cell subsampling threshold of the correlated strategy
+    pub n_subsample: usize,
+    /// Trees per ensemble (random forest, extra trees)
+    pub n_trees: Option<usize>,
+    /// Minimum samples per leaf (every learner)
+    pub min_samples_leaf: Option<usize>,
+    /// Features per split, 0 for the default (every learner)
+    pub n_features_split: Option<usize>,
+    /// Sample fraction per tree (random forest, boosting)
+    pub subsample_rate: Option<f32>,
+    /// Sample with replacement (random forest)
+    pub bootstrap: Option<bool>,
+    /// Maximum tree depth (every learner)
+    pub max_depth: Option<usize>,
+    /// Optional cell fraction per tree (random forest, extra trees)
+    pub subsample_frac: Option<f32>,
+    /// Random thresholds per feature (extra trees)
+    pub n_thresholds: Option<usize>,
+    /// Maximum boosting rounds (boosting)
+    pub n_trees_max: Option<usize>,
+    /// Shrinkage (boosting)
+    pub learning_rate: Option<f32>,
+    /// Early stopping window (boosting)
+    pub early_stop_window: Option<usize>,
+}
+
+impl Default for ScenicParamsSpec {
+    fn default() -> Self {
+        let d = ScenicParams::default();
+        Self {
+            min_counts: d.min_counts,
+            min_cells: d.min_cells,
+            learner_type: "randomforest".to_string(),
+            gene_batch_strategy: d.gene_batch_strategy,
+            gene_batch_size: d.gene_batch_size,
+            n_pcs: d.n_pcs,
+            n_subsample: d.n_subsample,
+            n_trees: None,
+            min_samples_leaf: None,
+            n_features_split: None,
+            subsample_rate: None,
+            bootstrap: None,
+            max_depth: None,
+            subsample_frac: None,
+            n_thresholds: None,
+            n_trees_max: None,
+            learning_rate: None,
+            early_stop_window: None,
+        }
+    }
+}
+
+impl TryFrom<ScenicParamsSpec> for ScenicParams {
+    type Error = String;
+
+    /// Build the learner `learner_type` names from its keys.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [ScenicParams], or an error naming an unrecognised learner.
+    fn try_from(spec: ScenicParamsSpec) -> Result<Self, String> {
+        let learner = parse_regression_learner(&spec.learner_type).ok_or_else(|| {
+            format!(
+                "learner_type must be 'randomforest', 'extratrees' or 'grnboost2', got '{}'",
+                spec.learner_type
+            )
+        })?;
+        let regression_learner = match learner {
+            RegressionLearner::RandomForest(d) => {
+                RegressionLearner::RandomForest(RandomForestConfig {
+                    n_trees: spec.n_trees.unwrap_or(d.n_trees),
+                    min_samples_leaf: spec.min_samples_leaf.unwrap_or(d.min_samples_leaf),
+                    n_features_split: spec.n_features_split.unwrap_or(d.n_features_split),
+                    subsample_rate: spec.subsample_rate.unwrap_or(d.subsample_rate),
+                    bootstrap: spec.bootstrap.unwrap_or(d.bootstrap),
+                    max_depth: spec.max_depth.or(d.max_depth),
+                    subsample_frac: spec.subsample_frac.or(d.subsample_frac),
+                })
+            }
+            RegressionLearner::ExtraTrees(d) => RegressionLearner::ExtraTrees(ExtraTreesConfig {
+                n_trees: spec.n_trees.unwrap_or(d.n_trees),
+                min_samples_leaf: spec.min_samples_leaf.unwrap_or(d.min_samples_leaf),
+                n_features_split: spec.n_features_split.unwrap_or(d.n_features_split),
+                n_thresholds: spec.n_thresholds.unwrap_or(d.n_thresholds),
+                max_depth: spec.max_depth.or(d.max_depth),
+                subsample_frac: spec.subsample_frac.or(d.subsample_frac),
+            }),
+            RegressionLearner::GradientBoosting(d) => {
+                RegressionLearner::GradientBoosting(GradientBoostingConfig {
+                    n_trees_max: spec.n_trees_max.unwrap_or(d.n_trees_max),
+                    learning_rate: spec.learning_rate.unwrap_or(d.learning_rate),
+                    max_depth: spec.max_depth.unwrap_or(d.max_depth),
+                    min_samples_leaf: spec.min_samples_leaf.unwrap_or(d.min_samples_leaf),
+                    early_stop_window: spec.early_stop_window.unwrap_or(d.early_stop_window),
+                    subsample_rate: spec.subsample_rate.unwrap_or(d.subsample_rate),
+                    n_features_split: spec.n_features_split.unwrap_or(d.n_features_split),
+                })
+            }
+        };
+        Ok(Self {
+            min_counts: spec.min_counts,
+            min_cells: spec.min_cells,
+            regression_learner,
+            gene_batch_strategy: spec.gene_batch_strategy,
+            gene_batch_size: spec.gene_batch_size,
+            n_pcs: spec.n_pcs,
+            n_subsample: spec.n_subsample,
+        })
+    }
+}
+
+/////////////////////////
+// Importance matrices //
+/////////////////////////
+
+/// One retained TF to gene link: `(gene row, TF column, importance)`.
+pub type ImportanceLink = (usize, usize, f64);
+
+/// The `k` strongest links per row or per column of an importance matrix
+///
+/// Rows are target genes, columns TFs. Per row (`by_gene`) it keeps each
+/// gene's `k` strongest regulators; per column each TF's `k` strongest
+/// targets. Values below `min_value` never qualify. Within a row or column the
+/// order is that of a partial selection, not sorted.
+///
+/// ### Params
+///
+/// * `matrix` - Genes x TFs importances
+/// * `k` - Links to keep per row or column
+/// * `by_gene` - `true` for per gene (row), `false` for per TF (column)
+/// * `min_value` - Optional floor on the importance
+///
+/// ### Returns
+///
+/// The retained links, row or column by row or column.
+pub fn top_k_links(
+    matrix: MatRef<f64>,
+    k: usize,
+    by_gene: bool,
+    min_value: Option<f64>,
+) -> Vec<ImportanceLink> {
+    let (outer, inner) = if by_gene {
+        (matrix.nrows(), matrix.ncols())
+    } else {
+        (matrix.ncols(), matrix.nrows())
+    };
+    let at = |o: usize, i: usize| -> (usize, usize) { if by_gene { (o, i) } else { (i, o) } };
+    let k = k.min(inner);
+
+    (0..outer)
+        .flat_map(|o| {
+            let value = |i: usize| {
+                let (r, c) = at(o, i);
+                matrix[(r, c)]
+            };
+            let mut idx: Vec<usize> = (0..inner)
+                .filter(|&i| min_value.is_none_or(|m| value(i) >= m))
+                .collect();
+            let take = k.min(idx.len());
+            if take > 0 {
+                idx.select_nth_unstable_by(take - 1, |&a, &b| {
+                    value(b)
+                        .partial_cmp(&value(a))
+                        .unwrap_or(CmpOrdering::Equal)
+                });
+            }
+            idx.truncate(take);
+            idx.into_iter()
+                .map(|i| {
+                    let (r, c) = at(o, i);
+                    (r, c, matrix[(r, c)])
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Links above a per-gene threshold of `mean + n_sd * sd`
+///
+/// For each target gene (row) the threshold is the mean plus `n_sd`
+/// population standard deviations of its importances over all TFs; every TF
+/// at or above it, and at or above `min_value` if given, is kept.
+///
+/// ### Params
+///
+/// * `matrix` - Genes x TFs importances
+/// * `n_sd` - Standard deviations above the mean
+/// * `min_value` - Optional floor on the importance
+///
+/// ### Returns
+///
+/// The retained links, gene by gene, TFs in column order.
+pub fn importance_threshold_links(
+    matrix: MatRef<f64>,
+    n_sd: f64,
+    min_value: Option<f64>,
+) -> Vec<ImportanceLink> {
+    let ncol = matrix.ncols();
+    (0..matrix.nrows())
+        .flat_map(|i| {
+            let (sum, sum_sq) = (0..ncol).fold((0.0, 0.0), |(s, sq), j| {
+                let v = matrix[(i, j)];
+                (s + v, sq + v * v)
+            });
+            let mean = sum / ncol as f64;
+            let sd = (sum_sq / ncol as f64 - mean * mean).max(0.0).sqrt();
+            let threshold = mean + n_sd * sd;
+            (0..ncol)
+                .filter(move |&j| {
+                    let v = matrix[(i, j)];
+                    v >= threshold && min_value.is_none_or(|m| v >= m)
+                })
+                .map(move |j| (i, j, matrix[(i, j)]))
+        })
+        .collect()
 }
 
 //////////

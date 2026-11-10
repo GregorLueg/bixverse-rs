@@ -10,6 +10,7 @@ use crate::knn_gpu::{KnnParamsGpu, dispatch_knn_query_gpu};
 use crate::prelude::*;
 use bixverse_sc::sc_batch_correction::fast_mnn::fast_mnn_embedding;
 use bixverse_sc::sc_processing::knn::to_true_distances;
+use serde::Deserialize;
 
 ////////////
 // Params //
@@ -19,16 +20,19 @@ use bixverse_sc::sc_processing::knn::to_true_distances;
 ///
 /// Mirrors `FastMnnParams` with the GPU nearest neighbour parameters in place
 /// of the CPU ones. There are no PCA fields, since the GPU entry point takes
-/// the embedding directly.
-#[derive(Clone, Debug)]
+/// the embedding directly. Deserialises from the R `params_sc_fastmnn_gpu()`
+/// list; missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct FastMnnParamsGpu {
     /// Number of median distances for tricube kernel bandwidth.
     pub ndist: f32,
     /// Apply cosine normalisation before computing distances.
     pub cos_norm: bool,
     /// [`KnnParamsGpu`] for the MNN and tricube searches. `k` sets the
-    /// neighbour count for both; `extract_knn` is ignored, since every search
-    /// here is a cross-query.
+    /// neighbour count for both; the NNDescent graph method runs as CAGRA,
+    /// since every search here is a cross-query.
+    #[serde(flatten)]
     pub knn_params: KnnParamsGpu,
 }
 

@@ -392,6 +392,7 @@ where
                 let data_chunk = &batch_data[start * dim..(start + assign_chunk.len()) * dim];
 
                 for (i, &c) in assign_chunk.iter().enumerate() {
+                    let c = c as usize;
                     local_counts[c] += 1;
                     let vec = &data_chunk[i * dim..(i + 1) * dim];
                     let offset = c * dim;
@@ -483,7 +484,10 @@ where
 
     let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i * dim + j]);
 
-    (centroid_mat, assignments)
+    (
+        centroid_mat,
+        assignments.into_iter().map(|c| c as usize).collect(),
+    )
 }
 
 /////////////
@@ -548,7 +552,7 @@ where
         &dist,
         Some(kmeans_params.0),
         seed,
-        verbose,
+        verbosity_from_flag(verbose),
     )?;
 
     let centroids_norm = if dist == Dist::Cosine {
@@ -576,7 +580,10 @@ where
 
     let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i * dim + j]);
 
-    Ok((centroid_mat, assignments))
+    Ok((
+        centroid_mat,
+        assignments.into_iter().map(|c| c as usize).collect(),
+    ))
 }
 
 ///////////

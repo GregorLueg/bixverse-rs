@@ -11,12 +11,13 @@ use cubecl_utils_rs::prelude::*;
 use faer::{Mat, MatRef};
 use std::time::Instant;
 
+use crate::fast_clusters_gpu::KMeansGpuSpec;
 use crate::kernels::harmony_kernels::*;
 use crate::prelude::*;
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_gpu::linalg::spmm::launch_dense_column_sum;
 use bixverse_gpu::{WORKGROUP_64, WORKGROUP_512};
-use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, create_batch_infos};
+use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, broadcast_param, create_batch_infos};
 use bixverse_sc::sc_batch_correction::harmony_core::{
     HARMONY_KMEANS_ITERS, RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge,
     to_row_major,
@@ -24,6 +25,7 @@ use bixverse_sc::sc_batch_correction::harmony_core::{
 use bixverse_sc::sc_batch_correction::harmony_v2::{
     HarmonyParamsV2, check_convergence, expand_theta,
 };
+use serde::Deserialize;
 
 ////////////
 // Consts //
@@ -90,7 +92,10 @@ fn level_runs(info: &BatchInfo) -> LevelRuns {
 
 /// Parameters for GPU Harmony (version 2, single covariate, arrowhead,
 /// full-batch Jacobi). Mirrors `HarmonyParamsV2` minus `block_size` (the Jacobi
-/// update has no blocks), with the GPU k-means parameters.
+/// update has no blocks), with the GPU k-means parameters. Deserialises from
+/// the R `params_sc_harmony_v2_gpu()` list, see [`HarmonyParamsV2GpuSpec`].
+#[derive(Deserialize)]
+#[serde(try_from = "HarmonyParamsV2GpuSpec")]
 pub struct HarmonyParamsV2Gpu {
     /// Number of clusters
     pub k: usize,
@@ -180,6 +185,113 @@ impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
             kmeans_params,
             ..Self::default()
         }
+    }
+}
+
+/// The keys a [`HarmonyParamsV2Gpu`] deserialises from, as its R list
+/// conversion reads them: the Harmony fields plus the flat k-means keys, which
+/// default to `HARMONY_KMEANS_ITERS` iterations, not fixed, not quantised.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct HarmonyParamsV2GpuSpec {
+    /// Number of clusters
+    pub k: usize,
+    /// Per-cluster diversity weights (length 1 or K)
+    pub sigma: Vec<f32>,
+    /// Per-variable diversity penalties (length 1 or n_variables)
+    pub theta: Vec<f32>,
+    /// Ridge penalty (length 1)
+    pub lambda: Vec<f32>,
+    /// Maximum Jacobi sweeps per Harmony round
+    pub max_iter_kmeans: usize,
+    /// Maximum Harmony outer iterations
+    pub max_iter_harmony: usize,
+    /// Clustering convergence threshold
+    pub epsilon_kmeans: f32,
+    /// Harmony convergence threshold
+    pub epsilon_harmony: f32,
+    /// Window size for convergence checking
+    pub window_size: usize,
+    /// Alpha for dynamic lambda estimation
+    pub alpha: f32,
+    /// Tau for theta scaling by batch size
+    pub tau: f32,
+    /// Batch proportion cutoff for pruning in ridge regression
+    pub batch_proportion_cutoff: f32,
+    /// Estimate lambda dynamically per cluster
+    pub use_dynamic_lambda: bool,
+    /// Lloyd's iterations of the initial k-means
+    pub k_means_iter: usize,
+    /// Optional initialisation, see `parse_kmeans_init`
+    pub k_means_init: Option<String>,
+    /// Run every k-means iteration without a convergence check
+    pub fixed: bool,
+    /// Hold the k-means data buffer at fp16
+    pub quantise: bool,
+}
+
+impl Default for HarmonyParamsV2GpuSpec {
+    fn default() -> Self {
+        let d = HarmonyParamsV2Gpu::default();
+        Self {
+            k: d.k,
+            sigma: d.sigma,
+            theta: d.theta,
+            lambda: d.lambda,
+            max_iter_kmeans: d.max_iter_kmeans,
+            max_iter_harmony: d.max_iter_harmony,
+            epsilon_kmeans: d.epsilon_kmeans,
+            epsilon_harmony: d.epsilon_harmony,
+            window_size: d.window_size,
+            alpha: d.alpha,
+            tau: d.tau,
+            batch_proportion_cutoff: d.batch_proportion_cutoff,
+            use_dynamic_lambda: d.use_dynamic_lambda,
+            k_means_iter: HARMONY_KMEANS_ITERS,
+            k_means_init: None,
+            fixed: false,
+            quantise: false,
+        }
+    }
+}
+
+impl TryFrom<HarmonyParamsV2GpuSpec> for HarmonyParamsV2Gpu {
+    type Error = String;
+
+    /// Check the k-means initialisation and assemble the parameters.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`HarmonyParamsV2Gpu`], or an error naming an unknown
+    /// initialisation.
+    fn try_from(s: HarmonyParamsV2GpuSpec) -> Result<Self, String> {
+        let kmeans_params = KMeansGpuSpec {
+            k_means_iter: s.k_means_iter,
+            k_means_init: s.k_means_init,
+            fixed: s.fixed,
+            quantise: s.quantise,
+        }
+        .into_params()?;
+        Ok(Self {
+            k: s.k,
+            sigma: s.sigma,
+            theta: s.theta,
+            lambda: s.lambda,
+            max_iter_kmeans: s.max_iter_kmeans,
+            max_iter_harmony: s.max_iter_harmony,
+            epsilon_kmeans: s.epsilon_kmeans,
+            epsilon_harmony: s.epsilon_harmony,
+            window_size: s.window_size,
+            alpha: s.alpha,
+            tau: s.tau,
+            batch_proportion_cutoff: s.batch_proportion_cutoff,
+            use_dynamic_lambda: s.use_dynamic_lambda,
+            kmeans_params: Some(kmeans_params),
+        })
     }
 }
 
@@ -287,7 +399,7 @@ pub fn row_l2_normalise_into<F: Float>(
         }
         let norm = F::sqrt(acc);
 
-        if norm > F::new(1e-8) {
+        if norm > F::new(1e-8_f32) {
             for e in 0..dim {
                 dst[base + e] = src[base + e] / norm;
             }
@@ -451,23 +563,8 @@ where
     let b = info.n_levels;
     let n_runs = runs.run_bounds.len() - 1;
 
-    let sigma = if params.sigma.len() == 1 {
-        vec![params.sigma[0]; k]
-    } else {
-        assert_eq!(params.sigma.len(), k, "sigma must be length 1 or K");
-        params.sigma.clone()
-    };
-
-    let theta = if params.theta.len() == 1 {
-        vec![params.theta[0]; 1]
-    } else {
-        assert_eq!(
-            params.theta.len(),
-            1,
-            "theta must be length 1 (single covariate)"
-        );
-        params.theta.clone()
-    };
+    let sigma = broadcast_param(&params.sigma, k, "sigma")?;
+    let theta = broadcast_param(&params.theta, 1, "theta")?;
     let theta_expanded = expand_theta(&theta, &batch_infos, k, params.tau);
     let theta_levels = &theta_expanded[0];
 
@@ -498,7 +595,7 @@ where
         params.kmeans_params,
         seed,
         device.clone(),
-        verbosity.detailed_verbosity(),
+        verbosity_from_flag(verbosity.detailed_verbosity()),
     )?;
     let mut y_host = vec![0.0f32; k * d];
     normalise_rows_into(&to_row_major(y_mat.as_ref()), d, &mut y_host);

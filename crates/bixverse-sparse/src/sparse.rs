@@ -1293,14 +1293,21 @@ where
     let (nrow, ncol) = sparse_data.shape();
     let (new_major, new_type) = converted_layout(sparse_data);
 
-    let mut new_data: Vec<T> = vec![T::default(); nnz];
+    // an empty `data` next to stored entries is a layer that was never read
+    // (norm-only reads), so it stays empty rather than being scattered
+    let has_data = !sparse_data.data.is_empty();
+    let mut new_data: Vec<T> = if has_data {
+        vec![T::default(); nnz]
+    } else {
+        Vec::new()
+    };
     let mut new_indices: Vec<u32> = vec![0u32; nnz];
     let mut new_data2: Option<Vec<U>> =
         sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
 
     let (new_indptr, mut cursors, sorted) = transpose_cursors(sparse_data, chunks, new_major);
 
-    let data_pair = Some((sparse_data.data.as_slice(), new_data.as_mut_slice()));
+    let data_pair = has_data.then_some((sparse_data.data.as_slice(), new_data.as_mut_slice()));
     let data2_pair = match (&sparse_data.data_2, &mut new_data2) {
         (Some(src), Some(dst)) => Some((src.as_slice(), dst.as_mut_slice())),
         _ => None,
@@ -2173,15 +2180,15 @@ where
         let data = &mat.data[row_start..row_end];
         let cols = &mat.indices[row_start..row_end];
         let mut acc = [T::default(); 4];
-        let mut data_chunks = data.chunks_exact(4);
-        let mut col_chunks = cols.chunks_exact(4);
-        for (d, c) in (&mut data_chunks).zip(&mut col_chunks) {
+        let (data_chunks, data_rem) = data.as_chunks::<4>();
+        let (col_chunks, col_rem) = cols.as_chunks::<4>();
+        for (d, c) in data_chunks.iter().zip(col_chunks) {
             for l in 0..4 {
                 acc[l] += d[l] * vec[c[l] as usize];
             }
         }
         let mut sum = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-        for (&d, &c) in data_chunks.remainder().iter().zip(col_chunks.remainder()) {
+        for (&d, &c) in data_rem.iter().zip(col_rem) {
             sum += d * vec[c as usize];
         }
         result[i] = sum;
@@ -2546,6 +2553,23 @@ mod tests {
 
         assert_eq!(counts_only.indptr, full.indptr);
         assert_eq!(norm_only.indices, full.indices);
+    }
+
+    /// A matrix holding only its second layer, as a norm-only read returns it,
+    /// transposes without touching the empty first layer, which stays empty.
+    #[test]
+    fn test_transpose_without_first_layer() {
+        let mut csr = transpose_fixture();
+        let full = transpose_sparse(&csr);
+        csr.data = Vec::new();
+
+        for chunks in [vec![(0, 5)], vec![(0, 2), (2, 5)]] {
+            let csc = transpose_sparse_chunked(&csr, &chunks, 1);
+            assert!(csc.data.is_empty());
+            assert_eq!(csc.data_2, full.data_2);
+            assert_eq!(csc.indices, full.indices);
+            assert_eq!(csc.indptr, full.indptr);
+        }
     }
 
     /// Both endpoints of every edge land in the matrix and every row stays ascending.

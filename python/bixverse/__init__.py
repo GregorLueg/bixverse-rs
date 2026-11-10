@@ -16,7 +16,27 @@ Batches are sparse CSR by default. Pass ``sparse=False`` for a dense
 scatter over every gene whether or not it holds a count.
 """
 
-from . import _bixverse
+from . import (
+    _bixverse,
+    annotate,
+    de,
+    dialogue,
+    doublets,
+    graph,
+    integrate,
+    io,
+    lr,
+    metacells,
+    mm,
+    nmf,
+    pathways,
+    pipeline,
+    pl,
+    pp,
+    qc,
+    traj,
+    trees,
+)
 from ._bixverse import (
     BixverseError,
     CellReader,
@@ -24,15 +44,56 @@ from ._bixverse import (
     __core_version__,
     __version__,
 )
+from ._core.db import TableNotFoundError
+from ._core.metacells import MetaCells
+from ._core.multimodal import SingleCellsMultiModal
+from ._core.single_cells import Counts, SingleCells, get_counts
+from ._core.state import CsrMatrix, KnnGraph, MagicLayer, ScCache, ScMap, Stamp
+from ._core.subset import SingleCellsSubset, merge_subset_obs
+from ._log import attach
 from .loader import Batch, CellLoader
+
+attach("bixverse")
 
 __all__ = [
     "Batch",
     "BixverseError",
     "CellLoader",
     "CellReader",
+    "Counts",
+    "CsrMatrix",
+    "KnnGraph",
+    "MagicLayer",
+    "MetaCells",
+    "ScCache",
+    "ScMap",
+    "SingleCells",
+    "SingleCellsMultiModal",
+    "SingleCellsSubset",
     "SparseFileError",
+    "Stamp",
+    "TableNotFoundError",
     "__core_version__",
     "__version__",
     "_bixverse",
+    "annotate",
+    "de",
+    "dialogue",
+    "doublets",
+    "get_counts",
+    "graph",
+    "integrate",
+    "io",
+    "lr",
+    "merge_subset_obs",
+    "metacells",
+    "mm",
+    "nmf",
+    "pathways",
+    "pipeline",
+    "pl",
+    "pp",
+    "qc",
+    "traj",
+    "trees",
 ]

@@ -2,3 +2,6 @@ target/
 
 # mkdocs build output
 site/
+
+# mkdocs-jupyter conversion cache
+.cache/

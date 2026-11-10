@@ -413,14 +413,14 @@ fn sweep_values<V: Copy + Into<u32>>(
             .copied()
             .unwrap_or_else(|| (x as f64 + gmean_eps).ln())
     };
+    let (chunks, rem) = values.as_chunks::<LN_SUM_LANES>();
     let mut lanes = [0.0_f64; LN_SUM_LANES];
-    let mut chunks = values.chunks_exact(LN_SUM_LANES);
-    for c in &mut chunks {
+    for c in chunks {
         for (lane, &x) in lanes.iter_mut().zip(c) {
             *lane += ln_of(x.into());
         }
     }
-    for &x in chunks.remainder() {
+    for &x in rem {
         lanes[0] += ln_of(x.into());
     }
     let sum_log: f64 = lanes.iter().sum();

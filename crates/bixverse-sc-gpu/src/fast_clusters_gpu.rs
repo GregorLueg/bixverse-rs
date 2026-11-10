@@ -12,7 +12,62 @@ use cubecl::Device;
 use faer::{Mat, MatRef};
 
 use crate::prelude::*;
+use bixverse_core::ml::clustering::k_means::parse_kmeans_init;
 use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
+use serde::Deserialize;
+
+////////////
+// Params //
+////////////
+
+/// The k-means keys of the R `params_sc_fast_cluster_gpu()` and
+/// `params_kmeans_gpu()` lists, as `KMeansGpuParams::from_r_list` reads them;
+/// missing keys take its defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct KMeansGpuSpec {
+    /// Lloyd's iterations
+    pub k_means_iter: usize,
+    /// Optional initialisation, see `parse_kmeans_init`
+    pub k_means_init: Option<String>,
+    /// Run every iteration without a convergence check
+    pub fixed: bool,
+    /// Hold the data buffer at fp16 on the device
+    pub quantise: bool,
+}
+
+impl Default for KMeansGpuSpec {
+    fn default() -> Self {
+        Self {
+            k_means_iter: 50,
+            k_means_init: None,
+            fixed: true,
+            quantise: false,
+        }
+    }
+}
+
+impl KMeansGpuSpec {
+    /// Check the initialisation and assemble the GPU k-means parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansGpuParams`], or an error naming an unknown initialisation.
+    pub fn into_params(self) -> Result<KMeansGpuParams, String> {
+        let init = self
+            .k_means_init
+            .map(|s| {
+                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
+            })
+            .transpose()?;
+        Ok(KMeansGpuParams::new(
+            self.k_means_iter,
+            init,
+            self.fixed,
+            self.quantise,
+        ))
+    }
+}
 
 ///////////////
 // GpuKMeans //
@@ -58,15 +113,19 @@ impl Coarsener for GpuKMeans {
         seed: usize,
         verbose: usize,
     ) -> Result<(Mat<f32>, Vec<usize>), ScGpuErrors> {
-        Ok(k_means_clusters_gpu::<f32>(
+        let (centroids, assignments) = k_means_clusters_gpu::<f32>(
             data,
             dist,
             n_centroids,
             self.params,
             seed,
             self.device.clone(),
-            parse_verbosity_level(verbose).detailed_verbosity(),
-        )?)
+            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+        )?;
+        Ok((
+            centroids,
+            assignments.into_iter().map(|c| c as usize).collect(),
+        ))
     }
 
     /// Exhaustive GPU kNN of the cells against the centroids.
@@ -77,8 +136,9 @@ impl Coarsener for GpuKMeans {
         m: usize,
         dist: &str,
     ) -> Result<Vec<u32>, ScGpuErrors> {
-        let index = build_exhaustive_index_gpu(centroids, dist, self.device.clone())?;
-        let (idx, _) = query_exhaustive_index_gpu(data, &index, m, false, false)?;
+        let index =
+            build_exhaustive_index_gpu(centroids, dist, self.device.clone(), Verbosity::Quiet)?;
+        let (idx, _) = query_exhaustive_index_gpu(data, &index, m, false, Verbosity::Quiet)?;
         let mut out = Vec::with_capacity(idx.len() * m);
         for row in idx {
             out.extend(row.into_iter().map(|c| c as u32));
@@ -121,7 +181,7 @@ mod tests {
             .unwrap();
         let cpu = top_m_cpu(data.as_ref(), centroids.as_ref(), 5, "euclidean");
         let mut mismatch = 0;
-        for (g, c) in gpu.chunks_exact(5).zip(cpu.chunks_exact(5)) {
+        for (g, c) in gpu.as_chunks::<5>().0.iter().zip(cpu.as_chunks::<5>().0) {
             let (mut g, mut c) = (g.to_vec(), c.to_vec());
             g.sort_unstable();
             c.sort_unstable();

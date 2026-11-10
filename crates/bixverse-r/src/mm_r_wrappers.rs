@@ -43,11 +43,11 @@ impl FromRList for WnnParams {
             .map(|v| v as usize)
             .unwrap_or(defaults.knn_range);
 
-        let sigma_method = params
-            .get("sigma_method")
-            .and_then(|v| v.as_str())
-            .and_then(parse_sigma_method)
-            .unwrap_or(defaults.sigma_method);
+        let sigma_method = match params.get("sigma_method").and_then(|v| v.as_str()) {
+            Some(s) => parse_sigma_method(s)
+                .ok_or_else(|| extendr_api::Error::Other(format!("Invalid sigma_method: {s}")))?,
+            None => defaults.sigma_method,
+        };
 
         let sigma_idx = params
             .get("sigma_idx")

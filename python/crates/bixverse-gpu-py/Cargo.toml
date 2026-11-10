@@ -1,0 +1,32 @@
+[package]
+name = "bixverse-gpu-py"
+description = "Python bindings for the bixverse-rs GPU single cell methods"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_bixverse_gpu"
+crate-type = ["cdylib"]
+
+[dependencies]
+py-common.workspace = true
+# wgpu through cubecl; no MLX in the wheel. No HDF5 either: the GPU methods
+# only read stores the `bixverse` wheel wrote.
+bixverse-sc-gpu = { workspace = true, features = ["bonsai"] }
+bixverse-gpu.workspace = true
+bixverse-sc.workspace = true
+bixverse-sc-data.workspace = true
+bixverse-methods.workspace = true
+cubecl.workspace = true
+cubecl-utils-rs.workspace = true
+faer.workspace = true
+indexmap.workspace = true
+numpy.workspace = true
+pyo3.workspace = true
+serde.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+bixverse-core = { workspace = true, features = ["accelerate"] }

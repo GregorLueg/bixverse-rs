@@ -17,6 +17,7 @@
 
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::{coo_to_csr, csr_sparse_matmul_dense, csr_vecmat};
@@ -35,7 +36,11 @@ const ROW_BLOCK: usize = 16;
 ////////////
 
 /// Parameters for NicheNet ligand-target matrix construction.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the keys of the R `params_ligand_target()` list; missing
+/// keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, bound(deserialize = "T: BixverseFloat + Deserialize<'de>"))]
 pub struct LigandTargetParams<T: BixverseFloat> {
     /// Hub correction strength for signalling layer (0 disables).
     pub lr_sig_hub: T,

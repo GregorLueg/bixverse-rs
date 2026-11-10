@@ -16,6 +16,7 @@
 
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use bixverse_core::ml::clustering::k_means::*;
@@ -146,6 +147,72 @@ impl Default for DsbParams {
             kmeans_iters: 50,
             quantile_clip: None,
         }
+    }
+}
+
+/// The keys a [DsbParams] deserialises from, as the R `params_sc_dsb()` list
+/// carries them; missing keys take the defaults.
+///
+/// The isotype indices are not part of the list: the caller resolves them
+/// from names and hands them to [DsbParamsSpec::into_params].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct DsbParamsSpec {
+    /// Run second step (cell-to-cell technical noise removal).
+    pub denoise_counts: bool,
+    /// Include isotype controls in the noise matrix.
+    pub use_isotype_controls: bool,
+    /// Pseudocount added before log transform.
+    pub pseudocount: f64,
+    /// Lower quantile for per-protein clipping. Clipping needs both bounds.
+    pub quantile_low: Option<f64>,
+    /// Upper quantile for per-protein clipping. Clipping needs both bounds.
+    pub quantile_high: Option<f64>,
+}
+
+impl Default for DsbParamsSpec {
+    fn default() -> Self {
+        let d = DsbParams::default();
+        Self {
+            denoise_counts: d.denoise_counts,
+            use_isotype_controls: d.use_isotype_controls,
+            pseudocount: d.pseudocount,
+            quantile_low: d.quantile_clip.map(|q| q.0),
+            quantile_high: d.quantile_clip.map(|q| q.1),
+        }
+    }
+}
+
+impl DsbParamsSpec {
+    /// Resolve into [DsbParams]
+    ///
+    /// ### Params
+    ///
+    /// * `isotype_indices` - 0-based column indices of the isotype controls
+    ///
+    /// ### Returns
+    ///
+    /// The [DsbParams], or an error if only one quantile bound is given.
+    pub fn into_params(self, isotype_indices: Vec<usize>) -> Result<DsbParams, ScErrors> {
+        let quantile_clip = match (self.quantile_low, self.quantile_high) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            (None, None) => None,
+            _ => {
+                return Err(CoreErrors::InvalidArgument(
+                    "quantile_low and quantile_high must both be given or both be absent"
+                        .to_string(),
+                )
+                .into());
+            }
+        };
+        Ok(DsbParams {
+            denoise_counts: self.denoise_counts,
+            use_isotype_controls: self.use_isotype_controls,
+            isotype_indices,
+            pseudocount: self.pseudocount,
+            quantile_clip,
+            ..DsbParams::default()
+        })
     }
 }
 
@@ -1095,5 +1162,18 @@ mod tests {
             res,
             Err(ScErrors::Core(CoreErrors::InvalidArgument(_)))
         ));
+    }
+
+    /// One quantile bound on its own is an error, not a silent no-clip.
+    #[test]
+    fn dsb_params_spec_rejects_single_quantile_bound() {
+        let spec = DsbParamsSpec {
+            quantile_low: Some(0.1),
+            ..Default::default()
+        };
+        assert!(spec.into_params(vec![]).is_err());
+        let params = DsbParamsSpec::default().into_params(vec![2, 3]).unwrap();
+        assert_eq!(params.isotype_indices, vec![2, 3]);
+        assert!(params.quantile_clip.is_none());
     }
 }

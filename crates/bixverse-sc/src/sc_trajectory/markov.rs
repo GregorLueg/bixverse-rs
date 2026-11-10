@@ -236,8 +236,9 @@ fn waypoint_knn(wp_data: &[Vec<f32>], k: usize, verbose: bool) -> ScKnnResults {
     let n_dims = wp_data[0].len();
 
     let mat = Mat::<f32>::from_fn(n_wp, n_dims, |i, j| wp_data[i][j]);
-    let index = build_exhaustive_index(mat.as_ref(), "euclidean");
-    let (indices, distances) = query_exhaustive_self(&index, k, true, verbose)?;
+    let index = build_exhaustive_index(mat.as_ref(), "euclidean", Verbosity::Quiet);
+    let (indices, distances) =
+        query_exhaustive_self(&index, k, true, verbosity_from_flag(verbose))?;
 
     let mut distances = distances.ok_or(CoreErrors::InvalidArgument(
         "Palantir: the exhaustive waypoint search returned no distances".to_string(),

@@ -9,6 +9,7 @@
 //! and get every comparison out of one sort per gene.
 
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -1156,6 +1157,37 @@ pub fn parse_auc_type(s: &str) -> Option<AucType> {
     }
 }
 
+/// Deserialise the AUC type, checked through [parse_auc_type]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding `"recovery"`, `"wilcox"` or `"ap"`
+///
+/// ### Returns
+///
+/// The [AucType], or an error naming the unrecognised value.
+pub fn de_auc_type<'de, D: Deserializer<'de>>(d: D) -> Result<AucType, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_auc_type(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "auc_type must be 'recovery', 'wilcox' or 'ap', got '{s}'"
+        ))
+    })
+}
+
+/// Deserialise an optional rank cutoff the R side hands over as a double
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a number or nothing
+///
+/// ### Returns
+///
+/// The cutoff truncated to a count, as the R binding reads it, or `None`.
+pub fn de_max_rank<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.map(|v| v as usize))
+}
+
 ////////////
 // Params //
 ////////////
@@ -1172,14 +1204,19 @@ const AUC_MAX_RANK_FRAC: f64 = 0.05;
 ///
 /// The default is the recovery-curve AUC, i.e. AUCell as published. Derived
 /// rather than hand-written so it cannot drift away from [AucType]'s default.
-#[derive(Clone, Copy, Debug, Default)]
+/// Deserialises from the R `params_sc_aucell()` list; missing keys take the
+/// defaults.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct AucellParams {
     /// Which statistic to compute.
+    #[serde(deserialize_with = "de_auc_type")]
     pub auc_type: AucType,
     /// Rank cutoff for [AucType::Recovery], counted from the top of the
     /// within-cell ranking. `None` resolves to the top 5% of the gene
     /// universe, see `AUC_MAX_RANK_FRAC`. Ignored
     /// by the other two variants.
+    #[serde(deserialize_with = "de_max_rank")]
     pub max_rank: Option<usize>,
     /// If true, z-score each gene set's scores across cells before returning.
     /// This is what makes [AucType::AveragePrecision] comparable across gene

@@ -378,11 +378,11 @@ where
     F1: Fn(&[T], &[T]) -> T,
 {
     let mut out = Vec::with_capacity(ys.len());
-    let mut chunks = ys.chunks_exact(4);
-    for c in &mut chunks {
-        out.extend_from_slice(&f4(q, [c[0], c[1], c[2], c[3]]));
+    let (chunks, rem) = ys.as_chunks::<4>();
+    for &c in chunks {
+        out.extend_from_slice(&f4(q, c));
     }
-    out.extend(chunks.remainder().iter().map(|y| f1(q, y)));
+    out.extend(rem.iter().map(|y| f1(q, y)));
     out
 }
 

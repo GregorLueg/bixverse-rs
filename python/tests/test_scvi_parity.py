@@ -1,9 +1,9 @@
-"""Weight transfer: scvi-tools' SCVI into ours, and our torch model into MLX.
+"""Weight transfer: scvi-tools' SCVI into ours, our torch model into MLX and JAX.
 
 Same weights, same batch, eval mode, z at the posterior mean: the encoder
 output, the reconstruction term and the KL must agree to float rounding. A
 mismatch localises to a layer or a likelihood term. Skips without the
-`validation` group (scvi-tools) or off Apple Silicon (MLX).
+`validation` group (scvi-tools), off Apple Silicon (MLX) or without JAX.
 """
 
 import platform
@@ -119,3 +119,81 @@ def test_torch_weights_reproduce_in_mlx(counts, lik):
         np.array(got["reconstruction"]), want["reconstruction"], rtol=1e-4
     )
     np.testing.assert_allclose(np.array(got["kl"]), want["kl"], rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("lik", ["nb", "zinb"])
+def test_torch_weights_reproduce_in_jax(counts, lik):
+    jnp = pytest.importorskip("jax.numpy")
+    import jax
+
+    from bixverse.nn import _jax as bvj
+
+    x, b = counts
+    params = ScviParams(gene_likelihood=lik)
+    torch.manual_seed(0)
+    src = bvt.Vae(x.shape[1], 2, params)
+    src.train()
+    with torch.no_grad():
+        src(x, b, 1.0)
+    src.eval()
+
+    dst = bvj.torch_state_to_jax(src.state_dict(), n_batch=2)
+    assert bvj.n_parameters(dst) == sum(p.numel() for p in src.parameters())
+
+    with torch.no_grad():
+        want = src(x, b, 1.0, sample=False)
+    got, _ = bvj.forward(
+        dst.params,
+        dst.state,
+        jnp.asarray(x.numpy()),
+        jnp.asarray(b.numpy().astype(np.int32)),
+        1.0,
+        jax.random.key(0),
+        n_batch=2,
+        dropout=params.dropout_rate,
+        train=False,
+        sample=False,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(got["qz_m"]), want["qz_m"], rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(got["reconstruction"]), want["reconstruction"], rtol=1e-5
+    )
+    np.testing.assert_allclose(np.asarray(got["kl"]), want["kl"], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("lik", ["nb", "zinb"])
+def test_jax_batchnorm_training_update_matches_torch(counts, lik):
+    jnp = pytest.importorskip("jax.numpy")
+    import jax
+
+    from bixverse.nn import _jax as bvj
+
+    x, b = counts
+    params = ScviParams(gene_likelihood=lik, dropout_rate=0.0)
+    torch.manual_seed(0)
+    src = bvt.Vae(x.shape[1], 2, params)
+    dst = bvj.torch_state_to_jax(src.state_dict(), n_batch=2)
+    src.train()
+    with torch.no_grad():
+        want = src(x, b, 1.0, sample=False)
+    got, state = bvj.forward(
+        dst.params,
+        dst.state,
+        jnp.asarray(x.numpy()),
+        jnp.asarray(b.numpy().astype(np.int32)),
+        1.0,
+        jax.random.key(0),
+        n_batch=2,
+        dropout=0.0,
+        train=True,
+        sample=False,
+    )
+    np.testing.assert_allclose(
+        np.asarray(got["reconstruction"]), want["reconstruction"], rtol=1e-5
+    )
+    after = bvj.torch_state_to_jax(src.state_dict(), n_batch=2).state
+    for g, w in zip(jax.tree.leaves(state), jax.tree.leaves(after), strict=True):
+        np.testing.assert_allclose(np.asarray(g), np.asarray(w), rtol=1e-5, atol=1e-6)

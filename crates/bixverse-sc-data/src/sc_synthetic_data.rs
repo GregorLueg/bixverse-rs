@@ -10,6 +10,7 @@ use faer::Mat;
 use rand::prelude::*;
 use rand_distr::{StandardNormal, Uniform};
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 
 use crate::prelude::*;
 
@@ -88,9 +89,13 @@ pub fn parse_sample_bias(s: &str) -> Option<SampleBias> {
 }
 
 /// Structure to keep the CellTypeConfig
-#[derive(Clone, Debug)]
+///
+/// Deserialises from one entry of the R `marker_genes` list; a missing
+/// `marker_genes` key means no markers.
+#[derive(Clone, Debug, Deserialize)]
 pub struct CellTypeConfig {
     /// Indices are the marker genes for this specific cell type
+    #[serde(default)]
     pub marker_genes: Vec<usize>,
 }
 
@@ -605,7 +610,11 @@ const DIALOGUE_COUNT_SCALE: f32 = 10.0;
 /// contiguously by sample, so every cell type ends up with the same sample
 /// composition. That is the easy case for the method: it is a fixture for
 /// testing the pipeline, not a stress test of the sample overlap logic.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_synthetic_dialogue()`
+/// list; missing keys take the [Default].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct DialogueSyntheticParams {
     /// Samples the experiment spans. Below `MIN_SHARED_SAMPLES` the
     /// decomposition refuses to run.
@@ -910,7 +919,11 @@ const CELLSWEEP_ALPHA_MAX: f64 = 0.85;
 /// Real barcodes come first, empty droplets after, which is the order
 /// `run_cellsweep` wants its per-sample index lists in anyway. Cell types are
 /// assigned round-robin over the real barcodes.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_synthetic_cellsweep()`
+/// list; missing keys take the [Default].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct CellSweepSyntheticParams {
     /// Number of real barcodes.
     pub n_real: usize,

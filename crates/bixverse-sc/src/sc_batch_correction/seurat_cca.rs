@@ -24,9 +24,11 @@ use crate::sc_batch_correction::seurat_anchors::{
     tree_merge_embeddings,
 };
 use crate::sc_processing::pca::{
-    SingleCellPcaParams, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
+    SingleCellPcaParams, clr_offsets_on_store, pca_on_sc_sparse, resolve_clr_size_factor,
+    scale_csc_chunk,
 };
 use bixverse_core::core::math::pca_svd::randomised_svd_matfree;
+use serde::Deserialize;
 
 /// Cells per parallel task when transposing gene-major rows into a matrix
 const CELL_TILE: usize = 16;
@@ -43,7 +45,11 @@ type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 ////////////
 
 /// Parameters for Seurat CCA integration.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_seurat_cca()` list: its own keys
+/// plus the kNN and PCA keys; missing keys take the defaults.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct SeuratCcaParams {
     /// Number of canonical correlation dimensions
     pub num_cc: usize,
@@ -64,8 +70,10 @@ pub struct SeuratCcaParams {
     /// Gaussian kernel bandwidth divisor
     pub sd: f32,
     /// kNN backend parameters
+    #[serde(flatten)]
     pub knn_params: KnnParams,
     /// Base PCA parameters
+    #[serde(flatten)]
     pub pca_params: SingleCellPcaParams,
 }
 
@@ -696,4 +704,53 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
     }
 
     Ok(corrected)
+}
+
+/// Seurat CCA integration over an on-disk experiment.
+///
+/// Opens the gene-major store, loads the CLR offsets from the cell-major one
+/// when `params.pca_params.clr` asks for the `PFlogPF` transformation, and
+/// runs [`seurat_cca_integration`].
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file, read only for the
+///   CLR offsets
+/// * `cell_indices` - Absolute cell indices into the store
+/// * `gene_indices` - Absolute HVG indices used for the CCA anchor space
+/// * `batch_indices` - Zero-based batch label per cell in `cell_indices`
+/// * `pre_computed_pca` - Optional pre-computed base PCA scores
+/// * `params` - Method parameters, see [SeuratCcaParams]
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+/// * `seed` - Random seed for SVD sketches and kNN backends
+///
+/// ### Returns
+///
+/// Corrected PCA embedding, `(n_cells, no_pcs)`, in `cell_indices` order.
+#[allow(clippy::too_many_arguments)]
+pub fn seurat_cca_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    batch_indices: &[usize],
+    pre_computed_pca: Option<Mat<f32>>,
+    params: &SeuratCcaParams,
+    verbose: usize,
+    seed: usize,
+) -> Result<Mat<f32>, ScErrors> {
+    let offsets = clr_offsets_on_store(f_path_cell, cell_indices, params.pca_params.clr, verbose)?;
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    seurat_cca_integration(
+        &reader,
+        cell_indices,
+        gene_indices,
+        batch_indices,
+        pre_computed_pca,
+        offsets.as_deref(),
+        params,
+        verbose,
+        seed,
+    )
 }

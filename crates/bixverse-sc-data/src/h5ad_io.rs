@@ -5,6 +5,7 @@ use hdf5::{File, Result};
 use ndarray::{Array2, s};
 use num_traits::Float;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,6 +34,7 @@ const N_CHECK: usize = 100;
 
 /// The format in which the H5AD counts were stored (because the field is
 /// insane and stores them in so many ways...)
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum H5ADFormat {
     /// CSR type format.
     Csr,
@@ -61,6 +63,41 @@ pub fn parse_h5ad_format(s: &str) -> Option<H5ADFormat> {
         "dense_col" => Some(H5ADFormat::DenseCol),
         _ => None,
     }
+}
+
+impl H5ADFormat {
+    /// The name [parse_h5ad_format] maps back to this format
+    ///
+    /// ### Returns
+    ///
+    /// `"CSR"`, `"CSC"`, `"DENSE_ROW"` or `"DENSE_COL"`, as the R side
+    /// spells it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            H5ADFormat::Csr => "CSR",
+            H5ADFormat::Csc => "CSC",
+            H5ADFormat::DenseRow => "DENSE_ROW",
+            H5ADFormat::DenseCol => "DENSE_COL",
+        }
+    }
+}
+
+/// Deserialise an [H5ADFormat] through [parse_h5ad_format]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The format, or an error naming the unrecognised value.
+pub fn de_h5ad_format<'de, D: Deserializer<'de>>(d: D) -> Result<H5ADFormat, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_h5ad_format(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "cs_type must be one of 'csr', 'csc', 'dense_row' or 'dense_col', got '{s}'"
+        ))
+    })
 }
 
 ///////////////////
@@ -152,6 +189,29 @@ pub fn parse_raw_slot(s: &str) -> Option<RawDataSlot> {
         "raw" | "raw.x" => Some(RawDataSlot::RawX),
         "layers.counts" => Some(RawDataSlot::LayerCounts),
         _ => None,
+    }
+}
+
+/// Deserialise an optional [RawDataSlot] through [parse_raw_slot]
+///
+/// A missing or null value is the default slot (`X`), as an unset or `NA`
+/// `raw_slot` is on the R side.
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string or null
+///
+/// ### Returns
+///
+/// The slot, or an error naming the unrecognised value.
+pub fn de_raw_slot<'de, D: Deserializer<'de>>(d: D) -> Result<RawDataSlot, D::Error> {
+    match Option::<String>::deserialize(d)? {
+        None => Ok(RawDataSlot::default()),
+        Some(s) => parse_raw_slot(&s).ok_or_else(|| {
+            D::Error::custom(format!(
+                "raw_slot must be one of 'X', 'raw.X' or 'layers.counts', got '{s}'"
+            ))
+        }),
     }
 }
 
@@ -642,15 +702,11 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_gene + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<u32>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<u32>(data_start..data_end)?;
 
             for &gene_idx in gene_chunk.iter() {
                 let gene_data_start = indptr[gene_idx] - data_start;
@@ -677,9 +733,9 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; shape.0];
     let mut cell_lib_size = vec![0.0f32; shape.0];
@@ -707,7 +763,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max={:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib.separate_with_underscores(),
             max_lib.separate_with_underscores()
         );
@@ -1215,15 +1271,11 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_cell + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<u32>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<u32>(data_start..data_end)?;
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;
@@ -1251,9 +1303,9 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; shape.0];
     let mut cell_lib_size = vec![0.0f32; shape.0];
@@ -1278,7 +1330,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max = {:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib, max_lib
         );
     }
@@ -1873,7 +1925,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max = {:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib, max_lib
         );
         println!("Second pass done: {:.2?}", second_pass_time.elapsed());

@@ -10,6 +10,7 @@ use crate::sc_processing::residuals::{
     validate_residual_row_inputs,
 };
 use bixverse_core::errors::CoreErrors;
+use serde::Deserialize;
 
 ////////////
 // Consts //
@@ -29,7 +30,11 @@ const DEFAULT_THETA: f64 = 100.0;
 ////////////
 
 /// Tuning knobs for analytic Pearson residuals.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Deserialises from the keys of the R `params_sc_apr()` list through
+/// [`AprParamsSpec`], validated.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "AprParamsSpec")]
 pub struct AprParams {
     /// Shared inverse overdispersion. Use `f64::INFINITY` for the Poisson
     /// limit.
@@ -89,6 +94,63 @@ impl AprParams {
             validate_clip_range(clip)?;
         }
         Ok(())
+    }
+}
+
+/// [`AprParams`] as the R `params_sc_apr()` list spells it, with the clipping
+/// range as two optional bounds. Missing keys take the defaults.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct AprParamsSpec {
+    /// See [`AprParams::theta`].
+    pub theta: f64,
+    /// See [`AprParams::min_cells`].
+    pub min_cells: usize,
+    /// Lower clipping bound.
+    pub clip_min: Option<f64>,
+    /// Upper clipping bound.
+    pub clip_max: Option<f64>,
+}
+
+impl Default for AprParamsSpec {
+    fn default() -> Self {
+        let d = AprParams::default();
+        Self {
+            theta: d.theta,
+            min_cells: d.min_cells,
+            clip_min: None,
+            clip_max: None,
+        }
+    }
+}
+
+impl TryFrom<AprParamsSpec> for AprParams {
+    type Error = ScErrors;
+
+    /// Resolve the clipping bounds into a range and validate.
+    ///
+    /// Both ends or neither: a spec carrying only one is treated as carrying
+    /// none, as on the R side.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The deserialised spec
+    ///
+    /// ### Returns
+    ///
+    /// The parameters, or the error [`AprParams::validate`] raises.
+    fn try_from(spec: AprParamsSpec) -> Result<Self, ScErrors> {
+        let clip_range = match (spec.clip_min, spec.clip_max) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        };
+        let params = Self {
+            theta: spec.theta,
+            min_cells: spec.min_cells,
+            clip_range,
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 

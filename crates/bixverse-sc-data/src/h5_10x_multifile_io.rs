@@ -14,6 +14,7 @@
 
 use hdf5::File;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +22,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::data_io::*;
-use crate::h5_10x_io::{TenxVersion, validate_feature_types_tenx};
+use crate::h5_10x_io::{TenxVersion, de_tenx_version, validate_feature_types_tenx};
 use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::check_tenx_filters;
 use crate::h5ad_io::write_h5_cell_major_cells;
@@ -32,12 +33,17 @@ use crate::prelude::*;
 ////////////////
 
 /// Per-file task descriptor for multi-10x loading
+///
+/// Deserialises from the keys of one R `prescan_tenx_h5_files()` file task.
+/// `version` goes through [parse_tenx_version](crate::h5_10x_io::parse_tenx_version).
+#[derive(Deserialize)]
 pub struct TenxFileTask {
     /// Experimental identifier
     pub exp_id: String,
     /// Path to the 10x CellRanger h5 file
     pub h5_path: String,
     /// CellRanger layout version (resolved by the caller)
+    #[serde(deserialize_with = "de_tenx_version")]
     pub version: TenxVersion,
     /// Number of cells/spots (columns) in this file
     pub no_cells: usize,
@@ -51,6 +57,7 @@ pub struct TenxFileTask {
     /// Target modality for V3 files (e.g. "Gene Expression", "Antibody
     /// Capture"). Defaults to "Gene Expression" when `None`. Ignored for V2,
     /// which is single-modality.
+    #[serde(default)]
     pub feature_type: Option<String>,
 }
 

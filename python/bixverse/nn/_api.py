@@ -8,6 +8,7 @@ import numpy as np
 from beartype import beartype
 
 from .._bixverse import CellReader
+from .._validate import Verbose
 from ._data import encode_batches, resolve_cells, resolve_genes
 from ._params import Backend, ScviFit, ScviParams
 
@@ -30,7 +31,7 @@ def _backend(name: Backend) -> Any:
     """Import a backend module, naming the extra when it is missing.
 
     Args:
-        name: `"torch"` or `"mlx"`.
+        name: `"torch"`, `"mlx"` or `"jax"`.
 
     Returns:
         The backend module.
@@ -44,6 +45,8 @@ def _backend(name: Backend) -> Any:
                 from . import _torch as mod
             case "mlx":
                 from . import _mlx as mod
+            case "jax":
+                from . import _jax as mod
     except ImportError as e:
         raise ImportError(
             f"the {name} backend needs `pip install bixverse[{name}]`"
@@ -62,6 +65,7 @@ def train_scvi(
     backend: Backend = "torch",
     device: str = "auto",
     seed: int = 42,
+    verbose: Verbose = True,
 ) -> ScviFit:
     """Train scVI on raw counts streamed from a bixverse store.
 
@@ -73,10 +77,13 @@ def train_scvi(
             scvi-tools on a gene-subset AnnData.
         batch: One batch label per entry of `cells`. `None` is one batch.
         params: Hyperparameters. `None` takes scvi-tools' defaults.
-        backend: `"torch"` or `"mlx"` (Apple Silicon).
-        device: Torch device, or `"auto"` for cuda, then mps, then cpu.
-            Ignored by MLX, which runs on the GPU.
+        backend: `"torch"`, `"mlx"` (Apple Silicon) or `"jax"`.
+        device: Torch device, or `"auto"` for cuda, then mps, then cpu. On
+            JAX a platform name (`"cpu"`, `"gpu"`), `"auto"` taking JAX's
+            default. Ignored by MLX, which runs on the GPU.
         seed: Seeds initialisation, sampling and shuffling.
+        verbose: `0` (`False`) silent, `1` (`True`) a progress bar over the epochs,
+            `2` also logs the loss per epoch.
 
     Returns:
         The fitted model.
@@ -92,7 +99,7 @@ def train_scvi(
     params = params or ScviParams()
     mod = _backend(backend)
     match backend:
-        case "torch":
+        case "torch" | "jax":
             return mod.train(
                 reader,
                 cells_,
@@ -102,10 +109,18 @@ def train_scvi(
                 params=params,
                 device=device,
                 seed=seed,
+                verbose=verbose,
             )
         case "mlx":
             return mod.train(
-                reader, cells_, genes_, codes, categories, params=params, seed=seed
+                reader,
+                cells_,
+                genes_,
+                codes,
+                categories,
+                params=params,
+                seed=seed,
+                verbose=verbose,
             )
 
 

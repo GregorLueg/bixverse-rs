@@ -7,6 +7,7 @@
 
 use num_traits::Float;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::iter::Sum;
 use std::time::Instant;
 
@@ -64,7 +65,11 @@ pub enum SnnSimilarity {
 }
 
 /// How a directed kNN becomes an undirected graph.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Deserialises from the flat keys of the R `params_knn_graph_defaults()`
+/// list, see [`KnnSymmetrisationSpec`].
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "KnnSymmetrisationSpec")]
 pub enum KnnSymmetrisation {
     /// kNN union. Mutual pairs weigh 2 and one-sided pairs 1, unless `binary`
     /// sets every weight to 1.
@@ -120,6 +125,81 @@ pub fn parse_snn_similarity(s: &str) -> Option<SnnSimilarity> {
         "jaccard" => Some(SnnSimilarity::Jaccard),
         "rank" => Some(SnnSimilarity::Rank),
         _ => None,
+    }
+}
+
+/// The flat keys a [`KnnSymmetrisation`] deserialises from. Each variant
+/// only reads its own keys; missing keys take the defaults of
+/// `params_knn_graph_defaults()`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct KnnSymmetrisationSpec {
+    /// `"snn"`, `"umap"` or `"knn"`
+    pub knn_sym: String,
+    /// sNN weight: `"jaccard"` or `"rank"`
+    pub snn_similarity: String,
+    /// sNN prune threshold
+    pub pruning: f64,
+    /// sNN component rescue
+    pub rescue: bool,
+    /// UMAP local connectivity
+    pub local_connectivity: f64,
+    /// UMAP fuzzy union / intersection mix
+    pub mix_ratio: f64,
+    /// kNN union with unit weights
+    pub binary: bool,
+}
+
+impl Default for KnnSymmetrisationSpec {
+    fn default() -> Self {
+        Self {
+            knn_sym: "snn".to_string(),
+            snn_similarity: "jaccard".to_string(),
+            pruning: SNN_PRUNE_DEFAULT,
+            rescue: true,
+            local_connectivity: 1.0,
+            mix_ratio: 1.0,
+            binary: false,
+        }
+    }
+}
+
+impl TryFrom<KnnSymmetrisationSpec> for KnnSymmetrisation {
+    type Error = String;
+
+    /// Pick the variant named by `knn_sym` and fill it from the spec.
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The flat keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`KnnSymmetrisation`], or an error naming an unknown variant or
+    /// similarity.
+    fn try_from(spec: KnnSymmetrisationSpec) -> Result<Self, String> {
+        match spec.knn_sym.to_lowercase().as_str() {
+            "snn" => Ok(Self::Snn {
+                similarity: parse_snn_similarity(&spec.snn_similarity).ok_or_else(|| {
+                    format!(
+                        "snn_similarity must be 'jaccard' or 'rank', got '{}'",
+                        spec.snn_similarity
+                    )
+                })?,
+                prune: spec.pruning,
+                rescue: spec.rescue,
+            }),
+            "umap" => Ok(Self::Umap {
+                local_connectivity: spec.local_connectivity,
+                mix_ratio: spec.mix_ratio,
+            }),
+            "knn" => Ok(Self::Knn {
+                binary: spec.binary,
+            }),
+            other => Err(format!(
+                "knn_sym must be 'snn', 'umap' or 'knn', got '{other}'"
+            )),
+        }
     }
 }
 

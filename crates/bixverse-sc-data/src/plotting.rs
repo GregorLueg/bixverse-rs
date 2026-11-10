@@ -25,7 +25,8 @@ pub struct GroupedGeneStats {
     pub pct_expressed: Vec<f32>,
 }
 
-/// Z-score in place using SIMD helpers, optionally clamp.
+/// Z-score in place by the sample SD using SIMD helpers, optionally clamp. Fewer
+/// than two values stay unscaled.
 ///
 /// ### Params
 ///
@@ -34,8 +35,11 @@ pub struct GroupedGeneStats {
 fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
     let n = data.len() as f32;
     let mean = sum_simd_f32(data) / n;
-    let var = sum_squared_dev_simd_f32(data, mean) / n;
-    let sd = var.sqrt();
+    let sd = if data.len() > 1 {
+        (sum_squared_dev_simd_f32(data, mean) / (n - 1.0)).sqrt()
+    } else {
+        0.0
+    };
     if sd > 1e-8 {
         for x in data.iter_mut() {
             *x = (*x - mean) / sd;
@@ -214,23 +218,24 @@ pub fn extract_grouped_gene_stats<S: SingleCellReading>(
     group_ids: &[usize],
     group_levels: &[String],
 ) -> Result<GroupedGeneStats, ScDataErrors> {
-    assert_eq!(
-        cell_indices.len(),
-        group_ids.len(),
-        "cell_indices and group_ids must have equal length"
-    );
+    if cell_indices.len() != group_ids.len() {
+        return Err(ScDataErrors::InvalidArgument(format!(
+            "cell_indices ({}) and group_ids ({}) must have equal length",
+            cell_indices.len(),
+            group_ids.len()
+        )));
+    }
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_groups = group_levels.len();
 
     let mut group_sizes = vec![0usize; n_groups];
     for &g in group_ids {
-        debug_assert!(
-            g < n_groups,
-            "group_id {} out of bounds for {} levels",
-            g,
-            n_groups
-        );
+        if g >= n_groups {
+            return Err(ScDataErrors::InvalidArgument(format!(
+                "group_id {g} out of bounds for {n_groups} levels"
+            )));
+        }
         group_sizes[g] += 1;
     }
 

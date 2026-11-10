@@ -27,6 +27,7 @@
 
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::prelude::*;
 use crate::sc_trajectory::palantir::PalantirResult;
@@ -62,7 +63,11 @@ const GENE_TRENDS_MIN_RESOLUTION: usize = 2;
 //////////////////////
 
 /// Parameters for [select_branch_cells].
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_branch_selection()` list;
+/// missing keys take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct BranchSelectionParams {
     /// Upper-tail quantile of the fate probability. Reference: `1e-2`.
     pub q: f64,
@@ -255,8 +260,50 @@ pub enum BranchWeighting {
     FateProbability,
 }
 
+/// Parse a weighting name into a [BranchWeighting].
+///
+/// ### Params
+///
+/// * `s` - The weighting name, `"hard_mask"` or `"fate_probability"`,
+///   case-insensitive.
+///
+/// ### Returns
+///
+/// The matching weighting, or `None` if the string is not recognised.
+pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
+    match s.to_lowercase().as_str() {
+        "hard_mask" | "hardmask" | "mask" => Some(BranchWeighting::HardMask),
+        "fate_probability" | "fateprobability" | "fate_prob" => {
+            Some(BranchWeighting::FateProbability)
+        }
+        _ => None,
+    }
+}
+
+/// Deserialise a [BranchWeighting] through [parse_branch_weighting]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The weighting, or an error naming the unrecognised value.
+pub fn de_branch_weighting<'de, D: Deserializer<'de>>(d: D) -> Result<BranchWeighting, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_branch_weighting(&s).ok_or_else(|| {
+        D::Error::custom(format!(
+            "weighting must be 'hard_mask' or 'fate_probability', got '{s}'"
+        ))
+    })
+}
+
 /// Parameters for [compute_gene_trends].
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the flat R `params_sc_gene_trends()` list, the Gaussian
+/// process keys at the same level, see [`GeneTrendsParamsSpec`].
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(from = "GeneTrendsParamsSpec")]
 pub struct GeneTrendsParams {
     /// Grid points per branch. Reference: [PSEUDOTIME_RES].
     pub resolution: usize,
@@ -293,6 +340,68 @@ impl Default for GeneTrendsParams {
             resolution: PSEUDOTIME_RES,
             weighting: BranchWeighting::default(),
             gp: LandmarkGpParams::default(),
+        }
+    }
+}
+
+/// The keys a [`GeneTrendsParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take the [`GeneTrendsParams`] defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct GeneTrendsParamsSpec {
+    /// See [`GeneTrendsParams::resolution`].
+    pub resolution: usize,
+    /// See [`GeneTrendsParams::weighting`].
+    #[serde(deserialize_with = "de_branch_weighting")]
+    pub weighting: BranchWeighting,
+    /// Matérn-5/2 length scale.
+    pub length_scale: f64,
+    /// Noise standard deviation.
+    pub sigma: f64,
+    /// Diagonal loading for the landmark Cholesky.
+    pub jitter: f64,
+    /// Cholesky retries, each multiplying the jitter by ten.
+    pub max_jitter_retries: usize,
+    /// Training rows per accumulation chunk, `0` for the default.
+    pub chunk_size: usize,
+}
+
+impl Default for GeneTrendsParamsSpec {
+    fn default() -> Self {
+        let d = GeneTrendsParams::default();
+        Self {
+            resolution: d.resolution,
+            weighting: d.weighting,
+            length_scale: d.gp.length_scale,
+            sigma: d.gp.sigma,
+            jitter: d.gp.jitter,
+            max_jitter_retries: d.gp.max_jitter_retries,
+            chunk_size: d.gp.chunk_size,
+        }
+    }
+}
+
+impl From<GeneTrendsParamsSpec> for GeneTrendsParams {
+    /// Assemble the Gaussian process hyperparameters.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`GeneTrendsParams`].
+    fn from(s: GeneTrendsParamsSpec) -> Self {
+        Self {
+            resolution: s.resolution,
+            weighting: s.weighting,
+            gp: LandmarkGpParams::new(
+                s.length_scale,
+                s.sigma,
+                s.jitter,
+                s.max_jitter_retries,
+                s.chunk_size,
+            ),
         }
     }
 }

@@ -459,6 +459,82 @@ pub fn read_cell_subset_csc(
     Ok(transpose_sparse(&csr))
 }
 
+/// A cell selection read into memory, for the gene-major drivers to run on.
+///
+/// What [`prefer_cell_subset`] and [`read_cell_subset_csc`] add up to: the
+/// selection renumbered `0..n` behind an [`InMemorySparseReader`], so a driver
+/// handed [`CellSubset::local`] sees the same cells, in the same order, as one
+/// handed the store indices over the on-disk gene store.
+pub struct CellSubset {
+    /// The selected cells, CSC with shape `(cells, genes)`. Raw counts in
+    /// `data`, normalised counts in `data_2`.
+    pub matrix: CompressedSparseData2<u32, f32>,
+    /// Library size the normalised layer of the store was scaled to.
+    pub target_size: Option<f32>,
+    /// `0..n`, the selection's indices into `matrix`.
+    pub local: Vec<usize>,
+}
+
+impl CellSubset {
+    /// Read the selection into memory if the gate says the cell path wins.
+    ///
+    /// ### Params
+    ///
+    /// * `f_path_cell` - Path to the `counts_cells.bin` file
+    /// * `cell_set` - The selected cells, 0-based store positions
+    /// * `n_total` - Number of cells in the store
+    /// * `verbose` - Controls verbosity
+    ///
+    /// ### Returns
+    ///
+    /// `Some` with the in-memory subset, or `None` when the gene-major sweep
+    /// should be used.
+    pub fn load(
+        f_path_cell: &str,
+        cell_set: &[usize],
+        n_total: usize,
+        verbose: bool,
+    ) -> Result<Option<Self>, ScDataErrors> {
+        if !prefer_cell_subset(cell_set.len(), n_total) {
+            return Ok(None);
+        }
+        if verbose {
+            println!(
+                "Reading the {} selected cells from the cell-major store.",
+                cell_set.len()
+            );
+        }
+
+        let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+        let matrix = read_cell_subset_csc(&cell_reader, cell_set)?;
+
+        Ok(Some(Self {
+            matrix,
+            target_size: cell_reader.target_size(),
+            local: (0..cell_set.len()).collect(),
+        }))
+    }
+
+    /// Gene-major reader over the subset.
+    ///
+    /// ### Returns
+    ///
+    /// The [`InMemorySparseReader`], borrowing the subset.
+    pub fn reader(&self) -> Result<InMemorySparseReader<'_>, ScDataErrors> {
+        InMemorySparseReader::new(&self.matrix, self.target_size)
+    }
+
+    /// Cell-major reader over the subset, for the drivers that need per-cell
+    /// chunks over the same renumbered cells. Holds a CSR copy of the subset.
+    ///
+    /// ### Returns
+    ///
+    /// The [`InMemorySparseReader`] in cell-major mode, borrowing the subset.
+    pub fn cell_reader(&self) -> Result<InMemorySparseReader<'_>, ScDataErrors> {
+        InMemorySparseReader::new_cell_major(&self.matrix, self.target_size)
+    }
+}
+
 impl SingleCellReading for InMemorySparseReader<'_> {
     /// Read cells by index in a multi-threaded manner
     ///

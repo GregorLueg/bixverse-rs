@@ -36,5 +36,6 @@ pub const N_POWER_ITERS_SINGLE_CELL: usize = 4;
 /// The default power iterations for randomised SVD
 pub const DEFAULT_N_POWER_ITERS_RAND_SVD: usize = 2;
 
-/// MAD scaling constant. R's `mad()` applies this factor by default.
+/// MAD scaling constant `1 / qnorm(0.75)`. R's `mad()` applies it rounded to
+/// 1.4826, so results drift from R by a relative ~1.5e-6.
 pub const MAD_SCALE: f64 = 1.482_602_218_505_602;

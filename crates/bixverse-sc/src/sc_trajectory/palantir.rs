@@ -81,6 +81,7 @@
 
 use faer::Mat;
 use rustc_hash::FxHashMap;
+use serde::Deserialize;
 
 use crate::prelude::*;
 use crate::sc_trajectory::diffusion::{
@@ -100,7 +101,11 @@ use crate::sc_trajectory::pseudotime::{
 //////////////////////
 
 /// Parameters for Palantir trajectory inference.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_sc_palantir()` list, see
+/// [`PalantirParamsSpec`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "PalantirParamsSpec")]
 pub struct PalantirParams {
     /// Usable diffusion components to extract before the multiscale scaling.
     /// The eigensolver is asked for `n_dcs + 1` pairs because the trivial
@@ -180,6 +185,90 @@ impl PalantirParams {
 impl Default for PalantirParams {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The keys a [`PalantirParams`] deserialises from, as its R list conversion
+/// reads them; missing keys take the [`PalantirParams`] defaults. The
+/// eigensolver keys carry a `lanczos_` prefix, the kNN keys sit at the same
+/// level.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct PalantirParamsSpec {
+    /// See [`PalantirParams::n_dcs`].
+    pub n_dcs: usize,
+    /// See [`PalantirParams::n_eigs`].
+    pub n_eigs: Option<usize>,
+    /// See [`PalantirParams::knn`].
+    pub knn: usize,
+    /// See [`PalantirParams::num_waypoints`].
+    pub num_waypoints: usize,
+    /// See [`PalantirParams::scale_components`].
+    pub scale_components: bool,
+    /// See [`PalantirParams::use_early_cell_as_start`].
+    pub use_early_cell_as_start: bool,
+    /// See [`PalantirParams::max_iterations`].
+    pub max_iterations: usize,
+    /// See [`PalantirParams::branch_prob_threshold`].
+    pub branch_prob_threshold: f32,
+    /// Lanczos basis size, `None` to derive it.
+    pub lanczos_basis_size: Option<usize>,
+    /// Lanczos restart cycles.
+    pub lanczos_max_restarts: usize,
+    /// Lanczos relative residual tolerance.
+    pub lanczos_tol: f64,
+    /// The kNN keys.
+    #[serde(flatten)]
+    pub knn_params: KnnParams,
+}
+
+impl Default for PalantirParamsSpec {
+    fn default() -> Self {
+        let d = PalantirParams::default();
+        Self {
+            n_dcs: d.n_dcs,
+            n_eigs: d.n_eigs,
+            knn: d.knn,
+            num_waypoints: d.num_waypoints,
+            scale_components: d.scale_components,
+            use_early_cell_as_start: d.use_early_cell_as_start,
+            max_iterations: d.max_iterations,
+            branch_prob_threshold: d.branch_prob_threshold,
+            lanczos_basis_size: d.lanczos_params.basis_size,
+            lanczos_max_restarts: d.lanczos_params.max_restarts,
+            lanczos_tol: d.lanczos_params.tol,
+            knn_params: d.knn_params,
+        }
+    }
+}
+
+impl From<PalantirParamsSpec> for PalantirParams {
+    /// Assemble the eigensolver parameters.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`PalantirParams`].
+    fn from(s: PalantirParamsSpec) -> Self {
+        Self {
+            n_dcs: s.n_dcs,
+            n_eigs: s.n_eigs,
+            knn: s.knn,
+            num_waypoints: s.num_waypoints,
+            scale_components: s.scale_components,
+            use_early_cell_as_start: s.use_early_cell_as_start,
+            max_iterations: s.max_iterations,
+            branch_prob_threshold: s.branch_prob_threshold,
+            knn_params: s.knn_params,
+            lanczos_params: LanczosParams {
+                basis_size: s.lanczos_basis_size,
+                max_restarts: s.lanczos_max_restarts,
+                tol: s.lanczos_tol,
+            },
+        }
     }
 }
 

@@ -46,6 +46,7 @@
 
 use faer::Mat;
 use rayon::prelude::*;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::time::Instant;
 
 use crate::mc_generation::seacells::compute_diffusion_kernel;
@@ -132,8 +133,44 @@ pub enum MagicLayer {
     Raw,
 }
 
+/// Parse a layer name into a [MagicLayer].
+///
+/// ### Params
+///
+/// * `s` - The layer name, `"norm"` or `"raw"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The matching layer, or `None` if the string is not recognised.
+pub fn parse_magic_layer(s: &str) -> Option<MagicLayer> {
+    match s.to_lowercase().as_str() {
+        "norm" | "normalised" | "normalized" => Some(MagicLayer::Norm),
+        "raw" | "counts" => Some(MagicLayer::Raw),
+        _ => None,
+    }
+}
+
+/// Deserialise a [MagicLayer] through [parse_magic_layer]
+///
+/// ### Params
+///
+/// * `d` - The deserialiser, holding a string
+///
+/// ### Returns
+///
+/// The layer, or an error naming the unrecognised value.
+pub fn de_magic_layer<'de, D: Deserializer<'de>>(d: D) -> Result<MagicLayer, D::Error> {
+    let s = String::deserialize(d)?;
+    parse_magic_layer(&s)
+        .ok_or_else(|| D::Error::custom(format!("layer must be 'norm' or 'raw', got '{s}'")))
+}
+
 /// Parameters for the MAGIC entry points.
-#[derive(Clone, Copy, Debug)]
+///
+/// Deserialises from the keys of the R `params_sc_magic()` list; missing keys
+/// take the defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
 pub struct MagicParams {
     /// Diffusion steps. Reference default: `3`.
     ///
@@ -146,6 +183,7 @@ pub struct MagicParams {
     /// Genes per disk batch. Clamped to the gene count at entry.
     pub gene_batch_size: usize,
     /// Which stored layer to impute.
+    #[serde(deserialize_with = "de_magic_layer")]
     pub layer: MagicLayer,
     /// Skip the `MAGIC_MAX_ELEMENTS` output-size check.
     pub allow_large: bool,

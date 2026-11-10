@@ -10,10 +10,11 @@
 
 use faer::Mat;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::pca::PcaSolver;
+use crate::sc_processing::pca::{PcaSolver, de_pca_solver};
 use crate::sc_processing::utils_doublets::*;
 
 ///////////
@@ -53,7 +54,11 @@ pub type FinalScrubletRes = (
 ///
 /// Controls preprocessing, doublet simulation, PCA, kNN construction and
 /// threshold selection.
-#[derive(Clone, Debug)]
+///
+/// Deserialises from the flat R `params_scrublet()` list, the kNN keys
+/// included; missing keys take [`ScrubletParams::default`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct ScrubletParams {
     // -- processing --
     /// Whether to log-transform counts after normalisation.
@@ -83,6 +88,7 @@ pub struct ScrubletParams {
     /// Number of principal components.
     pub no_pcs: usize,
     /// Which PCA solver to use, see [PcaSolver].
+    #[serde(deserialize_with = "de_pca_solver")]
     pub svd_solver: PcaSolver,
 
     // -- scrublet --
@@ -92,15 +98,45 @@ pub struct ScrubletParams {
     pub expected_doublet_rate: f32,
     /// Uncertainty in the expected doublet rate.
     pub stdev_doublet_rate: f32,
-    /// Number of histogram bins for Otsu threshold detection.
+    /// Number of histogram bins for Otsu threshold detection. The R list key
+    /// is `n_bins_histogram`.
+    #[serde(rename = "n_bins_histogram", alias = "n_bins_hist")]
     pub n_bins_hist: usize,
     /// Optional manual threshold. If `None`, Otsu's method is used.
     pub manual_threshold: Option<f32>,
 
     // -- knn --
     /// [KnnParams] for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// in ann-search-rs, read from the same flat keys
+    #[serde(flatten)]
     pub knn_params: KnnParams,
+}
+
+/// The fallbacks of the R list conversion. `params_scrublet()` always sends
+/// every key, and its defaults differ from these.
+impl Default for ScrubletParams {
+    fn default() -> Self {
+        Self {
+            log_transform: false,
+            mean_center: true,
+            normalise_variance: true,
+            target_size: None,
+            min_gene_var_pctl: 0.85,
+            hvg_method: "vst".to_string(),
+            loess_span: 0.3,
+            clip_max: None,
+            binning_strategy: "equal_width".to_string(),
+            n_bins: 20,
+            no_pcs: 30,
+            svd_solver: PcaSolver::Covariance,
+            sim_doublet_ratio: 2.0,
+            expected_doublet_rate: 0.1,
+            stdev_doublet_rate: 0.02,
+            n_bins_hist: 50,
+            manual_threshold: None,
+            knn_params: KnnParams::default(),
+        }
+    }
 }
 
 /// Results from the Scrublet algorithm.

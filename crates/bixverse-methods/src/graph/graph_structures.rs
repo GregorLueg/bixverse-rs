@@ -989,6 +989,56 @@ where
     SparseGraph::new(n_nodes, adjacency, false)
 }
 
+/// Build an undirected SparseGraph from a directed CSR adjacency, keeping the
+/// larger of the two directed weights per node pair.
+///
+/// The equivalent of `igraph::graph_from_adjacency_matrix(mode = "max")`: an
+/// edge stored in one direction only keeps its weight, a self-loop is one
+/// edge, and the result goes through [`edge_pairs_to_sparse_graph`].
+///
+/// ### Params
+///
+/// * `adjacency` - Square CSR adjacency, row = source, column = target
+///
+/// ### Returns
+///
+/// Undirected graph with a symmetric, row-sorted CSR
+pub fn max_symmetrise_to_sparse_graph<T>(adjacency: &CompressedSparseData2<T>) -> SparseGraph<T>
+where
+    T: BixverseFloat + std::iter::Sum + Send + Sync,
+{
+    let n_nodes = adjacency.shape.0;
+    let mut pairs: Vec<(usize, usize, T)> = Vec::with_capacity(adjacency.data.len());
+    for i in 0..n_nodes {
+        let (start, end) = (
+            adjacency.indptr[i] as usize,
+            adjacency.indptr[i + 1] as usize,
+        );
+        for (&j, &w) in adjacency.indices[start..end]
+            .iter()
+            .zip(&adjacency.data[start..end])
+        {
+            let j = j as usize;
+            pairs.push((i.min(j), i.max(j), w));
+        }
+    }
+    pairs.par_sort_unstable_by_key(|&(i, j, _)| (i, j));
+
+    let mut edges: Vec<usize> = Vec::with_capacity(2 * pairs.len());
+    let mut weights: Vec<T> = Vec::with_capacity(pairs.len());
+    for (i, j, w) in pairs {
+        let n = weights.len();
+        if n > 0 && edges[2 * n - 2] == i && edges[2 * n - 1] == j {
+            weights[n - 1] = weights[n - 1].max(w);
+        } else {
+            edges.extend([i, j]);
+            weights.push(w);
+        }
+    }
+
+    edge_pairs_to_sparse_graph(&edges, &weights, n_nodes)
+}
+
 ///////////
 // Tests //
 ///////////
@@ -1074,9 +1124,11 @@ mod tests {
     /// Sorted `(u, v, w)` triples, so edge lists compare as sets.
     fn edge_set(edges: &[u32], weights: &[f32]) -> Vec<(u32, u32, u32)> {
         let mut out: Vec<_> = edges
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .zip(weights)
-            .map(|(e, w)| (e[0].min(e[1]), e[0].max(e[1]), w.to_bits()))
+            .map(|(&[a, b], w)| (a.min(b), a.max(b), w.to_bits()))
             .collect();
         out.sort_unstable();
         out
@@ -1141,5 +1193,26 @@ mod tests {
                 CoreErrors::SerialisedWidthMismatch { .. }
             ))
         ));
+    }
+
+    /// Both directions collapse to the larger weight, one direction keeps
+    /// its own.
+    #[test]
+    fn test_max_symmetrise_keeps_larger_weight() {
+        // 0 -> 1 (0.2), 1 -> 0 (0.7), 1 -> 2 (0.4)
+        let adjacency = CompressedSparseData2::new_csr(
+            &[0.2_f32, 0.7, 0.4],
+            &[1, 0, 2],
+            &[0, 1, 3, 3],
+            None,
+            (3, 3),
+        );
+        let g = max_symmetrise_to_sparse_graph(&adjacency);
+        assert_eq!(g.get_neighbours_raw(0), (&[1u32][..], &[0.7f32][..]));
+        assert_eq!(
+            g.get_neighbours_raw(1),
+            (&[0u32, 2][..], &[0.7f32, 0.4][..])
+        );
+        assert_eq!(g.get_neighbours_raw(2), (&[1u32][..], &[0.4f32][..]));
     }
 }
