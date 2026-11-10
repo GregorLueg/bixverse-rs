@@ -1,3 +1,7 @@
+[![PyPI](https://img.shields.io/pypi/v/bixverse.svg)](https://pypi.org/project/bixverse/)
+[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://gregorlueg.github.io/bixverse-rs/)
+[![CI](https://github.com/GregorLueg/bixverse-rs/actions/workflows/python-test.yml/badge.svg)](https://github.com/GregorLueg/bixverse-rs/actions/workflows/python-test.yml)
+
 # bixverse
 
 A single cell suite for Python, with the numerics in Rust
