@@ -72,6 +72,10 @@ mod tests {
             let s: f64 = (0..5).map(|j| res[(i, j)]).sum();
             assert_relative_eq!(s, 0.0, epsilon = 1e-12);
         }
+        // and one closed-form value, so the log and pseudocount are pinned:
+        // row 0 is 2..=6, centred on the mean of their log1p
+        let mean = (2..=6).map(|x| (x as f64).ln_1p()).sum::<f64>() / 5.0;
+        assert_relative_eq!(res[(0, 0)], 2.0f64.ln_1p() - mean, epsilon = 1e-12);
     }
 
     /// The Seurat variant matches its closed form and stays non-negative,

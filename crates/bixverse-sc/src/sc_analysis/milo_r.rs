@@ -136,7 +136,7 @@ pub struct MiloRNhoods {
     pub nhoods_x: Vec<f64>,
     /// Number of cells, the rows of the membership matrix
     pub n_cells: usize,
-    /// Squared Euclidean distance of each index cell to its last kNN
+    /// Euclidean (not squared) distance of each index cell to its last kNN
     /// neighbour, the `"k-distance"` weighting of the spatial FDR
     pub kth_distances: Vec<f64>,
     /// Cells per neighbourhood and sample, row-major `n_nhoods * n_samples`

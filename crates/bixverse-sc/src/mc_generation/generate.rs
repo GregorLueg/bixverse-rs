@@ -647,7 +647,10 @@ pub fn supercells_on_store(
         println!("Running SuperCell with Walktrap");
     }
     let membership = supercell(knn_idx, knn_dist, params, n_meta_cells, verbose)?;
-    let metacells = assignments_to_metacells(&membership, n_meta_cells);
+    // walktrap cannot merge across components, so a disconnected graph leaves
+    // more communities than requested
+    let n_found = membership.iter().max().map_or(0, |&m| m + 1);
+    let metacells = assignments_to_metacells(&membership, n_found.max(n_meta_cells));
     if verbose > 0 {
         println!("Aggregating meta cells.");
     }

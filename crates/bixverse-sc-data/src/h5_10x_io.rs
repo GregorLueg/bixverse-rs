@@ -628,15 +628,11 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_cell + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<usize>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<usize>(data_start..data_end)?;
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;
@@ -664,9 +660,9 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; n_cells];
     let mut cell_lib_size = vec![0.0f32; n_cells];
@@ -942,6 +938,13 @@ mod tests {
             assert_eq!(detect_tenx_version(&path).unwrap(), version);
             assert_eq!(get_tenx_dimensions(&path, None).unwrap(), (2, 3));
             let file = File::open(&path).unwrap();
+            // 10x is feature-major CSC: one indptr slot per barcode, feature
+            // indices within; cell 0 holds g1 = 1 and g3 = 4, cell 1 g2 = 2
+            let arr = |name: &str| file.dataset(name).unwrap().read_raw::<i32>().unwrap();
+            assert_eq!(arr(version.get_data()), vec![1, 4, 2]);
+            assert_eq!(arr(version.get_indices()), vec![0, 2, 1]);
+            assert_eq!(arr(version.get_indptr()), vec![0, 2, 3]);
+            assert_eq!(arr(version.get_shape()), vec![3, 2]);
             let got = read_string_dataset(&file.dataset(version.get_feature_id()).unwrap());
             assert_eq!(got.unwrap(), ids);
             if let Some(ft) = version.get_feature_type() {

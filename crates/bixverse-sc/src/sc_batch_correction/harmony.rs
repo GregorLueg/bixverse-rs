@@ -304,6 +304,33 @@ pub fn compute_cosine_distances(centroids: MatRef<f32>, data_cos: MatRef<f32>) -
     dist
 }
 
+/// Broadcast a length 1 parameter to `n`, or check it already has length `n`
+///
+/// ### Params
+///
+/// * `values` - The parameter values
+/// * `n` - The target length
+/// * `param` - Name for the error
+///
+/// ### Returns
+///
+/// The values at length `n`, or [ScErrors::HarmonyParamLength].
+pub fn broadcast_param(
+    values: &[f32],
+    n: usize,
+    param: &'static str,
+) -> Result<Vec<f32>, ScErrors> {
+    match values.len() {
+        1 => Ok(vec![values[0]; n]),
+        len if len == n => Ok(values.to_vec()),
+        got => Err(ScErrors::HarmonyParamLength {
+            param,
+            got,
+            expected: n,
+        }),
+    }
+}
+
 /// Initialise soft cluster assignments from distances.
 ///
 /// Converts distances to probabilistic cluster assignments using exponential
@@ -399,23 +426,8 @@ pub fn harmony_with_state(
         }
     }
 
-    let sigma = if params.sigma.len() == 1 {
-        vec![params.sigma[0]; k]
-    } else {
-        assert_eq!(params.sigma.len(), k, "sigma must be length 1 or K");
-        params.sigma.clone()
-    };
-
-    let theta = if params.theta.len() == 1 {
-        vec![params.theta[0]; n_vars]
-    } else {
-        assert_eq!(
-            params.theta.len(),
-            n_vars,
-            "theta must be length 1 or n_variables"
-        );
-        params.theta.clone()
-    };
+    let sigma = broadcast_param(&params.sigma, k, "sigma")?;
+    let theta = broadcast_param(&params.theta, n_vars, "theta")?;
     let theta_levels: Vec<Vec<f32>> = batch_infos
         .iter()
         .zip(&theta)

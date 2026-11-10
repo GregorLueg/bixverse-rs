@@ -17,7 +17,7 @@ use crate::prelude::*;
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_gpu::linalg::spmm::launch_dense_column_sum;
 use bixverse_gpu::{WORKGROUP_64, WORKGROUP_512};
-use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, create_batch_infos};
+use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, broadcast_param, create_batch_infos};
 use bixverse_sc::sc_batch_correction::harmony_core::{
     HARMONY_KMEANS_ITERS, RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge,
     to_row_major,
@@ -563,23 +563,8 @@ where
     let b = info.n_levels;
     let n_runs = runs.run_bounds.len() - 1;
 
-    let sigma = if params.sigma.len() == 1 {
-        vec![params.sigma[0]; k]
-    } else {
-        assert_eq!(params.sigma.len(), k, "sigma must be length 1 or K");
-        params.sigma.clone()
-    };
-
-    let theta = if params.theta.len() == 1 {
-        vec![params.theta[0]; 1]
-    } else {
-        assert_eq!(
-            params.theta.len(),
-            1,
-            "theta must be length 1 (single covariate)"
-        );
-        params.theta.clone()
-    };
+    let sigma = broadcast_param(&params.sigma, k, "sigma")?;
+    let theta = broadcast_param(&params.theta, 1, "theta")?;
     let theta_expanded = expand_theta(&theta, &batch_infos, k, params.tau);
     let theta_levels = &theta_expanded[0];
 

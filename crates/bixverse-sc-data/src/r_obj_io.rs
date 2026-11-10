@@ -39,7 +39,7 @@ where
 
     if verbose {
         println!(
-            "Processing R sparse matrix (shape: {} x {})...",
+            "Processing sparse matrix (shape: {} x {})...",
             no_cells.separate_with_underscores(),
             no_genes.separate_with_underscores()
         );

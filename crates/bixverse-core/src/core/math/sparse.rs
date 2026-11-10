@@ -2249,6 +2249,14 @@ mod tests {
                 for i in 0..k {
                     assert_relative_eq!(svd.s[i], s_ref[i], max_relative = 1e-6);
                 }
+                // the vectors too, up to sign: a swapped U and V or rows lost
+                // on the way back from the transpose leave the values intact
+                for i in 0..k {
+                    let du: f64 = (0..n).map(|r| svd.u[(r, i)] * reference.U()[(r, i)]).sum();
+                    let dv: f64 = (0..m).map(|r| svd.v[(r, i)] * reference.V()[(r, i)]).sum();
+                    assert_relative_eq!(du.abs(), 1.0, epsilon = 1e-6);
+                    assert_relative_eq!(dv.abs(), 1.0, epsilon = 1e-6);
+                }
 
                 let again = run();
                 assert_eq!(svd.s, again.s);

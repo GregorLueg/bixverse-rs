@@ -702,15 +702,11 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_gene + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<u32>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<u32>(data_start..data_end)?;
 
             for &gene_idx in gene_chunk.iter() {
                 let gene_data_start = indptr[gene_idx] - data_start;
@@ -737,9 +733,9 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; shape.0];
     let mut cell_lib_size = vec![0.0f32; shape.0];
@@ -767,7 +763,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max={:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib.separate_with_underscores(),
             max_lib.separate_with_underscores()
         );
@@ -1275,15 +1271,11 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
             let data_end = indptr[chunk_end_cell + 1];
 
             if data_start >= data_end {
-                return (local_unique, local_lib_size);
+                return Ok((local_unique, local_lib_size));
             }
 
-            let (Ok(chunk_data), Ok(chunk_indices)) = (
-                data_rd.read::<f32>(data_start..data_end),
-                indices_rd.read::<u32>(data_start..data_end),
-            ) else {
-                return (local_unique, local_lib_size);
-            };
+            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
+            let chunk_indices = indices_rd.read::<u32>(data_start..data_end)?;
 
             for cell_idx in chunk_start_cell..=chunk_end_cell {
                 let cell_data_start = indptr[cell_idx] - data_start;
@@ -1311,9 +1303,9 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
                 }
             }
 
-            (local_unique, local_lib_size)
+            Ok((local_unique, local_lib_size))
         })
-        .collect();
+        .collect::<Result<_, ScDataErrors>>()?;
 
     let mut cell_unique_genes = vec![0usize; shape.0];
     let mut cell_lib_size = vec![0.0f32; shape.0];
@@ -1338,7 +1330,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max = {:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib, max_lib
         );
     }
@@ -1933,7 +1925,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
             max_genes.separate_with_underscores()
         );
         println!(
-            "  Cell stats: library size: min = {:.1} | max = {:.1}",
+            "  Cell stats: library size: min = {} | max = {}",
             min_lib, max_lib
         );
         println!("Second pass done: {:.2?}", second_pass_time.elapsed());

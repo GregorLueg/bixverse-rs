@@ -250,6 +250,15 @@ pub(crate) fn solve_dense_pca(
             }
         }
     };
+    // every solver clamps to the rank
+    if res.s.len() < no_pcs {
+        return Err(ScErrors::PcaTooFewComponents {
+            requested: no_pcs,
+            found: res.s.len(),
+            n_cells,
+            n_genes,
+        });
+    }
     // here rather than in `randomised_svd`, which ICA, NMF and rPCA call too
     res.flip_signs();
     let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
@@ -1479,6 +1488,15 @@ fn sparse_pca<S: SingleCellReading>(
             }
         }
     };
+    // every solver clamps to the rank, and Lanczos also drops zero Ritz values
+    if svd_res.s().len() < no_pcs {
+        return Err(ScErrors::PcaTooFewComponents {
+            requested: no_pcs,
+            found: svd_res.s().len(),
+            n_cells: cell_set.len(),
+            n_genes: gene_indices.len(),
+        });
+    }
     let scores_f64 = compute_pc_scores(&svd_res);
     let scores = Mat::<f32>::from_fn(cell_set.len(), no_pcs, |i, j| scores_f64[(i, j)] as f32);
     let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {

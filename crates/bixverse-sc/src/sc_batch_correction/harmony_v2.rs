@@ -17,7 +17,7 @@ use crate::prelude::parse_verbosity_level;
 use crate::prelude::*;
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
-use super::harmony::{BatchInfo, HarmonyResult, StageTimes, create_batch_infos};
+use super::harmony::{BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_infos};
 use super::harmony_core::{
     HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
     distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
@@ -305,23 +305,8 @@ pub fn harmony_v2_with_state(
         }
     }
 
-    let sigma = if params.sigma.len() == 1 {
-        vec![params.sigma[0]; k]
-    } else {
-        assert_eq!(params.sigma.len(), k, "sigma must be length 1 or K");
-        params.sigma.clone()
-    };
-
-    let theta = if params.theta.len() == 1 {
-        vec![params.theta[0]; n_vars]
-    } else {
-        assert_eq!(
-            params.theta.len(),
-            n_vars,
-            "theta must be length 1 or n_variables"
-        );
-        params.theta.clone()
-    };
+    let sigma = broadcast_param(&params.sigma, k, "sigma")?;
+    let theta = broadcast_param(&params.theta, n_vars, "theta")?;
 
     let theta_expanded = expand_theta(&theta, &batch_infos, k, params.tau);
 

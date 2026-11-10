@@ -125,6 +125,17 @@ pub enum ScErrors {
     #[error("Harmony: sigma length must match number of clusters")]
     HarmonySigmaLengthUnequalCluster,
 
+    /// A per-cluster or per-variable parameter has the wrong length
+    #[error("Harmony: {param} has length {got}, must be 1 or {expected}")]
+    HarmonyParamLength {
+        /// Parameter name
+        param: &'static str,
+        /// Length given
+        got: usize,
+        /// Length expected besides 1
+        expected: usize,
+    },
+
     // -- PCA --
     /// Error if user wants CLR-normalised PCA, but did not provide the offsets
     #[error(
@@ -141,6 +152,23 @@ pub enum ScErrors {
         len_offset: usize,
         /// Number of cells provided
         n_cells: usize,
+    },
+
+    /// The solver returned fewer components than requested, the data having
+    /// lower rank
+    #[error(
+        "PCA: requested {requested} components, but the data ({n_cells} cells x {n_genes} genes) \
+         only supports {found}. Lower no_pcs."
+    )]
+    PcaTooFewComponents {
+        /// Components requested
+        requested: usize,
+        /// Components the solver returned
+        found: usize,
+        /// Number of cells
+        n_cells: usize,
+        /// Number of genes
+        n_genes: usize,
     },
 
     // -- HVG --

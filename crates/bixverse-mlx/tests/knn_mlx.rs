@@ -130,6 +130,17 @@ fn test_knn_with_dist_mlx_graph_distances_ascending() {
         assert_eq!(d.len(), k, "row {}", i);
         assert!(d.windows(2).all(|w| w[0] <= w[1]), "row {} not sorted", i);
         assert!(d.iter().all(|&x| x.is_finite() && x >= 0.0), "row {}", i);
+        // true Euclidean distances to the neighbour each sits next to
+        for (&j, &dj) in row.iter().zip(d) {
+            let want: f32 = (0..data.ncols())
+                .map(|c| (data[(i, c)] - data[(j, c)]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            assert!(
+                (dj - want).abs() <= 1e-3 * want.max(1.0),
+                "row {i}: {dj} vs {want}"
+            );
+        }
     }
 }
 
