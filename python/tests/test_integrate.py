@@ -267,3 +267,51 @@ def test_integration_metrics_one_row(sc):
         1,
         1,
     )
+
+
+######################
+# Review regressions #
+######################
+
+
+@pytest.mark.parametrize(
+    "params", [HarmonyV2Params(theta=(2.0, 2.0)), HarmonyV2Params(sigma=(0.1, 0.2))]
+)
+def test_harmony_wrong_param_length_is_an_error_not_a_panic(sc, params):
+    # theta is per batch variable, sigma per cluster: both used to assert
+    with pytest.raises(bv.BixverseError, match="must be 1 or"):
+        integrate.harmony(sc, BATCH, harmony_params=params)
+
+
+def test_graph_connectivity_with_one_cell_type_is_none(one_batch):
+    graph.find_neighbours(one_batch)
+    with pytest.warns(UserWarning, match="only has one cell type"):
+        assert integrate.calculate_graph_connectivity(one_batch, "single") is None
+
+
+def test_fortran_ordered_knn_reads_the_same(sc):
+    graph.find_neighbours(sc)
+    knn = sc.cache.knn
+    lisi = integrate.calculate_lisi(sc, BATCH)
+    assert knn is not None and lisi is not None
+    want = lisi.per_cell
+    sc.cache.knn = bv.KnnGraph(
+        indices=np.asfortranarray(knn.indices),
+        distances=np.asfortranarray(knn.distances),
+        dist_metric=knn.dist_metric,
+    )
+    sc.stamp("knn", parents=["pca"])
+    assert sc.cache.knn.indices.flags.c_contiguous
+    lisi = integrate.calculate_lisi(sc, BATCH)
+    assert lisi is not None
+    np.testing.assert_array_equal(lisi.per_cell, want)
+
+
+def test_bindings_refuse_fortran_order(sc):
+    from bixverse import _bixverse
+
+    graph.find_neighbours(sc)
+    idx = np.asfortranarray(sc.cache.knn.indices)
+    codes = np.zeros(sc.n_cells, dtype=np.uint32) + 1
+    with pytest.raises(ValueError, match="C-contiguous"):
+        _bixverse.graph_connectivity(idx, codes)

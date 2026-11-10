@@ -418,10 +418,16 @@ def test_save_and_load_round_trip(exp):
     np.testing.assert_array_equal(
         back.cache.embeddings["umap"], sc.cache.embeddings["umap"]
     )
-    assert back.cache.connectivities is not None
-    assert back.cache.connectivities.indptr.dtype == np.uint64
+    np.testing.assert_array_equal(back.cache.pca_factors, sc.cache.pca_factors)
+    g, h = back.cache.connectivities, sc.cache.connectivities
+    assert g is not None and h is not None
+    assert g.indptr.dtype == np.uint64
+    for a, b in ((g.data, h.data), (g.indices, h.indices), (g.indptr, h.indptr)):
+        np.testing.assert_array_equal(a, b)
+    assert g.shape == h.shape
     assert back.cache.magic is not None
     assert back.cache.magic.features.tolist() == ["g1", "g2"]
+    np.testing.assert_array_equal(back.cache.magic.data, sc.cache.magic.data)
     assert back.cache.stamps == sc.cache.stamps
     assert back.check_state(["pca", "umap"]) is True
 

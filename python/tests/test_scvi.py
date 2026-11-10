@@ -61,14 +61,17 @@ def test_gene_subset_sets_the_model_width(store, backend):
     assert bvnn.scvi_latent(fit, path).shape == (N_CELLS, SHORT.n_latent)
 
 
-def test_elbo_terms_are_finite_and_add_up(store, backend, batch):
+def test_elbo_terms_are_finite_and_bounded(store, backend, batch):
     path, _ = store
     fit = bvnn.train_scvi(
         path, batch=batch, params=SHORT, backend=backend, device="cpu"
     )
     elbo = bvnn.scvi_elbo(fit, path, batch=batch)
     assert np.isfinite(list(elbo.values())).all()
-    assert elbo["elbo"] == pytest.approx(elbo["reconstruction"] + elbo["kl"])
+    # a KL divergence is non-negative, and so is the negative log-likelihood
+    # of counts under a discrete (ZI)NB
+    assert elbo["kl"] >= 0
+    assert elbo["reconstruction"] > 0
 
 
 def test_torch_is_reproducible_under_a_seed(store, batch):

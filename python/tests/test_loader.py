@@ -91,11 +91,13 @@ def test_shuffled_epoch_is_a_permutation(reader, truth):
 
 
 def test_same_seed_gives_the_same_order(reader):
-    def first_row(seed):
+    def first_batch(seed):
         loader = bv.CellLoader(reader, batch_size=8, seed=seed, layer="raw")
-        return next(iter(loader)).scipy_csr().toarray()[0]
+        return next(iter(loader)).scipy_csr().toarray()
 
-    np.testing.assert_array_equal(first_row(11), first_row(11))
+    np.testing.assert_array_equal(first_batch(11), first_batch(11))
+    # and the seed is honoured, not fixed inside
+    assert not np.array_equal(first_batch(11), first_batch(12))
 
 
 def test_successive_epochs_reshuffle(reader):

@@ -326,6 +326,13 @@ def test_vision_w_autocor_cached_and_searched_knn(sc):
     b = pathways.vision_w_autocor(sc, VGS, "pca", vision_params=vp, use_knn=False)
     assert a.auto_cor.columns == ["gene_set_name", "auto_cor", "p_val", "fdr"]
     np.testing.assert_array_equal(a.vision_matrix.values, b.vision_matrix.values)
+    # the cached kNN (exact, k = 10) and the searched one (exhaustive, k = 10)
+    # are the same graph, and only the autocorrelation reads it
+    np.testing.assert_allclose(
+        a.auto_cor.sort("gene_set_name")["auto_cor"].to_numpy(),
+        b.auto_cor.sort("gene_set_name")["auto_cor"].to_numpy(),
+        rtol=1e-6,
+    )
     with pytest.raises(ValueError, match="No embedding"):
         pathways.vision_w_autocor(sc, VGS, "umap_nope")
 
@@ -409,3 +416,26 @@ def test_meta_cell_twins_run(mc):
     assert auto.height == 10
     with pytest.raises(BeartypeCallHintParamViolation):
         pathways.module_scores(mc, GS)
+
+
+######################
+# Review regressions #
+######################
+
+
+def test_vision_kmeans_populates_every_cluster_with_tied_rows():
+    from bixverse._core.pathways import _kmeans
+
+    # 16 signatures of one (size, balance), as top-n marker sets are, plus 4
+    x = np.array(
+        [[np.log10(50), 1.0]] * 16
+        + [
+            [np.log10(200), 1.0],
+            [np.log10(150), 0.6],
+            [np.log10(100), 0.8],
+            [np.log10(30), 1.0],
+        ]
+    )
+    for seed in range(50):
+        labels = _kmeans(x, 5, np.random.default_rng(seed))
+        assert np.unique(labels).size == 5, seed

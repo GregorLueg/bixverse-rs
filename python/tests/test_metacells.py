@@ -285,3 +285,44 @@ def test_residual_fit_is_not_persisted(tmp_path, mc):
         warnings.simplefilter("error")
         back = metacells.load_metacells(tmp_path / "mc")
     assert back.cache.residual_fit is None
+
+
+######################
+# Review regressions #
+######################
+
+
+def test_supercells_on_a_disconnected_graph(tmp_path):
+    # three blocks with no shared genes give a kNN of three components; asking
+    # for fewer meta cells than that used to index past the end
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(0)
+    n, g = 40, 30
+    dense = np.zeros((3 * n, 3 * g), dtype=np.int64)
+    for i in range(3):
+        dense[i * n : (i + 1) * n, i * g : (i + 1) * g] = rng.poisson(20, (n, g))
+    obs = pl.DataFrame({"cell_id": [f"c{i}" for i in range(3 * n)]})
+    var = pl.DataFrame({"gene_id": [f"g{j}" for j in range(3 * g)]})
+    sc = bv.io.load_csr(tmp_path / "sc", sp.csr_matrix(dense), obs, var, qc=QC)
+    pp.find_hvg(sc, hvg_no=60)
+    pp.calculate_pca(sc, 10)
+    graph.find_neighbours(sc)
+    mc = metacells.generate_supercells(sc, params=SupercellParams(graining_factor=60.0))
+    assert mc is not None
+    assert mc.n_cells >= 3
+    members = mc.cell_assignments()["cell_idx"].to_numpy()
+    assert np.unique(members).size == sc.n_cells
+
+
+def test_purity_ignores_missing_labels_outside_the_meta_cells(sc, mc):
+    # the first ten cells are not kept, so belong to no meta cell
+    m = _copy(mc)
+    labels = ["x"] * sc.dims[0]
+    labels[:10] = [None] * 10
+    metacells.calc_meta_cell_purity(m, labels)
+    assert (m.obs()["mc_purity"] == 1.0).all()
+    member = int(m.obs()["original_cell_idx"].to_list()[0][0])
+    labels[member] = None
+    with pytest.raises(ValueError, match="missing values"):
+        metacells.calc_meta_cell_purity(_copy(mc), labels)

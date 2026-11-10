@@ -5,8 +5,11 @@ on its own: round trips through the writers and loaders, the encoding rules,
 the archive, and the download cache.
 """
 
+import gzip
+import shutil
 import urllib.request
 import warnings
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -18,7 +21,12 @@ from bixverse._core import db
 from bixverse._core.ingest import _make_unique
 from bixverse._core.state import CsrMatrix
 from bixverse._core.writers import _permute_square, h5ad_columns
-from bixverse.params import MinQualityParams, MtxIoParams, SyntheticDataParams
+from bixverse.params import (
+    HvgParams,
+    MinQualityParams,
+    MtxIoParams,
+    SyntheticDataParams,
+)
 
 QC = MinQualityParams(min_unique_genes=1, min_lib_size=1, min_cells=1)
 
@@ -303,3 +311,71 @@ def test_downloads_hit_the_cache(tmp_path, monkeypatch):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"cached")
         assert fn(tmp_path) == target
+
+
+######################
+# Review regressions #
+######################
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.parametrize("fmt", ["csr", "csc"])
+def test_reads_an_h5ad_anndata_wrote(fmt, tmp_path):
+    # written by anndata (dev/gen_anndata_fixture.py), not by bixverse, so a
+    # convention the reader and writer share cannot pass unnoticed
+    truth = np.load(FIXTURES / "anndata_counts.npy")
+    f = FIXTURES / f"anndata_{fmt}.h5ad"
+    meta = bv.io.read_h5ad_metadata(f)
+    assert meta["dims"] == truth.shape
+    obs = meta["obs"]
+    assert isinstance(obs, pl.DataFrame)
+    assert obs["cell_id"].to_list() == [f"cell_{i}" for i in range(30)]
+    sc = bv.io.load_h5ad(tmp_path / "sc", f, qc=QC)
+    np.testing.assert_array_equal(_dense(sc), truth)
+    assert sc.var()["gene_id"].to_list() == [f"gene_{j}" for j in range(12)]
+    assert sorted(set(sc.obs()["cell_type"].to_list())) == ["a", "b", "c"]
+
+
+def test_cell_ranger_params_find_gzipped_files(data, tmp_path):
+    # Cell Ranger v3+ writes all three files gzipped
+    bv.io.write_cellranger_output(
+        tmp_path / "cr",
+        data.counts,
+        data.obs,
+        data.var,
+        rows="genes",
+        format_type="tsv",
+    )
+    gz = tmp_path / "gz"
+    gz.mkdir()
+    for name in ("matrix.mtx", "barcodes.tsv", "features.tsv"):
+        with (
+            (tmp_path / "cr" / name).open("rb") as src,
+            gzip.open(gz / f"{name}.gz", "wb") as dst,
+        ):
+            shutil.copyfileobj(src, dst)
+    params = bv.io.get_cell_ranger_params(gz, has_hdr=True)
+    assert params.path_mtx.endswith("matrix.mtx.gz")
+    sc = bv.io.load_mtx(tmp_path / "sc", params, qc=QC)
+    np.testing.assert_array_equal(_dense(sc), _truth(data))
+
+
+def test_varm_pcs_sit_on_the_genes_the_pca_ran_on(data, tmp_path):
+    h5py = pytest.importorskip("h5py")
+    sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
+    bv.pp.find_hvg(sc, hvg_no=15)
+    assert sc.map.hvg is not None
+    genes = sc.map.hvg.copy()
+    bv.pp.calculate_pca(sc, 3)
+    assert sc.cache.pca_loadings is not None
+    loadings = sc.cache.pca_loadings.copy()
+    # new HVGs after the PCA: the loadings still belong to the old ones
+    bv.pp.find_hvg(sc, hvg_no=15, hvg_params=HvgParams(method="meanvarbin"))
+    assert not np.array_equal(np.sort(sc.map.hvg), np.sort(genes))
+    out = bv.io.save_h5ad(sc, tmp_path / "s.h5ad")
+    with h5py.File(out) as f:
+        pcs = f["varm/PCs"][:]
+    np.testing.assert_allclose(pcs[genes], loadings, rtol=1e-6)
+    others = np.setdiff1d(np.arange(sc.n_genes), genes)
+    assert np.all(pcs[others] == 0)

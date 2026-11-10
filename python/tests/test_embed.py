@@ -82,6 +82,23 @@ def test_cached_knn_is_reused(sc):
     np.testing.assert_array_equal(sc.cache.embeddings["umap"], cached)
 
 
+def test_planted_knn_changes_the_embedding(sc):
+    # a ring graph in the cache: a run that reads it must differ from a search
+    k = sc.cache.knn.indices.shape[1]
+    n = sc.n_cells
+    ring = (np.arange(n)[:, None] + np.arange(1, k + 1)[None, :]) % n
+    sc.cache.knn = bv.KnnGraph(
+        indices=ring.astype(np.uint32),
+        distances=np.tile(np.arange(1, k + 1, dtype=np.float32), (n, 1)),
+        dist_metric="euclidean",
+    )
+    sc.stamp("knn", parents=["pca"])
+    embed.umap(sc, params=_fast_umap())
+    planted = sc.cache.embeddings["umap"]
+    embed.umap(sc, use_knn=False, params=_fast_umap())
+    assert not np.allclose(sc.cache.embeddings["umap"], planted)
+
+
 def test_missing_knn_warns_and_searches(sc):
     sc.cache.knn = None
     with pytest.warns(UserWarning, match="No kNN data found"):

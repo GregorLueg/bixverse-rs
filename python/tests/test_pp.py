@@ -364,3 +364,44 @@ def test_magic_refuses_a_stale_or_misaligned_knn(sc):
     )
     with pytest.raises(ValueError, match="covers 10 cells"):
         pp.run_magic(sc, ["gene_01"])
+
+
+######################
+# Review regressions #
+######################
+
+
+@pytest.mark.parametrize("sparse_svd", [True, False])
+def test_pca_asking_for_more_pcs_than_cells_errors(sc, sparse_svd):
+    # every solver clamps to the rank; the output used to be sized to no_pcs
+    # anyway and panicked on the slice
+    pp.find_hvg(sc, hvg_no=40)
+    sc.set_cells_to_keep(np.arange(25))
+    with pytest.raises(bv.BixverseError, match="only supports"):
+        pp.calculate_pca(sc, 30, sparse_svd=sparse_svd)
+
+
+def test_residual_pca_survives_save_and_load(sc):
+    # the residual model is not saved; its children must not load as stale
+    pp.fit_residuals(sc, method="analytic_pearson")
+    pp.find_hvg(sc, hvg_no=30)
+    pp.calculate_pca(sc, 5, residuals=True, pca_params=PCA_RESIDUAL)
+    bv.graph.find_neighbours(sc)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bv.io.save(sc)
+    back = bv.io.load_existing(sc.dir)
+    assert back.check_state(["pca", "knn"]) is True
+    bv.graph.find_neighbours(back)
+
+
+def test_pca_remembers_its_genes(sc):
+    pp.find_hvg(sc, hvg_no=30)
+    hvg = sc.map.hvg.copy()
+    pp.calculate_pca(sc, 5)
+    np.testing.assert_array_equal(sc.cache.pca_genes, hvg)
+    pp.fit_residuals(sc, method="analytic_pearson")
+    pp.calculate_pca(sc, 5, residuals=True, pca_params=PCA_RESIDUAL)
+    # the residual path sorts the genes and the loadings rows follow
+    assert np.all(np.diff(sc.cache.pca_genes.astype(np.int64)) > 0)
+    assert set(sc.cache.pca_genes) <= set(hvg)

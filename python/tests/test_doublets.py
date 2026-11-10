@@ -102,6 +102,8 @@ def test_scrublet_is_seeded(sc):
     a = doublets.scrublet(sc, scrublet_params=SCRUBLET, seed=3)
     b = doublets.scrublet(sc, scrublet_params=SCRUBLET, seed=3)
     np.testing.assert_array_equal(a.doublet_scores_obs, b.doublet_scores_obs)
+    c = doublets.scrublet(sc, scrublet_params=SCRUBLET, seed=4)
+    assert not np.array_equal(a.doublet_scores_obs, c.doublet_scores_obs)
 
 
 def test_scrublet_cells_to_use_by_id(sc):

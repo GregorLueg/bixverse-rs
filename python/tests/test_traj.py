@@ -196,10 +196,15 @@ def test_paga_keeps_empty_enum_levels(sc):
     np.testing.assert_array_equal(c, c.T)
     assert np.all(np.diag(c) == 0)
     assert c.max() <= 1
-    # the arms meet only through the trunk
-    assert c[0, 1] > 0 and c[0, 2] > 0
+    # the arms touch the trunk, and each other at the branch point
+    assert c[0, 1] > 0 and c[0, 2] > 0 and c[1, 2] > 0
     t = res.connectivities_tree
     assert np.count_nonzero(t) / 2 == 2
+    # the maximum spanning tree drops the weakest edge of the triangle
+    edges = [(0, 1), (0, 2), (1, 2)]
+    weakest = min(edges, key=lambda e: c[e])
+    assert t[weakest] == 0
+    assert all(t[e] > 0 for e in edges if e != weakest)
     assert np.all(t[t > 0] == c[t > 0])
     assert "PagaRes" in repr(res)
 

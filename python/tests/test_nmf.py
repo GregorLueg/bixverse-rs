@@ -68,6 +68,8 @@ def test_nmf_is_seeded(sc):
     a = bvnmf.nmf(sc, 3, nmf_hals_params=p, seed=1)
     b = bvnmf.nmf(sc, 3, nmf_hals_params=p, seed=1)
     np.testing.assert_array_equal(a.w, b.w)
+    c = bvnmf.nmf(sc, 3, nmf_hals_params=p, seed=2)
+    assert not np.array_equal(a.w, c.w)
 
 
 def test_nmf_needs_genes(tmp_path):
