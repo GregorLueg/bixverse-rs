@@ -30,6 +30,7 @@ use crate::batch::{
     GeneRemap, Layer, PreparedBatch, adopt_csr, gene_remap, prepare_dense, subset_csr,
 };
 use crate::reader::PyCellReader;
+use py_common::convert::CSlice;
 use py_common::error::BvErr;
 
 ///////////////
@@ -198,7 +199,7 @@ impl PyCellLoader {
 
         let layer = Layer::parse(layer).map_err(PyValueError::new_err)?;
 
-        let slice = indices.as_slice()?;
+        let slice = indices.c_slice()?;
         let total_cells = reader.total_cells;
         if let Some(&bad) = slice.iter().find(|&&i| i as usize >= total_cells) {
             return Err(PyValueError::new_err(format!(
@@ -209,7 +210,7 @@ impl PyCellLoader {
         let remap = genes
             .map(|g| -> PyResult<Arc<GeneRemap>> {
                 let remap =
-                    gene_remap(g.as_slice()?, reader.total_genes).map_err(PyValueError::new_err)?;
+                    gene_remap(g.c_slice()?, reader.total_genes).map_err(PyValueError::new_err)?;
                 Ok(Arc::new(remap))
             })
             .transpose()?;

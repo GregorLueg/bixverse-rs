@@ -25,6 +25,7 @@ use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::SingleCellPcaParams;
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::f64_array;
 use py_common::convert::{flat_array, from_py, index_vec, mat_array, mat_view};
 use py_common::error::BvErr;
@@ -100,7 +101,7 @@ fn sctype_res(cell_types: Vec<String>, scores: &PyReadonlyArray2<'_, f64>) -> Py
     }
     Ok(SctypeRes {
         cell_types,
-        scores: scores.as_slice()?.iter().map(|&x| x as f32).collect(),
+        scores: scores.c_slice()?.iter().map(|&x| x as f32).collect(),
         n_cells,
         n_cell_types,
     })
@@ -318,9 +319,9 @@ pub fn sc_type_assign_cells<'py>(
                 )));
             }
             let adjacency = CompressedSparseData2::new_csr(
-                data.as_slice()?,
-                indices.as_slice()?,
-                indptr.as_slice()?,
+                data.c_slice()?,
+                indices.c_slice()?,
+                indptr.c_slice()?,
                 None,
                 (n, n),
             );
@@ -520,11 +521,11 @@ pub fn symphony_map_query<'py>(
         .map(index_vec)
         .collect::<PyResult<_>>()?;
     let gene_map: Vec<Option<usize>> = gene_map
-        .as_slice()?
+        .c_slice()?
         .iter()
         .map(|&x| usize::try_from(x).ok())
         .collect();
-    let (means, sds, nr) = (gene_means.as_slice()?, gene_sds.as_slice()?, nr.as_slice()?);
+    let (means, sds, nr) = (gene_means.c_slice()?, gene_sds.c_slice()?, nr.c_slice()?);
     let (loadings, centroids, c_cache) = (
         mat_view(&loadings)?,
         mat_view(&centroids)?,

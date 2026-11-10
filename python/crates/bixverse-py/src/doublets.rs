@@ -15,6 +15,7 @@ use bixverse_sc::sc_processing::scdblfinder::{ScDblFinder, ScDblFinderParams};
 use bixverse_sc::sc_processing::scrublet::{Scrublet, ScrubletParams};
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1};
+use py_common::convert::CSlice;
 use py_common::convert::{f64_array, u32_array};
 use py_common::convert::{flat_array, from_py, index_vec, mat_array};
 use py_common::error::BvErr;
@@ -251,7 +252,7 @@ pub fn empty_droplets<'py>(
     params: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let call: EmptyDropletCall = from_py(params, "empty droplet params")?;
-    let mask = infer_empty_droplets(lib_size.as_slice()?, call).map_err(BvErr::from)?;
+    let mask = infer_empty_droplets(lib_size.c_slice()?, call).map_err(BvErr::from)?;
     Ok(mask.into_pyarray(py).into_any())
 }
 

@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::batch::{Layer, adopt_csr, gene_remap, subset_csr};
+use py_common::convert::CSlice;
 use py_common::error::BvErr;
 
 ////////////////
@@ -129,14 +130,14 @@ impl PyCellReader {
         };
 
         let total_cells = self.total_cells;
-        let cells: Vec<usize> = cells.as_slice()?.iter().map(|&i| i as usize).collect();
+        let cells: Vec<usize> = cells.c_slice()?.iter().map(|&i| i as usize).collect();
         if let Some(&bad) = cells.iter().find(|&&i| i >= total_cells) {
             return Err(PyValueError::new_err(format!(
                 "cell index {bad} is out of range for a store of {total_cells} cells"
             )));
         }
         let remap = genes
-            .map(|g| gene_remap(g.as_slice()?, self.total_genes).map_err(PyValueError::new_err))
+            .map(|g| gene_remap(g.c_slice()?, self.total_genes).map_err(PyValueError::new_err))
             .transpose()?;
 
         let reader = Arc::clone(&self.inner);

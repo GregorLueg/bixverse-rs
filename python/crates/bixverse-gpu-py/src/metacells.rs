@@ -21,7 +21,7 @@ use py_common::results::{bonsai_dict, seacells_dict};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::device::{ensure_gpu, ensure_plane_ops, on_device};
+use crate::device::{ensure_plane_ops, on_device};
 use crate::error::GpuErr;
 
 /// SEACells over a cell-major store, the fit on the GPU
@@ -61,7 +61,7 @@ pub fn seacells<'py>(
     seed: usize,
     verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
-    ensure_gpu()?;
+    ensure_plane_ops()?;
     let params: SEACellsParams = from_py(params, "SEACells params")?;
     let knn = knn_pair(knn_indices.as_ref(), knn_distances.as_ref())?;
     let embd = mat_view(&embd)?;

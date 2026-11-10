@@ -12,6 +12,7 @@ use bixverse_sc::sc_analysis::bonsai::{
     BonsaiScParams, NO_NODE, bonsai_layout as layout_rs, parse_bonsai_layout, sanity_bonsai_sc,
 };
 use numpy::{IntoPyArray, PyReadonlyArray1};
+use py_common::convert::CSlice;
 use py_common::convert::{csr_from_parts, from_py, index_vec};
 use py_common::error::BvErr;
 use py_common::results::{bonsai_dict, parents_out};
@@ -144,13 +145,13 @@ pub fn bonsai_layout<'py>(
     let layout = parse_bonsai_layout(layout)
         .ok_or_else(|| PyValueError::new_err(format!("Invalid Bonsai layout: {layout}")))?;
     let parent: Vec<u32> = parent
-        .as_slice()?
+        .c_slice()?
         .iter()
         .map(|&p| if p < 0 { NO_NODE } else { p as u32 })
         .collect();
     let (parent, branch, coords) = layout_rs(
         parent,
-        branch.as_slice()?.to_vec(),
+        branch.c_slice()?.to_vec(),
         n_leaves,
         layout,
         hyperbolic,

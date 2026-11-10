@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 /// Dense normalised counts of several genes over a set of cells
 ///
 /// The twin of `rs_extract_several_genes_plots`. The z-score divides by the
-/// population standard deviation.
+/// sample standard deviation (`n - 1`).
 ///
 /// ### Params
 ///

@@ -25,6 +25,7 @@ use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
 use numpy::{
     IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
+use py_common::convert::CSlice;
 use py_common::convert::{from_py, index_vec, mat_array, u32_array};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
@@ -415,11 +416,11 @@ pub fn fit_residuals(
     };
     let cells = index_vec(&cell_indices)?;
     let groups: Option<Vec<u32>> = group_of_cell
-        .map(|g| g.as_slice().map(<[u32]>::to_vec))
+        .map(|g| g.c_slice().map(<[u32]>::to_vec))
         .transpose()?;
     let columns = covariates
         .iter()
-        .map(|(name, v)| Ok((name.clone(), v.as_slice()?.to_vec())))
+        .map(|(name, v)| Ok((name.clone(), v.c_slice()?.to_vec())))
         .collect::<PyResult<Vec<(String, Vec<f64>)>>>()?;
     let opts = stream_opts(gene_batch_size, seed, verbose);
 
@@ -667,12 +668,12 @@ pub fn magic_impute<'py>(
     let params: MagicParams = from_py(params, "magic params")?;
     let k = knn_indices.shape()[1];
     let indices: Vec<Vec<usize>> = knn_indices
-        .as_slice()?
+        .c_slice()?
         .chunks(k.max(1))
         .map(|row| row.iter().map(|&x| x as usize).collect())
         .collect();
     let distances: Vec<Vec<f32>> = knn_distances
-        .as_slice()?
+        .c_slice()?
         .chunks(k.max(1))
         .map(<[f32]>::to_vec)
         .collect();

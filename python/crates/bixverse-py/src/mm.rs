@@ -15,6 +15,7 @@ use bixverse_sc::multi_modal::wnn::{WnnParams, run_wnn};
 use bixverse_sc::prelude::{CoreErrors, ScErrors};
 use faer::{Mat, MatRef};
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{f64_array, flat_array, from_py, mat_f64, mat_view};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
@@ -36,7 +37,7 @@ use pyo3::types::PyDict;
 /// The view.
 fn mat_view_f64<'a>(m: &'a PyReadonlyArray2<'_, f64>) -> PyResult<MatRef<'a, f64>> {
     let (n, d) = (m.shape()[0], m.shape()[1]);
-    Ok(MatRef::from_row_major_slice(m.as_slice()?, n, d))
+    Ok(MatRef::from_row_major_slice(m.c_slice()?, n, d))
 }
 
 /// A `float64` matrix narrowed to `float32`, as R's `r_matrix_to_faer_fp32`

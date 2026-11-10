@@ -30,6 +30,35 @@ pub type CsrParts<'a, 'py> = (
 pub type KnnRows = (Vec<Vec<usize>>, Vec<Vec<f32>>);
 
 ////////////
+// Slices //
+////////////
+
+/// The flat buffer of a NumPy array, in C order only.
+///
+/// rust-numpy's `as_slice` also accepts an F-contiguous array and hands back
+/// its column-major buffer, which every row-major reader here would then take
+/// silently transposed. Use this instead of `as_slice` on any NumPy input.
+pub trait CSlice<T> {
+    /// The buffer, or a `ValueError` unless the array is C-contiguous.
+    fn c_slice(&self) -> PyResult<&[T]>;
+}
+
+impl<T: numpy::Element, D: numpy::ndarray::Dimension> CSlice<T>
+    for numpy::PyReadonlyArray<'_, T, D>
+{
+    fn c_slice(&self) -> PyResult<&[T]> {
+        if !self.is_c_contiguous() {
+            return Err(PyValueError::new_err(format!(
+                "expected a C-contiguous (row-major) array of shape {:?}; pass \
+                 np.ascontiguousarray(x)",
+                self.shape()
+            )));
+        }
+        Ok(self.as_slice()?)
+    }
+}
+
+////////////
 // Params //
 ////////////
 
@@ -61,7 +90,7 @@ pub fn from_py<T: DeserializeOwned>(obj: &Bound<'_, PyAny>, what: &str) -> PyRes
 ///
 /// The indices.
 pub fn index_vec(idx: &PyReadonlyArray1<'_, u32>) -> PyResult<Vec<usize>> {
-    Ok(idx.as_slice()?.iter().map(|&x| x as usize).collect())
+    Ok(idx.c_slice()?.iter().map(|&x| x as usize).collect())
 }
 
 /// A C-contiguous `float32` array as a faer view
@@ -75,7 +104,7 @@ pub fn index_vec(idx: &PyReadonlyArray1<'_, u32>) -> PyResult<Vec<usize>> {
 /// The view, or an error if the array is not contiguous.
 pub fn mat_view<'a>(m: &'a PyReadonlyArray2<'_, f32>) -> PyResult<MatRef<'a, f32>> {
     let (n, d) = (m.shape()[0], m.shape()[1]);
-    Ok(MatRef::from_row_major_slice(m.as_slice()?, n, d))
+    Ok(MatRef::from_row_major_slice(m.c_slice()?, n, d))
 }
 
 /// kNN indices as one row per cell
@@ -90,7 +119,7 @@ pub fn mat_view<'a>(m: &'a PyReadonlyArray2<'_, f32>) -> PyResult<MatRef<'a, f32
 pub fn knn_rows(indices: &PyReadonlyArray2<'_, u32>) -> PyResult<Vec<Vec<usize>>> {
     let k = indices.shape()[1];
     Ok(indices
-        .as_slice()?
+        .c_slice()?
         .chunks_exact(k.max(1))
         .map(|row| row.iter().map(|&j| j as usize).collect())
         .collect())
@@ -113,7 +142,7 @@ pub fn dist_rows(dist: &PyReadonlyArray2<'_, f32>, shape: &[usize]) -> PyResult<
         ));
     }
     Ok(dist
-        .as_slice()?
+        .c_slice()?
         .chunks_exact(shape[1].max(1))
         .map(<[f32]>::to_vec)
         .collect())
@@ -160,7 +189,7 @@ pub fn csr_from_parts<T: BixverseNumeric>(
     cast: impl Fn(f32) -> T,
 ) -> PyResult<CompressedSparseData2<T, f32>> {
     let (data, indices, indptr, shape) = parts;
-    let (data, indices, indptr) = (data.as_slice()?, indices.as_slice()?, indptr.as_slice()?);
+    let (data, indices, indptr) = (data.c_slice()?, indices.c_slice()?, indptr.c_slice()?);
     if indptr.len() != shape.0 + 1
         || data.len() != indices.len()
         || indptr.last().copied().unwrap_or(0) as usize != data.len()

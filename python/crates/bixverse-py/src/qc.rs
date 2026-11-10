@@ -10,6 +10,7 @@ use bixverse_sc::sc_processing::qc::{
 };
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1};
+use py_common::convert::CSlice;
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -29,7 +30,7 @@ use pyo3::types::PyList;
 ///
 /// The indices.
 fn cell_vec(cells: &PyReadonlyArray1<'_, u32>) -> PyResult<Vec<usize>> {
-    Ok(cells.as_slice()?.iter().map(|&x| x as usize).collect())
+    Ok(cells.c_slice()?.iter().map(|&x| x as usize).collect())
 }
 
 /// Per-cell metric vectors as a list of `float64` arrays
@@ -84,7 +85,7 @@ pub fn mad_outlier<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, f64)> {
     let dir = parse_outlier_type(direction)
         .ok_or_else(|| PyValueError::new_err(format!("Invalid direction '{direction}'")))?;
-    let (outlier, margin) = mad_outlier_core(x.as_slice()?, threshold, dir, r_standard);
+    let (outlier, margin) = mad_outlier_core(x.c_slice()?, threshold, dir, r_standard);
     Ok((outlier.into_pyarray(py).into_any(), margin))
 }
 
@@ -159,7 +160,7 @@ pub fn gene_set_perc<'py>(
     let cells = cell_vec(&cell_indices)?;
     let sets = gene_sets
         .iter()
-        .map(|g| Ok(g.as_slice()?.to_vec()))
+        .map(|g| Ok(g.c_slice()?.to_vec()))
         .collect::<PyResult<Vec<Vec<u32>>>>()?;
     let res = py
         .detach(|| {

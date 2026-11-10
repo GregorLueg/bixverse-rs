@@ -12,6 +12,7 @@ use bixverse_sc::sc_analysis::dialogue::{
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use faer::MatRef;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{csr_from_parts, from_py, index_vec, mat_f64, u32_array};
 use py_common::error::BvErr;
 use pyo3::prelude::*;
@@ -57,7 +58,7 @@ fn feature_views<'a>(features: &'a [PyReadonlyArray2<'_, f64>]) -> PyResult<Vec<
         .iter()
         .map(|m| {
             let (n, d) = (m.shape()[0], m.shape()[1]);
-            Ok(MatRef::from_row_major_slice(m.as_slice()?, n, d))
+            Ok(MatRef::from_row_major_slice(m.c_slice()?, n, d))
         })
         .collect()
 }
@@ -205,7 +206,7 @@ pub fn dialogue_sc<'py>(
         .collect::<PyResult<_>>()?;
     let views = feature_views(&features)?;
     let samples = index_vec(&sample_ids)?;
-    let quality = cell_quality.as_slice()?;
+    let quality = cell_quality.c_slice()?;
     let genes = index_vec(&gene_indices)?;
     let reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
 
@@ -270,7 +271,7 @@ pub fn mc_dialogue<'py>(
         .collect::<PyResult<_>>()?;
     let views = feature_views(&features)?;
     let samples = index_vec(&sample_ids)?;
-    let quality = cell_quality.as_slice()?;
+    let quality = cell_quality.c_slice()?;
     let genes = index_vec(&gene_indices)?;
 
     let res = py

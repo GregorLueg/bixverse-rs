@@ -14,6 +14,7 @@ use bixverse_sc::sc_trajectory::paga::{PagaResult, run_paga};
 use bixverse_sc::sc_trajectory::palantir::{PalantirParams, run_palantir};
 use faer::MatRef;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::u32_array;
 use py_common::convert::{dist_rows, flat_array, from_py, index_vec, knn_rows, mat_array};
 use py_common::error::BvErr;
@@ -211,9 +212,9 @@ pub fn gene_trends<'py>(
             "branch_probs has {bn} rows, the expression {n}"
         )));
     }
-    let expr = MatRef::from_row_major_slice(expression.as_slice()?, n, g);
-    let probs = MatRef::from_row_major_slice(branch_probs.as_slice()?, bn, nb);
-    let pt = pseudotime.as_slice()?;
+    let expr = MatRef::from_row_major_slice(expression.c_slice()?, n, g);
+    let probs = MatRef::from_row_major_slice(branch_probs.c_slice()?, bn, nb);
+    let pt = pseudotime.c_slice()?;
 
     let (branch_cells, res) = py
         .detach(|| {

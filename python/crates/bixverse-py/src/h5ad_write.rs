@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use bixverse_sc_data::data_io::{DataLayerReturn, ParallelSparseReader};
 use numpy::{PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::error::{BixverseError, BvErr};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -85,7 +86,7 @@ fn to_columns(cols: Vec<(String, String, Bound<'_, PyAny>)>, n: usize) -> PyResu
                     // -1 becomes u32::MAX, which scx narrows to -1, the anndata
                     // code for a missing value, in every code width
                     let codes = codes
-                        .as_slice()?
+                        .c_slice()?
                         .iter()
                         .map(|&c| if c < 0 { u32::MAX } else { c as u32 })
                         .collect();
@@ -335,7 +336,7 @@ pub fn save_h5ad(
     chunk_size: usize,
 ) -> PyResult<()> {
     let cells: Vec<usize> = cell_indices
-        .as_slice()?
+        .c_slice()?
         .iter()
         .map(|&c| c as usize)
         .collect();

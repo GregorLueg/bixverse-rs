@@ -24,6 +24,7 @@ use pyo3::types::PyDict;
 
 use crate::device::{ensure_gpu, on_device};
 use crate::error::GpuErr;
+use py_common::convert::CSlice;
 
 /////////////
 // Helpers //
@@ -48,7 +49,7 @@ fn load_sc(
     use_second_layer: bool,
 ) -> PyResult<CompressedSparseData2<f32>> {
     let genes = index_vec(gene_indices)?;
-    let cells: IndexSet<u32> = cell_indices.as_slice()?.iter().copied().collect();
+    let cells: IndexSet<u32> = cell_indices.c_slice()?.iter().copied().collect();
     let layer = if use_second_layer {
         DataLayerReturn::Norm
     } else {

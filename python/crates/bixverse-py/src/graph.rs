@@ -16,6 +16,7 @@ use bixverse_sc::sc_processing::knn::{
     KnnParams, compare_knn, generate_knn_with_dist, pad_knn_rows,
 };
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{flat_array, from_py, mat_view};
 use py_common::error::BvErr;
 use py_common::results::{FastClusterOut, fast_cluster_out};
@@ -50,10 +51,10 @@ fn knn_slices<'a>(
                 "indices and distances must have the same shape",
             ));
         }
-        Some(d) => Some(d.as_slice()?),
+        Some(d) => Some(d.c_slice()?),
         None => None,
     };
-    Ok((indices.as_slice()?, dist, n, k))
+    Ok((indices.c_slice()?, dist, n, k))
 }
 
 /////////
@@ -241,9 +242,9 @@ pub fn leiden<'py>(
     let params: LeidenParams = from_py(params, "leiden params")?;
     let n = indptr.len().saturating_sub(1);
     let adjacency = CompressedSparseData2::new_csr(
-        data.as_slice()?,
-        indices.as_slice()?,
-        indptr.as_slice()?,
+        data.c_slice()?,
+        indices.c_slice()?,
+        indptr.c_slice()?,
         None,
         (n, n),
     );

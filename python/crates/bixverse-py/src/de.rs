@@ -23,6 +23,7 @@ use bixverse_sc::sc_analysis::nebula::{NebulaScParams, run_nebula};
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use edge_rs::glm::test::Tested;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{dist_rows, flat_array, from_py, index_vec, knn_rows, mat_view};
 use py_common::convert::{f64_array, mat_f64, u32_array};
 use py_common::error::BvErr;
@@ -58,7 +59,7 @@ fn group_lists(groups: &[PyReadonlyArray1<'_, u32>]) -> PyResult<Vec<Vec<usize>>
 ///
 /// `(values, nrows, ncols)`.
 fn rows_f64(m: &PyReadonlyArray2<'_, f64>) -> PyResult<(Vec<f64>, usize, usize)> {
-    Ok((m.as_slice()?.to_vec(), m.shape()[0], m.shape()[1]))
+    Ok((m.c_slice()?.to_vec(), m.shape()[0], m.shape()[1]))
 }
 
 /// The per-gene fields of a two-group Mann-Whitney result
@@ -439,7 +440,7 @@ pub fn nebula<'py>(
     let subjects = index_vec(&subject_ids)?;
     let (design, _, n_coef) = rows_f64(&design)?;
     let offset = offset
-        .map(|o| o.as_slice().map(<[f64]>::to_vec))
+        .map(|o| o.c_slice().map(<[f64]>::to_vec))
         .transpose()?;
     let gene_reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
     let cell_reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
@@ -540,7 +541,7 @@ pub fn spatial_fdr<'py>(
     p_values: PyReadonlyArray1<'py, f64>,
     connectivity: PyReadonlyArray1<'py, f64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let res = sfdr(p_values.as_slice()?, connectivity.as_slice()?).map_err(BvErr::from)?;
+    let res = sfdr(p_values.c_slice()?, connectivity.c_slice()?).map_err(BvErr::from)?;
     Ok(res.into_pyarray(py).into_any())
 }
 

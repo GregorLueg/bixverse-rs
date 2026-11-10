@@ -18,6 +18,7 @@ use bixverse_sc::sc_analysis::nichenet::prioritisation::{
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use faer::MatRef;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{flat_array, from_py, index_vec, mat_f64};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
@@ -81,17 +82,17 @@ pub fn ligand_target_influence<'py>(
     let params: LigandTargetParams<f64> = from_py(params, "ligand target params")?;
     let seeds: Vec<Vec<u32>> = ligand_seeds
         .iter()
-        .map(|s| Ok(s.as_slice()?.to_vec()))
+        .map(|s| Ok(s.c_slice()?.to_vec()))
         .collect::<PyResult<_>>()?;
     let (pf, pt, pw) = (
-        ppi_from.as_slice()?,
-        ppi_to.as_slice()?,
-        ppi_weight.as_slice()?,
+        ppi_from.c_slice()?,
+        ppi_to.c_slice()?,
+        ppi_weight.c_slice()?,
     );
     let (gf, gt, gw) = (
-        grn_from.as_slice()?,
-        grn_to.as_slice()?,
-        grn_weight.as_slice()?,
+        grn_from.c_slice()?,
+        grn_to.c_slice()?,
+        grn_weight.c_slice()?,
     );
     if pf.len() != pt.len() || pf.len() != pw.len() || gf.len() != gt.len() || gf.len() != gw.len()
     {
@@ -143,7 +144,7 @@ pub fn ligand_activity_scores<'py>(
             bad.len()
         )));
     }
-    let view = MatRef::from_row_major_slice(influence.as_slice()?, n, d);
+    let view = MatRef::from_row_major_slice(influence.c_slice()?, n, d);
     let scores: Vec<LigandActivityScores<f64>> = py.detach(|| {
         in_gene_sets
             .iter()

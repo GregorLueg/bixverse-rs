@@ -21,6 +21,7 @@ use pyo3::prelude::*;
 
 use crate::device::{ensure_gpu, ensure_plane_ops, on_device};
 use crate::error::GpuErr;
+use py_common::convert::CSlice;
 
 /// GPU kNN over an embedding, with the distances
 ///
@@ -97,9 +98,9 @@ pub fn leiden<'py>(
     let params: LeidenParams = from_py(params, "leiden params")?;
     let n = indptr.len()?.saturating_sub(1);
     let adjacency = CompressedSparseData2::new_csr(
-        data.as_slice()?,
-        indices.as_slice()?,
-        indptr.as_slice()?,
+        data.c_slice()?,
+        indices.c_slice()?,
+        indptr.c_slice()?,
         None,
         (n, n),
     );

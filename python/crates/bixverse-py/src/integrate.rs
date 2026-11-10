@@ -20,6 +20,7 @@ use bixverse_sc::sc_processing::metrics::{
 };
 use faer::MatRef;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{dist_rows, knn_rows};
 use py_common::convert::{from_py, index_vec, mat_array, mat_view};
 use py_common::error::BvErr;
@@ -574,7 +575,7 @@ pub fn pcr<'py>(
     batches: PyReadonlyArray1<'py, u32>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let (n, d) = (embd.shape()[0], embd.shape()[1]);
-    let view = MatRef::from_row_major_slice(embd.as_slice()?, n, d);
+    let view = MatRef::from_row_major_slice(embd.c_slice()?, n, d);
     let batches = index_vec(&batches)?;
     let res = py.detach(|| pcr_rs(view, &batches)).map_err(BvErr::from)?;
     let out = PyDict::new(py);

@@ -45,6 +45,7 @@ use bixverse_sc::sc_processing::metrics::pairwise_gene_correlations;
 use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
 use faer::{Mat, MatRef};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{
     csr_from_parts, f64_array, flat_array, from_py, index_vec, knn_pair, mat_f64, mat_view,
     u32_array,
@@ -117,7 +118,7 @@ fn feature_sets(net: &[PyFeatureSet<'_>], n_features: usize) -> PyResult<Feature
     let mut weights = Vec::with_capacity(net.len());
     for (idx, w) in net {
         sets.push(index_vec(idx)?);
-        weights.push(w.as_slice()?.to_vec());
+        weights.push(w.c_slice()?.to_vec());
     }
     FeatureSetWeights::new(&sets, Some(&weights), n_features)
         .map_err(|e| BvErr::from(ScErrors::from(e)).into())
@@ -317,7 +318,7 @@ fn links_dict<'py>(py: Python<'py>, links: Vec<ImportanceLink>) -> PyResult<Boun
 /// The view.
 fn mat_view_f64<'a>(m: &'a PyReadonlyArray2<'_, f64>) -> PyResult<MatRef<'a, f64>> {
     let (r, c) = (m.shape()[0], m.shape()[1]);
-    Ok(MatRef::from_row_major_slice(m.as_slice()?, r, c))
+    Ok(MatRef::from_row_major_slice(m.c_slice()?, r, c))
 }
 
 ///////////////////
@@ -1288,6 +1289,8 @@ pub fn mc_scenic_grn<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let tfs = index_vec(&tf_indices)?;
+    // by design, as in R: the meta cell raw counts go into both layers, so the
+    // regressors (which read `data_2`) fit on raw rather than normalised counts
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let res = py
         .detach(|| run_scenic_grn_in_memory(&m, &tfs, &params, seed, verbose))
@@ -1481,7 +1484,7 @@ pub fn cistarget<'py>(
     })?;
     let sets = index_sets(&gene_sets)?;
     let (r, c) = (rankings.shape()[0], rankings.shape()[1]);
-    let m = MatRef::from_row_major_slice(rankings.as_slice()?, r, c);
+    let m = MatRef::from_row_major_slice(rankings.c_slice()?, r, c);
     let res = py.detach(|| {
         cistarget_gene_sets(
             m,

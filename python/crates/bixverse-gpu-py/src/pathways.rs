@@ -14,7 +14,7 @@ use py_common::convert::{csr_from_parts, from_py, index_vec, mat_f64};
 use py_common::error::BvErr;
 use pyo3::prelude::*;
 
-use crate::device::{ensure_gpu, on_device};
+use crate::device::{ensure_plane_ops, on_device};
 use crate::error::GpuErr;
 
 /// R's default VRAM budget per wave of trees, 4 GiB.
@@ -55,7 +55,7 @@ pub fn scenic_grn<'py>(
     verbose: usize,
     wave_byte_budget: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
-    ensure_gpu()?;
+    ensure_plane_ops()?;
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let gpu = ScenicGpuParams { wave_byte_budget };
     let cells = index_vec(&cell_indices)?;
@@ -116,7 +116,7 @@ pub fn mc_scenic_grn<'py>(
     verbose: usize,
     wave_byte_budget: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
-    ensure_gpu()?;
+    ensure_plane_ops()?;
     let params: ScenicParams = from_py(params, "SCENIC params")?;
     let gpu = ScenicGpuParams { wave_byte_budget };
     let tfs = index_vec(&tf_indices)?;

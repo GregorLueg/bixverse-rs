@@ -34,6 +34,7 @@ use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj_io::write_r_counts;
 use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v4};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
+use py_common::convert::CSlice;
 use py_common::convert::{from_py, u32_array};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
@@ -324,7 +325,7 @@ fn slot_name(slot: RawDataSlot) -> &'static str {
 ///
 /// The indices, or `None`.
 fn keep_rows(keep: Option<PyReadonlyArray1<'_, u32>>) -> PyResult<Option<Vec<usize>>> {
-    keep.map(|k| Ok(k.as_slice()?.iter().map(|&x| x as usize).collect()))
+    keep.map(|k| Ok(k.c_slice()?.iter().map(|&x| x as usize).collect()))
         .transpose()
 }
 
@@ -369,9 +370,9 @@ pub fn csr_to_file<'py>(
         ));
     }
     let csr = CompressedSparseData2::<u32>::new_csr(
-        data.as_slice()?,
-        indices.as_slice()?,
-        indptr.as_slice()?,
+        data.c_slice()?,
+        indices.c_slice()?,
+        indptr.c_slice()?,
         None,
         shape,
     );
@@ -1210,9 +1211,9 @@ pub fn write_tenx(
         ));
     }
     let counts = CompressedSparseData2::<u32>::new_csr(
-        data.as_slice()?,
-        indices.as_slice()?,
-        indptr.as_slice()?,
+        data.c_slice()?,
+        indices.c_slice()?,
+        indptr.c_slice()?,
         None,
         shape,
     );

@@ -37,6 +37,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::pp::{PyResidualFit, stats_dict};
+use py_common::convert::CSlice;
 use py_common::convert::{csr_from_parts, knn_pair};
 use py_common::convert::{dist_rows, from_py, index_vec, knn_rows, mat_array, mat_view};
 use py_common::error::BvErr;
@@ -508,7 +509,7 @@ pub fn mc_pca<'py>(
     let params: SingleCellPcaParams = from_py(params, "pca params")?;
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x)?;
     let offsets = match (params.clr, clr_offsets) {
-        (true, Some(o)) => Some(o.as_slice()?.to_vec()),
+        (true, Some(o)) => Some(o.c_slice()?.to_vec()),
         (true, None) => return Err(PyValueError::new_err("clr needs clr_offsets")),
         (false, _) => None,
     };
@@ -572,11 +573,11 @@ pub fn mc_fit_residuals(
     };
     let m = csr_from_parts((&data, &indices, &indptr, shape), |x| x as u32)?;
     let groups: Option<Vec<u32>> = group_of_cell
-        .map(|g| g.as_slice().map(<[u32]>::to_vec))
+        .map(|g| g.c_slice().map(<[u32]>::to_vec))
         .transpose()?;
     let columns = covariates
         .iter()
-        .map(|(name, v)| Ok((name.clone(), v.as_slice()?.to_vec())))
+        .map(|(name, v)| Ok((name.clone(), v.c_slice()?.to_vec())))
         .collect::<PyResult<Vec<(String, Vec<f64>)>>>()?;
     let fit = py
         .detach(|| {

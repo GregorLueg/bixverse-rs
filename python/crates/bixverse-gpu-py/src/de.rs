@@ -12,6 +12,7 @@ use pyo3::types::PyDict;
 
 use crate::device::{ensure_plane_ops, on_device};
 use crate::error::GpuErr;
+use py_common::convert::CSlice;
 
 /// NEBULA over a cell selection, stage two on the GPU in `f32`
 ///
@@ -58,9 +59,9 @@ pub fn nebula<'py>(
     let genes = index_vec(&gene_indices)?;
     let subjects = index_vec(&subject_ids)?;
     let n_coef = design.shape()[1];
-    let design = design.as_slice()?.to_vec();
+    let design = design.c_slice()?.to_vec();
     let offset = offset
-        .map(|o| o.as_slice().map(<[f64]>::to_vec))
+        .map(|o| o.c_slice().map(<[f64]>::to_vec))
         .transpose()?;
     let gene_reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
     let cell_reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
