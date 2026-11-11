@@ -1120,7 +1120,8 @@ class BbknnParams:
             nearest neighbours of each cell are assumed to be fully connected.
         trim: Trim the neighbours of each cell to these many top connectivities. May
             help with population independence and improve the tidiness of
-            clustering. If `None`, it defaults to `10 * neighbours_within_batch`.
+            clustering. If `None`, it defaults to `10 * neighbours_within_batch *
+            n_batches`, as in the reference implementation.
         k: Number of neighbours.
         knn_method: Which method to use for the approximate nearest neighbour
             search. `"nndescent"` hands back the graph the NN-Descent built, with no
@@ -3487,8 +3488,8 @@ class ScdblfinderParams:
             selection.
         include_pcs: Number of leading principal components to include as classifier
             features.
-        expected_doublet_rate: Expected doublet rate as a fraction. If not
-            provided, will be calculated internally.
+        expected_doublet_rate: Expected doublet rate as a fraction, e.g. 0.12 for 12
+            %. If not provided, will be calculated internally.
         cxds_genes: Number of CXDS genes to consider. If not provided, defaults to
             `500`.
         manual_threshold: Manual score threshold. If `None` (default), expected-rate

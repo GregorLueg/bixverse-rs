@@ -503,7 +503,9 @@ def bbknn(
     and the max-symmetrised BBKNN connectivities to
     `sc.cache.connectivities`, stamped as derived from `"knn"`. The kNN keeps
     the `no_neighbours_to_keep` nearest of the per-batch neighbours of each
-    cell, by distance.
+    cell, balanced across batches: each batch keeps its nearest
+    `ceil(no_neighbours_to_keep / n_batches)`, and slots a batch cannot fill go
+    to the nearest of the rest. Rows are sorted by distance.
 
     Args:
         sc: The experiment, with a PCA.

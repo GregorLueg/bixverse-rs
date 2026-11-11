@@ -159,7 +159,8 @@ class BbknnGpuParams:
             nearest neighbours of each cell are assumed to be fully connected.
         trim: Trim the neighbours of each cell to these many top connectivities. May
             help with population independence and improve the tidiness of
-            clustering. If `None`, it defaults to `10 * neighbours_within_batch`.
+            clustering. If `None`, it defaults to `10 * neighbours_within_batch *
+            n_batches`, as in the reference implementation.
         knn_method: The GPU index to use.
         ann_dist: Manhattan is not supported by the GPU kernels.
         n_list: IVF only. Number of clusters. `None` gives `sqrt(n)`.
@@ -448,7 +449,7 @@ class HarmonyV2GpuParams:
     alpha: float = 0.2
     tau: float = 0.0
     batch_proportion_cutoff: float = 1e-05
-    use_dynamic_lambda: bool = True
+    use_dynamic_lambda: bool = False
     k_means_iter: int = 10
     k_means_init: str | None = None
     fixed: bool = False

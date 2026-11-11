@@ -561,10 +561,12 @@ plt.show()
 #
 # BBKNN constructs a batch-balanced kNN graph rather than correcting an
 # embedding. The key parameter is `neighbours_within_batch`, which controls how
-# many neighbours are found per batch. Setting `no_neighbours_to_keep` below the
-# total generated neighbours (here 10 from 2 batches = 20 total) ensures the
-# distance-based filtering introduces genuine variation, making downstream
-# metrics informative.
+# many neighbours are found per batch. The connectivity graph uses all of them
+# (here 10 from 2 batches = 20). `no_neighbours_to_keep` only cuts the stored
+# kNN, and the cut stays balanced: each batch keeps its nearest
+# `ceil(15 / 2) = 8`, so a cell ends up with 8 from one batch and 7 from the
+# other. A plain distance cut would throw the other batch away first, since
+# same-batch neighbours are nearly always closer.
 #
 # Note that kBET and the embedding metrics are not well suited for evaluating
 # BBKNN: kBET compares neighbourhood proportions against global proportions,
@@ -602,9 +604,13 @@ ax.set_title("BBKNN batch correction")
 plt.show()
 
 # %% [markdown]
-# The t-SNE on the BBKNN graph barely mixes. The 5 cross-batch neighbours each
-# cell keeps sit further out than the 10 within its own batch, so the t-SNE
-# affinities give them little weight. iLISI on the graph tells the better story.
+# The t-SNE on the BBKNN graph barely mixes, and that is the data, not the
+# graph: about half of every cell's stored neighbours come from the other batch,
+# but they sit further out than the ones in its own batch, so the t-SNE
+# affinities give them little weight. The two batches here were run on
+# different chemistries, so that distance is real. Any distance-weighted
+# embedding (t-SNE, UMAP) will look like this on a BBKNN graph. iLISI on the
+# graph tells the better story.
 #
 # ## Choosing a method
 #
