@@ -3174,10 +3174,10 @@ incomplete.</p>
     <div class="doc doc-contents ">
 
         <p>Batch-balanced kNN with the per-batch searches on the GPU.</p>
-<p>Writes what <code>bixverse.integrate.bbknn</code> writes: the kNN (the first
-<code>no_neighbours_to_keep</code> entries per row of the BBKNN distance matrix) to
-<code>sc.cache.knn</code> and the max-symmetrised connectivities to
-<code>sc.cache.connectivities</code>, on the PCA.</p>
+<p>Writes what <code>bixverse.integrate.bbknn</code> writes: the kNN (the
+<code>no_neighbours_to_keep</code> nearest per row of the BBKNN distance matrix,
+balanced across batches) to <code>sc.cache.knn</code> and the max-symmetrised
+connectivities to <code>sc.cache.connectivities</code>, on the PCA.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>

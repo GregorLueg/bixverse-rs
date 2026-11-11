@@ -4686,7 +4686,9 @@ fastMNN does.</p>
 and the max-symmetrised BBKNN connectivities to
 <code>sc.cache.connectivities</code>, stamped as derived from <code>"knn"</code>. The kNN keeps
 the <code>no_neighbours_to_keep</code> nearest of the per-batch neighbours of each
-cell, by distance.</p>
+cell, balanced across batches: each batch keeps its nearest
+<code>ceil(no_neighbours_to_keep / n_batches)</code>, and slots a batch cannot fill go
+to the nearest of the rest. Rows are sorted by distance.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>

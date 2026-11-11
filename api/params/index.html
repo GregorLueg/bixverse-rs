@@ -4975,7 +4975,8 @@ nearest neighbours of each cell are assumed to be fully connected.</p>
               <div class="doc-md-description">
                 <p>Trim the neighbours of each cell to these many top connectivities. May
 help with population independence and improve the tidiness of
-clustering. If <code>None</code>, it defaults to <code>10 * neighbours_within_batch</code>.</p>
+clustering. If <code>None</code>, it defaults to <code>10 * neighbours_within_batch *
+n_batches</code>, as in the reference implementation.</p>
               </div>
             </td>
           </tr>
@@ -12198,8 +12199,8 @@ features.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Expected doublet rate as a fraction. If not
-provided, will be calculated internally.</p>
+                <p>Expected doublet rate as a fraction, e.g. 0.12 for 12
+%. If not provided, will be calculated internally.</p>
               </div>
             </td>
           </tr>
