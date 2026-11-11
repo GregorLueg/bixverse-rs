@@ -3,6 +3,21 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.3.1
+
+Builds against the `bixverse-rs` workspace at 0.10.1. R parity is tested against
+bixverse 0.9.0 with the matching BBKNN changes.
+
+**Fixes**
+
+- `integrate.bbknn`: the default `trim` is `10 * neighbours_within_batch *
+  n_batches`, as in the reference, and the stored kNN keeps the nearest
+  `ceil(k / n_batches)` neighbours per batch instead of the `k` nearest overall.
+  Both the kNN and the connectivities change on the defaults. Same for the GPU
+  wheel.
+- Batch correction vignette: the BBKNN section is rewritten. kBET and iLISI no
+  longer count for BBKNN, and it is judged on graph weights and cluster mixing.
+
 ## 0.3.0
 
 Builds against the `bixverse-rs` workspace at 0.10.0: `bixverse-core`,

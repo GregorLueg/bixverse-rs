@@ -309,13 +309,14 @@ impl FromRList for BbknnParamsGpu {
         let trim = bbknn_list
             .get("trim")
             .and_then(|v| v.as_integer())
-            .unwrap_or(10 * neighbours_within_batch as i32) as usize;
+            .map(|t| t as usize);
 
+        // `None` leaves the reference default to `bbknn_graph_from_knn`
         Ok(Self {
             neighbours_within_batch,
             set_op_mix_ratio,
             local_connectivity,
-            trim: Some(trim),
+            trim,
             knn_params,
         })
     }

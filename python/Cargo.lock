@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ann-search-rs",
  "bixverse-core",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu-py"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bixverse-core",
  "bixverse-gpu",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-methods"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-py"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bixverse-core",
  "bixverse-methods",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "approx 0.5.1",
  "bincode",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-gpu"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bincode",
  "num-traits",
@@ -4560,7 +4560,7 @@ checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
 name = "py-common"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bixverse-methods",
  "bixverse-sc",

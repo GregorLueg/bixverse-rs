@@ -24,11 +24,12 @@ use bixverse_core::core::math::sparse::*;
 const SMOOTH_K_TOLERANCE: f32 = 1e-5;
 const MIN_K_DIST_SCALE: f32 = 1e-3;
 
-/// Default trim as a multiple of `neighbours_within_batch`, the BBKNN
-/// reference's `trim = 10 * neighbors_within_batch`.
+/// Default trim as a multiple of the batch-balanced row width
+/// (`neighbours_within_batch * n_batches`), as in the BBKNN reference's
+/// `trim = 10 * knn_distances.shape[1]`.
 const BBKNN_TRIM_FACTOR: usize = 10;
 
-/// Structure to store the BBKNN pamareters
+/// Structure to store the BBKNN parameters
 ///
 /// Deserialises from the flat R `params_sc_bbknn()` list, see
 /// [`BbknnParamsSpec`].
@@ -42,8 +43,10 @@ pub struct BbknnParams {
     /// UMAP connectivity computation parameter, how many nearest neighbours of
     /// each cell are assumed to be fully connected.
     pub local_connectivity: f32,
-    /// Trim the neighbours of each cell to these many to connectivities. May
-    /// help with population independence and improve the tidiness of clustering.
+    /// Trim the neighbours of each cell to these many top connectivities. May
+    /// help with population independence and improve the tidiness of
+    /// clustering. `None` is `10 * neighbours_within_batch * n_batches`, `0`
+    /// skips the trim.
     pub trim: Option<usize>,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
@@ -63,7 +66,7 @@ pub struct BbknnParamsSpec {
     /// connected
     pub local_connectivity: f32,
     /// Trim to these many top connectivities; `None` is
-    /// `10 * neighbours_within_batch`
+    /// `10 * neighbours_within_batch * n_batches`
     pub trim: Option<usize>,
     /// The kNN keys
     #[serde(flatten)]
@@ -83,7 +86,9 @@ impl Default for BbknnParamsSpec {
 }
 
 impl From<BbknnParamsSpec> for BbknnParams {
-    /// Resolve the trim default.
+    /// Take the keys over as they are. A missing trim stays `None` and is
+    /// resolved in [`bbknn_graph_from_knn`], once the number of batches is
+    /// known.
     ///
     /// ### Params
     ///
@@ -91,16 +96,13 @@ impl From<BbknnParamsSpec> for BbknnParams {
     ///
     /// ### Returns
     ///
-    /// The [`BbknnParams`], always with a trim.
+    /// The [`BbknnParams`].
     fn from(s: BbknnParamsSpec) -> Self {
         Self {
             neighbours_within_batch: s.neighbours_within_batch,
             set_op_mix_ratio: s.set_op_mix_ratio,
             local_connectivity: s.local_connectivity,
-            trim: Some(
-                s.trim
-                    .unwrap_or(BBKNN_TRIM_FACTOR * s.neighbours_within_batch),
-            ),
+            trim: s.trim,
             knn_params: s.knn_params,
         }
     }
@@ -716,6 +718,8 @@ fn trim_graph(
 /// * `local_connectivity` - How many nearest neighbours of each cell are
 ///   assumed to be fully connected.
 /// * `trim` - Trim the neighbours of each cell to these many connectivities.
+///   `None` is the reference default, `10 *` the row width of the kNN, i.e.
+///   `10 * neighbours_within_batch * n_batches`. `Some(0)` skips the trim.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -765,10 +769,9 @@ pub fn bbknn_graph_from_knn(
 
     let dist = knn_to_sparse_dist(knn_indices, knn_dists, n_obs);
 
-    if let Some(trim_val) = trim
-        && trim_val > 0
-    {
-        connectivities = trim_graph(connectivities, trim_val);
+    let trim = trim.unwrap_or(BBKNN_TRIM_FACTOR * n_neighbours);
+    if trim > 0 {
+        connectivities = trim_graph(connectivities, trim);
     }
 
     Ok((dist, connectivities))
@@ -791,7 +794,7 @@ pub fn bbknn_graph_from_knn(
 ///
 /// ### Returns
 ///
-/// A tuple of two CompressedSparseData2 with `(indices, connectivities)`.
+/// A tuple of two CompressedSparseData2 with `(distances, connectivities)`.
 pub fn bbknn(
     mat: MatRef<f32>,
     batch_labels: &[usize],
@@ -827,26 +830,54 @@ pub fn bbknn(
     )
 }
 
-/// The `k` nearest neighbours of each cell in the distance CSR from [`bbknn`].
+/// The batch-balanced `k` nearest neighbours of each cell in the distance CSR
+/// from [`bbknn`].
 ///
-/// The CSR rows are sorted by column index, so each row is reordered by
-/// distance (ties by index) before the first `k` are taken. Zero distances are
-/// not stored in the CSR, so a cell with duplicates can come back with a
-/// shorter row.
+/// Same-batch neighbours are nearly always nearer than cross-batch ones, so a
+/// plain distance cut would drop the other batches first. Each batch instead
+/// gets a quota of `ceil(k / n_batches)`: the row, sorted by distance (ties by
+/// index), is walked nearest first, taking an entry while its batch is under
+/// quota, until `k` are taken. Slots a batch cannot fill (zero distances are
+/// not stored in the CSR, so a row can hold fewer of a batch's neighbours than
+/// its quota) go to the nearest skipped entries of any batch. The BBKNN
+/// reference has no cut and returns the full row.
 ///
 /// ### Params
 ///
-/// * `distances` - The distance CSR from [`bbknn`]
+/// * `distances` - The distance CSR from [`bbknn`], `n_cells x n_cells`
+/// * `batch_labels` - Batch of each cell, as passed to [`bbknn`]
 /// * `k` - Neighbours to keep per row
 ///
 /// ### Returns
 ///
-/// `(indices, distances)` per cell, nearest first, each row at most `k` long.
-pub fn bbknn_nearest_neighbours(
+/// `(indices, distances)` per cell, nearest first, each row `min(k, stored
+/// entries)` long. `MetricLabelLengthMismatch` if `batch_labels` does not
+/// have one label per cell.
+pub fn bbknn_balanced_neighbours(
     distances: &CompressedSparseData2<f32>,
+    batch_labels: &[usize],
     k: usize,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
-    (0..distances.shape.0)
+) -> ScKnnResults {
+    let (n_rows, n_cols) = distances.shape;
+    if batch_labels.len() != n_rows || batch_labels.len() != n_cols {
+        return Err(ScErrors::MetricLabelLengthMismatch {
+            n_cells: n_cols,
+            n_labels: batch_labels.len(),
+        });
+    }
+
+    let (unique_batches, n_batches) = process_batch_labels(batch_labels);
+    let batch_ids: Vec<usize> = batch_labels
+        .iter()
+        .map(|b| {
+            unique_batches
+                .binary_search(b)
+                .expect("every label is in its own unique set")
+        })
+        .collect();
+    let quota = k.div_ceil(n_batches.max(1));
+
+    Ok((0..n_rows)
         .into_par_iter()
         .map(|i| {
             let start = distances.indptr[i] as usize;
@@ -857,10 +888,39 @@ pub fn bbknn_nearest_neighbours(
                 .map(|(&j, &d)| (j as usize, d))
                 .collect();
             row.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-            row.truncate(k);
+
+            if row.len() > k {
+                let mut taken = vec![false; row.len()];
+                let mut per_batch = vec![0_usize; n_batches];
+                let mut n_taken = 0;
+                for (t, &(j, _)) in row.iter().enumerate() {
+                    if n_taken == k {
+                        break;
+                    }
+                    let b = batch_ids[j];
+                    if per_batch[b] < quota {
+                        per_batch[b] += 1;
+                        taken[t] = true;
+                        n_taken += 1;
+                    }
+                }
+                for t in taken.iter_mut().filter(|t| !**t) {
+                    if n_taken == k {
+                        break;
+                    }
+                    *t = true;
+                    n_taken += 1;
+                }
+                row = row
+                    .into_iter()
+                    .zip(taken)
+                    .filter_map(|(e, t)| t.then_some(e))
+                    .collect();
+            }
+
             row.into_iter().unzip()
         })
-        .unzip()
+        .unzip())
 }
 
 ///////////
@@ -871,19 +931,116 @@ pub fn bbknn_nearest_neighbours(
 mod tests {
     use super::*;
 
+    /// Cell 0's row in a 7 cell CSR: batch 0 (cells 1 to 3) at distances 1 to
+    /// 3, batch 1 (cells 4 to 6) at 4 to 6, stored by column index. All other
+    /// rows are empty.
+    ///
+    /// ### Returns
+    ///
+    /// The CSR and the batch labels.
+    fn one_batch_nearer() -> (CompressedSparseData2<f32>, Vec<usize>) {
+        let mut indptr = vec![0_u32, 6];
+        indptr.extend([6; 6]);
+        let csr = CompressedSparseData2::new_csr(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            &[1, 2, 3, 4, 5, 6],
+            &indptr,
+            None,
+            (7, 7),
+        );
+        (csr, vec![0, 0, 0, 0, 1, 1, 1])
+    }
+
     #[test]
-    fn test_bbknn_nearest_neighbours_sorts_by_distance() {
+    fn test_bbknn_balanced_neighbours_one_batch_sorts_by_distance() {
         // Row 0 stores its neighbours by column index with descending
-        // distances; row 1 has a tie broken by index.
+        // distances; row 1 has a tie broken by index. One batch, so the quota
+        // is k and this is a plain distance cut.
         let csr: CompressedSparseData2<f32> = CompressedSparseData2::new_csr(
             &[3.0, 2.0, 1.0, 0.5, 0.5],
             &[1, 2, 3, 2, 0],
-            &[0, 3, 5],
+            &[0, 3, 5, 5, 5],
             None,
-            (2, 4),
+            (4, 4),
         );
-        let (idx, dist) = bbknn_nearest_neighbours(&csr, 2);
-        assert_eq!(idx, vec![vec![3, 2], vec![0, 2]]);
-        assert_eq!(dist, vec![vec![1.0, 2.0], vec![0.5, 0.5]]);
+        let (idx, dist) = bbknn_balanced_neighbours(&csr, &[7; 4], 2).unwrap();
+        assert_eq!(idx, vec![vec![3, 2], vec![0, 2], vec![], vec![]]);
+        assert_eq!(dist[..2], [vec![1.0, 2.0], vec![0.5, 0.5]]);
+    }
+
+    #[test]
+    fn test_bbknn_balanced_neighbours_splits_per_batch() {
+        let (csr, labels) = one_batch_nearer();
+        let (idx, dist) = bbknn_balanced_neighbours(&csr, &labels, 4).unwrap();
+        assert_eq!(idx[0], vec![1, 2, 4, 5]);
+        assert_eq!(dist[0], vec![1.0, 2.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_bbknn_balanced_neighbours_k_not_divisible() {
+        // Quota ceil(3 / 2) = 2: the nearer batch takes 2, the other the rest.
+        let (csr, labels) = one_batch_nearer();
+        let (idx, _) = bbknn_balanced_neighbours(&csr, &labels, 3).unwrap();
+        assert_eq!(idx[0], vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn test_bbknn_balanced_neighbours_full_row() {
+        let (csr, labels) = one_batch_nearer();
+        for k in [6, 10] {
+            let (idx, dist) = bbknn_balanced_neighbours(&csr, &labels, k).unwrap();
+            assert_eq!(idx[0], vec![1, 2, 3, 4, 5, 6]);
+            assert_eq!(dist[0], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        }
+    }
+
+    #[test]
+    fn test_bbknn_balanced_neighbours_fills_short_batch() {
+        // Batch 1 holds only cell 4 in the row, so its second slot goes to the
+        // nearest skipped cell, 3; the row stays sorted.
+        let (csr, _) = one_batch_nearer();
+        let labels = vec![0, 0, 0, 0, 1, 0, 0];
+        let (idx, _) = bbknn_balanced_neighbours(&csr, &labels, 4).unwrap();
+        assert_eq!(idx[0], vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_bbknn_balanced_neighbours_label_length_mismatch() {
+        let (csr, _) = one_batch_nearer();
+        assert!(matches!(
+            bbknn_balanced_neighbours(&csr, &[0, 1], 2),
+            Err(ScErrors::MetricLabelLengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_bbknn_trim_default_is_ten_times_row_width() {
+        // Cells 1 to 40 each point at a partner, at cell 0 and at a third
+        // cell, so cell 0 collects 40 in-edges of varying weight and a trim
+        // to 10 * 3 = 30 bites on its row.
+        let n_hub = 40;
+        let width = 3;
+        let wrap = |c: usize| (c - 1) % n_hub + 1;
+        let mut knn_idx = vec![vec![1, 2, 3]];
+        let mut knn_dist = vec![vec![1.01, 1.02, 1.03]];
+        for i in 1..=n_hub {
+            let partner = if i % 2 == 1 { wrap(i + 1) } else { i - 1 };
+            knn_idx.push(vec![partner, 0, wrap(i + 2)]);
+            knn_dist.push(vec![1.0, 1.0 + 0.01 * i as f32, 2.0]);
+        }
+        let n_obs = n_hub + 1;
+        let run = |trim: Option<usize>| {
+            let (mut idx, mut dist) = (knn_idx.clone(), knn_dist.clone());
+            let (_, conn) =
+                bbknn_graph_from_knn(&mut idx, &mut dist, n_obs, 1.0, 1.0, trim, 0).unwrap();
+            conn
+        };
+        let default = run(None);
+        let explicit = run(Some(10 * width));
+        let untrimmed = run(Some(0));
+        assert_eq!(default.indptr, explicit.indptr);
+        assert_eq!(default.indices, explicit.indices);
+        assert_eq!(default.data, explicit.data);
+        assert!(default.data.len() < untrimmed.data.len());
     }
 }

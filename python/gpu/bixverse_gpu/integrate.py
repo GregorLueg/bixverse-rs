@@ -96,10 +96,10 @@ def bbknn(
 ) -> None:
     """Batch-balanced kNN with the per-batch searches on the GPU.
 
-    Writes what `bixverse.integrate.bbknn` writes: the kNN (the first
-    `no_neighbours_to_keep` entries per row of the BBKNN distance matrix) to
-    `sc.cache.knn` and the max-symmetrised connectivities to
-    `sc.cache.connectivities`, on the PCA.
+    Writes what `bixverse.integrate.bbknn` writes: the kNN (the
+    `no_neighbours_to_keep` nearest per row of the BBKNN distance matrix,
+    balanced across batches) to `sc.cache.knn` and the max-symmetrised
+    connectivities to `sc.cache.connectivities`, on the PCA.
 
     Args:
         sc: The experiment, with a PCA.
