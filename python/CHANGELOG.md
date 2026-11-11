@@ -15,6 +15,8 @@ bixverse 0.9.0 with the matching BBKNN changes.
   `ceil(k / n_batches)` neighbours per batch instead of the `k` nearest overall.
   Both the kNN and the connectivities change on the defaults. Same for the GPU
   wheel.
+- Batch correction vignette: the BBKNN section is rewritten. kBET and iLISI no
+  longer count for BBKNN, and it is judged on graph weights and cluster mixing.
 
 ## 0.3.0
 

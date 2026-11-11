@@ -126,7 +126,7 @@ pub fn harmony_v2<'py>(
 /// The twin of `rs_bbknn`, then `rs_bbknn_filtering` on the distances and
 /// the max symmetrisation of `.bbknn_to_connectivity` on the
 /// connectivities. Rows left short of `k` (zero distances are not stored)
-/// are padded by repeating their last neighbour; R leaves them `NA`.
+/// are padded by repeating their last neighbour, as R does (with a warning).
 ///
 /// ### Params
 ///

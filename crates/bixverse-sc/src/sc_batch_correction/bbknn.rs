@@ -29,7 +29,7 @@ const MIN_K_DIST_SCALE: f32 = 1e-3;
 /// `trim = 10 * knn_distances.shape[1]`.
 const BBKNN_TRIM_FACTOR: usize = 10;
 
-/// Structure to store the BBKNN pamareters
+/// Structure to store the BBKNN parameters
 ///
 /// Deserialises from the flat R `params_sc_bbknn()` list, see
 /// [`BbknnParamsSpec`].
@@ -794,7 +794,7 @@ pub fn bbknn_graph_from_knn(
 ///
 /// ### Returns
 ///
-/// A tuple of two CompressedSparseData2 with `(indices, connectivities)`.
+/// A tuple of two CompressedSparseData2 with `(distances, connectivities)`.
 pub fn bbknn(
     mat: MatRef<f32>,
     batch_labels: &[usize],
