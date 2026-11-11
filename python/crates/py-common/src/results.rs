@@ -141,12 +141,13 @@ pub fn bbknn_out<'py>(
     k: usize,
 ) -> PyResult<BbknnOut<'py>> {
     let n = distances.shape.0;
-    let (idx, dist, graph) = py.detach(|| {
-        let (mut idx, mut dist) = bbknn_balanced_neighbours(distances, batch_labels, k)?;
-        pad_knn_rows(&mut idx, Some(&mut dist), k);
-        Ok::<_, ScErrors>((idx, dist, max_symmetrise_to_sparse_graph(connectivities)))
-    })
-    .map_err(BvErr::from)?;
+    let (idx, dist, graph) = py
+        .detach(|| {
+            let (mut idx, mut dist) = bbknn_balanced_neighbours(distances, batch_labels, k)?;
+            pad_knn_rows(&mut idx, Some(&mut dist), k);
+            Ok::<_, ScErrors>((idx, dist, max_symmetrise_to_sparse_graph(connectivities)))
+        })
+        .map_err(BvErr::from)?;
 
     let idx: Vec<u32> = idx.into_iter().flatten().map(|j| j as u32).collect();
     let dist: Vec<f32> = dist.into_iter().flatten().collect();
