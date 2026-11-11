@@ -17,14 +17,6 @@ use bixverse_sc::sc_batch_correction::batch_utils::process_batch_labels;
 use bixverse_sc::sc_batch_correction::bbknn::{bbknn_graph_from_knn, check_batch_size};
 use serde::Deserialize;
 
-///////////////
-// Constants //
-///////////////
-
-/// Trim per neighbour within a batch when `trim` is not given, as the CPU
-/// BBKNN and the R list conversion default it.
-const BBKNN_GPU_TRIM_FACTOR: usize = 10;
-
 ////////////
 // Params //
 ////////////
@@ -44,9 +36,10 @@ pub struct BbknnParamsGpu {
     /// UMAP connectivity computation parameter, how many nearest neighbours of
     /// each cell are assumed to be fully connected.
     pub local_connectivity: f32,
-    /// Trim the neighbours of each cell to these many to connectivities. May
+    /// Trim the neighbours of each cell to these many top connectivities. May
     /// help with population independence and improve the tidiness of
-    /// clustering.
+    /// clustering. `None` is `10 * neighbours_within_batch * n_batches`, `0`
+    /// skips the trim.
     pub trim: Option<usize>,
     /// [`KnnParamsGpu`] for the per-batch searches. `k` is ignored, since
     /// `neighbours_within_batch` sets the neighbour count, and the NNDescent
@@ -65,7 +58,7 @@ impl BbknnParamsGpu {
             neighbours_within_batch: 3,
             set_op_mix_ratio: 1.0,
             local_connectivity: 1.0,
-            trim: Some(30),
+            trim: None,
             knn_params: KnnParamsGpu::new(),
         }
     }
@@ -91,7 +84,7 @@ pub struct BbknnParamsGpuSpec {
     /// connected
     pub local_connectivity: f32,
     /// Trim to these many top connectivities; `None` is
-    /// `BBKNN_GPU_TRIM_FACTOR * neighbours_within_batch`
+    /// `10 * neighbours_within_batch * n_batches`
     pub trim: Option<usize>,
     /// The GPU kNN keys
     #[serde(flatten)]
@@ -112,7 +105,9 @@ impl Default for BbknnParamsGpuSpec {
 }
 
 impl From<BbknnParamsGpuSpec> for BbknnParamsGpu {
-    /// Resolve the trim default.
+    /// Take the keys over as they are. A missing trim stays `None` and is
+    /// resolved in `bbknn_graph_from_knn`, once the number of batches is
+    /// known.
     ///
     /// ### Params
     ///
@@ -120,16 +115,13 @@ impl From<BbknnParamsGpuSpec> for BbknnParamsGpu {
     ///
     /// ### Returns
     ///
-    /// The [`BbknnParamsGpu`], always with a trim.
+    /// The [`BbknnParamsGpu`].
     fn from(s: BbknnParamsGpuSpec) -> Self {
         Self {
             neighbours_within_batch: s.neighbours_within_batch,
             set_op_mix_ratio: s.set_op_mix_ratio,
             local_connectivity: s.local_connectivity,
-            trim: Some(
-                s.trim
-                    .unwrap_or(BBKNN_GPU_TRIM_FACTOR * s.neighbours_within_batch),
-            ),
+            trim: s.trim,
             knn_params: s.knn_params,
         }
     }

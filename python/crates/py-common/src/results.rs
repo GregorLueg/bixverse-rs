@@ -14,7 +14,7 @@ use bixverse_sc::prelude::{CompressedSparseData2, ScErrors};
 use bixverse_sc::sc_analysis::bonsai::{BonsaiScResult, NO_NODE};
 use bixverse_sc::sc_analysis::fast_clusters::{FastClusterResult, GridStats};
 use bixverse_sc::sc_analysis::nebula::NebulaScRes;
-use bixverse_sc::sc_batch_correction::bbknn::bbknn_nearest_neighbours;
+use bixverse_sc::sc_batch_correction::bbknn::bbknn_balanced_neighbours;
 use bixverse_sc::sc_processing::knn::pad_knn_rows;
 use bixverse_sc::sc_processing::scrublet::FinalScrubletRes;
 use numpy::IntoPyArray;
@@ -118,15 +118,16 @@ pub fn fast_cluster_out<'py>(
 
 /// The BBKNN distances and connectivities as a kNN and a symmetric CSR
 ///
-/// The kNN keeps the first `k` entries per row of the distance matrix, which
-/// is ordered by cell index, not by distance, as R's `rs_bbknn_filtering`.
-/// Short rows are padded. The connectivities are max-symmetrised.
+/// The kNN keeps the batch-balanced `k` nearest per row of the distance
+/// matrix (`bbknn_balanced_neighbours`), as R's `rs_bbknn_filtering`. Short
+/// rows are padded. The connectivities are max-symmetrised.
 ///
 /// ### Params
 ///
 /// * `py` - GIL token
 /// * `distances` - The BBKNN distance matrix
 /// * `connectivities` - The BBKNN connectivities
+/// * `batch_labels` - Batch per cell, as passed to BBKNN
 /// * `k` - Neighbours per cell to keep
 ///
 /// ### Returns
@@ -136,14 +137,16 @@ pub fn bbknn_out<'py>(
     py: Python<'py>,
     distances: &CompressedSparseData2<f32>,
     connectivities: &CompressedSparseData2<f32>,
+    batch_labels: &[usize],
     k: usize,
 ) -> PyResult<BbknnOut<'py>> {
     let n = distances.shape.0;
     let (idx, dist, graph) = py.detach(|| {
-        let (mut idx, mut dist) = bbknn_nearest_neighbours(distances, k);
+        let (mut idx, mut dist) = bbknn_balanced_neighbours(distances, batch_labels, k)?;
         pad_knn_rows(&mut idx, Some(&mut dist), k);
-        (idx, dist, max_symmetrise_to_sparse_graph(connectivities))
-    });
+        Ok::<_, ScErrors>((idx, dist, max_symmetrise_to_sparse_graph(connectivities)))
+    })
+    .map_err(BvErr::from)?;
 
     let idx: Vec<u32> = idx.into_iter().flatten().map(|j| j as u32).collect();
     let dist: Vec<f32> = dist.into_iter().flatten().collect();

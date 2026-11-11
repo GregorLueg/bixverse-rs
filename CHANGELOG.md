@@ -1,5 +1,20 @@
 # News
 
+## 0.10.1
+
+### Fixes
+
+- BBKNN `trim = None` now defaults to `10 * neighbours_within_batch * n_batches`,
+  as the reference does (was `10 * neighbours_within_batch`). It resolves in
+  `bbknn_graph_from_knn`; `BbknnParams`, `BbknnParamsGpu` and their R list
+  conversions keep `None`. Connectivities on the default trim change, more so with
+  many batches.
+- `bbknn_nearest_neighbours(distances, k)` is now
+  `bbknn_balanced_neighbours(distances, batch_labels, k)`: it keeps the nearest
+  `ceil(k / n_batches)` per batch and fills short batches from the others, so the
+  stored kNN no longer drops cross-batch neighbours first. The stored kNN changes;
+  the connectivities do not.
+
 ## 0.10.0
 
 ### Breaking

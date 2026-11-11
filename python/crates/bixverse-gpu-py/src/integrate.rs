@@ -87,7 +87,7 @@ pub fn bbknn_graph<'py>(
     let (distances, connectivities) = py
         .detach(|| on_device(|device| bbknn_gpu(view, &labels, &params, seed, device, verbose)))
         .map_err(GpuErr::from)?;
-    bbknn_out(py, &distances, &connectivities, k)
+    bbknn_out(py, &distances, &connectivities, &labels, k)
 }
 
 /// fastMNN on an embedding, the neighbour searches on the GPU

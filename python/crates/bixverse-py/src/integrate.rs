@@ -159,7 +159,7 @@ pub fn bbknn_graph<'py>(
     let (distances, connectivities) = py
         .detach(|| bbknn(view, &labels, &params, seed, verbose))
         .map_err(BvErr::from)?;
-    bbknn_out(py, &distances, &connectivities, k)
+    bbknn_out(py, &distances, &connectivities, &labels, k)
 }
 
 /////////////////////////
