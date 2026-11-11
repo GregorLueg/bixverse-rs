@@ -415,6 +415,9 @@ bv.integrate.harmony(sc, "exp_id")
 
 bv.graph.find_neighbours(sc, embd_to_use="harmony")
 
+# for the cluster comparison in the BBKNN section
+bv.graph.find_clusters(sc, res=1.0, name="leiden_harmony")
+
 # %% [markdown]
 # Let's calculate the batch correction-related scores.
 
@@ -559,21 +562,20 @@ plt.show()
 #
 # ### BBKNN
 #
-# BBKNN constructs a batch-balanced kNN graph rather than correcting an
-# embedding. The key parameter is `neighbours_within_batch`, which controls how
-# many neighbours are found per batch. The connectivity graph uses all of them
-# (here 10 from 2 batches = 20). `no_neighbours_to_keep` only cuts the stored
+# BBKNN doesn't touch the embedding. It builds a batch-balanced neighbour graph
+# instead: `neighbours_within_batch` nearest neighbours from every batch, turned
+# into UMAP-style connectivities. Here that's 10 per batch, so 20 neighbours per
+# cell feed the connectivities. `no_neighbours_to_keep` only cuts the stored
 # kNN, and the cut stays balanced: each batch keeps its nearest
 # `ceil(15 / 2) = 8`, so a cell ends up with 8 from one batch and 7 from the
-# other. A plain distance cut would throw the other batch away first, since
-# same-batch neighbours are nearly always closer.
+# other.
 #
-# Note that kBET and the embedding metrics are not well suited for evaluating
-# BBKNN: kBET compares neighbourhood proportions against global proportions,
-# which BBKNN manipulates by design, and ASW and PCR need an embedding. BBKNN
-# only hands back a graph, so we pass `embd_to_use=None` and those columns come
-# back null. iLISI, cLISI and graph connectivity on the stored kNN are the ones
-# to read here.
+# That makes BBKNN awkward to score. kBET and iLISI read the stored kNN, which
+# is balanced by construction, so they come out near perfect whatever the data
+# looks like. That's the method grading its own homework, not a sign of mixing.
+# ASW and PCR need an embedding, and BBKNN doesn't have one, so we pass
+# `embd_to_use=None` and those come back null. cLISI and graph connectivity are
+# still fair, since they only look at cell types.
 
 # %%
 bv.integrate.bbknn(
@@ -595,6 +597,86 @@ metrics_df = pl.concat(
 
 metrics_df.filter(pl.col("method") == "BBKNN")
 
+# %% [markdown]
+# So what does the graph actually look like? Counting edges is not enough: the
+# connectivities are weighted, and everything downstream (clustering, t-SNE,
+# UMAP) follows the weights. Below: the cross-batch share of the stored kNN, of
+# the graph's edges and of its total weight, plus the median distance from each
+# cell to its nearest neighbour in its own batch and in the other one.
+
+# %%
+batch = sc.obs(cols=["exp_id"], filtered=True)["exp_id"].to_numpy()
+
+knn_idx = sc.cache.knn.indices
+knn_dist = sc.cache.knn.distances
+other_batch = batch[knn_idx] != batch[:, None]
+
+conn = sc.cache.connectivities
+edge_rows = np.repeat(np.arange(conn.shape[0]), np.diff(conn.indptr))
+cross_edge = batch[edge_rows] != batch[conn.indices]
+
+pl.DataFrame(
+    {
+        "cross_batch_share_knn": [other_batch.mean()],
+        "cross_batch_share_edges": [cross_edge.mean()],
+        "cross_batch_share_weight": [conn.data[cross_edge].sum() / conn.data.sum()],
+        "median_nearest_same_batch": [
+            np.median(np.where(other_batch, np.inf, knn_dist).min(axis=1))
+        ],
+        "median_nearest_other_batch": [
+            np.median(np.where(other_batch, knn_dist, np.inf).min(axis=1))
+        ],
+    }
+)
+
+# %% [markdown]
+# Half the edges cross batches, but they carry only a few percent of the weight.
+# The nearest cell in the other batch sits about twice as far away as the
+# nearest one in the cell's own batch, and the UMAP connectivities decay with
+# distance, so the cross-batch edges end up with next to no weight. This isn't
+# an implementation detail: the reference `bbknn` package behaves the same on
+# this data. pbmc3k and pbmc4k were run on different 10x chemistries (GemCode
+# v1 against v2), and that gap is real.
+#
+# The fair test of a graph method is clustering, so let's run Leiden on the
+# BBKNN graph and compare its clusters against the uncorrected ones and
+# Harmony v2. A cluster where one batch holds more than 90% of the cells counts
+# as unmixed.
+
+# %%
+bv.graph.find_clusters(sc, res=1.0, name="leiden_bbknn")
+
+# share of a cluster's cells from one batch above which it counts as unmixed
+SINGLE_BATCH_CUTOFF = 0.9
+
+
+def batch_composition(cluster_col: str) -> pl.DataFrame:
+    obs = sc.obs(cols=[cluster_col, "exp_id"], filtered=True)
+    per_cluster = (
+        obs.group_by(cluster_col, "exp_id")
+        .len()
+        .with_columns(share=pl.col("len") / pl.col("len").sum().over(cluster_col))
+        .group_by(cluster_col)
+        .agg(n_cells=pl.col("len").sum(), top_batch_share=pl.col("share").max())
+    )
+    unmixed = per_cluster.filter(pl.col("top_batch_share") > SINGLE_BATCH_CUTOFF)
+    return pl.DataFrame(
+        {
+            "clustering": [cluster_col],
+            "n_clusters": [per_cluster.height],
+            "n_unmixed_clusters": [unmixed.height],
+            "share_cells_in_unmixed": [unmixed["n_cells"].sum() / obs.height],
+        }
+    )
+
+
+pl.concat(
+    [
+        batch_composition(col)
+        for col in ["leiden_uncorrected", "leiden_harmony", "leiden_bbknn"]
+    ]
+)
+
 # %%
 bv.embed.tsne(sc, use_knn=True, params=bv.embed.tsne_defaults().set_params(approx="qd"))  # ty: ignore[invalid-argument-type] # manifolds-rs types set_params as BaseEmbedding
 
@@ -604,13 +686,12 @@ ax.set_title("BBKNN batch correction")
 plt.show()
 
 # %% [markdown]
-# The t-SNE on the BBKNN graph barely mixes, and that is the data, not the
-# graph: about half of every cell's stored neighbours come from the other batch,
-# but they sit further out than the ones in its own batch, so the t-SNE
-# affinities give them little weight. The two batches here were run on
-# different chemistries, so that distance is real. Any distance-weighted
-# embedding (t-SNE, UMAP) will look like this on a BBKNN graph. iLISI on the
-# graph tells the better story.
+# The clusters and the t-SNE tell the same story. Leiden on the BBKNN graph
+# still puts most cells into single-batch clusters, barely better than doing
+# nothing, while Harmony mixes nearly all of them. The t-SNE follows the same
+# weights and stays split by batch. On a batch effect this strong, BBKNN on its
+# own doesn't correct much. It's built for milder effects, where the
+# cross-batch neighbours sit close enough to keep real weight.
 #
 # ## Choosing a method
 #
@@ -635,13 +716,19 @@ fig, axes = plt.subplots(
 methods = metrics_df["method"].to_list()
 cmap = plt.get_cmap("Blues").with_extremes(bad="0.9")
 
+# BBKNN's kBET and iLISI read its own balanced kNN, so they are greyed out
+plot_df = metrics_df.with_columns(
+    pl.when(pl.col("method") == "BBKNN").then(None).otherwise(pl.col(col)).alias(col)
+    for col in ["kbet_accept", "ilisi"]
+)
+
 for ax, cols, title in zip(
     axes,
     [batch_metrics, bio_metrics],
     ["Batch mixing", "Bio conservation"],
     strict=True,
 ):
-    scores = metrics_df.select(cols).to_numpy().astype(np.float64)
+    scores = plot_df.select(cols).to_numpy().astype(np.float64)
     im = ax.imshow(np.ma.masked_invalid(scores), cmap=cmap, vmin=0, vmax=1)
     for i, j in np.ndindex(scores.shape):
         if not np.isnan(scores[i, j]):
@@ -671,8 +758,8 @@ plt.show()
 # no matter what. Batch ASW barely moves either, since two PBMC batches of the
 # same tissue never separate much on silhouette to begin with. Both earn their
 # keep on finer labels and nastier batch effects. On two PBMC runs, kBET, iLISI
-# and PCR do the talking. And BBKNN's perfect kBET is the artefact mentioned
-# above, not a win.
+# and PCR do the talking. BBKNN's row is greyed out on the batch side: its kBET
+# and iLISI in the table above are the artefact from its section, not a win.
 #
 # There is no universally best batch correction method. Some practical
 # guidance:
@@ -694,16 +781,17 @@ plt.show()
 #   though, and on data that already mixes well they can make the batch metrics
 #   slightly worse. rPCA is the cheaper and gentler of the two and a sensible
 #   default; go to CCA when the batches genuinely don't share their cell types.
-# - **BBKNN** is useful when you want to avoid modifying the embedding at all.
-#   The batch-balanced graph can be passed directly to graph-based clustering
-#   algorithms. It is the lightest-touch approach but provides less control
-#   over the degree of correction.
+# - **BBKNN** leaves the embedding alone and hands a batch-balanced graph
+#   straight to clustering. It's the lightest touch of the lot, and that cuts
+#   both ways: when the batches sit far apart, as here, the cross-batch edges
+#   carry next to no weight and the clusters stay split by batch. Judge it on
+#   clustering, not on kBET or iLISI.
 #
 # In practice, running multiple methods and looking at quantitative metrics is
 # the most reliable approach. No single metric captures everything: kBET and
-# PCR only see batch, cLISI and cell type ASW only see biology, and the ones
-# built on the kNN graph are the only fair comparison for graph-based methods
-# like BBKNN. UMAPs and tSNE assessments should be taken with a big pinch of
+# PCR only see batch, cLISI and cell type ASW only see biology, and the kNN
+# metrics can't score a method that builds the kNN to look balanced. UMAPs and
+# tSNE assessments should be taken with a big pinch of
 # salt, see
 # [Chari, et al.](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011288)
 # Admittedly, they do look pretty however.
