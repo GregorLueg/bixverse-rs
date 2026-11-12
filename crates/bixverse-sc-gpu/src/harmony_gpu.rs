@@ -16,7 +16,6 @@ use crate::fast_clusters_gpu::KMeansGpuSpec;
 use crate::kernels::harmony_kernels::*;
 use crate::prelude::*;
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
-use bixverse_gpu::linalg::spmm::launch_dense_column_sum;
 use bixverse_gpu::{WORKGROUP_64, WORKGROUP_512};
 use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, broadcast_param, create_batch_infos};
 use bixverse_sc::sc_batch_correction::harmony_core::{
@@ -320,11 +319,8 @@ impl TryFrom<HarmonyParamsV2GpuSpec> for HarmonyParamsV2Gpu {
 /// * `client` - CubeCL compute client
 /// * `r` - Soft assignments `[n, k]`
 /// * `dist` - Distance matrix `[n, k]`
-/// * `o` - Observed counts `[b, k]`
-/// * `r_sum` - Per-cluster totals `[k]`
+/// * `cross` - Cross-entropy weights `[b, k]`, see `launch_level_tables`
 /// * `sigma` - Per-cluster weights `[k]`
-/// * `theta` - Per-level theta for the single covariate `[b]`
-/// * `pr_b` - Level frequencies `[b]`
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `n` - Cell count
 /// * `k` - Cluster count
@@ -338,11 +334,8 @@ pub fn compute_objective_gpu(
     client: &Client,
     r: &GpuTensor<f32>,
     dist: &GpuTensor<f32>,
-    o: &GpuTensor<f32>,
-    r_sum: &GpuTensor<f32>,
+    cross: &GpuTensor<f32>,
     sigma: &GpuTensor<f32>,
-    theta: &GpuTensor<f32>,
-    pr_b: &GpuTensor<f32>,
     cell_to_level: &GpuTensor<u32>,
     n: usize,
     k: usize,
@@ -352,11 +345,8 @@ pub fn compute_objective_gpu(
     launch_objective_partials(
         r,
         dist,
-        o,
-        r_sum,
+        cross,
         sigma,
-        theta,
-        pr_b,
         cell_to_level,
         &partials,
         n,
@@ -469,8 +459,22 @@ where
 // Main //
 //////////
 
-/// Per-level observed counts `O` `[b, k]` and per-cluster totals `r_sum` of
-/// the current assignments.
+/// Device buffers of one sweep's statistics: observed counts and what is
+/// derived from them.
+struct SweepStats {
+    /// Observed counts `[b, k]`
+    o: GpuTensor<f32>,
+    /// Per-cluster totals `[k]`
+    r_sum: GpuTensor<f32>,
+    /// Diversity penalties `[b, k]`
+    pen: GpuTensor<f32>,
+    /// Cross-entropy weights of the objective `[b, k]`
+    cross: GpuTensor<f32>,
+}
+
+/// Per-level observed counts `O` `[b, k]` of the current assignments, and
+/// from them `r_sum`, the penalty table and the objective's cross-entropy
+/// weights.
 ///
 /// ### Params
 ///
@@ -479,9 +483,10 @@ where
 /// * `run_bounds` - Run cell offsets `[n_runs + 1]`
 /// * `level_runs` - Run offsets per level `[b + 1]`
 /// * `partial` - Scratch `[n_runs, k]`
-/// * `o` - Output observed counts `[b, k]`
-/// * `r_sum` - Output per-cluster totals `[k]`
-/// * `n` - Cell count
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `theta` - Per-level theta `[b]`
+/// * `pr_b` - Level frequencies `[b]`
+/// * `out` - Output buffers
 /// * `n_runs` - Number of runs
 /// * `b` - Number of levels
 /// * `k` - Cluster count
@@ -490,22 +495,25 @@ where
 ///
 /// * `CubeclUtils` if a dispatch grid is over the device limit.
 #[allow(clippy::too_many_arguments)]
-fn observed_counts_gpu(
+fn sweep_stats_gpu(
     client: &Client,
     r: &GpuTensor<f32>,
     run_bounds: &GpuTensor<u32>,
     level_runs: &GpuTensor<u32>,
     partial: &GpuTensor<f32>,
-    o: &GpuTensor<f32>,
-    r_sum: &GpuTensor<f32>,
-    n: usize,
+    sigma: &GpuTensor<f32>,
+    theta: &GpuTensor<f32>,
+    pr_b: &GpuTensor<f32>,
+    out: &SweepStats,
     n_runs: usize,
     b: usize,
     k: usize,
 ) -> Result<(), ScGpuErrors> {
     launch_run_sums(r, run_bounds, partial, n_runs, k, client)?;
-    launch_reduce_runs(partial, level_runs, o, b, k, client)?;
-    launch_dense_column_sum(r, r_sum, n, k, client)?;
+    launch_reduce_runs(partial, level_runs, &out.o, b, k, client)?;
+    launch_level_tables(
+        &out.o, sigma, theta, pr_b, &out.r_sum, &out.pen, &out.cross, b, k, client,
+    )?;
     Ok(())
 }
 
@@ -630,23 +638,28 @@ where
     let dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
     let scale_dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
     let r_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
-    let o_gpu = GpuTensor::<f32>::empty(vec![b, k], &client)?;
-    let r_sum_gpu = GpuTensor::<f32>::empty(vec![k], &client)?;
+    let sweep = SweepStats {
+        o: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+        r_sum: GpuTensor::<f32>::empty(vec![k], &client)?,
+        pen: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+        cross: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+    };
     let z_corr_gpu = GpuTensor::<f32>::empty(vec![n, d], &client)?;
     let partial_o_gpu = GpuTensor::<f32>::empty(vec![n_runs, k], &client)?;
     let partial_s_gpu = GpuTensor::<f32>::empty(vec![n_runs * k * d], &client)?;
     let s_gpu = GpuTensor::<f32>::empty(vec![b * k * d], &client)?;
 
     let stats = |r: &GpuTensor<f32>| {
-        observed_counts_gpu(
+        sweep_stats_gpu(
             &client,
             r,
             &run_bounds_gpu,
             &level_runs_gpu,
             &partial_o_gpu,
-            &o_gpu,
-            &r_sum_gpu,
-            n,
+            &sigma_gpu,
+            &theta_gpu,
+            &pr_b_gpu,
+            &sweep,
             n_runs,
             b,
             k,
@@ -657,16 +670,16 @@ where
             &client,
             &r_gpu,
             &dist_gpu,
-            &o_gpu,
-            &r_sum_gpu,
+            &sweep.cross,
             &sigma_gpu,
-            &theta_gpu,
-            &pr_b_gpu,
             &cell_to_level_gpu,
             n,
             k,
         )
     };
+    // the windowed check cannot fire within max_iter_kmeans sweeps, so only
+    // the last sweep's objective is ever read
+    let objective_every_sweep = params.max_iter_kmeans > params.window_size + 1;
 
     // initial distances, R, and statistics
     launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client)?;
@@ -696,10 +709,7 @@ where
             // Jacobi sweep: reads O/r_sum from the previous sweep, writes R in place
             launch_jacobi_r_update(
                 &scale_dist_gpu,
-                &o_gpu,
-                &r_sum_gpu,
-                &theta_gpu,
-                &pr_b_gpu,
+                &sweep.pen,
                 &cell_to_level_gpu,
                 &r_gpu,
                 n,
@@ -708,6 +718,9 @@ where
             )?;
             stats(&r_gpu)?;
 
+            if !objective_every_sweep && kmeans_iter + 1 < params.max_iter_kmeans {
+                continue;
+            }
             objectives_kmeans.push(objective()?);
 
             if kmeans_iter > params.window_size
@@ -738,7 +751,7 @@ where
         )?;
         launch_reduce_runs(&partial_s_gpu, &level_runs_gpu, &s_gpu, b, k * d, &client)?;
         let s_host = s_gpu.clone().read(&client)?;
-        let o_host = o_gpu.clone().read(&client)?;
+        let o_host = sweep.o.clone().read(&client)?;
         let sums = [(
             s_host.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
             o_host.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
@@ -954,15 +967,36 @@ mod tests_harmony_gpu {
             |x: &[f32], shape: Vec<usize>| GpuTensor::<f32>::from_slice(x, shape, &client).unwrap();
         let ctl: Vec<u32> = info.cell_to_level.iter().map(|&l| l as u32).collect();
         let ctl_gpu = GpuTensor::<u32>::from_slice(&ctl, vec![n], &client).unwrap();
+        let sigma_gpu = up(&sigma, vec![k]);
+        let sweep = SweepStats {
+            o: up(&o, vec![b, k]),
+            r_sum: GpuTensor::<f32>::empty(vec![k], &client).unwrap(),
+            pen: GpuTensor::<f32>::empty(vec![b, k], &client).unwrap(),
+            cross: GpuTensor::<f32>::empty(vec![b, k], &client).unwrap(),
+        };
+        launch_level_tables(
+            &sweep.o,
+            &sigma_gpu,
+            &up(&theta_levels[0], vec![b]),
+            &up(&info.pr_b, vec![b]),
+            &sweep.r_sum,
+            &sweep.pen,
+            &sweep.cross,
+            b,
+            k,
+            &client,
+        )
+        .unwrap();
+        let r_sum_gpu = sweep.r_sum.clone().read(&client).unwrap();
+        for (g, c) in r_sum_gpu.iter().zip(&r_sum) {
+            assert_relative_eq!(*g, *c, epsilon = 1e-4);
+        }
         let gpu_obj = compute_objective_gpu(
             &client,
             &up(&r, vec![n, k]),
             &up(&dist, vec![n, k]),
-            &up(&o, vec![b, k]),
-            &up(&r_sum, vec![k]),
-            &up(&sigma, vec![k]),
-            &up(&theta_levels[0], vec![b]),
-            &up(&info.pr_b, vec![b]),
+            &sweep.cross,
+            &sigma_gpu,
             &ctl_gpu,
             n,
             k,
