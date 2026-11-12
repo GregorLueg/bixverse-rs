@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-core"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ann-search-rs",
  "bixverse-core",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-methods"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "approx 0.5.1",
  "bincode",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-gpu"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ann-search-rs",
  "approx 0.5.1",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "bincode",
  "num-traits",
