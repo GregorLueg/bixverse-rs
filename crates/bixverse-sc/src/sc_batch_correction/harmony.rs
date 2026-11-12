@@ -15,7 +15,7 @@ use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
     HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
     distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
-    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
+    r_to_mat, random_ranks, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
     window_converged,
 };
 
@@ -494,6 +494,8 @@ pub fn harmony_with_state(
         println!("Initial objective: {:.4}", initial_obj);
     }
 
+    let ranks = random_ranks(n, seed as u64);
+
     for harmony_iter in 0..params.max_iter_harmony {
         if verbosity.normal_verbosity() {
             println!("\n=== Harmony iteration {} ===", harmony_iter + 1);
@@ -521,6 +523,7 @@ pub fn harmony_with_state(
                     &mut o,
                     &mut r_sum,
                     params.block_size,
+                    &ranks,
                     (seed + harmony_iter * 1000 + kmeans_iter) as u64,
                 )
             });

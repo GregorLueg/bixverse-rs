@@ -12,9 +12,9 @@
 
 use faer::linalg::solvers::Solve;
 use faer::{Accum, Mat, MatMut, MatRef, Par, Side};
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use ann_search_rs::prelude::EMeansParams;
@@ -778,14 +778,38 @@ fn penalised(base: &[f32], pen: &[f32], out: &mut [f32]) -> f32 {
     f32::bxv_sum(out)
 }
 
+/// Rank of every cell in one seeded random order.
+///
+/// Drawn once per run: [`update_assignments`] cuts its blocks from this order
+/// at a per-call offset instead of reshuffling, since a Fisher-Yates shuffle of
+/// every cell is serial.
+///
+/// ### Params
+///
+/// * `n` - Cell count
+/// * `seed` - Shuffle seed
+///
+/// ### Returns
+///
+/// `ranks[c]`, the position of cell `c` in the random order
+pub(crate) fn random_ranks(n: usize, seed: u64) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.shuffle(&mut StdRng::seed_from_u64(seed));
+    let mut ranks = vec![0u32; n];
+    for (p, &c) in order.iter().enumerate() {
+        ranks[c as usize] = p as u32;
+    }
+    ranks
+}
+
 /// Block-wise diversity-penalised update of all soft assignments.
 ///
-/// Cells are visited in a seeded random order in `ceil(1 / block_size)`
-/// blocks; the last block takes every remaining cell. Per block: remove the
-/// block from O and `r_sum`, build each variable's `[n_levels, k]` penalty
-/// table once (`O`, `E` are frozen within a block), reassign every block cell
-/// in parallel as `base * prod_v penalty_v[level_v]` normalised, then add the
-/// block back.
+/// Cells are visited in `ceil(1 / block_size)` blocks, cut from the run's
+/// random order (`ranks`) rotated by a seeded offset; the last block takes
+/// every remaining cell. Per block: remove the block from O and `r_sum`,
+/// build each variable's `[n_levels, k]` penalty table once (`O`, `E` are
+/// frozen within a block), reassign every block cell in parallel as
+/// `base * prod_v penalty_v[level_v]` normalised, then add the block back.
 ///
 /// A block's cells are scattered across memory, and that gather is the cost.
 /// So the block loop reads only `base` and accumulates level sums, without
@@ -809,7 +833,9 @@ fn penalised(base: &[f32], pen: &[f32], out: &mut [f32]) -> f32 {
 /// * `o` - Observed counts per variable, kept in sync with `r`
 /// * `r_sum` - Per-cluster totals, kept in sync with `r`
 /// * `block_size` - Fraction of cells per block
-/// * `seed` - Shuffle seed
+/// * `ranks` - Every cell's position in the run's random order, see
+///   [`random_ranks`]
+/// * `seed` - Seed of the rotation offset into that order
 ///
 /// ### Returns
 ///
@@ -827,44 +853,26 @@ pub(crate) fn update_assignments(
     o: &mut [Vec<f32>],
     r_sum: &mut [f32],
     block_size: f32,
+    ranks: &[u32],
     seed: u64,
 ) -> (f64, f64) {
     let k = sigma.len();
     let n = r.len() / k;
     let n_vars = infos.len();
 
-    let mut order: Vec<usize> = (0..n).collect();
-    order.shuffle(&mut StdRng::seed_from_u64(seed));
-
-    let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = ((n as f32 * block_size) as usize).max(1);
-    let bounds: Vec<(usize, usize)> = (0..n_blocks)
-        .map(|b| b * cells_per_block)
-        .take_while(|&lo| lo < n)
-        .enumerate()
-        .map(|(b, lo)| {
-            let hi = if b == n_blocks - 1 {
-                n
-            } else {
-                (lo + cells_per_block).min(n)
-            };
-            (lo, hi)
-        })
+    let n_blk = ((1.0 / block_size).ceil() as usize).min(n.div_ceil(cells_per_block));
+    let offset = StdRng::seed_from_u64(seed).random_range(0..n);
+    // only block membership is random: each block lists its cells in memory
+    // order, so its row reads are monotone
+    let block_of: Vec<u32> = ranks
+        .par_iter()
+        .map(|&p| (((p as usize + offset) % n) / cells_per_block).min(n_blk - 1) as u32)
         .collect();
-    // only block membership is random: bucket the cells by block in memory
-    // order, so every block's row reads are monotone
-    let mut block_of = vec![0u32; n];
-    for (bi, &(lo, hi)) in bounds.iter().enumerate() {
-        for &c in &order[lo..hi] {
-            block_of[c] = bi as u32;
-        }
-    }
-    let mut cursor: Vec<usize> = bounds.iter().map(|&(lo, _)| lo).collect();
-    for (c, &bi) in block_of.iter().enumerate() {
-        order[cursor[bi as usize]] = c;
-        cursor[bi as usize] += 1;
-    }
-    let blocks: Vec<&[usize]> = bounds.iter().map(|&(lo, hi)| &order[lo..hi]).collect();
+    let blocks: Vec<Vec<usize>> = (0..n_blk as u32)
+        .into_par_iter()
+        .map(|bi| (0..n).filter(|&c| block_of[c] == bi).collect())
+        .collect();
 
     let mut offsets = Vec::with_capacity(n_vars + 1);
     offsets.push(0);
@@ -873,7 +881,6 @@ pub(crate) fn update_assignments(
     }
     let len = offsets[n_vars] + k;
     let tab = offsets[n_vars];
-    let n_blk = blocks.len();
     // every block's penalty tables, kept for the write-back pass
     let mut pen = vec![0.0f32; n_blk * tab];
     let mut log_pen = vec![0.0f32; n_blk * tab];
@@ -1523,7 +1530,8 @@ pub(crate) fn r_to_mat(r: &[f32], k: usize) -> Mat<f32> {
     MatRef::from_column_major_slice(r, k, r.len() / k).to_owned()
 }
 
-/// Row-major `[n, d]` buffer as an `n x d` faer matrix.
+/// Row-major `[n, d]` buffer as an `n x d` faer matrix, filled in parallel
+/// row blocks so each task reads its rows contiguously.
 ///
 /// ### Params
 ///
@@ -1534,7 +1542,18 @@ pub(crate) fn r_to_mat(r: &[f32], k: usize) -> Mat<f32> {
 ///
 /// The matrix
 pub fn row_major_to_mat(z: &[f32], d: usize) -> Mat<f32> {
-    MatRef::from_row_major_slice(z, z.len() / d, d).to_owned()
+    let mut out = Mat::<f32>::zeros(z.len() / d, d);
+    out.as_mut()
+        .par_row_chunks_mut(RUN_CELLS)
+        .zip(z.par_chunks(RUN_CELLS * d))
+        .for_each(|(mut blk, rows)| {
+            for (i, row) in rows.chunks_exact(d).enumerate() {
+                for (j, &x) in row.iter().enumerate() {
+                    blk[(i, j)] = x;
+                }
+            }
+        });
+    out
 }
 
 ///////////
@@ -1664,7 +1683,19 @@ mod tests {
             let mut r = random_r(n, k, 9);
             let (mut o, mut r_sum) = observed_counts(&r, &infos, k);
             let (e, h) = update_assignments(
-                variant, &mut r, &b, &lb, &sh, &sigma, &theta, &infos, &mut o, &mut r_sum, 0.07, 11,
+                variant,
+                &mut r,
+                &b,
+                &lb,
+                &sh,
+                &sigma,
+                &theta,
+                &infos,
+                &mut o,
+                &mut r_sum,
+                0.07,
+                &random_ranks(n, 10),
+                11,
             );
 
             for row in r.chunks_exact(k) {
@@ -1709,6 +1740,7 @@ mod tests {
             &mut o,
             &mut r_sum,
             0.05,
+            &random_ranks(n, 0),
             1,
         );
         for (a, b) in r.iter().zip(&b) {
