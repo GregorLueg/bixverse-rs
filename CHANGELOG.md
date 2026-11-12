@@ -1,5 +1,11 @@
 # News
 
+## 0.10.3
+
+### Fix
+
+- Take forward the fix from `edge-rs` for the LN stage.
+
 ## 0.10.2
 
 ### Features

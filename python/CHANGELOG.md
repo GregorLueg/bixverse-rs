@@ -3,6 +3,14 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.3.2
+
+Builds against `bixverse-rs` workspace at 0.10.3.
+
+**Fixes**
+
+- Takes the NEBULA-LN stage fix forward from the meta crate.
+
 ## 0.3.1
 
 Builds against the `bixverse-rs` workspace at 0.10.1. R parity is tested against
