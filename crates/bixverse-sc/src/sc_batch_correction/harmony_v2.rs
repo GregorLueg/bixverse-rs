@@ -19,9 +19,9 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
 use super::harmony::{BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_infos};
 use super::harmony_core::{
-    HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, distances_and_base,
-    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, random_ranks,
-    ridge_correction, row_major_to_mat, to_row_major, update_assignments, window_converged,
+    HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, kmeans_centroids,
+    normalise_rows_into, objective, r_to_mat, random_ranks, restart_assignments, ridge_correction,
+    row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -381,10 +381,19 @@ fn run_harmony_v2(
     let mut log_base = vec![0.0f32; n * k];
     let mut shift = vec![0.0f32; n];
     let mut base = vec![0.0f32; n * k];
-    let (mut r, mut o, mut r_sum) = times.time("init_r", || {
-        distances_and_base(&z_cos, &y, &sigma, d, &mut log_base, &mut base, &mut shift);
-        let (o, r_sum) = observed_counts(&base, &batch_infos, k);
-        (base.clone(), o, r_sum)
+    let mut r = vec![0.0f32; n * k];
+    let (mut o, mut r_sum) = times.time("init_r", || {
+        restart_assignments(
+            &z_cos,
+            &y,
+            &sigma,
+            d,
+            &batch_infos,
+            &mut log_base,
+            &mut base,
+            &mut r,
+            &mut shift,
+        )
     });
 
     let (error, entropy) = base_error_and_entropy(&log_base, &base, &shift, &sigma);
@@ -488,9 +497,17 @@ fn run_harmony_v2(
         // cold restart of R from the new distances
         times.time("init_r", || {
             normalise_rows_into(&z_corr, d, &mut z_cos);
-            distances_and_base(&z_cos, &y, &sigma, d, &mut log_base, &mut base, &mut shift);
-            r.copy_from_slice(&base);
-            (o, r_sum) = observed_counts(&r, &batch_infos, k);
+            (o, r_sum) = restart_assignments(
+                &z_cos,
+                &y,
+                &sigma,
+                d,
+                &batch_infos,
+                &mut log_base,
+                &mut base,
+                &mut r,
+                &mut shift,
+            );
         });
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
