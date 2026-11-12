@@ -880,7 +880,8 @@ impl<'a> HarmonyMlx<'a> {
     /// convergence check. One sweep stays in flight: sweep `t` is submitted
     /// before the host blocks on the objective of `t - 1`; on convergence at
     /// `t - 1` the speculative sweep is dropped, so the result is the same as
-    /// a synchronous loop.
+    /// a synchronous loop. When the check cannot fire within the sweep budget,
+    /// only the last sweep computes its objective.
     ///
     /// ### Params
     ///
@@ -902,6 +903,33 @@ impl<'a> HarmonyMlx<'a> {
         objectives: &mut Vec<f32>,
     ) -> Result<Assign, MlxErrors> {
         let mut cur = start;
+        // the windowed check cannot fire within max_iter_kmeans sweeps, so
+        // only the last sweep's objective is ever read
+        if params.max_iter_kmeans <= params.window_size + 1 {
+            for it in 0..params.max_iter_kmeans {
+                let r = self.jacobi(base, &cur.pen, cur.r.as_ref().unwrap_or(base))?;
+                let (o, r_sum, pen) = self.stats(&r)?;
+                let partials = if it + 1 == params.max_iter_kmeans {
+                    let p = self.objective_partials(&r, dist)?;
+                    eval_all(&[&r, &o, &r_sum, &pen, &p], true)?;
+                    Some(p)
+                } else {
+                    eval_all(&[&r, &o, &r_sum, &pen], true)?;
+                    None
+                };
+                cur = Assign {
+                    r: Some(r),
+                    o,
+                    r_sum,
+                    pen,
+                    partials,
+                };
+            }
+            if let Some(partials) = cur.partials.as_ref() {
+                objectives.push(self.finish_objective(partials, &cur.o, &cur.r_sum)?);
+            }
+            return Ok(cur);
+        }
         let mut flight: Option<Assign> = None;
         for it in 0..params.max_iter_kmeans {
             let src = flight.as_ref().unwrap_or(&cur);
