@@ -336,32 +336,135 @@ pub(crate) fn distances_and_base(
         .zip(shift.par_chunks_mut(RUN_CELLS))
         .zip(z_cos.par_chunks(d * RUN_CELLS))
         .for_each(|(((lb_c, base_c), shift_c), z_c)| {
-            let m = z_c.len() / d;
-            let z_ref = MatRef::from_row_major_slice(z_c, m, d);
-            gemm(
-                MatMut::from_column_major_slice_mut(lb_c, k, m),
-                Accum::Replace,
-                y_ref,
-                z_ref.transpose(),
-                1.0,
-                Par::Seq,
-            );
-            for ((lb, bc), sh) in lb_c
-                .chunks_exact_mut(k)
-                .zip(base_c.chunks_exact_mut(k))
-                .zip(shift_c.iter_mut())
-            {
-                for (l, is) in lb.iter_mut().zip(&inv_sigma) {
-                    *l = -2.0 * (1.0 - *l) * is;
-                }
-                let max_logit = lane_max(lb);
-                let total = f32::bxv_exp_shift_sum(lb, max_logit, bc);
-                let inv = 1.0 / total;
-                bc.iter_mut().for_each(|b| *b *= inv);
-                *sh = max_logit + total.ln();
-                lb.iter_mut().for_each(|l| *l -= *sh);
-            }
+            base_run(z_c, y_ref, &inv_sigma, lb_c, base_c, shift_c);
         });
+}
+
+/// [`distances_and_base`] on one run of cells.
+///
+/// ### Params
+///
+/// * `z_c` - The run's cosine-normalised cells `[m, d]` row-major
+/// * `y_ref` - Centroids `k x d`
+/// * `inv_sigma` - `1 / sigma` per cluster
+/// * `lb_c` - Output log assignments `[m, k]`
+/// * `base_c` - Output assignments `[m, k]`
+/// * `shift_c` - Output per-cell log-sum-exp (length m)
+fn base_run(
+    z_c: &[f32],
+    y_ref: MatRef<f32>,
+    inv_sigma: &[f32],
+    lb_c: &mut [f32],
+    base_c: &mut [f32],
+    shift_c: &mut [f32],
+) {
+    let (k, d) = (y_ref.nrows(), y_ref.ncols());
+    let m = z_c.len() / d;
+    let z_ref = MatRef::from_row_major_slice(z_c, m, d);
+    gemm(
+        MatMut::from_column_major_slice_mut(lb_c, k, m),
+        Accum::Replace,
+        y_ref,
+        z_ref.transpose(),
+        1.0,
+        Par::Seq,
+    );
+    for ((lb, bc), sh) in lb_c
+        .chunks_exact_mut(k)
+        .zip(base_c.chunks_exact_mut(k))
+        .zip(shift_c.iter_mut())
+    {
+        for (l, is) in lb.iter_mut().zip(inv_sigma) {
+            *l = -2.0 * (1.0 - *l) * is;
+        }
+        let max_logit = lane_max(lb);
+        let total = f32::bxv_exp_shift_sum(lb, max_logit, bc);
+        let inv = 1.0 / total;
+        bc.iter_mut().for_each(|b| *b *= inv);
+        *sh = max_logit + total.ln();
+        lb.iter_mut().for_each(|l| *l -= *sh);
+    }
+}
+
+/// Cold restart of the assignments: [`distances_and_base`] with `r` set to
+/// the base and the observed counts accumulated in the same pass, so neither
+/// the copy nor the counts read the `[n, k]` arrays again.
+///
+/// ### Params
+///
+/// * `z_cos` - Cosine-normalised cells `[n, d]` row-major
+/// * `y` - Cosine-normalised centroids `[k, d]` row-major
+/// * `sigma` - Per-cluster softness (length k)
+/// * `d` - Embedding dimension
+/// * `infos` - Batch information per variable
+/// * `log_base` - Output log assignments `[n, k]`
+/// * `base` - Output assignments `[n, k]`
+/// * `r` - Output soft assignments `[n, k]`, equal to `base`
+/// * `shift` - Output per-cell log-sum-exp (length n)
+///
+/// ### Returns
+///
+/// `(O per variable [n_levels, k], r_sum [k])` of `r`, as
+/// [`observed_counts`] gives them
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restart_assignments(
+    z_cos: &[f32],
+    y: &[f32],
+    sigma: &[f32],
+    d: usize,
+    infos: &[BatchInfo],
+    log_base: &mut [f32],
+    base: &mut [f32],
+    r: &mut [f32],
+    shift: &mut [f32],
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let k = sigma.len();
+    let y_ref = MatRef::from_row_major_slice(y, k, d);
+    let inv_sigma: Vec<f32> = sigma.iter().map(|s| 1.0 / s).collect();
+    let mut offsets = Vec::with_capacity(infos.len() + 1);
+    offsets.push(0);
+    for info in infos {
+        offsets.push(offsets.last().unwrap() + info.n_levels * k);
+    }
+    let len = *offsets.last().unwrap();
+
+    let sums = log_base
+        .par_chunks_mut(k * RUN_CELLS)
+        .zip(base.par_chunks_mut(k * RUN_CELLS))
+        .zip(r.par_chunks_mut(k * RUN_CELLS))
+        .zip(shift.par_chunks_mut(RUN_CELLS))
+        .zip(z_cos.par_chunks(d * RUN_CELLS))
+        .enumerate()
+        .fold(
+            || vec![0.0f32; len],
+            |mut acc, (chunk, ((((lb_c, base_c), r_c), shift_c), z_c))| {
+                base_run(z_c, y_ref, &inv_sigma, lb_c, base_c, shift_c);
+                r_c.copy_from_slice(base_c);
+                let c0 = chunk * RUN_CELLS;
+                for (i, row) in base_c.chunks_exact(k).enumerate() {
+                    for (v, info) in infos.iter().enumerate() {
+                        let at = offsets[v] + info.cell_to_level[c0 + i] * k;
+                        for (a, x) in acc[at..at + k].iter_mut().zip(row) {
+                            *a += x;
+                        }
+                    }
+                }
+                acc
+            },
+        )
+        .reduce(|| vec![0.0f32; len], add_into);
+
+    let o: Vec<Vec<f32>> = offsets
+        .windows(2)
+        .map(|w| sums[w[0]..w[1]].to_vec())
+        .collect();
+    let mut r_sum = vec![0.0f32; k];
+    for row in o[0].chunks_exact(k) {
+        for (a, v) in r_sum.iter_mut().zip(row) {
+            *a += v;
+        }
+    }
+    (o, r_sum)
 }
 
 ////////////////
