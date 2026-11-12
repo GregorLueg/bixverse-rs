@@ -12,7 +12,8 @@ use cubecl::Device;
 use faer::{Mat, MatRef};
 
 use crate::prelude::*;
-use bixverse_core::ml::clustering::k_means::parse_kmeans_init;
+use ann_search_rs::prelude::EMeansParams;
+use bixverse_core::ml::clustering::k_means::{parse_kmeans_algorithm, parse_kmeans_init};
 use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
 use serde::Deserialize;
 
@@ -26,6 +27,10 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct KMeansGpuSpec {
+    /// `"emeans"` or `"lloyd"`, see `parse_kmeans_algorithm`
+    pub k_means_algorithm: String,
+    /// e-means epoch budget, ignored for Lloyd's
+    pub e_means_epochs: f64,
     /// Lloyd's iterations
     pub k_means_iter: usize,
     /// Optional initialisation, see `parse_kmeans_init`
@@ -39,6 +44,8 @@ pub struct KMeansGpuSpec {
 impl Default for KMeansGpuSpec {
     fn default() -> Self {
         Self {
+            k_means_algorithm: "emeans".to_string(),
+            e_means_epochs: EMeansParams::default().epochs,
             k_means_iter: 50,
             k_means_init: None,
             fixed: true,
@@ -52,20 +59,21 @@ impl KMeansGpuSpec {
     ///
     /// ### Returns
     ///
-    /// The [`KMeansGpuParams`], or an error naming an unknown initialisation.
+    /// The [`KMeansGpuParams`], or an error naming an unknown algorithm or
+    /// initialisation.
     pub fn into_params(self) -> Result<KMeansGpuParams, String> {
+        let algorithm = parse_kmeans_algorithm(&self.k_means_algorithm, self.e_means_epochs)
+            .ok_or_else(|| format!("Invalid k-means algorithm: {}", self.k_means_algorithm))?;
         let init = self
             .k_means_init
             .map(|s| {
                 parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
             })
             .transpose()?;
-        Ok(KMeansGpuParams::new(
-            self.k_means_iter,
-            init,
-            self.fixed,
-            self.quantise,
-        ))
+        Ok(
+            KMeansGpuParams::new(self.k_means_iter, init, self.fixed, self.quantise)
+                .with_algorithm(algorithm),
+        )
     }
 }
 

@@ -10,6 +10,7 @@
 //! Stage one is behind the [`Coarsener`] trait, so the GPU and MLX crates swap
 //! in their own k-means (and nearest-centroid search) and reuse the rest.
 
+use ann_search_rs::prelude::{EMeansParams, KMeansAlgorithm};
 use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::utils::k_means_utils::assign_all_parallel_top_m;
 use ann_search_rs::utils::matrix_to_flat;
@@ -143,7 +144,7 @@ pub fn top_m_cpu(data: MatRef<f32>, centroids: MatRef<f32>, m: usize, dist: &str
 /// Which CPU k-means to run.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CpuKMeansKind {
-    /// Lloyd's / Hamerly k-means on all cells
+    /// k-means on all cells, e-means or Lloyd's as the params pick
     #[default]
     Standard,
     /// Mini-batch k-means
@@ -191,8 +192,10 @@ impl CpuKMeans {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct CpuKMeansSpec {
-    /// `"standard"` or `"minibatch"`
+    /// `"emeans"`, `"standard"` (Lloyd's) or `"minibatch"`
     pub km_type: String,
+    /// e-means epoch budget
+    pub e_means_epochs: f64,
     /// Mini-batch: cells per batch
     pub batch_size: usize,
     /// Mini-batch: stop once the centroids move less than this
@@ -212,7 +215,8 @@ pub struct CpuKMeansSpec {
 impl Default for CpuKMeansSpec {
     fn default() -> Self {
         Self {
-            km_type: "standard".to_string(),
+            km_type: "emeans".to_string(),
+            e_means_epochs: EMeansParams::default().epochs,
             batch_size: 4096,
             drift_threshold: 1e-4,
             lr_alpha: 1.0,
@@ -238,16 +242,23 @@ impl TryFrom<CpuKMeansSpec> for CpuKMeans {
     /// The [`CpuKMeans`], or an error naming an unknown `km_type` or
     /// initialisation.
     fn try_from(spec: CpuKMeansSpec) -> Result<Self, String> {
-        let kind = match parse_k_means(&spec.km_type) {
-            Some(KMeansType::StandardKMeans) => CpuKMeansKind::Standard,
-            Some(KMeansType::MiniBatchKMeans) => CpuKMeansKind::MiniBatch {
-                batch_size: spec.batch_size,
-                drift_threshold: spec.drift_threshold,
-                lr_alpha: spec.lr_alpha,
-            },
+        let (kind, algorithm) = match parse_k_means(&spec.km_type) {
+            Some(KMeansType::EMeans) => (
+                CpuKMeansKind::Standard,
+                KMeansAlgorithm::EMeans(EMeansParams::new(spec.e_means_epochs)),
+            ),
+            Some(KMeansType::StandardKMeans) => (CpuKMeansKind::Standard, KMeansAlgorithm::Lloyd),
+            Some(KMeansType::MiniBatchKMeans) => (
+                CpuKMeansKind::MiniBatch {
+                    batch_size: spec.batch_size,
+                    drift_threshold: spec.drift_threshold,
+                    lr_alpha: spec.lr_alpha,
+                },
+                KMeansAlgorithm::Lloyd,
+            ),
             None => {
                 return Err(format!(
-                    "km_type must be 'standard' or 'minibatch', got '{}'",
+                    "km_type must be 'emeans', 'standard' or 'minibatch', got '{}'",
                     spec.km_type
                 ));
             }
@@ -264,7 +275,7 @@ impl TryFrom<CpuKMeansSpec> for CpuKMeans {
         };
         Ok(CpuKMeans::new(
             kind,
-            KMeansParamsWrappers::new(spec.k_means_iter, init, path),
+            KMeansParamsWrappers::new(spec.k_means_iter, init, path).with_algorithm(algorithm),
         ))
     }
 }

@@ -5,6 +5,7 @@
 #![allow(missing_docs)]
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
+use ann_search_rs::prelude::{EMeansParams, KMeansAlgorithm};
 use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
@@ -145,12 +146,10 @@ impl Default for HarmonyParamsV2Gpu {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: Some(KMeansGpuParams::new(
-                HARMONY_KMEANS_ITERS,
-                None,
-                true,
-                false,
-            )),
+            kmeans_params: Some(
+                KMeansGpuParams::new(HARMONY_KMEANS_ITERS, None, true, false)
+                    .with_algorithm(KMeansAlgorithm::default()),
+            ),
         }
     }
 }
@@ -159,15 +158,16 @@ impl Default for HarmonyParamsV2Gpu {
 /// MLX port (`mlx::sc::harmony::harmony_v2_mlx`) takes.
 ///
 /// `block_size` has no GPU counterpart and takes the CPU default; the MLX
-/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`
-/// and `balanced`. `fixed` and `quantise_to_f16` have no CPU counterpart and
+/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`,
+/// `balanced` and `algorithm`. `fixed` and `quantise_to_f16` have no CPU counterpart and
 /// are dropped. A `None` k-means block maps to [`KMeansGpuParams::default`],
 /// matching what the GPU path does with `None`.
 impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
     fn from(p: &HarmonyParamsV2Gpu) -> Self {
         let km = p.kmeans_params.unwrap_or_default();
-        let kmeans_params =
-            KMeansParamsWrappers::new(km.iters, km.init, None).with_balancing(km.balanced);
+        let kmeans_params = KMeansParamsWrappers::new(km.iters, km.init, None)
+            .with_balancing(km.balanced)
+            .with_algorithm(km.algorithm);
         Self {
             k: p.k,
             sigma: p.sigma.clone(),
@@ -224,6 +224,10 @@ pub struct HarmonyParamsV2GpuSpec {
     pub k_means_iter: usize,
     /// Optional initialisation, see `parse_kmeans_init`
     pub k_means_init: Option<String>,
+    /// `"emeans"` or `"lloyd"`, see `parse_kmeans_algorithm`
+    pub k_means_algorithm: String,
+    /// e-means epoch budget, ignored for Lloyd's
+    pub e_means_epochs: f64,
     /// Run every k-means iteration without a convergence check
     pub fixed: bool,
     /// Hold the k-means data buffer at fp16
@@ -249,6 +253,8 @@ impl Default for HarmonyParamsV2GpuSpec {
             use_dynamic_lambda: d.use_dynamic_lambda,
             k_means_iter: HARMONY_KMEANS_ITERS,
             k_means_init: None,
+            k_means_algorithm: "emeans".to_string(),
+            e_means_epochs: EMeansParams::default().epochs,
             fixed: false,
             quantise: false,
         }
@@ -266,10 +272,12 @@ impl TryFrom<HarmonyParamsV2GpuSpec> for HarmonyParamsV2Gpu {
     ///
     /// ### Returns
     ///
-    /// The [`HarmonyParamsV2Gpu`], or an error naming an unknown
-    /// initialisation.
+    /// The [`HarmonyParamsV2Gpu`], or an error naming an unknown algorithm
+    /// or initialisation.
     fn try_from(s: HarmonyParamsV2GpuSpec) -> Result<Self, String> {
         let kmeans_params = KMeansGpuSpec {
+            k_means_algorithm: s.k_means_algorithm,
+            e_means_epochs: s.e_means_epochs,
             k_means_iter: s.k_means_iter,
             k_means_init: s.k_means_init,
             fixed: s.fixed,

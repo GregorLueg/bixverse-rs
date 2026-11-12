@@ -17,12 +17,13 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
+use ann_search_rs::prelude::EMeansParams;
 use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 
 use crate::prelude::*;
 use crate::sc_batch_correction::harmony::BatchInfo;
 use bixverse_core::ml::clustering::k_means::{
-    KMeansParamsWrappers, parse_kmean_path, parse_kmeans_init,
+    KMeansParamsWrappers, parse_kmean_path, parse_kmeans_algorithm, parse_kmeans_init,
 };
 use bixverse_core::utils::gemm::gemm;
 use serde::Deserialize;
@@ -36,7 +37,8 @@ use serde::Deserialize;
 /// small enough that the gathered `R` and `Z` blocks stay in L2.
 pub(crate) const RUN_CELLS: usize = 1024;
 
-/// Lloyd iterations of the initial k-means. R harmony 2.0.5 runs 10
+/// Lloyd iterations of the initial k-means, when Lloyd's is picked over the
+/// default e-means. R harmony 2.0.5 runs 10
 /// (`kmeans_centers` in `src/utils.cpp`). Against 30 on 829k cells x 50 PCs it
 /// halved `kmeans_init` with a marginally lower final objective in both v1 and
 /// v2, and corrected embeddings within 3% relative Frobenius.
@@ -75,6 +77,10 @@ const ARROWHEAD_EPS: f64 = 1e-10;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct HarmonyKMeansSpec {
+    /// `"emeans"` or `"lloyd"`, see `parse_kmeans_algorithm`
+    pub k_means_algorithm: String,
+    /// e-means epoch budget, ignored for Lloyd's
+    pub e_means_epochs: f64,
     /// Lloyd iterations of the initial k-means
     pub k_means_iter: usize,
     /// Optional initialisation, see `parse_kmeans_init`
@@ -88,6 +94,8 @@ pub struct HarmonyKMeansSpec {
 impl Default for HarmonyKMeansSpec {
     fn default() -> Self {
         Self {
+            k_means_algorithm: "emeans".to_string(),
+            e_means_epochs: EMeansParams::default().epochs,
             k_means_iter: HARMONY_KMEANS_ITERS,
             k_means_init: None,
             gemm: None,
@@ -110,9 +118,11 @@ impl TryFrom<HarmonyKMeansSpec> for KMeansParamsWrappers {
     ///
     /// ### Returns
     ///
-    /// The [`KMeansParamsWrappers`], or an error naming an unknown
-    /// initialisation.
+    /// The [`KMeansParamsWrappers`], or an error naming an unknown algorithm
+    /// or initialisation.
     fn try_from(spec: HarmonyKMeansSpec) -> Result<Self, String> {
+        let algorithm = parse_kmeans_algorithm(&spec.k_means_algorithm, spec.e_means_epochs)
+            .ok_or_else(|| format!("Invalid k-means algorithm: {}", spec.k_means_algorithm))?;
         let init = spec
             .k_means_init
             .map(|s| {
@@ -123,7 +133,7 @@ impl TryFrom<HarmonyKMeansSpec> for KMeansParamsWrappers {
             (None, None) => None,
             (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
         };
-        Ok(KMeansParamsWrappers::new(spec.k_means_iter, init, path))
+        Ok(KMeansParamsWrappers::new(spec.k_means_iter, init, path).with_algorithm(algorithm))
     }
 }
 

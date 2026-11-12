@@ -27,6 +27,9 @@ pub enum KMeansType {
     StandardKMeans,
     /// Mini-batch version of k-means based on Sculley, 2010
     MiniBatchKMeans,
+    /// e-means: mini-batch EMA updates with a fitted batch size and step, see
+    /// [`KMeansAlgorithm::EMeans`]
+    EMeans,
 }
 
 /// Function to parse the type of k-means to use
@@ -42,6 +45,7 @@ pub fn parse_k_means(s: &str) -> Option<KMeansType> {
     match s.to_lowercase().as_str() {
         "standard" | "kmeans" | "k-means" => Some(KMeansType::StandardKMeans),
         "minibatch" | "mini-batch" => Some(KMeansType::MiniBatchKMeans),
+        "emeans" | "e-means" => Some(KMeansType::EMeans),
         _ => None,
     }
 }
@@ -88,6 +92,21 @@ impl KMeansParamsWrappers {
         Self(self.0.with_balancing(balanced))
     }
 
+    /// Pick the clustering algorithm, see
+    /// [`KMeansTrainingParams::with_algorithm`]. Under e-means, `iters`,
+    /// `init`, `path` and `balanced` are ignored.
+    ///
+    /// ### Params
+    ///
+    /// * `algorithm` - [`KMeansAlgorithm::EMeans`] or [`KMeansAlgorithm::Lloyd`]
+    ///
+    /// ### Returns
+    ///
+    /// `self` with the algorithm set.
+    pub fn with_algorithm(self, algorithm: KMeansAlgorithm) -> Self {
+        Self(self.0.with_algorithm(algorithm))
+    }
+
     /// Returns the parameters and consumes self
     ///
     /// ### Returns
@@ -98,10 +117,30 @@ impl KMeansParamsWrappers {
     }
 }
 
-/// Default implementation for [KMeansParamsWrappers]
+/// e-means at its default epoch budget. The Lloyd's fields keep 100
+/// iterations with auto init and path, read by the mini-batch path and by
+/// `with_algorithm(KMeansAlgorithm::Lloyd)`.
 impl Default for KMeansParamsWrappers {
     fn default() -> Self {
-        Self::new(100, None, None)
+        Self::new(100, None, None).with_algorithm(KMeansAlgorithm::default())
+    }
+}
+
+/// Parse the k-means algorithm
+///
+/// ### Params
+///
+/// * `s` - `"emeans"` / `"e-means"` or `"lloyd"`
+/// * `epochs` - e-means epoch budget, ignored for Lloyd's
+///
+/// ### Returns
+///
+/// The [KMeansAlgorithm], `None` for an unknown name
+pub fn parse_kmeans_algorithm(s: &str, epochs: f64) -> Option<KMeansAlgorithm> {
+    match s.to_lowercase().as_str() {
+        "emeans" | "e-means" => Some(KMeansAlgorithm::EMeans(EMeansParams::new(epochs))),
+        "lloyd" => Some(KMeansAlgorithm::Lloyd),
+        _ => None,
     }
 }
 
@@ -151,6 +190,7 @@ impl std::fmt::Debug for KMeansParamsWrappers {
             .field("init", &self.0.init)
             .field("path", &self.0.path)
             .field("balanced", &self.0.balanced)
+            .field("algorithm", &self.0.algorithm)
             .finish()
     }
 }

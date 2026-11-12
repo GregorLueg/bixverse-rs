@@ -52,3 +52,7 @@ panic = "unwind"
 
 [profile.dev]
 opt-level = 2
+
+# e-means work in progress; drop before release
+[patch.crates-io]
+ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs", branch = "feat-e-means" }

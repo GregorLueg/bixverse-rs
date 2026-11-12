@@ -5,7 +5,8 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::FromRList;
-use crate::r_rust_interface::{r_list_count, r_list_to_map};
+use crate::r_rust_interface::{r_list_count, r_list_real, r_list_to_map};
+use ann_search_rs::prelude::{EMeansParams, KMeansAlgorithm};
 use bixverse_rs::ml::clustering::k_means::*;
 
 //////////////////////////
@@ -66,5 +67,30 @@ pub fn kmeans_params_from_r_list_with_iters(
         (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
     };
 
-    Ok(KMeansParamsWrappers::new(iters, init, path))
+    let algorithm = kmeans_algorithm_from_r_map(&params_list)?;
+
+    Ok(KMeansParamsWrappers::new(iters, init, path).with_algorithm(algorithm))
+}
+
+/// Read the k-means algorithm from an already flattened R list.
+///
+/// `k_means_algorithm` defaults to `"emeans"` and `e_means_epochs` to the
+/// e-means default; an unrecognised algorithm is an error.
+///
+/// ### Params
+///
+/// * `params_list` - The flattened R list
+///
+/// ### Returns
+///
+/// The [KMeansAlgorithm]
+pub fn kmeans_algorithm_from_r_map(params_list: &HashMap<&str, Robj>) -> Result<KMeansAlgorithm> {
+    let name = params_list
+        .get("k_means_algorithm")
+        .and_then(|v| v.as_str())
+        .unwrap_or("emeans");
+    let epochs =
+        r_list_real(params_list, "e_means_epochs")?.unwrap_or(EMeansParams::default().epochs);
+    parse_kmeans_algorithm(name, epochs)
+        .ok_or_else(|| Error::Other(format!("Invalid k-means algorithm: {}", name)))
 }
