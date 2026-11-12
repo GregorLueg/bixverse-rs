@@ -20,8 +20,8 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use super::harmony::{BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_infos};
 use super::harmony_core::{
     HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, distances_and_base,
-    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
-    row_major_to_mat, to_row_major, update_assignments, window_converged,
+    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, random_ranks,
+    ridge_correction, row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -280,6 +280,32 @@ pub fn harmony_v2_with_state(
     seed: usize,
     verbose: usize,
 ) -> Result<HarmonyResult, ScErrors> {
+    let (z_corr, r) = run_harmony_v2(pca, batch_labels, params, seed, verbose)?;
+    Ok(HarmonyResult {
+        z_corr: row_major_to_mat(&z_corr, pca.ncols()),
+        r: r_to_mat(&r, params.k),
+    })
+}
+
+/// The Harmony v2 loop behind [`harmony_v2`] and [`harmony_v2_with_state`],
+/// on flat buffers, so a caller that wants only the embedding never copies
+/// `R`.
+///
+/// ### Params
+///
+/// See [`harmony_v2_with_state`].
+///
+/// ### Returns
+///
+/// `(z_corr, r)`: the corrected embedding `[n, d]` and the soft assignments
+/// `[n, k]`, both row-major
+fn run_harmony_v2(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParamsV2,
+    seed: usize,
+    verbose: usize,
+) -> Result<(Vec<f32>, Vec<f32>), ScErrors> {
     let start = Instant::now();
 
     let verbosity = parse_verbosity_level(verbose);
@@ -381,6 +407,8 @@ pub fn harmony_v2_with_state(
         println!("Initial objective: {:.4}", initial_obj);
     }
 
+    let ranks = random_ranks(n, seed as u64);
+
     for harmony_iter in 0..params.max_iter_harmony {
         if verbosity.normal_verbosity() {
             println!("\n=== Harmony v2 iteration {} ===", harmony_iter + 1);
@@ -404,6 +432,7 @@ pub fn harmony_v2_with_state(
                     &mut o,
                     &mut r_sum,
                     params.block_size,
+                    &ranks,
                     (seed + harmony_iter * 1000 + kmeans_iter) as u64,
                 )
             });
@@ -493,10 +522,7 @@ pub fn harmony_v2_with_state(
         times.print();
     }
 
-    Ok(HarmonyResult {
-        z_corr: row_major_to_mat(&z_corr, d),
-        r: r_to_mat(&r, k),
-    })
+    Ok((z_corr, r))
 }
 
 /// Run Harmony v2 batch correction.
@@ -523,7 +549,8 @@ pub fn harmony_v2(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, ScErrors> {
-    Ok(harmony_v2_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
+    let (z_corr, _) = run_harmony_v2(pca, batch_labels, params, seed, verbose)?;
+    Ok(row_major_to_mat(&z_corr, pca.ncols()))
 }
 
 ///////////
