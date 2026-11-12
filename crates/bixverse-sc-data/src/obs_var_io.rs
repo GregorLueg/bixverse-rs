@@ -10,7 +10,7 @@
 //! written as strings; their levels come back in [`ParquetColumnInfo`] so the
 //! caller can cast them to a DuckDB ENUM.
 
-use hdf5::{Dataset, File, Group, IndexType, IterationOrder, LocationType, types::TypeDescriptor};
+use hdf5::File;
 use parquet::basic::{Compression, LogicalType, Repetition, Type as PhysicalType, ZstdLevel};
 use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, DoubleType, Int32Type};
 use parquet::file::properties::WriterProperties;
@@ -21,6 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::h5_10x_io::{TenxVersion, read_string_dataset};
+use crate::h5ad_frame_io::{ColumnData, H5adFrame, read_frame};
 use crate::prelude::*;
 
 /// Rows per Parquet row group. DuckDB parallelises a scan over row groups, so
@@ -138,361 +139,23 @@ pub struct ParquetFrameInfo {
     pub n_rows: usize,
 }
 
-/// A column held in memory between the HDF5 read and the Parquet write
-#[derive(Clone, Debug, PartialEq)]
-enum ColumnData {
-    /// Integers, `None` for missing or out of `i32` range
-    Integer(Vec<Option<i32>>),
-    /// Floats widened to `f64`; NaN stays NaN, `None` is NULL
-    Double(Vec<Option<f64>>),
-    /// Booleans
-    Boolean(Vec<Option<bool>>),
-    /// Strings
-    String(Vec<Option<String>>),
-    /// Categorical; a code outside `0..categories.len()` is NULL
-    Categorical {
-        /// Per-row level codes
-        codes: Vec<i32>,
-        /// Levels
-        categories: Vec<String>,
-    },
-}
-
-impl ColumnData {
-    /// Number of rows
-    ///
-    /// ### Returns
-    ///
-    /// The column length.
-    fn len(&self) -> usize {
-        match self {
-            ColumnData::Integer(v) => v.len(),
-            ColumnData::Double(v) => v.len(),
-            ColumnData::Boolean(v) => v.len(),
-            ColumnData::String(v) => v.len(),
-            ColumnData::Categorical { codes, .. } => codes.len(),
-        }
-    }
-
-    /// Keep the rows at `keep`, in that order
-    ///
-    /// ### Params
-    ///
-    /// * `keep` - 0-based row positions, all `< self.len()`
-    ///
-    /// ### Returns
-    ///
-    /// The filtered column.
-    fn gather(self, keep: &[usize]) -> Self {
-        fn pick<T: Clone>(v: &[T], keep: &[usize]) -> Vec<T> {
-            keep.iter().map(|&i| v[i].clone()).collect()
-        }
-        match self {
-            ColumnData::Integer(v) => ColumnData::Integer(pick(&v, keep)),
-            ColumnData::Double(v) => ColumnData::Double(pick(&v, keep)),
-            ColumnData::Boolean(v) => ColumnData::Boolean(pick(&v, keep)),
-            ColumnData::String(v) => ColumnData::String(pick(&v, keep)),
-            ColumnData::Categorical { codes, categories } => ColumnData::Categorical {
-                codes: pick(&codes, keep),
-                categories,
-            },
-        }
-    }
-
-    /// Set the rows flagged in `mask` to NULL (anndata nullable encoding)
-    ///
-    /// ### Params
-    ///
-    /// * `mask` - `Some(true)` marks a missing value
-    fn apply_mask(&mut self, mask: &[Option<bool>]) {
-        let missing = |i: usize| mask.get(i).copied().flatten().unwrap_or(false);
-        match self {
-            ColumnData::Integer(v) => mask_vec(v, missing),
-            ColumnData::Double(v) => mask_vec(v, missing),
-            ColumnData::Boolean(v) => mask_vec(v, missing),
-            ColumnData::String(v) => mask_vec(v, missing),
-            ColumnData::Categorical { codes, .. } => {
-                for (i, c) in codes.iter_mut().enumerate() {
-                    if missing(i) {
-                        *c = -1;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Render the values as categorical levels, the way R's `factor()` turns
-    /// non-character levels into strings
-    ///
-    /// ### Returns
-    ///
-    /// The levels, or `None` for a categorical of categoricals.
-    fn into_levels(self) -> Option<Vec<String>> {
-        fn render<T>(v: Vec<Option<T>>, f: impl Fn(T) -> String) -> Vec<String> {
-            v.into_iter()
-                .map(|x| x.map(&f).unwrap_or_else(|| "NA".to_string()))
-                .collect()
-        }
-        match self {
-            ColumnData::Integer(v) => Some(render(v, |x| x.to_string())),
-            ColumnData::Double(v) => Some(render(v, |x| x.to_string())),
-            ColumnData::Boolean(v) => {
-                Some(render(v, |x| if x { "TRUE" } else { "FALSE" }.to_string()))
-            }
-            ColumnData::String(v) => Some(render(v, |x| x)),
-            ColumnData::Categorical { .. } => None,
-        }
-    }
-
-    /// Type of the column as written
-    ///
-    /// ### Returns
-    ///
-    /// The matching [`ParquetColumnType`].
-    fn col_type(&self) -> ParquetColumnType {
-        match self {
-            ColumnData::Integer(_) => ParquetColumnType::Integer,
-            ColumnData::Double(_) => ParquetColumnType::Double,
-            ColumnData::Boolean(_) => ParquetColumnType::Boolean,
-            ColumnData::String(_) => ParquetColumnType::String,
-            ColumnData::Categorical { .. } => ParquetColumnType::Categorical,
-        }
-    }
-}
-
-/// Null out the masked entries of an optional vector
+/// Parquet type of a column
 ///
 /// ### Params
 ///
-/// * `v` - Values
-/// * `missing` - Whether row `i` is missing
-fn mask_vec<T>(v: &mut [Option<T>], missing: impl Fn(usize) -> bool) {
-    for (i, x) in v.iter_mut().enumerate() {
-        if missing(i) {
-            *x = None;
-        }
-    }
-}
-
-/// An h5ad dataframe group as read, before renaming and filtering
-struct RawFrame {
-    /// Columns in R's order (groups, then datasets, each by name)
-    cols: Vec<(String, ColumnData)>,
-    /// The index column, if the group has one
-    idx: Option<ColumnData>,
-    /// Columns left out for an unsupported encoding
-    skipped: Vec<String>,
-}
-
-/////////////
-// Readers //
-/////////////
-
-/// Convert an HDF5 integer to an R integer: out of range, or R's NA sentinel
-/// `i32::MIN`, becomes missing
-///
-/// ### Params
-///
-/// * `x` - The value
+/// * `col` - The column
 ///
 /// ### Returns
 ///
-/// The value as `i32`, or `None`.
-#[inline]
-fn to_r_int<T: TryInto<i32>>(x: T) -> Option<i32> {
-    x.try_into().ok().filter(|&v| v != i32::MIN)
-}
-
-/// Read a plain 1-D dataset, mirroring `.read_h5ad_dataset` in R
-///
-/// HDF5 enums with only `FALSE` / `TRUE` members are booleans (anndata writes
-/// no other enums).
-///
-/// ### Params
-///
-/// * `ds` - The dataset
-///
-/// ### Returns
-///
-/// The column, or `None` for a dtype or shape R would not turn into a vector.
-fn read_dataset(ds: &Dataset) -> Result<Option<ColumnData>, ScDataErrors> {
-    if ds.ndim() != 1 {
-        return Ok(None);
+/// The matching [`ParquetColumnType`].
+fn col_type(col: &ColumnData) -> ParquetColumnType {
+    match col {
+        ColumnData::Integer(_) => ParquetColumnType::Integer,
+        ColumnData::Double(_) => ParquetColumnType::Double,
+        ColumnData::Boolean(_) => ParquetColumnType::Boolean,
+        ColumnData::String(_) => ParquetColumnType::String,
+        ColumnData::Categorical { .. } => ParquetColumnType::Categorical,
     }
-    let col = match ds.dtype()?.to_descriptor()? {
-        TypeDescriptor::Integer(_) => {
-            ColumnData::Integer(ds.read_raw::<i64>()?.into_iter().map(to_r_int).collect())
-        }
-        TypeDescriptor::Unsigned(_) => {
-            ColumnData::Integer(ds.read_raw::<u64>()?.into_iter().map(to_r_int).collect())
-        }
-        TypeDescriptor::Float(_) => {
-            ColumnData::Double(ds.read_raw::<f64>()?.into_iter().map(Some).collect())
-        }
-        TypeDescriptor::Boolean => {
-            ColumnData::Boolean(ds.read_raw::<bool>()?.into_iter().map(Some).collect())
-        }
-        TypeDescriptor::Enum(e)
-            if e.members
-                .iter()
-                .all(|m| m.name == "FALSE" || m.name == "TRUE") =>
-        {
-            ColumnData::Boolean(ds.read_raw::<bool>()?.into_iter().map(Some).collect())
-        }
-        TypeDescriptor::VarLenUnicode
-        | TypeDescriptor::VarLenAscii
-        | TypeDescriptor::FixedAscii(_)
-        | TypeDescriptor::FixedUnicode(_) => {
-            ColumnData::String(read_string_dataset(ds)?.into_iter().map(Some).collect())
-        }
-        _ => return Ok(None),
-    };
-    Ok(Some(col))
-}
-
-/// Names of the members of `group` of one type, in HDF5 name order (what
-/// `rhdf5::h5ls` lists)
-///
-/// ### Params
-///
-/// * `group` - The group
-/// * `loc_type` - Keep members of this type
-///
-/// ### Returns
-///
-/// The member names.
-fn members_of_type(group: &Group, loc_type: LocationType) -> Result<Vec<String>, ScDataErrors> {
-    let mut out = Vec::new();
-    for name in group.member_names_by(IndexType::Name, IterationOrder::Increasing)? {
-        if group.loc_type_by_name(&name)? == loc_type {
-            out.push(name);
-        }
-    }
-    Ok(out)
-}
-
-/// Read one dataframe column, mirroring `.read_h5ad_column` in R: a plain
-/// dataset, a categorical group (`categories` + `codes`, negative code is
-/// NA) or a nullable group (`values` + optional `mask`)
-///
-/// ### Params
-///
-/// * `group` - The dataframe group
-/// * `name` - Column name inside it
-///
-/// ### Returns
-///
-/// The column, or `None` for an unsupported encoding.
-fn read_column(group: &Group, name: &str) -> Result<Option<ColumnData>, ScDataErrors> {
-    match group.loc_type_by_name(name)? {
-        LocationType::Dataset => read_dataset(&group.dataset(name)?),
-        LocationType::Group => {
-            let g = group.group(name)?;
-            let subs = members_of_type(&g, LocationType::Dataset)?;
-            let has = |s: &str| subs.iter().any(|x| x == s);
-
-            if has("categories") && has("codes") {
-                let Some(categories) =
-                    read_dataset(&g.dataset("categories")?)?.and_then(ColumnData::into_levels)
-                else {
-                    return Ok(None);
-                };
-                let Some(ColumnData::Integer(codes)) = read_dataset(&g.dataset("codes")?)? else {
-                    return Ok(None);
-                };
-                let codes = codes.into_iter().map(|c| c.unwrap_or(-1)).collect();
-                return Ok(Some(ColumnData::Categorical { codes, categories }));
-            }
-
-            if has("values") {
-                let Some(mut values) = read_dataset(&g.dataset("values")?)? else {
-                    return Ok(None);
-                };
-                if has("mask") {
-                    let Some(ColumnData::Boolean(mask)) = read_dataset(&g.dataset("mask")?)? else {
-                        return Ok(None);
-                    };
-                    values.apply_mask(&mask);
-                }
-                return Ok(Some(values));
-            }
-
-            Ok(None)
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Read an h5ad dataframe group, mirroring `.read_h5ad_frame` and
-/// `.resolve_h5_index` in R
-///
-/// The index is the column named by the `_index` attribute, else an `_index`
-/// dataset. Old-style categoricals (integer codes in a dataset, levels under
-/// `__categories/<name>`) are resolved.
-///
-/// ### Params
-///
-/// * `group` - The dataframe group
-///
-/// ### Returns
-///
-/// The [`RawFrame`].
-fn read_frame(group: &Group) -> Result<RawFrame, ScDataErrors> {
-    let mut skip: Vec<String> = vec!["_index".into(), "__categories".into()];
-
-    let idx = if group.attr_names()?.iter().any(|a| a == "_index") {
-        let idx_col = read_string_dataset(&group.attr("_index")?)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                ScDataErrors::UnsupportH5ADFormat("empty _index attribute".to_string())
-            })?;
-        let idx = read_column(group, &idx_col)?;
-        skip.push(idx_col);
-        idx
-    } else if group.link_exists("_index")
-        && group.loc_type_by_name("_index")? == LocationType::Dataset
-    {
-        read_dataset(&group.dataset("_index")?)?
-    } else {
-        None
-    };
-
-    let old_cats: Vec<String> = if group.link_exists("__categories")
-        && group.loc_type_by_name("__categories")? == LocationType::Group
-    {
-        members_of_type(&group.group("__categories")?, LocationType::Dataset)?
-    } else {
-        Vec::new()
-    };
-
-    let mut names = members_of_type(group, LocationType::Group)?;
-    names.extend(members_of_type(group, LocationType::Dataset)?);
-    names.retain(|n| !skip.contains(n));
-
-    let mut cols = Vec::with_capacity(names.len());
-    let mut skipped = Vec::new();
-    for name in names {
-        let Some(mut col) = read_column(group, &name)? else {
-            skipped.push(name);
-            continue;
-        };
-        if old_cats.contains(&name)
-            && let ColumnData::Integer(codes) = &col
-        {
-            let categories = read_dataset(&group.dataset(&format!("__categories/{name}"))?)?
-                .and_then(ColumnData::into_levels);
-            if let Some(categories) = categories {
-                col = ColumnData::Categorical {
-                    codes: codes.iter().map(|c| c.unwrap_or(-1)).collect(),
-                    categories,
-                };
-            }
-        }
-        cols.push((name, col));
-    }
-
-    Ok(RawFrame { cols, idx, skipped })
 }
 
 //////////////
@@ -622,7 +285,7 @@ fn filter_and_index(
 ///
 /// The columns, identifier first.
 fn assemble_h5ad(
-    frame: RawFrame,
+    frame: H5adFrame,
     kind: FrameKind,
     id_col: Option<&str>,
 ) -> Result<Vec<(String, ColumnData)>, ScDataErrors> {
@@ -715,7 +378,7 @@ fn write_parquet(
     let fields = cols
         .iter()
         .map(|(name, col)| {
-            let (physical, logical) = match col.col_type() {
+            let (physical, logical) = match col_type(col) {
                 ParquetColumnType::Integer => (PhysicalType::INT32, None),
                 ParquetColumnType::Double => (PhysicalType::DOUBLE, None),
                 ParquetColumnType::Boolean => (PhysicalType::BOOLEAN, None),
@@ -832,7 +495,7 @@ fn finish(
         .into_iter()
         .map(|(name, col)| ParquetColumnInfo {
             name,
-            col_type: col.col_type(),
+            col_type: col_type(&col),
             categories: match col {
                 ColumnData::Categorical { categories, .. } => Some(categories),
                 _ => None,
@@ -948,6 +611,7 @@ pub fn tenx_frame_to_parquet<P: AsRef<Path>, Q: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hdf5::Group;
     use hdf5::types::{FixedAscii, VarLenUnicode};
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::Field;
