@@ -33,6 +33,8 @@ pub mod h5_filters;
 #[cfg(feature = "h5")]
 pub mod h5_scan;
 #[cfg(feature = "h5")]
+pub mod h5ad_frame_io;
+#[cfg(feature = "h5")]
 pub mod h5ad_io;
 #[cfg(feature = "h5")]
 pub mod h5ad_multifile_io;

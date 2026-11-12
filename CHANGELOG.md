@@ -1,5 +1,18 @@
 # News
 
+## 0.10.2
+
+### Features
+
+- New `h5ad_frame_io` module (feature `h5`): decodes h5ad dataframes into
+  memory (`read_h5ad_frame`), reads single datasets or encoded columns
+  (`read_h5_column`), attributes (`read_h5_attrs`), 2-D numeric datasets
+  (`read_h5_matrix`) and group listings (`list_h5_group`), and writes minimal
+  h5ad files with CSR, CSC or dense `X` (`write_h5ad_plain`). This lets the R
+  package drop rhdf5 entirely.
+- `obs_var_io` now builds on the shared decoder; its Parquet output is
+  unchanged.
+
 ## 0.10.1
 
 ### Fixes
