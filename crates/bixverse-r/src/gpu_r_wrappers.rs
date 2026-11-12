@@ -5,6 +5,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::FromRList;
+use crate::ml_r_wrappers::kmeans_algorithm_from_r_map;
 use crate::r_rust_interface::r_list_to_map;
 #[cfg(feature = "single-cell")]
 use crate::r_rust_interface::{r_list_count, r_list_count_allow_zero};
@@ -53,7 +54,9 @@ impl FromRList for KMeansGpuParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        Ok(Self::new(iters, init, fixed, quantise_to_f16))
+        let algorithm = kmeans_algorithm_from_r_map(&params_list)?;
+
+        Ok(Self::new(iters, init, fixed, quantise_to_f16).with_algorithm(algorithm))
     }
 }
 
@@ -164,12 +167,11 @@ impl FromRList for HarmonyParamsV2Gpu {
             .get("quantise")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let kmeans_params = Some(KMeansGpuParams::new(
-            kmeans_iters,
-            kmeans_init,
-            kmeans_fixed,
-            kmeans_quantise,
-        ));
+        let kmeans_algorithm = kmeans_algorithm_from_r_map(&params_list)?;
+        let kmeans_params = Some(
+            KMeansGpuParams::new(kmeans_iters, kmeans_init, kmeans_fixed, kmeans_quantise)
+                .with_algorithm(kmeans_algorithm),
+        );
 
         Ok(Self {
             k,

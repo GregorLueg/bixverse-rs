@@ -11,6 +11,7 @@ use crate::r_rust_interface::{
     r_list_count, r_list_count_allow_zero, r_list_real, r_list_required_real, r_list_to_map,
 };
 use crate::{FromRList, FromRMap, ToRList};
+use ann_search_rs::prelude::{EMeansParams, KMeansAlgorithm};
 use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
 use bixverse_rs::graph::leiden::parse_community_algorithm;
 use bixverse_rs::ml::clustering::hierarchical::parse_linkage_method;
@@ -980,25 +981,39 @@ pub fn cpu_kmeans_from_r_list(r_list: List, default_km_type: &str) -> Result<Cpu
         .get("km_type")
         .and_then(|v| v.as_str())
         .unwrap_or(default_km_type);
-    let kind = match parse_k_means(km_type) {
-        Some(KMeansType::StandardKMeans) => CpuKMeansKind::Standard,
-        Some(KMeansType::MiniBatchKMeans) => CpuKMeansKind::MiniBatch {
-            batch_size: r_list_count(&params, "batch_size")?.unwrap_or(4096),
-            drift_threshold: r_list_real(&params, "drift_threshold")?.unwrap_or(1e-4) as f32,
-            lr_alpha: r_list_real(&params, "lr_alpha")?.unwrap_or(1.0) as f32,
-        },
+    let (kind, algorithm) = match parse_k_means(km_type) {
+        Some(KMeansType::EMeans) => {
+            let epochs =
+                r_list_real(&params, "e_means_epochs")?.unwrap_or(EMeansParams::default().epochs);
+            (
+                CpuKMeansKind::Standard,
+                KMeansAlgorithm::EMeans(EMeansParams::new(epochs)),
+            )
+        }
+        Some(KMeansType::StandardKMeans) => (CpuKMeansKind::Standard, KMeansAlgorithm::Lloyd),
+        Some(KMeansType::MiniBatchKMeans) => (
+            CpuKMeansKind::MiniBatch {
+                batch_size: r_list_count(&params, "batch_size")?.unwrap_or(4096),
+                drift_threshold: r_list_real(&params, "drift_threshold")?.unwrap_or(1e-4) as f32,
+                lr_alpha: r_list_real(&params, "lr_alpha")?.unwrap_or(1.0) as f32,
+            },
+            KMeansAlgorithm::Lloyd,
+        ),
         None => {
             return Err(Error::Other(format!(
-                "Unknown km_type '{km_type}'; expected 'standard' or 'minibatch'"
+                "Unknown km_type '{km_type}'; expected 'emeans', 'standard' or 'minibatch'"
             )));
         }
     };
-    Ok(CpuKMeans::new(kind, kmeans_params))
+    Ok(CpuKMeans::new(
+        kind,
+        kmeans_params.with_algorithm(algorithm),
+    ))
 }
 
 impl FromRList for CpuKMeans {
-    /// Parse a [CpuKMeans] from an R list, standard k-means unless `km_type`
-    /// says otherwise. See [cpu_kmeans_from_r_list].
+    /// Parse a [CpuKMeans] from an R list, e-means unless `km_type` says
+    /// otherwise. See [cpu_kmeans_from_r_list].
     ///
     /// ### Params
     ///
@@ -1008,7 +1023,7 @@ impl FromRList for CpuKMeans {
     ///
     /// The [CpuKMeans]
     fn from_r_list(r_list: List) -> Result<Self> {
-        cpu_kmeans_from_r_list(r_list, "standard")
+        cpu_kmeans_from_r_list(r_list, "emeans")
     }
 }
 

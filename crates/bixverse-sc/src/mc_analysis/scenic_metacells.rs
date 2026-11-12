@@ -270,7 +270,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
-    let k_means_params = KMeansParamsWrappers::new(50, None, None);
+    let k_means_params = KMeansParamsWrappers::default();
 
     let centroids = train_centroids(
         &gene_loadings,

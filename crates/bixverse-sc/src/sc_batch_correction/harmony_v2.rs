@@ -19,10 +19,9 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
 use super::harmony::{BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_infos};
 use super::harmony_core::{
-    HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
-    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
-    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
-    window_converged,
+    HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, distances_and_base,
+    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
+    row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -85,7 +84,9 @@ impl Default for HarmonyParamsV2 {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
+            kmeans_params: HarmonyKMeansSpec::default()
+                .try_into()
+                .expect("default k-means keys parse"),
         }
     }
 }
