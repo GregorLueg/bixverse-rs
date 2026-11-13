@@ -3,6 +3,22 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.4.0
+
+Builds against the `bixverse-rs` workspace at 0.11.0.
+
+**Breaking**
+
+- k-means defaults to e-means in Harmony, fast_cluster and SCENIC, in both
+  wheels. Results differ at the same seed. The new `k_means_algorithm` and
+  `e_means_epochs` keys are not in the generated parameters yet; they follow
+  once the R specs land and `dev/gen_params.py` is rerun.
+
+**Changes**
+
+- Harmony is faster on CPU and GPU. Its block order is now drawn once per run,
+  which changes results at the same seed.
+
 ## 0.3.2
 
 Builds against `bixverse-rs` workspace at 0.10.3.
