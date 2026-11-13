@@ -8,10 +8,10 @@
 //! `Z_b - R_b C_b` are one MLX GEMM per level over row slices, cell axis
 //! outermost in both operands. The per-cell softmax, the Jacobi update, the
 //! row norm and the objective are custom Metal kernels with one SIMD group
-//! per cell and `simd_sum` reductions. The initial k-means is the CPU one, on
-//! the unsorted cells, so it starts from the same centroids as the CPU v2.
-//! f32 only.
+//! per cell and `simd_sum` reductions. The initial k-means runs on MLX, on
+//! the unsorted cells. f32 only.
 
+use ann_search_rs::mlx::k_means_mlx::k_means_clusters_mlx;
 use faer::{Mat, MatRef};
 use std::time::Instant;
 
@@ -22,8 +22,8 @@ use crate::ffi::{
 use crate::prelude::*;
 use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, StageTimes, create_batch_infos};
 use bixverse_sc::sc_batch_correction::harmony_core::{
-    RidgeSettings, Variant, kmeans_centroids, normalise_rows_into, objective, row_major_to_mat,
-    solve_ridge, to_row_major,
+    RidgeSettings, Variant, normalise_rows_into, objective, row_major_to_mat, solve_ridge,
+    to_row_major,
 };
 use bixverse_sc::sc_batch_correction::harmony_v2::{
     HarmonyParamsV2, check_convergence, expand_theta,
@@ -1051,8 +1051,18 @@ pub fn harmony_v2_mlx(
     if verbosity.normal_verbosity() {
         println!("MLX Harmony v2: running initial k-means");
     }
-    let mut y_host = times.time("kmeans_init", || {
-        kmeans_centroids(&z_cos_host, d, k, params.kmeans_params, seed, split)
+    let mut y_host = times.time("kmeans_init", || -> Result<Vec<f32>, MlxErrors> {
+        let (y, _) = k_means_clusters_mlx(
+            (z_cos_host.as_slice(), n, d),
+            "cosine",
+            k,
+            Some(params.kmeans_params.get_data()),
+            seed,
+            verbosity_from_flag(split),
+        )?;
+        let mut y_host = vec![0.0f32; k * d];
+        normalise_rows_into(&to_row_major(y.as_ref()), d, &mut y_host);
+        Ok(y_host)
     })?;
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start.elapsed());
