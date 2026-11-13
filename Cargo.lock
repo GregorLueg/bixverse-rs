@@ -115,7 +115,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 [[package]]
 name = "ann-search-rs"
 version = "0.12.2"
-source = "git+https://github.com/GregorLueg/ann-search-rs?branch=feat-e-means#f6a0c3962153a5f2833c060350920d89d873615f"
+source = "git+https://github.com/GregorLueg/ann-search-rs?branch=feat-e-means#64f4751f5cacdbb4a751cef9dc300ed7be737b4d"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
