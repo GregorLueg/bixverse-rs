@@ -1,5 +1,29 @@
 # News
 
+## 0.11.0
+
+### Breaking
+
+- Needs `ann-search-rs` 0.13. e-means is now the default k-means for
+  `KMeansParamsWrappers::default()`, Harmony v1 and v2 (CPU, MLX and GPU),
+  fast_cluster (`km_type = "emeans"`, CPU and GPU) and SCENIC. Results differ
+  at the same seed; `k_means_algorithm = "lloyd"` (or `km_type = "standard"`)
+  gives the old behaviour. DSB and NMF consensus stay on Lloyd.
+
+### Features
+
+- New keys `k_means_algorithm` (`"emeans"` or `"lloyd"`) and `e_means_epochs`
+  on the Harmony and GPU k-means parameters, read by the R list conversions;
+  `parse_kmeans_algorithm` parses the first.
+
+### Changes
+
+- Harmony v1 and v2 draw their random block order once per run instead of
+  once per sweep. Results differ at the same seed.
+- MLX Harmony runs its initial k-means on MLX. Results differ at the same seed.
+- Harmony is faster on every backend; apart from the two items above, results
+  are unchanged.
+
 ## 0.10.3
 
 ### Fix
