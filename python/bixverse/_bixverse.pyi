@@ -229,6 +229,7 @@ def save_h5ad(
     obsp: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     uns_json: str,
     chunk_size: int = ...,
+    zarr: bool = ...,
 ) -> None: ...
 def write_h5ad(
     h5_path: Path,

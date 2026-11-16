@@ -42,6 +42,7 @@ bixverse-sc-data = { path = "crates/bixverse-sc-data", version = "0.11.0", defau
 bixverse-sc = { path = "crates/bixverse-sc", version = "0.11.0", default-features = false }
 bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.11.0", default-features = false }
 bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.11.0", default-features = false }
+bixverse-sc-export = { path = "crates/bixverse-sc-export", version = "0.11.0", default-features = false }
 bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.11.0", default-features = false }
 bixverse-rs = { path = "crates/bixverse-rs", version = "0.11.0", default-features = false }
 
@@ -79,6 +80,11 @@ rand_distr = "0.5.1"
 rayon = "1.11.0"
 rustc-hash = "2.1.1"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+# h5ad / AnnData Zarr writers. Never its `bixverse` feature: that pins an old
+# bixverse-sc-data from crates.io
+scx-core = { version = "0.6.2", default-features = false }
+sprs = "0.11"
 statrs = "0.18.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"

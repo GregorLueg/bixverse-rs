@@ -25,6 +25,8 @@ pub mod errors {
     pub use bixverse_sc::errors::*;
     #[cfg(feature = "single-cell")]
     pub use bixverse_sc_data::errors::*;
+    #[cfg(feature = "export")]
+    pub use bixverse_sc_export::errors::*;
     #[cfg(feature = "sc-gpu")]
     pub use bixverse_sc_gpu::errors::*;
 }
@@ -50,6 +52,8 @@ pub mod single_cell {
     pub use bixverse_sc::*;
     pub use bixverse_sc_data as sc_data;
     pub use bixverse_sc_data::{CELL_BATCH_SIZE, sc_traits};
+    #[cfg(feature = "export")]
+    pub use bixverse_sc_export as sc_export;
 }
 
 /// GPU methods via cubecl.

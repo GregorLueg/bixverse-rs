@@ -31,9 +31,8 @@ numpy.workspace = true
 pyo3.workspace = true
 pythonize.workspace = true
 rand.workspace = true
-scx-core.workspace = true
+bixverse-sc-export = { workspace = true, features = ["zarr"] }
 serde_json.workspace = true
-sprs.workspace = true
 
 # Accelerate GEMM on macOS, as the R package builds it.
 [target.'cfg(target_os = "macos")'.dependencies]

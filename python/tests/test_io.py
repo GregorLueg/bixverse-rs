@@ -391,6 +391,22 @@ def test_cell_ranger_params_find_gzipped_files(data, tmp_path):
     np.testing.assert_array_equal(_dense(sc), _truth(data))
 
 
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_save_round_trips_through_the_loader(data, fmt, tmp_path):
+    sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
+    save = bv.io.save_zarr if fmt == "zarr" else bv.io.save_h5ad
+    out = save(sc, tmp_path / f"out.{fmt}")
+    back = bv.io.load_h5ad(tmp_path / "back", out, qc=QC)
+    np.testing.assert_array_equal(_dense(back), _dense(sc))
+    assert back.obs()["cell_id"].to_list() == sc.obs()["cell_id"].to_list()
+    assert back.var()["gene_id"].to_list() == sc.var()["gene_id"].to_list()
+    if fmt == "zarr":
+        ad = pytest.importorskip("anndata")
+        np.testing.assert_array_equal(
+            np.asarray(ad.read_zarr(out).X.todense()), _dense(sc)
+        )
+
+
 def test_varm_pcs_sit_on_the_genes_the_pca_ran_on(data, tmp_path):
     h5py = pytest.importorskip("h5py")
     sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)

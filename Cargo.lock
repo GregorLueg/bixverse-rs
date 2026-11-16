@@ -86,6 +86,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alga"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f823d037a7ec6ea2197046bafd4ae150e6bc36f9ca347404f46a46823fa84f2"
+dependencies = [
+ "approx 0.3.2",
+ "num-complex 0.2.4",
+ "num-traits",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,6 +174,15 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "approx"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0e60b75072ecd4168020818c0107f2857bb6c4e64252d8d3983f6263b40a5c3"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "approx"
@@ -496,7 +516,7 @@ name = "bixverse-core"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-sparse",
  "document-features",
  "faer",
@@ -537,7 +557,7 @@ name = "bixverse-methods"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-core",
  "bixverse-sparse",
  "document-features",
@@ -559,7 +579,7 @@ name = "bixverse-mlx"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-core",
  "bixverse-gpu",
  "bixverse-methods",
@@ -599,13 +619,14 @@ name = "bixverse-rs"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-core",
  "bixverse-gpu",
  "bixverse-methods",
  "bixverse-mlx",
  "bixverse-sc",
  "bixverse-sc-data",
+ "bixverse-sc-export",
  "bixverse-sc-gpu",
  "bonsai-rs",
  "cubecl",
@@ -631,7 +652,7 @@ name = "bixverse-sc"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-core",
  "bixverse-methods",
  "bixverse-sc-data",
@@ -655,7 +676,7 @@ dependencies = [
 name = "bixverse-sc-data"
 version = "0.11.0"
 dependencies = [
- "approx",
+ "approx 0.5.1",
  "bincode",
  "bixverse-core",
  "bixverse-sparse",
@@ -671,7 +692,7 @@ dependencies = [
  "memmap2",
  "ndarray",
  "num-traits",
- "parquet",
+ "parquet 60.0.0",
  "rand 0.9.5",
  "rand_distr 0.5.1",
  "rayon",
@@ -685,11 +706,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bixverse-sc-export"
+version = "0.11.0"
+dependencies = [
+ "bixverse-sc-data",
+ "document-features",
+ "scx-core",
+ "sprs",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bixverse-sc-gpu"
 version = "0.11.0"
 dependencies = [
  "ann-search-rs",
- "approx",
+ "approx 0.5.1",
  "bixverse-core",
  "bixverse-gpu",
  "bixverse-methods",
@@ -715,12 +747,25 @@ dependencies = [
 name = "bixverse-sparse"
 version = "0.11.0"
 dependencies = [
- "approx",
+ "approx 0.5.1",
  "bincode",
  "num-traits",
  "rayon",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -1076,6 +1121,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
 name = "constcat"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1346,7 +1397,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
  "log",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "pliron",
@@ -1511,7 +1562,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "internment",
  "itertools 0.15.0",
- "num-complex",
+ "num-complex 0.4.6",
  "num-integer",
  "num-traits",
  "pliron",
@@ -2445,7 +2496,7 @@ dependencies = [
  "generativity",
  "libm",
  "nano-gemm",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "private-gemm-x86",
  "pulp 0.22.3",
@@ -2465,7 +2516,7 @@ dependencies = [
  "bytemuck",
  "coe-rs",
  "libm",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "pulp 0.18.22",
  "reborrow",
@@ -2481,7 +2532,7 @@ dependencies = [
  "dyn-stack",
  "generativity",
  "libm",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "pulp 0.22.3",
  "qd",
@@ -2510,6 +2561,15 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
 
 [[package]]
 name = "filetime"
@@ -2703,7 +2763,7 @@ dependencies = [
  "gemm-f16",
  "gemm-f32",
  "gemm-f64",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -2718,7 +2778,7 @@ checksum = "086936dbdcb99e37aad81d320f98f670e53c1e55a98bee70573e83f95beb128c"
 dependencies = [
  "dyn-stack",
  "gemm-common",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -2733,7 +2793,7 @@ checksum = "20c8aeeeec425959bda4d9827664029ba1501a90a0d1e6228e48bef741db3a3f"
 dependencies = [
  "dyn-stack",
  "gemm-common",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -2750,7 +2810,7 @@ dependencies = [
  "dyn-stack",
  "half",
  "libm",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "once_cell",
  "paste",
@@ -2771,7 +2831,7 @@ dependencies = [
  "gemm-common",
  "gemm-f32",
  "half",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -2787,7 +2847,7 @@ checksum = "02e0b8c9da1fbec6e3e3ab2ce6bc259ef18eb5f6f0d3e4edf54b75f9fd41a81c"
 dependencies = [
  "dyn-stack",
  "gemm-common",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -2802,7 +2862,7 @@ checksum = "056131e8f2a521bfab322f804ccd652520c79700d81209e9d9275bbdecaadc6a"
 dependencies = [
  "dyn-stack",
  "gemm-common",
- "num-complex",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "raw-cpuid",
@@ -3590,6 +3650,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-rs-sys"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "434324ee61a8e4a05dd3fdf03d51c073ea7fdaf5a35b2ca33c4ca9f3f37def4a"
+dependencies = [
+ "zlib-rs",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3811,6 +3880,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+ "simd-adler32",
 ]
 
 [[package]]
@@ -3912,9 +3982,9 @@ version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d43ddcacf343185dfd6de2ee786d9e8b1c2301622afab66b6c73baf9882abfd"
 dependencies = [
- "approx",
+ "approx 0.5.1",
  "matrixmultiply",
- "num-complex",
+ "num-complex 0.4.6",
  "num-rational",
  "num-traits",
  "rand 0.8.8",
@@ -3936,7 +4006,7 @@ dependencies = [
  "nano-gemm-core",
  "nano-gemm-f32",
  "nano-gemm-f64",
- "num-complex",
+ "num-complex 0.4.6",
 ]
 
 [[package]]
@@ -3947,7 +4017,7 @@ checksum = "0775b1e2520e64deee8fc78b7732e3091fb7585017c0b0f9f4b451757bbbc562"
 dependencies = [
  "nano-gemm-codegen",
  "nano-gemm-core",
- "num-complex",
+ "num-complex 0.4.6",
 ]
 
 [[package]]
@@ -3958,7 +4028,7 @@ checksum = "9af49a20d58816e6b5ee65f64142e50edb5eba152678d4bb7377fcbf63f8437a"
 dependencies = [
  "nano-gemm-codegen",
  "nano-gemm-core",
- "num-complex",
+ "num-complex 0.4.6",
 ]
 
 [[package]]
@@ -4021,7 +4091,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
 dependencies = [
  "matrixmultiply",
- "num-complex",
+ "num-complex 0.4.6",
  "num-integer",
  "num-traits",
  "portable-atomic",
@@ -4082,7 +4152,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
  "num-bigint 0.4.8",
- "num-complex",
+ "num-complex 0.4.6",
  "num-integer",
  "num-iter",
  "num-rational",
@@ -4106,6 +4176,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b19411a9719e753aff12e5187b74d60d3dc449ec3f4dc21e3989c3f554bc95"
+dependencies = [
+ "autocfg",
  "num-traits",
 ]
 
@@ -4426,6 +4506,27 @@ dependencies = [
 
 [[package]]
 name = "parquet"
+version = "59.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eb260d566f2fbdabe356d26aaa5d13403aac29b5b4e44463b8f9bd7b2b12680"
+dependencies = [
+ "ahash",
+ "bytes",
+ "chrono",
+ "flate2",
+ "half",
+ "hashbrown 0.17.1",
+ "num-bigint 0.5.1",
+ "num-integer",
+ "num-traits",
+ "seq-macro",
+ "snap",
+ "twox-hash",
+ "zstd 0.13.5",
+]
+
+[[package]]
+name = "parquet"
 version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8af83d2940bc0510f9aef86d865f56fdc6095f87ab115ac885a80b7c5226d3ba"
@@ -4567,6 +4668,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -4747,7 +4861,7 @@ checksum = "a0a01a0dc67cf4558d279f0c25b0962bd08fc6dec0137699eae304103e882fe6"
 dependencies = [
  "bytemuck",
  "libm",
- "num-complex",
+ "num-complex 0.4.6",
  "reborrow",
 ]
 
@@ -4760,7 +4874,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "libm",
- "num-complex",
+ "num-complex 0.4.6",
  "paste",
  "pulp-wasm-simd-flag",
  "raw-cpuid",
@@ -5313,6 +5427,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scx-core"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbbb186b4daaf4ea387278c7117b16918c1b52cec5cea01e00a09dc5e4d2afcc"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "blake3",
+ "bytemuck",
+ "chrono",
+ "flate2",
+ "futures",
+ "hdf5-metno",
+ "hdf5-metno-sys",
+ "libc",
+ "libz-rs-sys",
+ "memmap2",
+ "ndarray",
+ "parquet 59.3.2",
+ "png",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sprs",
+ "thiserror 2.0.21",
+ "tracing",
+ "zarrs",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5462,8 +5607,8 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
 dependencies = [
- "approx",
- "num-complex",
+ "approx 0.5.1",
+ "num-complex 0.4.6",
  "num-traits",
  "paste",
  "wide 0.7.33",
@@ -5575,6 +5720,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprs"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59468ff1d42d9e2439415c7dbb6d9d965253dac6986f29dbcda72c2e36e94fb7"
+dependencies = [
+ "alga",
+ "ndarray",
+ "num-complex 0.4.6",
+ "num-traits",
+ "num_cpus",
+ "rayon",
+ "smallvec",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5592,7 +5752,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a3fe7c28c6512e766b0874335db33c94ad7b8f9054228ae1c2abd47ce7d335e"
 dependencies = [
- "approx",
+ "approx 0.5.1",
  "nalgebra",
  "num-traits",
  "rand 0.8.8",
@@ -7208,7 +7368,7 @@ dependencies = [
  "lru",
  "moka",
  "num",
- "num-complex",
+ "num-complex 0.4.6",
  "paste",
  "quick_cache",
  "rayon",

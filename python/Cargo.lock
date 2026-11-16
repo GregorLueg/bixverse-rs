@@ -401,7 +401,7 @@ dependencies = [
  "addr2line",
  "cfg-if",
  "libc",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
  "object",
  "rustc-demangle",
  "windows-link 0.2.1",
@@ -621,6 +621,7 @@ dependencies = [
  "bixverse-methods",
  "bixverse-sc",
  "bixverse-sc-data",
+ "bixverse-sc-export",
  "crossbeam-channel",
  "edge-rs",
  "faer",
@@ -629,9 +630,7 @@ dependencies = [
  "pyo3",
  "pythonize",
  "rand 0.9.5",
- "scx-core",
  "serde_json",
- "sprs",
 ]
 
 [[package]]
@@ -679,7 +678,7 @@ dependencies = [
  "memmap2",
  "ndarray",
  "num-traits",
- "parquet",
+ "parquet 60.1.0",
  "rand 0.9.5",
  "rand_distr 0.5.1",
  "rayon",
@@ -690,6 +689,17 @@ dependencies = [
  "xxhash-rust",
  "zarrs",
  "zstd 0.14.4",
+]
+
+[[package]]
+name = "bixverse-sc-export"
+version = "0.11.0"
+dependencies = [
+ "bixverse-sc-data",
+ "document-features",
+ "scx-core",
+ "sprs",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -728,6 +738,19 @@ dependencies = [
  "rayon",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -1081,6 +1104,12 @@ name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "constcat"
@@ -2474,6 +2503,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2502,7 +2540,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
 
@@ -2982,10 +3020,12 @@ checksum = "7aff3a4833f1adfd8644b045749c6f5b0fd789673f289ff835fe7196e5800bd2"
 dependencies = [
  "bitflags",
  "cfg-if",
+ "errno",
  "hdf5-metno-derive",
  "hdf5-metno-sys",
  "hdf5-metno-types",
  "libc",
+ "lzf-sys",
  "ndarray",
  "pastey",
 ]
@@ -3556,6 +3596,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-rs-sys"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "434324ee61a8e4a05dd3fdf03d51c073ea7fdaf5a35b2ca33c4ca9f3f37def4a"
+dependencies = [
+ "zlib-rs",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3691,6 +3740,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzf-sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "411d1ba1d5d217b00615238cb6e9d68fbb93dc422f68e3396b5cf803ad832b6f"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3760,6 +3818,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -4400,6 +4468,27 @@ dependencies = [
 
 [[package]]
 name = "parquet"
+version = "59.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eb260d566f2fbdabe356d26aaa5d13403aac29b5b4e44463b8f9bd7b2b12680"
+dependencies = [
+ "ahash",
+ "bytes",
+ "chrono",
+ "flate2",
+ "half",
+ "hashbrown 0.17.1",
+ "num-bigint 0.5.1",
+ "num-integer",
+ "num-traits",
+ "seq-macro",
+ "snap",
+ "twox-hash",
+ "zstd 0.13.5",
+]
+
+[[package]]
+name = "parquet"
 version = "60.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "806eaa0f1c0436dcb43bee8e6a82bf2efff90521a60172f8281cb9ef577b43a4"
@@ -4555,6 +4644,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -5372,19 +5474,25 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx-core"
-version = "0.5.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9eae5d35161c4ca1db080f82cf36edd7fb18db87f15242b8067b6806767455f"
+checksum = "fbbb186b4daaf4ea387278c7117b16918c1b52cec5cea01e00a09dc5e4d2afcc"
 dependencies = [
+ "ahash",
  "async-trait",
+ "blake3",
  "bytemuck",
  "chrono",
  "flate2",
  "futures",
  "hdf5-metno",
  "hdf5-metno-sys",
+ "libc",
+ "libz-rs-sys",
  "memmap2",
  "ndarray",
+ "parquet 59.3.2",
+ "png",
  "rayon",
  "serde",
  "serde_json",
@@ -5392,6 +5500,7 @@ dependencies = [
  "sprs",
  "thiserror 2.0.21",
  "tracing",
+ "zarrs",
 ]
 
 [[package]]
