@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 mod annotate;
+mod atac;
 mod batch;
 mod de;
 mod dialogue;
@@ -203,6 +204,18 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(dialogue::mc_dialogue, m)?,
         wrap_pyfunction!(plot::extract_genes_dense, m)?,
         wrap_pyfunction!(plot::grouped_gene_stats, m)?,
+        wrap_pyfunction!(atac::atac_read_bed, m)?,
+        wrap_pyfunction!(atac::atac_genome_tiles, m)?,
+        wrap_pyfunction!(atac::atac_reduce_regions, m)?,
+        wrap_pyfunction!(atac::atac_gtf_genes, m)?,
+        wrap_pyfunction!(atac::atac_tss_positions, m)?,
+        wrap_pyfunction!(atac::atac_gene_activity_regions, m)?,
+        wrap_pyfunction!(atac::atac_tenx_peaks_to_store, m)?,
+        wrap_pyfunction!(atac::atac_fragments_to_store, m)?,
+        wrap_pyfunction!(atac::atac_fragment_qc, m)?,
+        wrap_pyfunction!(atac::atac_set_tf_idf, m)?,
+        wrap_pyfunction!(atac::atac_feature_totals, m)?,
+        wrap_pyfunction!(atac::atac_lsi, m)?,
     ] {
         m.add_function(f)?;
     }

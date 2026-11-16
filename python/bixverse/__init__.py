@@ -19,6 +19,7 @@ scatter over every gene whether or not it holds a count.
 from . import (
     _bixverse,
     annotate,
+    atac,
     de,
     dialogue,
     doublets,
@@ -79,6 +80,7 @@ __all__ = [
     "__version__",
     "_bixverse",
     "annotate",
+    "atac",
     "de",
     "dialogue",
     "doublets",

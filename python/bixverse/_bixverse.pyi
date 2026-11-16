@@ -1212,3 +1212,65 @@ def grouped_gene_stats(
     group_ids: np.ndarray,
     n_groups: int,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+def atac_read_bed(path: Path) -> dict[str, Any]: ...
+def atac_genome_tiles(
+    chroms: list[str], sizes: list[int], width: int
+) -> dict[str, Any]: ...
+def atac_reduce_regions(
+    chrom: list[str], start: list[int], end: list[int]
+) -> dict[str, Any]: ...
+def atac_gtf_genes(path: Path) -> dict[str, Any]: ...
+def atac_tss_positions(path: Path, biotypes: list[str]) -> dict[str, Any]: ...
+def atac_gene_activity_regions(
+    path: Path, upstream: int, downstream: int, max_width: int, biotypes: list[str]
+) -> dict[str, Any]: ...
+def atac_tenx_peaks_to_store(
+    h5_path: Path,
+    f_path_cells: Path,
+    f_path_genes: Path,
+    barcodes: list[str],
+    max_mem_gb: float | None = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...
+def atac_fragments_to_store(
+    fragments: Path,
+    f_path_cells: Path,
+    f_path_genes: Path,
+    barcodes: list[str],
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    mode: str,
+    kind: str,
+    target_size: float,
+    max_mem_gb: float | None = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...
+def atac_fragment_qc(
+    fragments: Path,
+    barcodes: list[str],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    mito_chroms: list[str],
+) -> dict[str, np.ndarray]: ...
+def atac_set_tf_idf(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray | None,
+    scale: float,
+) -> np.ndarray: ...
+def atac_feature_totals(
+    f_path_genes: Path, cells: np.ndarray | None
+) -> dict[str, np.ndarray]: ...
+def atac_lsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    n_comp: int,
+    solver: str = ...,
+    scale_embeddings: bool = ...,
+    scale_max: float | None = ...,
+    seed: int = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...

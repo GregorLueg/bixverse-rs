@@ -13,6 +13,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 py-common.workspace = true
+# ATAC: fragments, peak and tile stores, TF-IDF, LSI; `h5` for the 10x
+# multiome `Peaks` reader (HDF5 comes static through bixverse-sc-data).
+bixverse-atac = { workspace = true, features = ["h5"] }
 # The single cell crates, no extendr, so no libR on the link line. Python
 # extras cannot switch Rust features, so the wheel carries every sc feature.
 bixverse-sc = { workspace = true, features = ["multi-modal", "bonsai"] }
