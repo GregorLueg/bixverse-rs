@@ -1,0 +1,14 @@
+{
+  "column-order": [
+    "cell_type",
+    "n_umi_float",
+    "is_doublet",
+    "sample",
+    "barcode",
+    "batch_int",
+    "flag_na"
+  ],
+  "_index": "_index",
+  "encoding-type": "dataframe",
+  "encoding-version": "0.2.0"
+}

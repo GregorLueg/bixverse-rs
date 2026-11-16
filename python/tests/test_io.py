@@ -320,12 +320,26 @@ def test_downloads_hit_the_cache(tmp_path, monkeypatch):
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.mark.parametrize("fmt", ["csr", "csc"])
-def test_reads_an_h5ad_anndata_wrote(fmt, tmp_path):
+@pytest.mark.parametrize(
+    "name",
+    [
+        "anndata_csr.h5ad",
+        "anndata_csc.h5ad",
+        "anndata_dense.h5ad",
+        "anndata_csr_v2.zarr",
+        "anndata_csc_v2.zarr",
+        "anndata_dense_v2.zarr",
+        "anndata_csr_v3.zarr",
+        "anndata_csc_v3.zarr",
+        "anndata_dense_v3.zarr",
+        "anndata_csr_v3_sharded.zarr",
+    ],
+)
+def test_reads_an_h5ad_anndata_wrote(name, tmp_path):
     # written by anndata (dev/gen_anndata_fixture.py), not by bixverse, so a
     # convention the reader and writer share cannot pass unnoticed
     truth = np.load(FIXTURES / "anndata_counts.npy")
-    f = FIXTURES / f"anndata_{fmt}.h5ad"
+    f = FIXTURES / name
     meta = bv.io.read_h5ad_metadata(f)
     assert meta["dims"] == truth.shape
     obs = meta["obs"]

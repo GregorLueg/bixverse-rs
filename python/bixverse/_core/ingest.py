@@ -359,11 +359,11 @@ def load_h5ad(
     csc_mem_gb: float | None = None,
     verbose: Verbose = True,
 ) -> SingleCells:
-    """Load an h5ad file.
+    """Load an h5ad file or anndata Zarr store.
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         qc: Cell and gene QC thresholds and the target size.
         raw_count_slot: Where the raw counts are. `"auto"` detects it, see
             `detect_raw_count_slot`.
@@ -433,7 +433,7 @@ def stream_h5ad(
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         qc: Cell and gene QC thresholds and the target size.
         raw_count_slot: Where the raw counts are. `"auto"` detects it, see
             `detect_raw_count_slot`.
@@ -474,7 +474,7 @@ def load_h5ad_norm(
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         obs_lib_size_col: obs column with the total counts per cell.
         target_size: Target size of the original normalisation.
         qc: Cell and gene QC thresholds and the target size.

@@ -3,12 +3,13 @@
 //! decoders.
 
 use hdf5::types::{TypeDescriptor, VarLenUnicode};
-use hdf5::{Container, Dataset, File, Group, IndexType, IterationOrder, Location, LocationType};
+use hdf5::{Container, File, Group, IndexType, IterationOrder, Location, LocationType};
 use ndarray::ArrayView2;
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::ann_store::{AnnFile, NodeKind};
 use crate::h5_10x_io::read_string_dataset;
 use crate::prelude::*;
 
@@ -163,30 +164,35 @@ pub struct H5adFrame {
 ///
 /// The value as `i32`, or `None`.
 #[inline]
-fn to_r_int<T: TryInto<i32>>(x: T) -> Option<i32> {
+pub(crate) fn to_r_int<T: TryInto<i32>>(x: T) -> Option<i32> {
     x.try_into().ok().filter(|&v| v != i32::MIN)
 }
 
-/// Read a plain 1-D dataset
+/// Read a plain 1-D array
 ///
 /// HDF5 enums with only `FALSE` / `TRUE` members are booleans (anndata writes
 /// no other enums).
 ///
 /// ### Params
 ///
-/// * `ds` - The dataset
+/// * `file` - The open file
+/// * `path` - Path of the array
 ///
 /// ### Returns
 ///
 /// The column, or `None` for a dtype or shape R would not turn into a vector.
-fn read_dataset(ds: &Dataset) -> Result<Option<ColumnData>, ScDataErrors> {
-    if ds.ndim() != 1 {
+fn read_dataset(file: &AnnFile, path: &str) -> Result<Option<ColumnData>, ScDataErrors> {
+    if file.shape(path)?.len() != 1 {
         return Ok(None);
     }
-    read_values(ds)
+    match file {
+        AnnFile::H5(f) => read_values(&f.dataset(path)?),
+        #[cfg(feature = "zarr")]
+        AnnFile::Zarr(_) => file.read_zarr_column(path),
+    }
 }
 
-/// Dispatch a dataset or attribute on its dtype, ignoring its shape
+/// Dispatch an HDF5 dataset or attribute on its dtype, ignoring its shape
 ///
 /// ### Params
 ///
@@ -227,53 +233,57 @@ fn read_values(ds: &impl Deref<Target = Container>) -> Result<Option<ColumnData>
     Ok(Some(col))
 }
 
-/// Names of the members of `group` of one type, in HDF5 name order
+/// Names of the members of the group at `path` of one kind, in name order
 ///
 /// ### Params
 ///
-/// * `group` - The group
-/// * `loc_type` - Keep members of this type
+/// * `file` - The open file
+/// * `path` - Path of the group
+/// * `kind` - Keep members of this kind
 ///
 /// ### Returns
 ///
 /// The member names.
-fn members_of_type(group: &Group, loc_type: LocationType) -> Result<Vec<String>, ScDataErrors> {
-    let mut out = Vec::new();
-    for name in group.member_names_by(IndexType::Name, IterationOrder::Increasing)? {
-        if group.loc_type_by_name(&name)? == loc_type {
-            out.push(name);
-        }
-    }
-    Ok(out)
+fn members_of_kind(
+    file: &AnnFile,
+    path: &str,
+    kind: NodeKind,
+) -> Result<Vec<String>, ScDataErrors> {
+    Ok(file
+        .members(path)?
+        .into_iter()
+        .filter(|(_, k)| *k == kind)
+        .map(|(n, _)| n)
+        .collect())
 }
 
-/// Read one dataframe column: a plain
-/// dataset, a categorical group (`categories` + `codes`, negative code is
-/// NA) or a nullable group (`values` + optional `mask`)
+/// Read one dataframe column: a plain array, a categorical group
+/// (`categories` + `codes`, negative code is NA) or a nullable group
+/// (`values` + optional `mask`)
 ///
 /// ### Params
 ///
-/// * `group` - The dataframe group
-/// * `name` - Column name inside it
+/// * `file` - The open file
+/// * `path` - Path of the column
 ///
 /// ### Returns
 ///
 /// The column, or `None` for an unsupported encoding.
-fn read_column(group: &Group, name: &str) -> Result<Option<ColumnData>, ScDataErrors> {
-    match group.loc_type_by_name(name)? {
-        LocationType::Dataset => read_dataset(&group.dataset(name)?),
-        LocationType::Group => {
-            let g = group.group(name)?;
-            let subs = members_of_type(&g, LocationType::Dataset)?;
+fn read_column(file: &AnnFile, path: &str) -> Result<Option<ColumnData>, ScDataErrors> {
+    match file.node(path) {
+        Some(NodeKind::Array) => read_dataset(file, path),
+        Some(NodeKind::Group) => {
+            let subs = members_of_kind(file, path, NodeKind::Array)?;
             let has = |s: &str| subs.iter().any(|x| x == s);
+            let sub = |s: &str| format!("{path}/{s}");
 
             if has("categories") && has("codes") {
                 let Some(categories) =
-                    read_dataset(&g.dataset("categories")?)?.and_then(ColumnData::into_levels)
+                    read_dataset(file, &sub("categories"))?.and_then(ColumnData::into_levels)
                 else {
                     return Ok(None);
                 };
-                let Some(ColumnData::Integer(codes)) = read_dataset(&g.dataset("codes")?)? else {
+                let Some(ColumnData::Integer(codes)) = read_dataset(file, &sub("codes"))? else {
                     return Ok(None);
                 };
                 let codes = codes.into_iter().map(|c| c.unwrap_or(-1)).collect();
@@ -281,11 +291,11 @@ fn read_column(group: &Group, name: &str) -> Result<Option<ColumnData>, ScDataEr
             }
 
             if has("values") {
-                let Some(mut values) = read_dataset(&g.dataset("values")?)? else {
+                let Some(mut values) = read_dataset(file, &sub("values"))? else {
                     return Ok(None);
                 };
                 if has("mask") {
-                    let Some(ColumnData::Boolean(mask)) = read_dataset(&g.dataset("mask")?)? else {
+                    let Some(ColumnData::Boolean(mask)) = read_dataset(file, &sub("mask"))? else {
                         return Ok(None);
                     };
                     values.apply_mask(&mask);
@@ -295,76 +305,68 @@ fn read_column(group: &Group, name: &str) -> Result<Option<ColumnData>, ScDataEr
 
             Ok(None)
         }
-        _ => Ok(None),
+        None => Ok(None),
     }
 }
 
-/// Read an h5ad dataframe group
+/// Read an anndata dataframe group
 ///
 /// The index is the column named by the `_index` attribute, else an `_index`
-/// dataset. Old-style categoricals (integer codes in a dataset, levels under
+/// array. Old-style categoricals (integer codes in an array, levels under
 /// `__categories/<name>`) are resolved.
 ///
 /// ### Params
 ///
-/// * `group` - The dataframe group
+/// * `file` - The open h5ad file or Zarr store
+/// * `group` - Path of the dataframe group
 ///
 /// ### Returns
 ///
 /// The [`H5adFrame`].
-pub(crate) fn read_frame(group: &Group) -> Result<H5adFrame, ScDataErrors> {
+pub(crate) fn read_frame(file: &AnnFile, group: &str) -> Result<H5adFrame, ScDataErrors> {
     let mut skip: Vec<String> = vec!["_index".into(), "__categories".into()];
+    let col = |name: &str| format!("{group}/{name}");
 
-    let idx = if group.attr_names()?.iter().any(|a| a == "_index") {
-        let idx_col = read_string_dataset(&group.attr("_index")?)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                ScDataErrors::UnsupportH5ADFormat("empty _index attribute".to_string())
-            })?;
-        let idx = read_column(group, &idx_col)?;
+    let idx = if let Some(idx_col) = file.attr_str(group, "_index")? {
+        let idx = read_column(file, &col(&idx_col))?;
         skip.push(idx_col);
         idx
-    } else if group.link_exists("_index")
-        && group.loc_type_by_name("_index")? == LocationType::Dataset
-    {
-        read_dataset(&group.dataset("_index")?)?
+    } else if file.node(&col("_index")) == Some(NodeKind::Array) {
+        read_dataset(file, &col("_index"))?
     } else {
         None
     };
 
-    let old_cats: Vec<String> = if group.link_exists("__categories")
-        && group.loc_type_by_name("__categories")? == LocationType::Group
-    {
-        members_of_type(&group.group("__categories")?, LocationType::Dataset)?
+    let old_cats: Vec<String> = if file.node(&col("__categories")) == Some(NodeKind::Group) {
+        members_of_kind(file, &col("__categories"), NodeKind::Array)?
     } else {
         Vec::new()
     };
 
-    let mut names = members_of_type(group, LocationType::Group)?;
-    names.extend(members_of_type(group, LocationType::Dataset)?);
+    let mut names = members_of_kind(file, group, NodeKind::Group)?;
+    names.extend(members_of_kind(file, group, NodeKind::Array)?);
     names.retain(|n| !skip.contains(n));
 
     let mut cols = Vec::with_capacity(names.len());
     let mut skipped = Vec::new();
     for name in names {
-        let Some(mut col) = read_column(group, &name)? else {
+        let Some(mut c) = read_column(file, &col(&name))? else {
             skipped.push(name);
             continue;
         };
         if old_cats.contains(&name)
-            && let ColumnData::Integer(codes) = &col
+            && let ColumnData::Integer(codes) = &c
         {
-            let categories = read_dataset(&group.dataset(&format!("__categories/{name}"))?)?
+            let categories = read_dataset(file, &col(&format!("__categories/{name}")))?
                 .and_then(ColumnData::into_levels);
             if let Some(categories) = categories {
-                col = ColumnData::Categorical {
+                c = ColumnData::Categorical {
                     codes: codes.iter().map(|c| c.unwrap_or(-1)).collect(),
                     categories,
                 };
             }
         }
-        cols.push((name, col));
+        cols.push((name, c));
     }
 
     Ok(H5adFrame { cols, idx, skipped })
@@ -374,44 +376,27 @@ pub(crate) fn read_frame(group: &Group) -> Result<H5adFrame, ScDataErrors> {
 // Exports //
 /////////////
 
-/// Split an HDF5 path into the parent group and the member name
+/// Read an anndata dataframe group (`obs`, `var` or any other) into memory
 ///
 /// ### Params
 ///
-/// * `file` - The open file
-/// * `path` - Path of the member, with or without a leading `/`
-///
-/// ### Returns
-///
-/// The parent group and the member name.
-fn parent_and_name<'a>(file: &File, path: &'a str) -> Result<(Group, &'a str), ScDataErrors> {
-    let path = path.trim_start_matches('/');
-    match path.rsplit_once('/') {
-        Some((parent, name)) => Ok((file.group(parent)?, name)),
-        None => Ok((file.group("/")?, path)),
-    }
-}
-
-/// Read an h5ad dataframe group (`obs`, `var` or any other) into memory
-///
-/// ### Params
-///
-/// * `h5_path` - The h5ad file
+/// * `h5_path` - The h5ad file or Zarr store
 /// * `group` - Path of the dataframe group
 ///
 /// ### Returns
 ///
 /// The decoded [`H5adFrame`].
 pub fn read_h5ad_frame<P: AsRef<Path>>(h5_path: P, group: &str) -> Result<H5adFrame, ScDataErrors> {
-    let file = File::open(h5_path)?;
-    read_frame(&file.group(group)?)
+    read_frame(&AnnFile::open(h5_path)?, group)
 }
 
 /// Read one 1-D dataset or encoded column (categorical, nullable) at any path
 ///
+/// Scalars are read from HDF5 only.
+///
 /// ### Params
 ///
-/// * `h5_path` - The HDF5 file
+/// * `h5_path` - The h5ad file or Zarr store
 /// * `path` - Path of the dataset or column group
 ///
 /// ### Returns
@@ -421,15 +406,17 @@ pub fn read_h5_column<P: AsRef<Path>>(
     h5_path: P,
     path: &str,
 ) -> Result<Option<ColumnData>, ScDataErrors> {
-    let file = File::open(h5_path)?;
-    let (parent, name) = parent_and_name(&file, path)?;
-    if parent.loc_type_by_name(name)? == LocationType::Dataset {
-        let ds = parent.dataset(name)?;
+    let file = AnnFile::open(h5_path)?;
+    let path = path.trim_start_matches('/');
+    if let Some(f) = file.h5()
+        && file.node(path) == Some(NodeKind::Array)
+    {
+        let ds = f.dataset(path)?;
         if ds.ndim() == 0 {
             return read_values(&ds);
         }
     }
-    read_column(&parent, name)
+    read_column(&file, path)
 }
 
 /// One member of an HDF5 group

@@ -24,6 +24,8 @@ use zarrs::group::Group as ZGroup;
 
 use crate::h5_10x_io::read_string_dataset;
 use crate::h5_chunked::{H5ChunkedReader, H5Elem};
+#[cfg(feature = "zarr")]
+use crate::h5ad_frame_io::{ColumnData, to_r_int};
 use crate::prelude::*;
 
 /// A Zarr array on the local filesystem.
@@ -281,8 +283,7 @@ impl AnnFile {
             #[cfg(feature = "zarr")]
             Self::Zarr(store) => {
                 let arr = open_zarray(store, path)?;
-                let n = arr.shape().first().copied().unwrap_or(0);
-                zread(&arr, vec![0..n])
+                zread(&arr, whole(&arr))
             }
         }
     }
@@ -356,16 +357,70 @@ impl AnnFile {
             #[cfg(feature = "zarr")]
             Self::Zarr(store) => {
                 let arr = open_zarray(store, path)?;
-                let n = arr.shape().first().copied().unwrap_or(0);
                 if *arr.data_type() != zdt::string() {
                     return Err(ScDataErrors::ZarrError(format!(
                         "{path} is not a string array"
                     )));
                 }
-                arr.retrieve_array_subset::<Vec<String>>(&vec![0..n])
+                arr.retrieve_array_subset::<Vec<String>>(&whole(&arr))
                     .map_err(zarr_err)
             }
         }
+    }
+
+    /// A 1-D Zarr array as a dataframe column.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Path of the array
+    ///
+    /// ### Returns
+    ///
+    /// The column, or `None` for a dtype R would not turn into a vector.
+    #[cfg(feature = "zarr")]
+    pub(crate) fn read_zarr_column(&self, path: &str) -> Result<Option<ColumnData>, ScDataErrors> {
+        let Self::Zarr(store) = self else {
+            return Ok(None);
+        };
+        let arr = open_zarray(store, path)?;
+        let dt = arr.data_type();
+        let ints = [
+            zdt::int8(),
+            zdt::int16(),
+            zdt::int32(),
+            zdt::int64(),
+            zdt::uint8(),
+            zdt::uint16(),
+            zdt::uint32(),
+            zdt::uint64(),
+        ];
+        Ok(Some(if ints.contains(dt) {
+            ColumnData::Integer(
+                zread::<i64>(&arr, whole(&arr))?
+                    .into_iter()
+                    .map(to_r_int)
+                    .collect(),
+            )
+        } else if *dt == zdt::float32() || *dt == zdt::float64() {
+            ColumnData::Double(
+                zread::<f64>(&arr, whole(&arr))?
+                    .into_iter()
+                    .map(Some)
+                    .collect(),
+            )
+        } else if *dt == zdt::bool() {
+            ColumnData::Boolean(
+                arr.retrieve_array_subset::<Vec<bool>>(&whole(&arr))
+                    .map_err(zarr_err)?
+                    .into_iter()
+                    .map(Some)
+                    .collect(),
+            )
+        } else if *dt == zdt::string() {
+            ColumnData::String(self.read_strings(path)?.into_iter().map(Some).collect())
+        } else {
+            return Ok(None);
+        }))
     }
 }
 
@@ -392,7 +447,10 @@ impl AnnArray {
         match self {
             Self::H5(r) => r.read(range),
             #[cfg(feature = "zarr")]
-            Self::Zarr(a) => zread(a, vec![range.start as u64..range.end as u64]),
+            Self::Zarr(a) => zread(
+                a,
+                std::iter::once(range.start as u64..range.end as u64).collect(),
+            ),
         }
     }
 }
@@ -443,6 +501,20 @@ fn zarr_err(e: impl std::fmt::Display) -> ScDataErrors {
 fn open_zarray(store: &Arc<FilesystemStore>, path: &str) -> Result<ZArray, ScDataErrors> {
     ZArray::open(store.clone(), &zpath(path))
         .map_err(|e| ScDataErrors::ZarrError(format!("{path}: {e}")))
+}
+
+/// The whole of a Zarr array as a subset.
+///
+/// ### Params
+///
+/// * `arr` - The array
+///
+/// ### Returns
+///
+/// One full range per dimension.
+#[cfg(feature = "zarr")]
+fn whole(arr: &ZArray) -> Vec<Range<u64>> {
+    arr.shape().iter().map(|&n| 0..n).collect()
 }
 
 /// Read a subset of a Zarr array in its stored type and convert to `T`.
@@ -501,4 +573,99 @@ fn zread<T: H5Elem>(arr: &ZArray, subset: Vec<Range<u64>>) -> Result<Vec<T>, ScD
             dt
         )));
     })
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(all(test, feature = "zarr"))]
+mod tests {
+    use super::*;
+    use crate::h5_scan::{detect_raw_count_slot, get_h5ad_dimensions};
+    use crate::h5ad_frame_io::read_h5ad_frame;
+    use crate::h5ad_io::{RawDataSlot, write_h5_counts};
+    use std::path::PathBuf;
+
+    /// anndata-written fixtures, `python/dev/gen_anndata_fixture.py`.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/tests/fixtures")
+            .join(name)
+    }
+
+    /// The Zarr store reads like its h5ad twin: scan, obs / var, and the cell
+    /// file built from it, byte for byte.
+    fn assert_matches_h5ad(zarr: &str, h5ad: &str, format: &str) {
+        let (z, h) = (fixture(zarr), fixture(h5ad));
+        assert!(is_zarr(&z) && !is_zarr(&h));
+
+        let dims = get_h5ad_dimensions(&z).unwrap();
+        assert_eq!(dims, get_h5ad_dimensions(&h).unwrap(), "{zarr}");
+
+        let slots = [
+            RawDataSlot::LayerCounts,
+            RawDataSlot::RawX,
+            RawDataSlot::DataX,
+        ];
+        let slot = detect_raw_count_slot(&z, &slots, 100, 0.99).unwrap();
+        assert!(matches!(slot, Some(RawDataSlot::DataX)), "{zarr}");
+
+        for group in ["obs", "var"] {
+            let (fz, fh) = (
+                read_h5ad_frame(&z, group).unwrap(),
+                read_h5ad_frame(&h, group).unwrap(),
+            );
+            assert_eq!(fz.cols, fh.cols, "{zarr} {group}");
+            assert_eq!(fz.idx, fh.idx, "{zarr} {group}");
+            assert_eq!(fz.skipped, fh.skipped, "{zarr} {group}");
+        }
+        let obs = read_h5ad_frame(&z, "obs").unwrap();
+        assert!(obs.skipped.is_empty(), "{zarr}: {:?}", obs.skipped);
+        assert_eq!(obs.cols.len(), 7, "{zarr}");
+
+        let dir = std::env::temp_dir().join(format!("bixverse_zarr_{}_{zarr}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let qc = MinCellQuality {
+            min_unique_genes: 0,
+            min_lib_size: 0,
+            min_cells: 0,
+            target_size: 1e4,
+        };
+        let mut bytes = Vec::new();
+        for (src, out) in [(&z, "zarr.bin"), (&h, "h5ad.bin")] {
+            let out = dir.join(out);
+            write_h5_counts(
+                src.as_path(),
+                out.as_path(),
+                format,
+                dims.n_obs,
+                dims.n_var,
+                qc.clone(),
+                RawDataSlot::DataX,
+                false,
+            )
+            .unwrap();
+            bytes.push(std::fs::read(&out).unwrap());
+        }
+        assert_eq!(bytes[0], bytes[1], "{zarr}: cell file differs");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_zarr_v3_matches_h5ad() {
+        assert_matches_h5ad("anndata_csr_v3.zarr", "anndata_csr.h5ad", "csr");
+        assert_matches_h5ad("anndata_csc_v3.zarr", "anndata_csc.h5ad", "csc");
+        assert_matches_h5ad("anndata_dense_v3.zarr", "anndata_dense.h5ad", "dense_row");
+        assert_matches_h5ad("anndata_csr_v3_sharded.zarr", "anndata_csr.h5ad", "csr");
+    }
+
+    // zarr v2 defaults to blosc
+    #[cfg(feature = "zarr-blosc")]
+    #[test]
+    fn test_zarr_v2_matches_h5ad() {
+        assert_matches_h5ad("anndata_csr_v2.zarr", "anndata_csr.h5ad", "csr");
+        assert_matches_h5ad("anndata_csc_v2.zarr", "anndata_csc.h5ad", "csc");
+        assert_matches_h5ad("anndata_dense_v2.zarr", "anndata_dense.h5ad", "dense_row");
+    }
 }
