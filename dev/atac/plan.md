@@ -107,6 +107,11 @@ Majority: insertions, both ends counted (ArchR, Cell Ranger). Default
 insertion peak matrix on Cell Ranger's peaks must equal the `Peaks` matrix in
 the 10x h5, a free end-to-end check.
 
+Insertion positions: Cell Ranger takes the raw start and raw end of the
+fragment line (a peak `[ps, pe)` contains `c` iff `ps <= c < pe`), which
+reproduces its `Peaks` matrix exactly on the fixtures; SnapATAC2 and ArchR use
+`end - 1` (62 entries differ on 500 cells, chr22). We follow Cell Ranger.
+
 QC and footprint pileups always use insertions (both ends, raw BED coordinates,
 no Tn5 shift, as Signac).
 
@@ -140,7 +145,8 @@ Shelling out to `macs2` from a library is not an option.
   z-scored per column (n - 1). Keep `idf`, loadings `V` and `d` so new cells
   project (`X_tfidf(ref idf) V diag(1/d)`, then the reference z-scoring): that is
   Seurat's `lsiproject` and the core of rLSI.
-- Depth correlation: Pearson of each component with `log(n_fragments)`, return
+- Depth correlation: Pearson of each component with the raw peak library
+  size (Signac `DepthCor`), return
   it; the caller drops component 1 when it correlates (the vignette's `2:30`).
   Do not drop silently.
 - Memory: `sparse_pca` loads cells x top peaks. Whether `pca_on_sc_streaming`

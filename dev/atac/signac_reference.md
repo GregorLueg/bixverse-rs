@@ -71,7 +71,8 @@ removed in 1.17.0; `NucleosomeSignal` / `TSSEnrichment` deprecated in favour of
   `svds(t(X), k = min(n, ncol - 1))`, loadings `v`,
   `sdev = d / sqrt(max(1, n_features - 1))`, LSI embeddings `u` z-scored per
   column (n - 1), optional clip at `scale.max`. No component dropped in code.
-- `DepthCor` (R/visualization.R:203): `cor(emb[, 1:10], nCount)`; the vignette
+- `DepthCor` (R/visualization.R:203): `cor(emb[, 1:10], nCount)` on raw
+  counts, not log; the vignette
   drops LSI 1.
 
 ## Gene activity (R/utilities.R:410)

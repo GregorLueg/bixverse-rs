@@ -44,6 +44,7 @@ bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.11.0", default-featu
 bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.11.0", default-features = false }
 bixverse-sc-export = { path = "crates/bixverse-sc-export", version = "0.11.0", default-features = false }
 bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.11.0", default-features = false }
+bixverse-atac = { path = "crates/bixverse-atac", version = "0.11.0", default-features = false }
 bixverse-rs = { path = "crates/bixverse-rs", version = "0.11.0", default-features = false }
 
 # External

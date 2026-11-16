@@ -1,0 +1,834 @@
+//! Fragment files: parallel reading of 10x style `fragments.tsv.gz`.
+//!
+//! A fragment file is BED-like, one fragment per line: chromosome, start
+//! (0-based), end (exclusive), barcode and, optionally, the number of read
+//! pairs. Lines starting with `#` are headers. Files are coordinate sorted
+//! and BGZF compressed: a run of independent gzip members of at most 64 KiB
+//! each, with the compressed size in the gzip extra field. That makes them
+//! splittable, so a full pass maps the file, indexes the blocks, and inflates
+//! and parses groups of blocks in parallel. A line cut by a group boundary is
+//! stitched back together after the parallel pass. Plain gzip (not
+//! splittable) inflates on one thread and parses in parallel; uncompressed
+//! files split at newlines.
+//!
+//! Every pass is a fold: each worker owns an accumulator and gets runs of
+//! fragments on one chromosome, and the accumulators are merged at the end.
+//! Only fragments of the requested barcodes reach the fold; everything else
+//! is dropped while parsing.
+
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+use std::sync::Mutex;
+
+use flate2::read::{GzDecoder, MultiGzDecoder};
+use memmap2::Mmap;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+
+use crate::prelude::*;
+
+/// BGZF blocks inflated per parallel task. Blocks hold up to 64 KiB of text,
+/// so a group is a few MiB: large enough that the boundary stitching and the
+/// task overhead vanish, small enough to balance the threads.
+const BGZF_BLOCKS_PER_GROUP: usize = 64;
+
+/// Text per task on the plain gzip and uncompressed paths.
+const TEXT_CHUNK_BYTES: usize = 4 << 20;
+
+/// Bytes of a BGZF block header up to and including the extra field length.
+const GZIP_FIXED_HEADER: usize = 12;
+
+/// Partial lines at the edges of a BGZF group: `(group, head, tail)`.
+type GroupEdges = (usize, Vec<u8>, Vec<u8>);
+
+///////////
+// Types //
+///////////
+
+/// One fragment of a requested cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fragment {
+    /// 0-based start, the left Tn5 insertion.
+    pub start: u32,
+    /// End as written (exclusive in BED terms). Cell Ranger and Signac take
+    /// it as the right insertion as is.
+    pub end: u32,
+    /// Position of the barcode in the requested list.
+    pub cell: u32,
+    /// Read pairs supporting the fragment (column 5), 1 when absent.
+    pub count: u32,
+}
+
+impl Fragment {
+    /// Fragment length in base pairs.
+    ///
+    /// ### Returns
+    ///
+    /// `end - start`.
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.end - self.start
+    }
+
+    /// Whether the fragment is empty (never true for a valid record).
+    ///
+    /// ### Returns
+    ///
+    /// `end == start`.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
+    }
+}
+
+/// Lookup from barcode bytes to the position in the requested list.
+pub struct BarcodeIndex<'a> {
+    /// Barcode to position.
+    map: FxHashMap<&'a [u8], u32>,
+}
+
+impl<'a> BarcodeIndex<'a> {
+    /// Index a list of barcodes.
+    ///
+    /// ### Params
+    ///
+    /// * `barcodes` - The cells, in the order the passes report them
+    ///
+    /// ### Returns
+    ///
+    /// The index, or an error for a duplicated barcode or more than
+    /// `u32::MAX` cells.
+    pub fn new(barcodes: &'a [String]) -> Result<Self, AtacErrors> {
+        if barcodes.len() > u32::MAX as usize {
+            return Err(AtacErrors::InvalidArgument(
+                "more barcodes than fit u32".into(),
+            ));
+        }
+        let mut map = FxHashMap::default();
+        map.reserve(barcodes.len());
+        for (i, b) in barcodes.iter().enumerate() {
+            if map.insert(b.as_bytes(), i as u32).is_some() {
+                return Err(AtacErrors::InvalidArgument(format!(
+                    "barcode '{b}' is listed twice"
+                )));
+            }
+        }
+        Ok(Self { map })
+    }
+
+    /// Number of barcodes.
+    ///
+    /// ### Returns
+    ///
+    /// The count.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether no barcode is indexed.
+    ///
+    /// ### Returns
+    ///
+    /// `true` for an empty index.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Position of a barcode.
+    ///
+    /// ### Params
+    ///
+    /// * `b` - Barcode bytes
+    ///
+    /// ### Returns
+    ///
+    /// The position, or `None` for a barcode not requested.
+    #[inline]
+    fn get(&self, b: &[u8]) -> Option<u32> {
+        self.map.get(b).copied()
+    }
+}
+
+/// How a fragment file is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Compression {
+    /// Block gzip, splittable.
+    Bgzf,
+    /// Plain gzip, one stream.
+    Gzip,
+    /// Text.
+    None,
+}
+
+///////////////////
+// Line parsing  //
+///////////////////
+
+/// Parse an unsigned decimal field.
+///
+/// ### Params
+///
+/// * `s` - The bytes
+///
+/// ### Returns
+///
+/// The value, or `None` for an empty field, a non-digit or overflow.
+#[inline]
+fn parse_u32(s: &[u8]) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &c in s {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add(d as u32)?;
+    }
+    Some(v)
+}
+
+/// A malformed line, for the error message.
+///
+/// ### Params
+///
+/// * `line` - The line
+///
+/// ### Returns
+///
+/// The error.
+fn bad_line(line: &[u8]) -> AtacErrors {
+    AtacErrors::InvalidArgument(format!(
+        "malformed fragment line '{}'",
+        String::from_utf8_lossy(line)
+    ))
+}
+
+/// Parse complete lines and feed runs of one chromosome to the fold.
+///
+/// ### Params
+///
+/// * `text` - Whole lines, `\n` separated; a missing final newline is fine
+/// * `barcodes` - The requested cells
+/// * `acc` - The worker's accumulator
+/// * `fold` - Consumer of `(accumulator, chromosome, fragments)`
+/// * `buf` - Scratch for the current run
+///
+/// ### Returns
+///
+/// `Ok(())`, or an error for a malformed line.
+fn parse_lines<A, F>(
+    text: &[u8],
+    barcodes: &BarcodeIndex,
+    acc: &mut A,
+    fold: &F,
+    buf: &mut Vec<Fragment>,
+) -> Result<(), AtacErrors>
+where
+    F: Fn(&mut A, &str, &[Fragment]),
+{
+    buf.clear();
+    let mut run_chrom: &[u8] = &[];
+    for line in text.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let mut fields = line.split(|&b| b == b'\t');
+        let (Some(chrom), Some(start), Some(end), Some(bc)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(bad_line(line));
+        };
+        let Some(cell) = barcodes.get(bc) else {
+            continue;
+        };
+        let start = parse_u32(start).ok_or_else(|| bad_line(line))?;
+        let end = parse_u32(end).ok_or_else(|| bad_line(line))?;
+        if end <= start {
+            return Err(bad_line(line));
+        }
+        let count = match fields.next() {
+            Some(c) => parse_u32(c).ok_or_else(|| bad_line(line))?,
+            None => 1,
+        };
+        if chrom != run_chrom {
+            if !buf.is_empty() {
+                fold(acc, chrom_str(run_chrom, line)?, buf);
+                buf.clear();
+            }
+            run_chrom = chrom;
+        }
+        buf.push(Fragment {
+            start,
+            end,
+            cell,
+            count,
+        });
+    }
+    if !buf.is_empty() {
+        fold(acc, chrom_str(run_chrom, run_chrom)?, buf);
+        buf.clear();
+    }
+    Ok(())
+}
+
+/// Chromosome bytes as UTF-8.
+///
+/// ### Params
+///
+/// * `chrom` - The bytes
+/// * `line` - Context for the error
+///
+/// ### Returns
+///
+/// The name, or an error for invalid UTF-8.
+fn chrom_str<'a>(chrom: &'a [u8], line: &[u8]) -> Result<&'a str, AtacErrors> {
+    std::str::from_utf8(chrom).map_err(|_| bad_line(line))
+}
+
+//////////
+// BGZF //
+//////////
+
+/// Size of the BGZF block at the start of `bytes`.
+///
+/// ### Params
+///
+/// * `bytes` - File bytes from a block start
+///
+/// ### Returns
+///
+/// The total block length, or `None` when the bytes do not start a BGZF
+/// block (plain gzip has no `BC` extra subfield).
+fn bgzf_block_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < GZIP_FIXED_HEADER || bytes[0] != 31 || bytes[1] != 139 || bytes[2] != 8 {
+        return None;
+    }
+    if bytes[3] & 4 == 0 {
+        return None;
+    }
+    let xlen = u16::from_le_bytes([bytes[10], bytes[11]]) as usize;
+    let extra = bytes.get(GZIP_FIXED_HEADER..GZIP_FIXED_HEADER + xlen)?;
+    let mut i = 0;
+    while i + 4 <= extra.len() {
+        let slen = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
+        if extra[i] == b'B' && extra[i + 1] == b'C' && slen == 2 {
+            let bsize = u16::from_le_bytes([*extra.get(i + 4)?, *extra.get(i + 5)?]) as usize;
+            return Some(bsize + 1);
+        }
+        i += 4 + slen;
+    }
+    None
+}
+
+/// Offsets of every BGZF block.
+///
+/// ### Params
+///
+/// * `bytes` - The whole file
+///
+/// ### Returns
+///
+/// Block start offsets plus the file length as a final sentinel, or an error
+/// for a truncated or non-BGZF block.
+fn bgzf_block_offsets(bytes: &[u8]) -> Result<Vec<usize>, AtacErrors> {
+    let mut offsets = Vec::new();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let len = bgzf_block_len(&bytes[pos..]).ok_or_else(|| {
+            AtacErrors::InvalidArgument(format!("BGZF block expected at byte {pos}"))
+        })?;
+        if pos + len > bytes.len() {
+            return Err(AtacErrors::InvalidArgument("truncated BGZF file".into()));
+        }
+        offsets.push(pos);
+        pos += len;
+    }
+    offsets.push(bytes.len());
+    Ok(offsets)
+}
+
+/// Detect the compression from the first bytes.
+///
+/// ### Params
+///
+/// * `bytes` - The whole file
+///
+/// ### Returns
+///
+/// The [`Compression`].
+fn detect_compression(bytes: &[u8]) -> Compression {
+    if bytes.len() >= 2 && bytes[0] == 31 && bytes[1] == 139 {
+        if bgzf_block_len(bytes).is_some() {
+            Compression::Bgzf
+        } else {
+            Compression::Gzip
+        }
+    } else {
+        Compression::None
+    }
+}
+
+///////////////
+// The fold  //
+///////////////
+
+/// Complete lines of a chunk plus the partial lines at its edges.
+///
+/// ### Params
+///
+/// * `text` - The chunk
+/// * `first` - Whether the chunk starts the file (no partial head)
+///
+/// ### Returns
+///
+/// `(head, body, tail)`: the bytes up to and including the first newline
+/// (empty for the first chunk), the complete lines after it, and the bytes
+/// after the last newline.
+fn split_edges(text: &[u8], first: bool) -> (&[u8], &[u8], &[u8]) {
+    let head_end = if first {
+        0
+    } else {
+        match text.iter().position(|&b| b == b'\n') {
+            Some(i) => i + 1,
+            None => return (text, &[], &[]),
+        }
+    };
+    let tail_start = match text[head_end..].iter().rposition(|&b| b == b'\n') {
+        Some(i) => head_end + i + 1,
+        None => head_end,
+    };
+    (
+        &text[..head_end],
+        &text[head_end..tail_start],
+        &text[tail_start..],
+    )
+}
+
+/// Fold over the fragments of the requested cells.
+///
+/// Each worker starts from `init()`, receives runs of fragments on one
+/// chromosome through `fold`, and the workers' accumulators are combined with
+/// `reduce`. Runs arrive in no particular order across workers, but within a
+/// run fragments keep file order (sorted by start).
+///
+/// ### Params
+///
+/// * `path` - The fragment file (BGZF, gzip or text)
+/// * `barcodes` - Cells to keep; other barcodes are skipped
+/// * `init` - New accumulator
+/// * `fold` - Consumer of `(accumulator, chromosome, fragments)`
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error.
+pub fn fold_fragments<A, I, F, R>(
+    path: &Path,
+    barcodes: &BarcodeIndex,
+    init: I,
+    fold: F,
+    reduce: R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let file = File::open(path)?;
+    if file.metadata()?.len() == 0 {
+        return Ok(init());
+    }
+    // SAFETY: the file is opened read-only and not modified while mapped.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let bytes: &[u8] = &mmap;
+
+    match detect_compression(bytes) {
+        Compression::Bgzf => fold_bgzf(bytes, barcodes, &init, &fold, &reduce),
+        Compression::None => fold_text(bytes, barcodes, &init, &fold, &reduce),
+        Compression::Gzip => fold_gzip(&file, barcodes, &init, &fold, &reduce),
+    }
+}
+
+/// [`fold_fragments`] on a BGZF file.
+///
+/// ### Params
+///
+/// * `bytes` - The mapped file
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer
+/// * `reduce` - Merge
+///
+/// ### Returns
+///
+/// The combined accumulator.
+fn fold_bgzf<A, I, F, R>(
+    bytes: &[u8],
+    barcodes: &BarcodeIndex,
+    init: &I,
+    fold: &F,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let offsets = bgzf_block_offsets(bytes)?;
+    let n_blocks = offsets.len() - 1;
+    let groups: Vec<(usize, usize)> = (0..n_blocks)
+        .step_by(BGZF_BLOCKS_PER_GROUP)
+        .map(|b| (b, (b + BGZF_BLOCKS_PER_GROUP).min(n_blocks)))
+        .collect();
+    let edges: Mutex<Vec<GroupEdges>> = Mutex::new(Vec::new());
+
+    let acc = groups
+        .par_iter()
+        .enumerate()
+        .try_fold(
+            || (init(), Vec::new(), Vec::new()),
+            |(mut acc, mut text, mut buf), (g, &(b0, b1))| {
+                text.clear();
+                for b in b0..b1 {
+                    GzDecoder::new(&bytes[offsets[b]..offsets[b + 1]]).read_to_end(&mut text)?;
+                }
+                let (head, body, tail) = split_edges(&text, g == 0);
+                parse_lines(body, barcodes, &mut acc, fold, &mut buf)?;
+                edges.lock().expect("edge list lock poisoned").push((
+                    g,
+                    head.to_vec(),
+                    tail.to_vec(),
+                ));
+                Ok::<_, AtacErrors>((acc, text, buf))
+            },
+        )
+        .map(|r| r.map(|(acc, _, _)| acc))
+        .try_reduce(init, |a, b| Ok(reduce(a, b)))?;
+
+    // a line cut at a group boundary is the tail of one group plus the head
+    // of the next
+    let mut edges = edges.into_inner().expect("edge list lock poisoned");
+    edges.sort_unstable_by_key(|e| e.0);
+    let mut stitched = Vec::new();
+    for w in 0..edges.len() {
+        stitched.extend_from_slice(&edges[w].2);
+        if let Some(next) = edges.get(w + 1) {
+            stitched.extend_from_slice(&next.1);
+        }
+        if !stitched.ends_with(b"\n") {
+            stitched.push(b'\n');
+        }
+    }
+    let mut rest = init();
+    parse_lines(&stitched, barcodes, &mut rest, fold, &mut Vec::new())?;
+    Ok(reduce(acc, rest))
+}
+
+/// [`fold_fragments`] on an uncompressed file.
+///
+/// ### Params
+///
+/// * `bytes` - The mapped file
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer
+/// * `reduce` - Merge
+///
+/// ### Returns
+///
+/// The combined accumulator.
+fn fold_text<A, I, F, R>(
+    bytes: &[u8],
+    barcodes: &BarcodeIndex,
+    init: &I,
+    fold: &F,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = (start + TEXT_CHUNK_BYTES).min(bytes.len());
+        while end < bytes.len() && bytes[end - 1] != b'\n' {
+            end += 1;
+        }
+        chunks.push(&bytes[start..end]);
+        start = end;
+    }
+    chunks
+        .par_iter()
+        .try_fold(
+            || (init(), Vec::new()),
+            |(mut acc, mut buf), chunk| {
+                parse_lines(chunk, barcodes, &mut acc, fold, &mut buf)?;
+                Ok::<_, AtacErrors>((acc, buf))
+            },
+        )
+        .map(|r| r.map(|(acc, _)| acc))
+        .try_reduce(init, |a, b| Ok(reduce(a, b)))
+}
+
+/// [`fold_fragments`] on a plain gzip file: one inflating thread, parallel
+/// parsing.
+///
+/// ### Params
+///
+/// * `file` - The open file
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer
+/// * `reduce` - Merge
+///
+/// ### Returns
+///
+/// The combined accumulator.
+fn fold_gzip<A, I, F, R>(
+    file: &File,
+    barcodes: &BarcodeIndex,
+    init: &I,
+    fold: &F,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let mut decoder = MultiGzDecoder::new(std::io::BufReader::new(file));
+    let mut carry: Vec<u8> = Vec::new();
+    let mut acc = init();
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let batch = rayon::current_num_threads().max(1) * 2;
+    let mut eof = false;
+
+    while !eof {
+        // inflate a batch of chunks, each cut after its last newline
+        while chunks.len() < batch {
+            let mut chunk = std::mem::take(&mut carry);
+            let have = chunk.len();
+            chunk.resize(have + TEXT_CHUNK_BYTES, 0);
+            let mut filled = have;
+            while filled < chunk.len() {
+                let n = decoder.read(&mut chunk[filled..])?;
+                if n == 0 {
+                    eof = true;
+                    break;
+                }
+                filled += n;
+            }
+            chunk.truncate(filled);
+            if !eof && let Some(nl) = chunk.iter().rposition(|&b| b == b'\n') {
+                carry = chunk.split_off(nl + 1);
+            }
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+            if eof {
+                break;
+            }
+        }
+        let part = chunks
+            .par_iter()
+            .try_fold(
+                || (init(), Vec::new()),
+                |(mut acc, mut buf), chunk| {
+                    parse_lines(chunk, barcodes, &mut acc, fold, &mut buf)?;
+                    Ok::<_, AtacErrors>((acc, buf))
+                },
+            )
+            .map(|r| r.map(|(acc, _)| acc))
+            .try_reduce(init, |a, b| Ok(reduce(a, b)))?;
+        acc = reduce(acc, part);
+        chunks.clear();
+    }
+    Ok(acc)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::Compression as GzLevel;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    /// Synthetic fragment file text: three chromosomes, four barcodes, one
+    /// header line.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Fragments per chromosome
+    ///
+    /// ### Returns
+    ///
+    /// The text.
+    fn synthetic_text(n: u32) -> String {
+        let mut s = String::from("# id=test\n");
+        for chrom in ["chr1", "chr2", "chrX"] {
+            for i in 0..n {
+                let start = i * 37;
+                let end = start + 50 + (i % 400);
+                let bc = ["AAAC-1", "CCCG-1", "GGGT-1", "TTTA-1"][(i % 4) as usize];
+                s.push_str(&format!("{chrom}\t{start}\t{end}\t{bc}\t{}\n", 1 + i % 3));
+            }
+        }
+        s
+    }
+
+    /// Write `text` as a BGZF file: gzip members of at most `block` bytes of
+    /// text each, with the BC extra field.
+    ///
+    /// ### Params
+    ///
+    /// * `text` - The content
+    /// * `block` - Uncompressed bytes per block
+    ///
+    /// ### Returns
+    ///
+    /// The file bytes.
+    fn bgzf_bytes(text: &[u8], block: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for piece in text.chunks(block).chain(std::iter::once(&[][..])) {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), GzLevel::fast());
+            e.write_all(piece).unwrap();
+            let cdata = e.finish().unwrap();
+            let mut crc = flate2::Crc::new();
+            crc.update(piece);
+            let bsize = (18 + cdata.len() + 8 - 1) as u16;
+            out.extend_from_slice(&[31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, b'B', b'C', 2, 0]);
+            out.extend_from_slice(&bsize.to_le_bytes());
+            out.extend_from_slice(&cdata);
+            out.extend_from_slice(&crc.sum().to_le_bytes());
+            out.extend_from_slice(&(piece.len() as u32).to_le_bytes());
+        }
+        out
+    }
+
+    /// Every fragment of the requested cells, sorted, per chromosome.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - The file
+    /// * `cells` - Requested barcodes
+    ///
+    /// ### Returns
+    ///
+    /// `(chrom, fragment)` pairs, sorted.
+    fn collect(path: &Path, cells: &[String]) -> Vec<(String, Fragment)> {
+        let idx = BarcodeIndex::new(cells).unwrap();
+        let mut v = fold_fragments(
+            path,
+            &idx,
+            Vec::new,
+            |acc: &mut Vec<(String, Fragment)>, chrom, frags| {
+                acc.extend(frags.iter().map(|f| (chrom.to_string(), *f)))
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        )
+        .unwrap();
+        v.sort_by(|a, b| (&a.0, a.1.start, a.1.cell).cmp(&(&b.0, b.1.start, b.1.cell)));
+        v
+    }
+
+    /// Scratch file removed on drop.
+    struct TempPath(std::path::PathBuf);
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Write bytes to a scratch file.
+    ///
+    /// ### Params
+    ///
+    /// * `tag` - Unique name part
+    /// * `bytes` - Content
+    ///
+    /// ### Returns
+    ///
+    /// The guard.
+    fn temp_file(tag: &str, bytes: &[u8]) -> TempPath {
+        let p = std::env::temp_dir().join(format!("bv_atac_frag_{tag}_{}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        TempPath(p)
+    }
+
+    #[test]
+    fn test_parse_u32() {
+        assert_eq!(parse_u32(b"0"), Some(0));
+        assert_eq!(parse_u32(b"4294967295"), Some(u32::MAX));
+        assert_eq!(parse_u32(b"4294967296"), None);
+        assert_eq!(parse_u32(b""), None);
+        assert_eq!(parse_u32(b"12a"), None);
+    }
+
+    #[test]
+    fn test_split_edges() {
+        assert_eq!(
+            split_edges(b"ab\ncd\nef", false),
+            (&b"ab\n"[..], &b"cd\n"[..], &b"ef"[..])
+        );
+        assert_eq!(
+            split_edges(b"ab\ncd\n", true),
+            (&b""[..], &b"ab\ncd\n"[..], &b""[..])
+        );
+        assert_eq!(
+            split_edges(b"abc", false),
+            (&b"abc"[..], &b""[..], &b""[..])
+        );
+    }
+
+    #[test]
+    fn test_all_compressions_read_the_same_fragments() {
+        let text = synthetic_text(3000);
+        let cells: Vec<String> = ["CCCG-1", "TTTA-1", "AAAC-1"].map(String::from).to_vec();
+
+        let plain = temp_file("plain", text.as_bytes());
+        let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
+        gz.write_all(text.as_bytes()).unwrap();
+        let gzip = temp_file("gzip", &gz.finish().unwrap());
+        // small blocks so lines straddle block and group boundaries
+        let bgzf = temp_file("bgzf", &bgzf_bytes(text.as_bytes(), 997));
+
+        let reference = collect(&plain.0, &cells);
+        assert_eq!(reference.len(), 3 * 3000 * 3 / 4);
+        assert_eq!(collect(&gzip.0, &cells), reference);
+        assert_eq!(collect(&bgzf.0, &cells), reference);
+        assert!(reference.iter().all(|(_, f)| f.cell < 3 && f.count >= 1));
+    }
+
+    #[test]
+    fn test_malformed_line_is_an_error() {
+        let f = temp_file("bad", b"chr1\t10\t5\tAAAC-1\t1\n");
+        let cells = vec!["AAAC-1".to_string()];
+        let idx = BarcodeIndex::new(&cells).unwrap();
+        let r = fold_fragments(&f.0, &idx, || 0usize, |a, _, f| *a += f.len(), |a, b| a + b);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_duplicate_barcodes_are_refused() {
+        let cells: Vec<String> = ["A", "A"].map(String::from).to_vec();
+        assert!(BarcodeIndex::new(&cells).is_err());
+    }
+}

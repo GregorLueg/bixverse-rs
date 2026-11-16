@@ -858,6 +858,26 @@ pub fn set_cell_ids<S: AsRef<str>>(paths: &[&str], ids: &[S]) -> Result<(), ScDa
     Ok(())
 }
 
+/// Set what the features of an existing v5 store are.
+///
+/// Header only, no chunk is touched. For ingest paths that write through the
+/// generic writers (10x `Peaks`, say) and learn the kind from the input.
+///
+/// ### Params
+///
+/// * `paths` - The store's files (cell file, gene file)
+/// * `kind` - The feature kind
+///
+/// ### Returns
+///
+/// `Ok(())`, or an error for a file that is not v5.
+pub fn set_feature_kind(paths: &[&str], kind: FeatureKind) -> Result<(), ScDataErrors> {
+    for &p in paths {
+        rewrite_sections(p, SectionWriter::default(), |h| h.feature_kind = kind)?;
+    }
+    Ok(())
+}
+
 /// Error unless every store was written for the same cells.
 ///
 /// ### Params

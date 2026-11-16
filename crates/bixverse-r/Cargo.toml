@@ -38,6 +38,8 @@ export = ["h5", "bixverse-rs/export"]
 export-zarr = ["export", "zarr", "bixverse-rs/export-zarr"]
 ## See `bixverse-rs`.
 multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
+## Single cell ATAC-seq, see `bixverse-rs`.
+atac = ["single-cell", "bixverse-rs/atac"]
 ## See `bixverse-rs`.
 bonsai = ["single-cell", "bixverse-rs/bonsai", "dep:bonsai-rs"]
 ## See `bixverse-rs`.
