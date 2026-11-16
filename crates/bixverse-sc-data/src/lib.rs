@@ -15,6 +15,8 @@
 /// about what is inside the wheel; this does.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(feature = "h5")]
+pub mod ann_store;
 pub mod archive_io;
 pub mod bin_merge_io;
 pub mod data_io;

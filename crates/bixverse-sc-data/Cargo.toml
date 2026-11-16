@@ -39,6 +39,14 @@ hdf5-filters = ["h5", "hdf5/lzf", "hdf5/blosc-lz4", "hdf5/blosc-zlib", "hdf5/blo
 ## Parquet, for DuckDB to ingest with `read_parquet`. Pulls in `parquet`
 ## without arrow.
 parquet = ["h5", "dep:parquet"]
+## Read anndata Zarr stores (v2 and v3, sharded or not; zstd, gzip, zlib)
+## through the same ingest paths as h5ad. Implies `h5`: the ingest loops live
+## with the h5ad reader. zarr-python 3 writes zstd by default.
+zarr = ["h5", "dep:zarrs"]
+## Blosc for Zarr, which zarr v2 stores use by default. zarrs builds c-blosc
+## with snappy, which is C++, so like `hdf5-filters` it is kept out of builds
+## linked without the C++ runtime (the R package).
+zarr-blosc = ["zarr", "zarrs/blosc"]
 
 [dependencies]
 approx.workspace = true
@@ -66,6 +74,7 @@ serde.workspace = true
 thiserror.workspace = true
 thousands.workspace = true
 xxhash-rust.workspace = true
+zarrs = { workspace = true, optional = true }
 zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]

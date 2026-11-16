@@ -40,6 +40,10 @@ hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
 ## Parquet export of the h5ad obs / var and 10x barcodes / features. See
 ## `bixverse-sc-data`.
 parquet = ["h5", "bixverse-sc-data/parquet"]
+## Read anndata Zarr stores through the h5ad ingest paths. Implies `h5`.
+zarr = ["h5", "bixverse-sc-data/zarr"]
+## Blosc for Zarr (zarr v2 default). Builds snappy, which is C++.
+zarr-blosc = ["zarr", "bixverse-sc-data/zarr-blosc"]
 ## Multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
 ## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity

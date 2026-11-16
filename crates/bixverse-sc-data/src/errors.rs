@@ -236,6 +236,11 @@ pub enum ScDataErrors {
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
+    /// An anndata Zarr store could not be opened or read: missing node,
+    /// unsupported data type or codec, or a store error.
+    #[error("Zarr error: {0}")]
+    ZarrError(String),
+
     /// Two columns of an obs / var table end up with the same name after
     /// snake_case. DuckDB rejects the table, so the export stops before
     /// writing anything.
