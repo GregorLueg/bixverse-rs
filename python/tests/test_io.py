@@ -1,7 +1,6 @@
-"""Ingestion, writers, store maintenance and downloads, without R.
+"""Ingestion, writers, store maintenance and downloads.
 
-Parity with the R loaders is in `test_io_r.py`; these cover the Python side
-on its own: round trips through the writers and loaders, the encoding rules,
+Round trips through the writers and loaders, the encoding rules,
 the archive, and the download cache.
 """
 

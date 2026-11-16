@@ -1,7 +1,5 @@
-"""SingleCellsSubset without R: construction, index spaces, obs handling and
+"""SingleCellsSubset: construction, index spaces, obs handling and
 the write-back to the parent.
-
-Parity with the R subset chain is in `test_subset_r.py`.
 """
 
 import numpy as np

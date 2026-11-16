@@ -1,7 +1,5 @@
-"""Neighbours and clustering without R: state handling, persistence and edge
+"""Neighbours and clustering: state handling, persistence and edge
 cases.
-
-Parity with the R helpers is in `test_graph_r.py`.
 """
 
 import warnings

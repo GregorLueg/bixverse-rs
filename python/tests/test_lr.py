@@ -1,8 +1,6 @@
-"""Ligand-receptor analysis and DIALOGUE without R: the scaling helpers,
+"""Ligand-receptor analysis and DIALOGUE: the scaling helpers,
 guards, the CellPhoneDB flattening and cache, and the object plumbing on
 synthetic data.
-
-Parity with the R package is in `test_lr_r.py`.
 """
 
 import io

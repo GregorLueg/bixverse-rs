@@ -1,7 +1,5 @@
-"""Batch correction and integration metrics without R: state handling,
+"""Batch correction and integration metrics: state handling,
 persistence and edge cases.
-
-Parity with the R functions is in `test_integrate_r.py`.
 """
 
 import numpy as np

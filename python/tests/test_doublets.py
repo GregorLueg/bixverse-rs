@@ -1,7 +1,5 @@
-"""Doublet detection, empty droplets and CellSweep without R: result records,
+"""Doublet detection, empty droplets and CellSweep: result records,
 grouping, re-calls, input checks and the denoised store.
-
-Parity with the R functions is in `test_doublets_r.py`.
 """
 
 import dataclasses

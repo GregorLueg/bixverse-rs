@@ -1,7 +1,5 @@
-"""DGE, markers, pseudobulk, NEBULA, Milo and MELD without R: designs,
+"""DGE, markers, pseudobulk, NEBULA, Milo and MELD: designs,
 result records, getters and input checks.
-
-Parity with the R functions is in `test_de_r.py`.
 """
 
 import numpy as np

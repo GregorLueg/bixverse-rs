@@ -1,7 +1,5 @@
-"""2D embeddings without R: the missing extra, inputs, stamps, staleness and
+"""2D embeddings: the missing extra, inputs, stamps, staleness and
 persistence.
-
-Parity with the R helpers is in `test_embed_r.py`.
 """
 
 import importlib
