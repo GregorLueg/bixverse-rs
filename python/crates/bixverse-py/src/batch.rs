@@ -285,7 +285,7 @@ pub fn prepare_dense(
             for (value, &col) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
                 let out = map[col as usize];
                 if out != DROPPED {
-                    buf[row_start + out as usize] = value.to_f32();
+                    buf[row_start + out as usize] = *value;
                 }
             }
         }

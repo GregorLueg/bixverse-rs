@@ -32,7 +32,7 @@ use bixverse_sc_data::obs_var_io::{
 };
 use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj_io::write_r_counts;
-use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v4};
+use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v5};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
 use py_common::convert::{from_py, u32_array};
@@ -939,20 +939,20 @@ pub fn restore_cells_archive(
 ///
 /// ### Returns
 ///
-/// The version, e.g. 3 or 4.
+/// The version: 3, 4 or 5.
 #[pyfunction]
 pub fn file_version(path: PathBuf) -> PyResult<u32> {
     Ok(peek_file_version(&path).map_err(BvErr::from)?)
 }
 
-/// Convert both binaries to the v4 format in place
+/// Convert both binaries (v3 or v4) to the v5 format in place
 ///
 /// ### Params
 ///
 /// * `f_path_cells` - Cell-based binary
 /// * `f_path_genes` - Gene-based binary
 /// * `codec` - `"lz4"`, `"zstd"` or `"none"`
-/// * `keep_backup` - Keep the originals as `<path>.v3.bak`
+/// * `keep_backup` - Keep the originals as `<path>.v<n>.bak`, `n` their version
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
@@ -960,7 +960,7 @@ pub fn file_version(path: PathBuf) -> PyResult<u32> {
 /// `None`; raises on failure, leaving the store untouched.
 #[pyfunction]
 #[pyo3(signature = (f_path_cells, f_path_genes, codec = "lz4", keep_backup = true, verbose = 1))]
-pub fn upgrade_to_v4(
+pub fn upgrade_to_v5(
     py: Python<'_>,
     f_path_cells: PathBuf,
     f_path_genes: PathBuf,
@@ -975,7 +975,7 @@ pub fn upgrade_to_v4(
     })?;
     let cells = path_str(&f_path_cells)?;
     let genes = path_str(&f_path_genes)?;
-    py.detach(|| upgrade_store_to_v4(cells, Some(genes), codec, keep_backup, verbose > 0))
+    py.detach(|| upgrade_store_to_v5(cells, Some(genes), codec, keep_backup, verbose > 0))
         .map_err(BvErr::from)?;
     Ok(())
 }

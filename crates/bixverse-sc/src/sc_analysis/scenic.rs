@@ -4089,7 +4089,7 @@ pub fn scenic_gene_filter<S: SingleCellReading>(
 ) -> Result<Vec<usize>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let total_genes = reader.get_header().total_genes;
+    let total_genes = reader.dims().total_genes;
     let all_gene_indices: Vec<usize> = (0..total_genes).collect();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_indices.len();

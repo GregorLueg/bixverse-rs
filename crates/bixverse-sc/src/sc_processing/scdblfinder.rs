@@ -705,7 +705,7 @@ pub fn pca_combined<S: SingleCellReading>(
         let row = n_obs + si;
         for i in 0..chunk.indices.len() {
             let gene = chunk.indices[i] as usize;
-            let val = chunk.data_norm[i].to_f32() as f64;
+            let val = chunk.data_norm[i] as f64;
             *combined.get_mut(row, gene) = val;
         }
     }

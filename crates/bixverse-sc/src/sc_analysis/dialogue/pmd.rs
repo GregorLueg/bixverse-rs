@@ -754,7 +754,7 @@ fn build_signatures<S: SingleCellReading>(
 ) -> Result<Vec<ProgrammeSignature>, ScErrors> {
     let k = scores.ncols();
     let n_in_type = view.cells.len();
-    let total_cells = reader.get_header().total_cells;
+    let total_cells = reader.dims().total_cells;
 
     let position = view.position_table(total_cells);
 
@@ -773,7 +773,7 @@ fn build_signatures<S: SingleCellReading>(
                     let slot = position[cell as usize];
                     if slot != u32::MAX {
                         positions.push(slot as usize);
-                        values.push(value.to_f32() as f64);
+                        values.push(*value as f64);
                     }
                 }
                 sparse_gene_correlations(&positions, &values, &moments)
@@ -821,7 +821,7 @@ fn build_signatures<S: SingleCellReading>(
                 for (&cell, value) in chunk.indices.iter().zip(chunk.data_norm.iter()) {
                     let slot = position[cell as usize];
                     if slot != u32::MAX {
-                        dense[slot as usize] = value.to_f32() as f64;
+                        dense[slot as usize] = *value as f64;
                     }
                 }
                 let ranked_gene = rank_vector(&dense);

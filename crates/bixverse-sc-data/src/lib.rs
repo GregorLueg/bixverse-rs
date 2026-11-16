@@ -39,6 +39,7 @@ pub mod h5ad_io;
 #[cfg(feature = "h5")]
 pub mod h5ad_multifile_io;
 pub mod in_memory_io;
+pub mod interval_index;
 pub mod mtx_io;
 pub mod mtx_multifile_io;
 #[cfg(feature = "parquet")]
@@ -51,16 +52,21 @@ pub mod r_obj_io;
 pub mod sc_synthetic_data;
 pub mod sc_traits;
 pub mod v4_io;
+pub mod v5_io;
 
 /// How many cells to read in per given batch - global constant
 pub const CELL_BATCH_SIZE: usize = 50_000;
 
-/// Version of the single cell files writers emit: delta bit-packed chunks with
-/// the normalised layer recomputed on read.
-pub const SC_FILE_VERSION: u32 = 4;
+/// Version of the single cell files writers emit: the v4 chunk codec behind
+/// the v5 container, see `v5_io`.
+pub const SC_FILE_VERSION: u32 = 5;
 
-/// Previous file version: absolute `u32` indices, normalised layer stored.
-/// Readers still open it; `v4_io::upgrade_store_to_v4` converts it.
+/// v4: delta bit-packed chunks with the normalised layer recomputed on read,
+/// bincode header. Readers still open it.
+pub const SC_FILE_VERSION_V4: u32 = 4;
+
+/// v3: absolute `u32` indices, normalised layer stored. Only the converters
+/// read it; `v4_io::upgrade_store_to_v5` converts it.
 pub const SC_FILE_VERSION_V3: u32 = 3;
 
 /// Number of cell rows requested per HDF5 hyperslab read.

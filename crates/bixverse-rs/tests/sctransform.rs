@@ -155,10 +155,7 @@ fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
                 indices.push(cell);
             }
         }
-        let norms: Vec<F16> = raw
-            .iter()
-            .map(|&v| F16::from_f32((v as f32).ln_1p()))
-            .collect();
+        let norms: Vec<f32> = raw.iter().map(|&v| (v as f32).ln_1p()).collect();
 
         writer
             .write_gene_chunk(CscGeneChunk::from_conversion(
@@ -913,7 +910,7 @@ fn test_gene_store_transposes_to_cell_store() {
     let cell_reader = ParallelSparseReader::new(out.path()).expect("cell store opens");
     assert!(cell_reader.is_cell_based());
 
-    let header = cell_reader.get_header();
+    let header = cell_reader.dims();
     assert_eq!(header.total_cells, fx::N_CELLS);
     assert_eq!(header.total_genes, fx::N_GENES);
 
@@ -1624,7 +1621,7 @@ fn test_grouped_corrected_counts_use_each_groups_model() {
     sct_corrected_counts(&reader, &source, &cells, out.path(), opts).expect("corrected counts");
 
     let written = ParallelSparseReader::new(out.path()).expect("corrected store opens");
-    let header = written.get_header();
+    let header = written.dims();
     // The output gene axis is the shared one, not the store's.
     assert_eq!(header.total_genes, grouped.genes.len());
     assert_eq!(header.total_cells, fx::N_CELLS);

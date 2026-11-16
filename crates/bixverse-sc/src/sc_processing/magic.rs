@@ -270,7 +270,7 @@ impl MagicOperator {
     /// * `knn_indices` - kNN indices per cell, local positions.
     /// * `knn_distances` - Matching kNN distances.
     /// * `cell_indices` - Global cell ids, aligned with the kNN rows.
-    /// * `total_cells` - `SparseDataHeader::total_cells` of the store the
+    /// * `total_cells` - `StoreDims::total_cells` of the store the
     ///   selection indexes into.
     ///
     /// ### Returns
@@ -444,7 +444,7 @@ pub fn magic_impute_genes<S: SingleCellReading>(
     // The operator's lookup is indexed by global cell id, so a store with more
     // cells than the operator was built for would index past its end. Catching
     // it here turns a panic deep inside the scatter into a named error.
-    let store_cells = reader.get_header().total_cells;
+    let store_cells = reader.dims().total_cells;
     if operator.lookup.len() != store_cells {
         return Err(ScErrors::MagicStoreSizeMismatch {
             operator_cells: operator.lookup.len(),
@@ -494,7 +494,7 @@ pub fn magic_impute_genes<S: SingleCellReading>(
                     continue;
                 }
                 block[local as usize * width + col] = match params.layer {
-                    MagicLayer::Norm => chunk.data_norm[k].to_f32(),
+                    MagicLayer::Norm => chunk.data_norm[k],
                     MagicLayer::Raw => chunk.data_raw.get(k) as f32,
                 };
             }
@@ -877,7 +877,6 @@ mod tests {
     use bixverse_sc_data::data_io::{
         CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
     };
-    use bixverse_sc_data::sc_traits::F16;
 
     /// Scratch store that removes itself on drop.
     struct TempStore(std::path::PathBuf);
@@ -912,10 +911,7 @@ mod tests {
                     indices.push(cell);
                 }
             }
-            let norms: Vec<F16> = raw
-                .iter()
-                .map(|&v| F16::from_f32((v as f32).ln_1p()))
-                .collect();
+            let norms: Vec<f32> = raw.iter().map(|&v| (v as f32).ln_1p()).collect();
 
             writer
                 .write_gene_chunk(CscGeneChunk::from_conversion(
@@ -974,7 +970,7 @@ mod tests {
         for (g, gene) in dense.iter().enumerate() {
             for (c, &v) in gene.iter().enumerate() {
                 if v > 0 {
-                    block[c * n_genes + g] = F16::from_f32((v as f32).ln_1p()).to_f32();
+                    block[c * n_genes + g] = (v as f32).ln_1p();
                 }
             }
         }
@@ -1043,11 +1039,7 @@ mod tests {
         for (row, &cell) in selection.iter().enumerate() {
             for (col, &gene) in genes.iter().enumerate() {
                 let raw = dense[gene][cell];
-                let want = if raw > 0 {
-                    F16::from_f32((raw as f32).ln_1p()).to_f32()
-                } else {
-                    0.0
-                };
+                let want = if raw > 0 { (raw as f32).ln_1p() } else { 0.0 };
                 assert_relative_eq!(out.data[row * genes.len() + col], want, epsilon = 1e-6);
             }
         }

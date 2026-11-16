@@ -253,7 +253,7 @@ fn draw_gene(gene: usize, model: &CountModel) -> CscGeneChunk {
 
     let mut raw: Vec<u32> = Vec::new();
     let mut indices: Vec<usize> = Vec::new();
-    let mut norms: Vec<F16> = Vec::new();
+    let mut norms: Vec<f32> = Vec::new();
 
     for (cell, &library) in model.library_size.iter().enumerate() {
         let weight = gamma.as_ref().map_or(1.0, |g| g.sample(&mut rng));
@@ -264,9 +264,7 @@ fn draw_gene(gene: usize, model: &CountModel) -> CscGeneChunk {
 
         raw.push(count);
         indices.push(cell);
-        norms.push(F16::from_f32(
-            (count as f32 / library as f32 * TARGET_SIZE).ln_1p(),
-        ));
+        norms.push((count as f32 / library as f32 * TARGET_SIZE).ln_1p());
     }
 
     CscGeneChunk::from_conversion(RawCounts::from_u32_auto(&raw), &norms, &indices, gene, true)

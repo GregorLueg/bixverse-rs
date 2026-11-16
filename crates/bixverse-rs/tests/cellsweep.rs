@@ -289,7 +289,7 @@ fn recover_col_margins(denoised: &ParallelSparseReader) -> Vec<f64> {
         let fractions: Vec<f64> = cell
             .data_norm
             .iter()
-            .map(|v| v.to_f64().exp_m1() / TARGET_SIZE as f64)
+            .map(|&v| (v as f64).exp_m1() / TARGET_SIZE as f64)
             .collect();
         let total: f64 = fractions.iter().sum();
         if total <= 0.0 {

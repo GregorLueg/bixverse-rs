@@ -126,7 +126,7 @@ pub fn extract_norm_counts<S: SingleCellReading>(
     let n = cell_indices.len();
     let mut dense = vec![0.0f32; n];
     for (i, &cell_idx) in chunk.indices.iter().enumerate() {
-        dense[cell_idx as usize] = chunk.data_norm[i].to_f32();
+        dense[cell_idx as usize] = chunk.data_norm[i];
     }
 
     if scale {
@@ -175,7 +175,7 @@ pub fn extract_norm_counts_multi<S: SingleCellReading>(
         .map(|chunk| {
             let mut dense = vec![0.0f32; n];
             for (i, &cell_idx) in chunk.indices.iter().enumerate() {
-                dense[cell_idx as usize] = chunk.data_norm[i].to_f32();
+                dense[cell_idx as usize] = chunk.data_norm[i];
             }
             if scale {
                 scale_and_clip(&mut dense, clip);
@@ -255,7 +255,7 @@ pub fn extract_grouped_gene_stats<S: SingleCellReading>(
 
         for (i, &new_cell_idx) in chunk.indices.iter().enumerate() {
             let grp = group_ids[new_cell_idx as usize];
-            sums[grp] += chunk.data_norm[i].to_f32();
+            sums[grp] += chunk.data_norm[i];
             counts[grp] += 1;
         }
 

@@ -218,7 +218,7 @@ fn prepare<S: SingleCellReading>(
         }
         .into());
     }
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let n_clusters = clusters.len();
     if n_clusters > u16::MAX as usize {

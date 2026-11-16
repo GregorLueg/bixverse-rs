@@ -360,7 +360,7 @@ pub fn scale_csc_chunk(
 ) -> (Vec<f32>, f32, f32) {
     let mut dense_data = vec![0_f32; no_cells];
     for (idx, &row_idx) in chunk.indices.iter().enumerate() {
-        dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
+        dense_data[row_idx as usize] = chunk.data_norm[idx];
     }
 
     if let Some(off) = row_offsets {

@@ -261,8 +261,8 @@ impl TempStore {
 
 /// Writes the synthetic matrix out as a gene-major bixverse store.
 ///
-/// The in-memory reader narrows `data_2` to `f16` when it builds a chunk, and
-/// so does the writer, so both paths see bit-identical values and the
+/// The in-memory reader hands `data_2` through unchanged, and so does the
+/// writer for a norm that recomputes, so both paths see bit-identical values and the
 /// comparison against the streamed store can be exact rather than approximate.
 ///
 /// ### Params
@@ -283,7 +283,7 @@ fn write_store(path: &str, data: &DialogueSyntheticData) {
             .iter()
             .map(|v| *v as usize)
             .collect();
-        let norms: Vec<F16> = norm[lo..hi].iter().map(|v| F16::from_f32(*v)).collect();
+        let norms: Vec<f32> = norm[lo..hi].to_vec();
         writer
             .write_gene_chunk(CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&raw),

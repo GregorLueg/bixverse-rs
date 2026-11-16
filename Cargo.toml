@@ -83,4 +83,5 @@ statrs = "0.18.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 zstd = "0.14.0"

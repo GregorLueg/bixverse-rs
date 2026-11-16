@@ -137,6 +137,29 @@ pub enum ScDataErrors {
     #[error("v4 gene chunk needs the per-cell library-size table, which the file does not carry")]
     V4MissingCellLibraryTable,
 
+    /// The v5 file header or its section directory is malformed, or uses a
+    /// feature this build does not know.
+    #[error("Invalid v5 store: {0}")]
+    V5HeaderInvalid(String),
+
+    /// A read asked for the normalised layer of a store that has none: its
+    /// norm kind is `none`, or TF-IDF without an IDF table.
+    #[error("The store has no normalised layer ({0}); read the raw counts instead")]
+    NormNotAvailable(String),
+
+    /// A raw layer index past the store's layer count.
+    #[error("Raw layer {requested} requested, but the store has {available}")]
+    LayerOutOfRange {
+        /// Requested layer.
+        requested: usize,
+        /// Layers in the store.
+        available: usize,
+    },
+
+    /// A v3 store was opened for analysis. v3 is only read by the converters.
+    #[error("{0} is a v3 store, which only the converters read: run upgrade_store_to_v5 first")]
+    V3NeedsConversion(String),
+
     /// The file is not a bixverse count archive.
     #[error("Not a bixverse count archive (magic string mismatch)")]
     ArchiveMagicMismatch,

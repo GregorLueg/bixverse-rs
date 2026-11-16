@@ -32,7 +32,6 @@ use bixverse_rs::single_cell::sc_analysis::scenic::{
     SparseYBatch, fit_multi_trees_sparse,
 };
 use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
-use bixverse_rs::single_cell::sc_traits::F16;
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 #[cfg(feature = "large-test")]
 use bixverse_rs::{
@@ -1314,7 +1313,7 @@ fn write_synthetic_scenic_file(path: &str) {
 /// * `vals` - Expression per cell; non-positive or round-to-zero values are dropped
 fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize, vals: &[f32]) {
     let mut data_raw: Vec<u16> = Vec::new();
-    let mut data_norm: Vec<F16> = Vec::new();
+    let mut data_norm: Vec<f32> = Vec::new();
     let mut indices: Vec<usize> = Vec::new();
     for (cell_idx, &v) in vals.iter().enumerate() {
         if v <= 0.0 {
@@ -1325,7 +1324,7 @@ fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize
             continue;
         }
         data_raw.push(raw);
-        data_norm.push(F16::from(half::f16::from_f32(v.ln_1p())));
+        data_norm.push(v.ln_1p());
         indices.push(cell_idx);
     }
     let raw = RawCounts::U16(data_raw);

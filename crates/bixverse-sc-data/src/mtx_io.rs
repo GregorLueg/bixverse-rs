@@ -1972,7 +1972,7 @@ mod tests {
 
         let reader = ParallelSparseReader::new(bin.path()).expect("reader opens");
         assert!(reader.is_cell_based());
-        assert_eq!(reader.get_header().total_cells, 0);
+        assert_eq!(reader.dims().total_cells, 0);
     }
 
     /// A kept cell with no kept entries is still written, as an empty chunk,

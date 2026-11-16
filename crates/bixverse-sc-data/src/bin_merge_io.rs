@@ -101,7 +101,7 @@ fn remap_cell(
     renormalise: bool,
     target_size: f32,
 ) -> (CsrCellChunk, usize, usize) {
-    let mut entries: Vec<(u32, u32, F16)> = Vec::with_capacity(cell.indices.len());
+    let mut entries: Vec<(u32, u32, f32)> = Vec::with_capacity(cell.indices.len());
     for (i, &local_idx) in cell.indices.iter().enumerate() {
         if let Some(universe_idx) = gene_local_to_universe[local_idx as usize] {
             entries.push((universe_idx, cell.data_raw.get(i), cell.data_norm[i]));
@@ -119,7 +119,7 @@ fn remap_cell(
         (new_chunk, lib_size, nnz)
     } else {
         let raw: Vec<u32> = entries.iter().map(|&(_, r, _)| r).collect();
-        let norm: Vec<F16> = entries.iter().map(|&(_, _, n)| n).collect();
+        let norm: Vec<f32> = entries.iter().map(|&(_, _, n)| n).collect();
         let indices: Vec<u32> = entries.iter().map(|&(u, _, _)| u).collect();
         let new_chunk = CsrCellChunk {
             data_raw: RawCounts::from_u32_auto(&raw),
@@ -340,7 +340,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
         });
     }
 
-    let header = reader.get_header();
+    let header = reader.dims();
     let (no_cells, no_genes) = (header.total_cells, header.total_genes);
     let cells_per_phase = cells_per_phase.max(1);
     let gene_batch_size = gene_batch_size.max(1);
@@ -372,7 +372,7 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
         // One bucket per cell in the window. Entries accumulate in gene order
         // because the gene batches are walked ascending, so no sort is needed
         // before writing.
-        let mut buckets: Vec<Vec<(u32, u32, F16)>> = vec![Vec::new(); width];
+        let mut buckets: Vec<Vec<(u32, u32, f32)>> = vec![Vec::new(); width];
 
         for block_start in (0..no_genes).step_by(gene_batch_size) {
             let block_end = (block_start + gene_batch_size).min(no_genes);

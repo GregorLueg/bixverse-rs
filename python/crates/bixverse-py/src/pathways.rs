@@ -775,7 +775,7 @@ pub fn lm_activity<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: LmActivityParams = from_py(params, "lm activity params")?;
     let reader = ParallelSparseReader::new(f_path).map_err(BvErr::from)?;
-    let net = feature_sets(&net, reader.get_header().total_genes)?;
+    let net = feature_sets(&net, reader.dims().total_genes)?;
     let cells = index_vec(&cells_to_keep)?;
     let res = py
         .detach(|| calculate_lm_activity(&reader, &net, &cells, Some(params), verbose))

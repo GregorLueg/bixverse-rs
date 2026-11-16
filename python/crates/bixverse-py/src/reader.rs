@@ -53,7 +53,7 @@ impl PyCellReader {
         let inner = py
             .detach(|| ParallelSparseReader::new(path))
             .map_err(BvErr::from)?;
-        let header = inner.get_header();
+        let header = inner.dims();
 
         Ok(Self {
             total_cells: header.total_cells,

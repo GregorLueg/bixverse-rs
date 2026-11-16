@@ -316,7 +316,7 @@ fn materialise_sparse(chunks: &[CsrCellChunk]) -> (Vec<f32>, Vec<u32>, Vec<u32>)
     let mut offset = 0u32;
     indptr.push(offset);
     for chunk in chunks {
-        data.extend(chunk.data_norm.iter().map(|v| v.to_f32()));
+        data.extend_from_slice(&chunk.data_norm);
         indices.extend_from_slice(&chunk.indices);
         offset += chunk.indices.len() as u32;
         indptr.push(offset);
@@ -340,7 +340,7 @@ fn materialise_dense(chunks: &[CsrCellChunk], n_genes: usize) -> Vec<f32> {
     for (row, chunk) in chunks.iter().enumerate() {
         let base = row * n_genes;
         for (value, &col) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
-            out[base + col as usize] = value.to_f32();
+            out[base + col as usize] = *value;
         }
     }
     out

@@ -167,7 +167,7 @@ def restore_cells_archive(
     verbose: int = ...,
 ) -> None: ...
 def file_version(path: Path) -> int: ...
-def upgrade_to_v4(
+def upgrade_to_v5(
     f_path_cells: Path,
     f_path_genes: Path,
     codec: str = ...,

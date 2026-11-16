@@ -375,7 +375,7 @@ fn norm_stored(reader: &ParallelSparseReader) -> String {
 /// * `cell_path` - Cell store
 fn describe_store(cell_path: &str) {
     let reader = ParallelSparseReader::new(cell_path).expect("cell reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let raw_layer = DataLayerReturn::Raw;
 
@@ -606,7 +606,7 @@ fn phase_cursors(
 fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
     let total = Instant::now();
     let reader = ParallelSparseReader::new(cell_path).expect("cell reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let chunks = thread_chunks(n_cells);
     let raw_layer = DataLayerReturn::Raw;
@@ -696,7 +696,7 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
     let format = writer.format();
 
     let mut raw = vec![0u32; max_phase_nnz];
-    let mut norm = vec![F16::default(); max_phase_nnz];
+    let mut norm = vec![0.0f32; max_phase_nnz];
     let mut cell_idx = vec![0u32; max_phase_nnz];
 
     for (pi, &(g0, g1)) in phases.iter().enumerate() {
@@ -829,8 +829,7 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
                     .map(|g| {
                         let (a, b) = (gene_start[g - g0], gene_start[g - g0 + 1]);
                         let data_norm = norm[a..b].to_vec();
-                        let avg_exp =
-                            F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
+                        let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
                         let chunk = CscGeneChunk {
                             data_raw: RawCounts::from_u32_auto(&raw[a..b]),
                             data_norm,
@@ -873,7 +872,7 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
 /// * `gene_path` - Gene store
 fn bench_hvg(gene_path: &str) {
     let reader = ParallelSparseReader::new(gene_path).expect("gene reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let cells: Vec<usize> = (0..n_cells).collect();
     let index = CellBatchIndex::new(n_cells, &cells, None).expect("index");
@@ -1075,7 +1074,7 @@ fn main() {
             "  gene store {:.2} GB, gene chunks with stored norm {} of {}",
             std::fs::metadata(&gene_path).expect("stat").len() as f64 / 1e9,
             norm_stored(&genes),
-            genes.get_header().total_genes
+            genes.dims().total_genes
         );
     }
 

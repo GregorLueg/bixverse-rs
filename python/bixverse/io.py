@@ -50,8 +50,8 @@ sc = bv.io.load_existing("experiments/demo")
 set `raw_count_slot` if it picks wrong, and use `load_h5ad_norm` for files that
 only hold log-normalised values. `load_mtx` takes genes as rows, the 10x
 convention, unless `cells_as_rows` says otherwise; `get_cell_ranger_params`
-finds the three files for you. Nothing here needs h5py. A store in the old v3
-format still opens with a warning, and `upgrade_sc_store` converts it.
+finds the three files for you. Nothing here needs h5py. A v4 store still opens
+with a warning; a v3 store no longer opens. `upgrade_sc_store` converts both.
 """
 
 from bixverse._core.download import (

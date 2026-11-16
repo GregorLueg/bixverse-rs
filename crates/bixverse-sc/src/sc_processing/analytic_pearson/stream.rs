@@ -78,7 +78,7 @@ pub fn apr_gene_pass<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start = Instant::now();
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 
@@ -170,7 +170,7 @@ pub fn cell_totals_over_genes<S: SingleCellReading>(
 
     distinct_cell_set(cell_indices)?;
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let mut retained = vec![false; n_genes];
     for &g in genes {
         if let Some(slot) = retained.get_mut(g) {

@@ -253,7 +253,7 @@ fn build_gram<S: SingleCellReading>(
 ) -> Result<GeneGram, ScErrors> {
     let n_in_type = view.cells.len();
     let n_genes = genes.len();
-    let total_cells = reader.get_header().total_cells;
+    let total_cells = reader.dims().total_cells;
 
     let position = view.position_table(total_cells);
 
@@ -269,7 +269,7 @@ fn build_gram<S: SingleCellReading>(
             if row == u32::MAX {
                 continue;
             }
-            let v = value.to_f32();
+            let v = *value;
             let vd = v as f64;
             sum_x[slot] += vd;
             sum_xx[slot] += vd * vd;

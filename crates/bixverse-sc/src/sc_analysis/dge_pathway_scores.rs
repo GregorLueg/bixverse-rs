@@ -132,7 +132,7 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>
             || (vec![0.0f64; num_genes], vec![0usize; num_genes]),
             |(mut sum, mut count), cell| {
                 for (&gene_idx, &norm_val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-                    sum[gene_idx as usize] += norm_val.to_f32() as f64;
+                    sum[gene_idx as usize] += norm_val as f64;
                     count[gene_idx as usize] += 1;
                 }
                 (sum, count)
@@ -172,9 +172,9 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>
 ///
 /// The variance carries the standard tie correction
 /// `var = (n1 n2 / 12) * ((n + 1) - S / (n (n - 1)))` with `S = sum(t^3 - t)`.
-/// This matters a great deal here: the data is f16 normalised counts, so the
+/// This matters a great deal here: the data is log-normalised counts, so the
 /// implicit-zero block alone drops the variance by an order of magnitude on a
-/// sparsely detected gene, and f16 spacing collapses plenty of the non-zero
+/// sparsely detected gene, and small integer counts collapse plenty of the non-zero
 /// values into ties on top of that.
 ///
 /// One consequence worth knowing: with the correction in place, AUROC and the
@@ -262,7 +262,7 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
 
     let start_read = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
 
     let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices)?;
     let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices)?;
@@ -304,7 +304,7 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
 
     let mut indptr = vec![0_usize];
     let mut indices: Vec<u32> = Vec::new();
-    let mut data: Vec<F16> = Vec::new();
+    let mut data: Vec<f32> = Vec::new();
 
     append_cell_chunks(&cell_chunks_1, &mut indptr, &mut indices, &mut data);
     append_cell_chunks(&cell_chunks_2, &mut indptr, &mut indices, &mut data);
@@ -774,7 +774,7 @@ where
     F: Fn(&GeneGroupStats) -> T + Sync,
     C: FnMut(usize, T),
 {
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let n_groups = layout.sizes.len();
     let all_genes: Vec<usize> = (0..n_genes).collect();
     let mut genes_to_keep = Vec::with_capacity(n_genes);
@@ -860,7 +860,7 @@ pub fn calculate_dge_one_vs_rest_mann_whitney<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Vec<DgeMannWhitneyRes>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let header = reader.get_header();
+    let header = reader.dims();
     let layout = build_group_layout(groups, header.total_cells)?;
     let n_groups = groups.len();
     let sizes = &layout.sizes;
@@ -1002,7 +1002,7 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Vec<DgeAurocMultiRes>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let layout = build_group_layout(groups, reader.get_header().total_cells)?;
+    let layout = build_group_layout(groups, reader.dims().total_cells)?;
     let n_groups = groups.len();
     let sizes = &layout.sizes;
 
@@ -1552,7 +1552,7 @@ fn score_cells_fused(
             || {
                 (
                     Vec::<f32>::new(),
-                    Vec::<(u16, usize)>::new(),
+                    Vec::<(u32, usize)>::new(),
                     Vec::<f32>::new(),
                 )
             },
@@ -1604,7 +1604,7 @@ pub fn calculate_aucell<S: SingleCellReading>(
     let params = params.unwrap_or_default();
 
     let start_read = Instant::now();
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let total_cells = cell_chunks.len();
     let end_read = start_read.elapsed();
@@ -1674,7 +1674,7 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
 
     const CHUNK_SIZE: usize = 50000;
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let max_rank = resolve_max_rank(params.max_rank, no_genes);
     let mut all_results: Vec<Vec<f32>> =
@@ -2076,7 +2076,7 @@ mod tests {
     /// Twelve cells over six genes: cells 0-3 are the reference, 4-7 rival A,
     /// 8-11 rival B. Gene 5 is filler that pins every library size to 100, so
     /// a normalised value depends only on the raw count and the intended ties
-    /// survive the f16 quantisation exactly.
+    /// survive exactly.
     ///
     /// * gene 0 - reference only, so a perfect marker against both rivals
     /// * gene 1 - shared with rival A, so it only separates the reference from B

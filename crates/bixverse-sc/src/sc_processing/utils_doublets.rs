@@ -231,8 +231,7 @@ pub fn resolve_target_size(explicit: Option<f32>, hvg_library_sizes: &[usize]) -
 /// Read raw HVG counts and normalise them against the HVG library sizes.
 ///
 /// The normalised layer on disk was scaled against the full library, so the
-/// doublet PCA rebuilds it from raw counts. Done in `f32` on the fused batch,
-/// so no F16 rounding is involved.
+/// doublet PCA rebuilds it from raw counts, in `f32` on the fused batch.
 ///
 /// ### Params
 ///
@@ -339,7 +338,7 @@ pub fn scale_cell_chunks_with_stats(
     for (cell_idx, chunk) in chunks.iter().enumerate() {
         for (i, &gene) in chunk.indices.iter().enumerate() {
             let gene = gene as usize;
-            let mut value = chunk.data_norm[i].to_f32();
+            let mut value = chunk.data_norm[i];
             if mean_center {
                 value -= gene_means[gene];
             }
@@ -460,7 +459,7 @@ pub fn project_cell_chunks_with_stats(
 
             for (i, &gene) in chunk.indices.iter().enumerate() {
                 let gene = gene as usize;
-                let mut value = chunk.data_norm[i].to_f32();
+                let mut value = chunk.data_norm[i];
                 if normalise_variance {
                     value /= gene_stds[gene];
                 }
@@ -1183,7 +1182,7 @@ pub fn select_top_genes_streaming<S: SingleCellReading>(
     n_top: usize,
     verbose: bool,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_total_genes = reader.get_header().total_genes;
+    let n_total_genes = reader.dims().total_genes;
 
     if n_top >= n_total_genes {
         return Ok((0..n_total_genes).collect());
@@ -1433,7 +1432,7 @@ pub fn select_top_genes<S: SingleCellReading>(
     clusters: Option<&[usize]>,
     n_top: usize,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_total_genes = reader.get_header().total_genes;
+    let n_total_genes = reader.dims().total_genes;
 
     if n_top >= n_total_genes {
         return Ok((0..n_total_genes).collect());
@@ -1989,7 +1988,6 @@ pub fn mark_sims_from_flagged_origins(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use half::f16;
 
     /////////////////////
     // Doublet scaling //
@@ -2880,10 +2878,7 @@ mod tests {
                 .filter(|&c| counts[c][gene] > 0)
                 .map(|c| (counts[c][gene], c))
                 .unzip();
-            let norm: Vec<F16> = raw
-                .iter()
-                .map(|&x| F16::from(f16::from_f32(x as f32)))
-                .collect();
+            let norm: Vec<f32> = raw.iter().map(|&x| x as f32).collect();
             let chunk = CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&raw),
                 &norm,

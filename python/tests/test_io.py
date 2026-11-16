@@ -177,11 +177,11 @@ def test_archive_restores_on_load_existing(data, tmp_path):
     np.testing.assert_array_equal(_dense(bv.io.load_existing(tmp_path / "sc")), before)
 
 
-def test_upgrade_is_a_no_op_on_v4(data, tmp_path):
+def test_upgrade_is_a_no_op_on_v5(data, tmp_path):
     sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
-    assert bv._bixverse.file_version(sc.cells_path) == 4
+    assert bv._bixverse.file_version(sc.cells_path) == 5
     assert bv.io.upgrade_sc_store(sc) is sc
-    assert not (sc.dir / "counts_cells.bin.v3.bak").exists()
+    assert not (sc.dir / "counts_cells.bin.v4.bak").exists()
 
 
 ###########

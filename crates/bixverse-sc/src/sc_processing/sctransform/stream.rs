@@ -11,7 +11,6 @@
 //! The one stage that is not linear in the data is the step-1 fit, and it is
 //! bounded by construction: 2000 genes by 2000 cells regardless of the input.
 
-use half::f16;
 use indexmap::IndexSet;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -186,7 +185,7 @@ fn correct_one_gene(
             let value = corrected as u32;
             raw.push(value);
             indices.push(c);
-            norms.push(F16::from(f16::from_f32((value as f32).ln_1p())));
+            norms.push((value as f32).ln_1p());
         }
     }
 
@@ -287,7 +286,7 @@ fn count_detected<S: SingleCellReading>(
     cell_set: &IndexSet<u32>,
     opts: SctStreamOpts,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let mut out = vec![0_usize; n_genes];
     let step = opts.gene_batch_size.unwrap_or(genes.len()).max(1);
 
@@ -548,7 +547,7 @@ pub fn sct_gene_pass<S: SingleCellReading>(
     let start = Instant::now();
 
     let n_cells = cell_indices.len();
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 

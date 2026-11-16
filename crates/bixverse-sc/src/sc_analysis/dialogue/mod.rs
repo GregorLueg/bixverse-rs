@@ -98,7 +98,7 @@ pub fn dialogue_run<S: SingleCellReading>(
         }
     }
 
-    let total_cells = reader.get_header().total_cells;
+    let total_cells = reader.dims().total_cells;
     for cells in cell_type_indices.iter() {
         if let Some(&bad) = cells.iter().find(|&&c| c >= total_cells) {
             return Err(CoreErrors::InvalidArgument(format!(

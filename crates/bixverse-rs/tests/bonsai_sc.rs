@@ -134,10 +134,7 @@ fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
         } else {
             (Vec::new(), Vec::new())
         };
-        let norms: Vec<F16> = raw
-            .iter()
-            .map(|&v| F16::from_f32((v as f32).ln_1p()))
-            .collect();
+        let norms: Vec<f32> = raw.iter().map(|&v| (v as f32).ln_1p()).collect();
         writer
             .write_gene_chunk(CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&raw),
