@@ -192,6 +192,10 @@ def _finish(
             pl.DataFrame({"no_cells_exp": gene_nnz.astype(np.int32)}),
         )
         db.set_to_keep_column(con)
+        # hash the ids obs ended up with, so cell_id_col and multi-file
+        # prefixes count, not the raw source index
+        ids = [str(x) for x in db.get_ids(con, "obs")]
+    _bixverse.set_cell_ids(directory / CELLS_BIN, directory / GENES_BIN, ids)
     return SingleCells(directory)
 
 

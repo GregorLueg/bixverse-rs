@@ -77,6 +77,8 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(io::restore_cells_archive, m)?,
         wrap_pyfunction!(io::file_version, m)?,
         wrap_pyfunction!(io::upgrade_to_v5, m)?,
+        wrap_pyfunction!(io::set_cell_ids, m)?,
+        wrap_pyfunction!(io::cell_id_hash, m)?,
         wrap_pyfunction!(io::h5ad_obs_var_to_parquet, m)?,
         wrap_pyfunction!(io::tenx_obs_var_to_parquet, m)?,
         wrap_pyfunction!(io::snake_case, m)?,

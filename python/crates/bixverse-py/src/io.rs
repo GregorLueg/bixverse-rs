@@ -33,6 +33,7 @@ use bixverse_sc_data::obs_var_io::{
 use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj_io::write_r_counts;
 use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v5};
+use bixverse_sc_data::v5_io::set_cell_ids as v5_set_cell_ids;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
 use py_common::convert::{from_py, u32_array};
@@ -978,6 +979,51 @@ pub fn upgrade_to_v5(
     py.detach(|| upgrade_store_to_v5(cells, Some(genes), codec, keep_backup, verbose > 0))
         .map_err(BvErr::from)?;
     Ok(())
+}
+
+/// Record the cell IDs of a v5 store in both binaries' headers
+///
+/// Only their hash is stored; stores sharing a cell axis must carry the same
+/// one.
+///
+/// ### Params
+///
+/// * `f_path_cells` - Cell-based binary
+/// * `f_path_genes` - Gene-based binary
+/// * `ids` - Cell IDs in store order
+///
+/// ### Returns
+///
+/// `None`; raises for a store that is not v5 or a wrong number of IDs.
+#[pyfunction]
+pub fn set_cell_ids(
+    py: Python<'_>,
+    f_path_cells: PathBuf,
+    f_path_genes: PathBuf,
+    ids: Vec<String>,
+) -> PyResult<()> {
+    let cells = path_str(&f_path_cells)?;
+    let genes = path_str(&f_path_genes)?;
+    py.detach(|| v5_set_cell_ids(&[cells, genes], &ids))
+        .map_err(BvErr::from)?;
+    Ok(())
+}
+
+/// The cell-ID hash in a binary's header
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary
+///
+/// ### Returns
+///
+/// The 16-byte hash as hex, `None` when the store records no cell IDs.
+#[pyfunction]
+pub fn cell_id_hash(path: PathBuf) -> PyResult<Option<String>> {
+    let reader = ParallelSparseReader::new(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(reader
+        .cell_id_hash()
+        .map(|h| h.iter().map(|b| format!("{b:02x}")).collect()))
 }
 
 /////////////////////

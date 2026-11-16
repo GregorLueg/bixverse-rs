@@ -351,6 +351,22 @@ def test_reads_an_h5ad_anndata_wrote(name, tmp_path):
     assert sorted(set(sc.obs()["cell_type"].to_list())) == ["a", "b", "c"]
 
 
+def test_load_records_the_obs_cell_ids(tmp_path):
+    # the hash covers the ids obs ends up with: same cells, same hash whatever
+    # the source format, on both binaries
+    from bixverse import _bixverse
+
+    a = bv.io.load_h5ad(tmp_path / "a", FIXTURES / "anndata_csr.h5ad", qc=QC)
+    b = bv.io.load_h5ad(tmp_path / "b", FIXTURES / "anndata_csc_v3.zarr", qc=QC)
+    h = _bixverse.cell_id_hash(a.cells_path)
+    assert h is not None
+    assert _bixverse.cell_id_hash(a.genes_path) == h
+    assert _bixverse.cell_id_hash(b.cells_path) == h
+    ids = a.obs()["cell_id"].to_list()
+    _bixverse.set_cell_ids(b.cells_path, b.genes_path, ids[::-1])
+    assert _bixverse.cell_id_hash(b.cells_path) != h
+
+
 def test_cell_ranger_params_find_gzipped_files(data, tmp_path):
     # Cell Ranger v3+ writes all three files gzipped
     bv.io.write_cellranger_output(
