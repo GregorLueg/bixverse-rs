@@ -660,6 +660,19 @@ mod tests {
         assert_matches_h5ad("anndata_csr_v3_sharded.zarr", "anndata_csr.h5ad", "csr");
     }
 
+    // the R build leaves blosc out: a blosc store must refuse, not misread
+    #[cfg(not(feature = "zarr-blosc"))]
+    #[test]
+    fn test_zarr_v2_without_blosc_names_the_codec() {
+        let z = fixture("anndata_csr_v2.zarr");
+        let err = AnnFile::open(&z)
+            .unwrap()
+            .array("X/data")
+            .err()
+            .expect("blosc array opened without the codec");
+        assert!(err.to_string().contains("blosc"), "{err}");
+    }
+
     // zarr v2 defaults to blosc
     #[cfg(feature = "zarr-blosc")]
     #[test]
