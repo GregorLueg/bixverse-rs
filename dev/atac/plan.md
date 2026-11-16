@@ -92,10 +92,20 @@ matters later for region queries (coverage plots, footprinting on a subset).
 
 ### Count semantics
 
-Signac `FeatureMatrix`: one count per fragment per overlapping feature, whole
-fragment interval, read count ignored. A fragment spanning two peaks counts in
-both. ArchR and SnapATAC2 count Tn5 insertions (both ends) instead. Proposal:
-`CountMode::{Fragment, Insertion}`, default `Fragment` for Signac parity.
+What the main tools count into a feature (checked in source or docs):
+
+| Tool | Unit | Fragment with both ends in one feature |
+|---|---|---|
+| Signac `FeatureMatrix` | whole fragment overlapping | 1 |
+| ArchR `addPeakMatrix` / `addTileMatrix` | insertions (both ends) | 2 (peaks capped at 4; tiles binarised by default) |
+| Cell Ranger ATAC `generate_peak_matrix` | insertions (both ends) | 2 |
+| SnapATAC2 (`counting_strategy` default `paired-insertion`) | insertions | 1 |
+
+Majority: insertions, both ends counted (ArchR, Cell Ranger). Default
+`CountMode::Insertion`; `Fragment` (Signac parity) and `PairedInsertion`
+(SnapATAC2) as options, each a one-line branch in the sweep. Side benefit: our
+insertion peak matrix on Cell Ranger's peaks must equal the `Peaks` matrix in
+the 10x h5, a free end-to-end check.
 
 QC and footprint pileups always use insertions (both ends, raw BED coordinates,
 no Tn5 shift, as Signac).
@@ -196,21 +206,31 @@ kNN, clustering, UMAP, WNN and Harmony all consume the LSI embedding.
 
 ## Validation
 
-- Every numeric from a generated fixture, never recalled. Signac 1.17 is not
-  installed and delegates QC to the external `fragtk` binary, so the Signac
-  fast TSS definition must be checked against what `ATACqc()` actually returns.
-- Independent references through uv: SnapATAC2 (fragment import, tile
-  matrix, TSSe, its own definitions), muon (TF-IDF, LSI), MACS3 for the caller.
-- Input: a 10x multiome public dataset subset (one chromosome) under
-  `python/tests/fixtures/`, generator script in `dev/`.
+No R parity: the release chain is Rust, then Python, then R. Signac and the
+scverse tools are references for the numerics, not for a wrapper.
 
-## Open decisions
+- Every numeric from a generated fixture, never recalled. Signac 1.17.1 is
+  installed (R 4.6.1). It delegates `ATACqc()` to the external `fragtk` binary,
+  so fixtures use the deprecated in-R `NucleosomeSignal` / `TSSEnrichment`,
+  and the definition we implement is pinned to that code.
+- scverse references through uv: SnapATAC2 (fragment import, tile and peak
+  matrices in all three counting modes, TSSe, also the speed baseline since it
+  is Rust underneath) and muon (TF-IDF, LSI). Where a definition differs from
+  Signac (TSSe does), compare against the tool whose definition we implement
+  and report the other side by side, not as a test.
+- MACS3 through uv for the caller in phase 7.
+- Data: 10x PBMC multiome (Cell Ranger ARC 2.0.0). `pbmc_unsorted_3k`
+  (fragments 537 MB, h5 32 MB) for fixtures, cut to one chromosome under
+  `python/tests/fixtures/` by a generator in `python/dev/`;
+  `pbmc_granulocyte_sorted_10k` (fragments 2.4 GB) for benchmarks and the
+  vignette, the Signac multiome vignette's dataset.
 
-1. Crate split: one `bixverse-atac` above `bixverse-sc` (proposed).
-2. Count semantics default: Signac fragment overlap (proposed) or insertions.
-3. Peak source for v1: 10x peaks, BED, tiles (proposed), native caller in phase 7.
-4. Bindings order: Python first (lives in this repo, testable here) then the R
-   handover, or R first as the reference interface.
-5. Reference installs: Signac into the R library for fixtures, or SnapATAC2 /
-   muon through uv only.
-6. Paired only for v1 (proposed), ATAC-only `SingleCells` later.
+## Decisions (2026-11-16)
+
+1. One `bixverse-atac` crate above `bixverse-sc`.
+2. Count default: insertions, both ends (majority); fragment and paired
+   insertion as options.
+3. Peak source for v1: 10x peaks, BED, tiles; native caller in phase 7.
+4. Python first, R handover after. No R parity tests (removed from `python/`).
+5. References: Signac installed for fixtures, SnapATAC2 and muon through uv.
+6. Paired RNA plus ATAC for v1, on 10x PBMC multiome; ATAC-only later.
