@@ -16,11 +16,17 @@ use bixverse_atac::lsi::{
 use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
 use bixverse_atac::regions::{genome_tiles, read_bed, region};
 use bixverse_atac::rlsi::{BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store};
+use bixverse_sc::sc_annotation::seurat_transfer::{
+    TransferAnchorParams, TransferDataParams, find_transfer_anchors, transfer_labels,
+};
+use bixverse_sc::sc_batch_correction::seurat_anchors::AnchorSet;
 use bixverse_sc::sc_processing::pca::PcaSolver;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::data_io::{CellGeneSparseWriter, CsrCellChunk, ParallelSparseReader};
+use bixverse_sc_data::gene_file_io::write_gene_file;
 use bixverse_sc_data::interval_index::FeatureInterval;
 use bixverse_sc_data::v5_io::{FeatureKind, tf_idf_weights};
 use faer::Mat;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// chr22 length in hg38, as in `chrom_sizes.tsv`.
 const CHR22_LEN: u32 = 50_818_468;
@@ -620,4 +626,190 @@ fn test_rlsi_integration_matches_seurat() {
     .unwrap();
     let diff = max_abs_diff(&ours, &theirs);
     assert!(diff < 1e-5, "own LSIs: max |diff| {diff}");
+}
+
+////////////////////
+// Label transfer //
+////////////////////
+
+/// A log-CPM store from a fixture's `(feature, cell, count)` triplets.
+///
+/// ### Params
+///
+/// * `dir` - Where the store goes
+/// * `tag` - File name prefix
+/// * `rel` - The `matrix.tsv.gz`
+/// * `n_features` - Number of features
+/// * `target` - Target size of the norm
+///
+/// ### Returns
+///
+/// The gene file path.
+fn triplet_store(dir: &TempDir, tag: &str, rel: &str, n_features: usize, target: f32) -> String {
+    let n_cells = cells().len();
+    let mut per_cell: Vec<(Vec<u32>, Vec<u32>)> = vec![(Vec::new(), Vec::new()); n_cells];
+    for (f, c, v) in triplets(rel) {
+        per_cell[c as usize].0.push(f);
+        per_cell[c as usize].1.push(v);
+    }
+    let cf = dir.file(&format!("{tag}_cells.bin"));
+    let gf = dir.file(&format!("{tag}_genes.bin"));
+    let mut w = CellGeneSparseWriter::new(&cf, true, n_cells, n_features, target).unwrap();
+    for (c, (idx, raw)) in per_cell.iter().enumerate() {
+        w.write_cell_chunk(CsrCellChunk::from_data(raw, idx, c, target, true))
+            .unwrap();
+    }
+    w.finalise().unwrap();
+    write_gene_file(&cf, &gf, None, false).unwrap();
+    gf
+}
+
+/// The fixture's transfer anchors.
+///
+/// ### Returns
+///
+/// `(ref cell, query cell, score)` rows, Seurat's order.
+fn seurat_transfer_anchors() -> Vec<(u32, u32, f64)> {
+    let f = "seurat/transfer_anchors.tsv";
+    column(f, "ref_cell")
+        .iter()
+        .zip(column(f, "query_cell"))
+        .zip(column(f, "score"))
+        .map(|((&r, q), s)| (r as u32, q as u32, s))
+        .collect()
+}
+
+#[test]
+fn test_transfer_anchors_match_seurat() {
+    let dir = TempDir::new("transfer_anchors");
+    let n_genes = lines("signac/gene_activity/genes.tsv").len() - 1;
+    let target: f32 = lines("seurat/transfer_ga_target.txt")[0].parse().unwrap();
+    let rna_rel = "seurat/rna/matrix.tsv.gz";
+    let rna = triplet_store(&dir, "rna", rna_rel, n_genes, 1e4);
+    let ga = triplet_store(
+        &dir,
+        "ga",
+        "signac/gene_activity/matrix.tsv.gz",
+        n_genes,
+        target,
+    );
+
+    let (batch, _) = seurat_design();
+    let ref_cells: Vec<usize> = (0..batch.len()).filter(|&i| batch[i] == 0).collect();
+    let query_cells: Vec<usize> = (0..batch.len()).filter(|&i| batch[i] == 1).collect();
+    let features: Vec<usize> = lines("seurat/transfer_features.txt")
+        .iter()
+        .map(|l| l.parse().unwrap())
+        .collect();
+
+    let mut params = TransferAnchorParams::default();
+    params.knn_params.knn_method = "exhaustive".into();
+    let anchors = find_transfer_anchors(
+        &ParallelSparseReader::new(&rna).unwrap(),
+        &ref_cells,
+        &features,
+        &ParallelSparseReader::new(&ga).unwrap(),
+        &query_cells,
+        &features,
+        &params,
+        42,
+        0,
+    )
+    .unwrap();
+
+    // reference cells without counts in any feature share one CCA embedding,
+    // so the kNN order among them is arbitrary on either side
+    let mut feature_counts = vec![0u32; batch.len()];
+    for (f, c, v) in triplets(rna_rel) {
+        if features.contains(&(f as usize)) {
+            feature_counts[c as usize] += v;
+        }
+    }
+    let tied: Vec<u32> = (0..ref_cells.len() as u32)
+        .filter(|&i| feature_counts[ref_cells[i as usize]] == 0)
+        .collect();
+    assert_eq!(tied, vec![2, 64, 226]);
+
+    let theirs = seurat_transfer_anchors();
+    let their_pairs: FxHashSet<(u32, u32)> = theirs.iter().map(|t| (t.0, t.1)).collect();
+    let ours: FxHashMap<(u32, u32), f32> = anchors
+        .pairs
+        .iter()
+        .copied()
+        .zip(anchors.scores.iter().copied())
+        .collect();
+    assert_eq!(ours.len(), their_pairs.len());
+    for pair in ours.keys().filter(|p| !their_pairs.contains(p)) {
+        assert!(
+            tied.contains(&pair.0),
+            "anchor {pair:?} not in Seurat's set"
+        );
+    }
+    for p in their_pairs.iter().filter(|p| !ours.contains_key(p)) {
+        assert!(tied.contains(&p.0), "Seurat anchor {p:?} missing");
+    }
+    let mut n_off = 0;
+    for &(r, q, score) in &theirs {
+        if let Some(&s) = ours.get(&(r, q)) {
+            n_off += ((s as f64 - score).abs() > 1e-6) as usize;
+        }
+    }
+    // a swapped tied cell shifts the shared neighbour counts of a few pairs
+    assert!(n_off <= 2, "{n_off} anchor scores differ");
+}
+
+#[test]
+fn test_transfer_labels_match_seurat() {
+    let theirs = seurat_transfer_anchors();
+    let anchors = AnchorSet {
+        pairs: theirs.iter().map(|t| (t.0, t.1)).collect(),
+        scores: theirs.iter().map(|t| t.2 as f32).collect(),
+        batch_pair: (0, 1),
+    };
+
+    // labels indexed in order of first appearance, Seurat's possible.ids
+    let labels = lines("seurat/transfer_labels.txt");
+    let mut names: Vec<String> = Vec::new();
+    let ref_labels: Vec<usize> = labels
+        .iter()
+        .map(|l| match names.iter().position(|n| n == l) {
+            Some(i) => i,
+            None => {
+                names.push(l.clone());
+                names.len() - 1
+            }
+        })
+        .collect();
+    // Seurat's dims = 2:30 of the query LSI
+    let lsi = dense("seurat/batch1_lsi_embeddings.tsv.gz").1;
+    let weight_embedding = Mat::from_fn(lsi.nrows(), 29, |i, j| lsi[(i, j + 1)]);
+    let mut params = TransferDataParams {
+        k_weight: lines("seurat/transfer_k_weight.txt")[0].parse().unwrap(),
+        ..TransferDataParams::default()
+    };
+    params.knn_params.knn_method = "exhaustive".into();
+    let scores = transfer_labels(
+        &anchors,
+        &ref_labels,
+        names.len(),
+        weight_embedding.as_ref(),
+        &params,
+        42,
+    )
+    .unwrap();
+
+    let p = "seurat/transfer_predictions_exact_knn.tsv";
+    for (j, name) in names.iter().enumerate() {
+        for (i, t) in column(p, &format!("prediction.score.{name}"))
+            .iter()
+            .enumerate()
+        {
+            close(
+                scores[(i, j)] as f64,
+                *t,
+                1e-5,
+                &format!("cell {i}, {name}"),
+            );
+        }
+    }
 }

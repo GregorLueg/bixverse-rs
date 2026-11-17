@@ -108,6 +108,20 @@ last 250). Every LSI is `RunSVD(n = 30)` on one shared feature set
   `dims.to.integrate = 1:30`, `k.weight = 20` (29 anchor cells, so the
   default 100 errors). Batch 0 is the reference and comes back unchanged.
 
+- Label transfer, batch 0 RNA onto batch 1 gene activity (the Signac multiome
+  vignette's unpaired path). `rna/matrix.tsv.gz`: h5 `Gene Expression` counts
+  of the 500 cells for the `signac/gene_activity` genes, same row order (17 of
+  the 440 are not in the 10x reference and stay empty). Reference:
+  `NormalizeData`, 200 vst features (`transfer_features.txt`, row indices),
+  clusters at resolution 0.8 as labels (`transfer_labels.txt`, two). Query:
+  gene activity log-normalised to the median chr22 RNA depth of the query
+  cells (`transfer_ga_target.txt`). `transfer_anchors.tsv`:
+  `FindTransferAnchors(reduction = "cca", nn.method = "rann")`, 973 anchors,
+  0-based within reference and query. `transfer_predictions.tsv`:
+  `TransferData(weight.reduction = batch 1 LSI, dims = 2:30, k.weight = 50)`;
+  `transfer_predictions_exact_knn.tsv`: the same weights through Seurat's
+  `FindWeightsC` with exact kNN.
+
 ### Seurat caveats
 
 - `FindIntegrationAnchors` calls `ReciprocalProject` without `dims`, so the
@@ -118,6 +132,12 @@ last 250). Every LSI is `RunSVD(n = 30)` on one shared feature set
   in for an exact reference.
 - `FindWeightsC` caps a cell at `k.weight` anchor pairs in total, nearest
   anchor cells first; an anchor cell with several pairs takes several slots.
+- `TransferData` also weights through annoy; against exact kNN its scores
+  move by 2.4e-3, hence the `_exact_knn` file.
+- Seurat's transfer CCA is exact (irlba against `svd()`: 2e-11). Reference
+  cells 2, 64 and 226 have no counts in any transfer feature, so they share
+  one CCA embedding and the kNN order among them is arbitrary: 2 of the 973
+  anchors swap between them, and 2 shared anchors score differently.
 
 ## snapatac2/
 

@@ -1,8 +1,10 @@
-# Seurat 6 / Signac reference values for LSI projection and rLSI integration
-# on the chr22 fixture.
+# Seurat 6 / Signac reference values for LSI projection, rLSI integration and
+# gene activity label transfer on the chr22 fixture.
 #
 # Run from the repository root, after gen_atac_signac.R:
-#   Rscript dev/atac/gen_atac_seurat.R
+#   Rscript dev/atac/gen_atac_seurat.R [data_dir]      # default ~/data/bixverse/atac
+#
+# data_dir holds the 10x multiome h5 the RNA counts come from.
 #
 # Writes crates/bixverse-atac/tests/fixtures/pbmc3k_chr22/seurat/. The 500
 # cells split into two batches by position (first 250, last 250). Every LSI
@@ -13,6 +15,7 @@
 # comparable within a tolerance.
 
 suppressPackageStartupMessages({
+  library(rhdf5)
   library(Signac)
   library(Seurat)
   library(SeuratObject)
@@ -20,6 +23,8 @@ suppressPackageStartupMessages({
 })
 set.seed(42)
 
+args <- commandArgs(trailingOnly = TRUE)
+data_dir <- if (length(args) > 0) args[[1]] else path.expand("~/data/bixverse/atac")
 fix_dir <- "crates/bixverse-atac/tests/fixtures/pbmc3k_chr22"
 out_dir <- file.path(fix_dir, "seurat")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -126,6 +131,110 @@ int_emb <- Embeddings(integrated[["integrated_lsi"]])[cells, ]
 write_tsv(data.frame(barcode = cells, int_emb, check.names = FALSE),
           file.path(out_dir, "rlsi_integrated.tsv.gz"))
 
+## label transfer: batch 0 RNA (reference) onto batch 1 gene activity (query)
+
+# RNA counts of the 500 cells for the gene activity genes, in their order
+ga_genes <- read.table(file.path(fix_dir, "signac", "gene_activity", "genes.tsv"), header = TRUE)
+ga_ids <- sub("[.].*$", "", ga_genes$gene_id)
+h5 <- file.path(data_dir, "pbmc_unsorted_3k_filtered_feature_bc_matrix.h5")
+h5_ids <- as.vector(h5read(h5, "matrix/features/id"))
+h5_bc <- as.vector(h5read(h5, "matrix/barcodes"))
+stopifnot(identical(h5_bc[seq_along(cells)], cells))
+# genes outside the 10x reference stay all zero
+message("gene activity genes not in the h5: ", sum(!ga_ids %in% h5_ids))
+indptr <- as.vector(h5read(h5, "matrix/indptr"))
+nnz_end <- indptr[length(cells) + 1L]
+indices <- as.vector(h5read(h5, "matrix/indices", index = list(seq_len(nnz_end))))
+values <- as.vector(h5read(h5, "matrix/data", index = list(seq_len(nnz_end))))
+row <- match(h5_ids[indices + 1L], ga_ids)
+col <- rep(seq_along(cells), diff(indptr[seq_len(length(cells) + 1L)]))
+keep <- !is.na(row)
+rna <- sparseMatrix(
+  i = row[keep], j = col[keep], x = as.double(values[keep]),
+  dims = c(length(ga_ids), length(cells)), dimnames = list(ga_genes$gene_name, cells)
+)
+dir.create(file.path(out_dir, "rna"), showWarnings = FALSE)
+trip <- summary(rna)
+trip <- data.frame(feature_idx = trip$i - 1L, cell_idx = trip$j - 1L, value = as.integer(trip$x))
+trip <- trip[order(trip$feature_idx, trip$cell_idx), ]
+con <- gzfile(file.path(out_dir, "rna", "matrix.tsv.gz"), "w")
+write.table(trip, con, sep = "\t", quote = FALSE, row.names = FALSE)
+close(con)
+
+ga_trip <- read.table(file.path(fix_dir, "signac", "gene_activity", "matrix.tsv.gz"), header = TRUE)
+ga <- sparseMatrix(
+  i = ga_trip$feature_idx + 1L, j = ga_trip$cell_idx + 1L, x = as.double(ga_trip$value),
+  dims = dim(rna), dimnames = dimnames(rna)
+)
+
+ref_cells <- cells[batch == 0]
+query_cells <- cells[batch == 1]
+ref <- CreateSeuratObject(counts = rna[, ref_cells], assay = "RNA")
+ref <- NormalizeData(ref, verbose = FALSE)
+ref <- FindVariableFeatures(ref, nfeatures = 200, verbose = FALSE)
+ref <- ScaleData(ref, verbose = FALSE)
+ref <- RunPCA(ref, npcs = 10, verbose = FALSE)
+ref <- FindNeighbors(ref, dims = 1:10, verbose = FALSE)
+ref <- FindClusters(ref, resolution = 0.8, random.seed = 0, verbose = FALSE)
+labels <- paste0("c", as.character(ref$seurat_clusters[ref_cells]))
+writeLines(labels, file.path(out_dir, "transfer_labels.txt"))
+
+# Signac vignette: gene activity log-normalised to the median RNA depth
+target <- median(colSums(rna[, query_cells]))
+writeLines(fmt(target), file.path(out_dir, "transfer_ga_target.txt"))
+query <- CreateSeuratObject(counts = ga[, query_cells], assay = "ACTIVITY")
+query <- NormalizeData(query, scale.factor = target, verbose = FALSE)
+
+features <- VariableFeatures(ref)
+writeLines(as.character(match(features, rownames(rna)) - 1L), file.path(out_dir, "transfer_features.txt"))
+
+transfer <- FindTransferAnchors(
+  reference = ref, query = query, features = features, reference.assay = "RNA",
+  query.assay = "ACTIVITY", reduction = "cca", nn.method = "rann", verbose = FALSE
+)
+ta <- slot(transfer, "anchors")
+write_tsv(
+  data.frame(ref_cell = as.integer(ta[, "cell1"]) - 1L, query_cell = as.integer(ta[, "cell2"]) - 1L,
+             score = as.double(ta[, "score"])),
+  file.path(out_dir, "transfer_anchors.tsv")
+)
+
+n_anchor_cells <- length(unique(ta[, "cell2"]))
+k_weight <- min(50L, n_anchor_cells)
+writeLines(as.character(k_weight), file.path(out_dir, "transfer_k_weight.txt"))
+lsi_query <- objs[[2]][["lsi"]]
+pred <- TransferData(
+  anchorset = transfer, refdata = setNames(labels, ref_cells), weight.reduction = lsi_query,
+  dims = 2:30, k.weight = k_weight, verbose = FALSE
+)
+pred <- pred[query_cells, ]
+write_tsv(
+  data.frame(barcode = query_cells, predicted_id = pred$predicted.id,
+             pred[, grep("^prediction.score", colnames(pred))], check.names = FALSE),
+  file.path(out_dir, "transfer_predictions.tsv")
+)
+
+# TransferData's FindWeights runs annoy whatever nn.method says; the same
+# weights through Seurat's own FindWeightsC with exact kNN, on these anchors
+emb <- Embeddings(lsi_query)[query_cells, 2:30]
+anchor_q <- as.integer(ta[, "cell2"])
+anchor_cells <- unique(anchor_q)
+nn <- Seurat:::NNHelper(data = emb[anchor_cells, ], query = emb, k = k_weight, method = "rann")
+dist <- Distances(nn)
+dist <- 1 - dist / dist[, ncol(dist)]
+w <- Seurat:::FindWeightsC(
+  cells2 = 0:(length(query_cells) - 1), distances = as.matrix(dist),
+  anchor_cells2 = as.character(anchor_cells), integration_matrix_rownames = as.character(anchor_q),
+  cell_index = Indices(nn), anchor_score = ta[, "score"], min_dist = 0, sd = 1,
+  display_progress = FALSE
+)
+ids <- unique(labels)
+one_hot <- sapply(ids, function(l) as.numeric(labels[ta[, "cell1"]] == l))
+exact <- as.matrix(t(w) %*% one_hot)
+colnames(exact) <- paste0("prediction.score.", ids)
+write_tsv(data.frame(barcode = query_cells, exact, check.names = FALSE),
+          file.path(out_dir, "transfer_predictions_exact_knn.tsv"))
+
 writeLines(
   c(
     paste("R", getRversion()),
@@ -134,7 +243,9 @@ writeLines(
     paste("Signac", packageVersion("Signac")),
     paste("RANN", packageVersion("RANN")),
     paste("RcppAnnoy", packageVersion("RcppAnnoy")),
-    paste("Matrix", packageVersion("Matrix"))
+    paste("Matrix", packageVersion("Matrix")),
+    paste("irlba", packageVersion("irlba")),
+    paste("rhdf5", packageVersion("rhdf5"))
   ),
   file.path(out_dir, "versions.txt")
 )

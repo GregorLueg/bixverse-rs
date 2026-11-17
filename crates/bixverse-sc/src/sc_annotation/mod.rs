@@ -2,4 +2,5 @@
 //! methods
 
 pub mod sc_type;
+pub mod seurat_transfer;
 pub mod symphony;

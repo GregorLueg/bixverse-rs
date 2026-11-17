@@ -5,3 +5,5 @@ Signac 1.17.1
 RANN 2.6.3
 RcppAnnoy 0.0.23
 Matrix 1.7.6
+irlba 2.4.1
+rhdf5 2.56.1
