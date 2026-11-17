@@ -59,7 +59,10 @@ fn env_path(name: &str) -> PathBuf {
 /// * `t` - Start time
 /// * `note` - Extra column
 fn report(stage: &str, t: Instant, note: &str) {
-    println!("| {stage:<6} | {:>9.2} s | {note} |", t.elapsed().as_secs_f64());
+    println!(
+        "| {stage:<6} | {:>9.2} s | {note} |",
+        t.elapsed().as_secs_f64()
+    );
 }
 
 fn main() {
@@ -105,8 +108,8 @@ fn main() {
         let tss = tss_positions(&genes, &["protein_coding".to_string()]);
         let gtf_s = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let qc = fragment_qc(&fragments, &barcodes, &tss, &FragmentQcParams::default())
-            .expect("qc");
+        let qc =
+            fragment_qc(&fragments, &barcodes, &tss, &FragmentQcParams::default()).expect("qc");
         let tsse = qc.tss_enrichment();
         let mut sorted = tsse.clone();
         sorted.sort_by(f64::total_cmp);

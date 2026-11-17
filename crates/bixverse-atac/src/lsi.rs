@@ -9,12 +9,18 @@
 //!
 //! The first component usually tracks sequencing depth. It is not dropped
 //! here; [`LsiResult::depth_cor`] reports the correlation so the caller can.
+//!
+//! New cells project onto a fitted LSI as `X V diag(1/d)` ([`project_lsi`]),
+//! Seurat's `ProjectSVD(mode = "lsi")`. The TF-IDF of the projected cells can
+//! use any IDF ([`read_tf_idf`]): the reference's, or their own as Seurat does.
 
-use faer::Mat;
+use faer::{Mat, MatRef};
+use indexmap::IndexSet;
 use rayon::prelude::*;
 
 use bixverse_core::core::math::vector_helpers::pearson_correlation;
-use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, pca_on_sc_sparse};
+use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
+use bixverse_sc_data::data_io::{norm_value, peek_target_size};
 use bixverse_sc_data::prelude::*;
 use bixverse_sc_data::v5_io::{NormKind, set_tf_idf, tf_idf_weights};
 
@@ -146,6 +152,129 @@ fn mean_sd(x: &[f32]) -> (f64, f64) {
     (mean, (ss / (n - 1.0)).sqrt())
 }
 
+/// TF-IDF of a block of a store, cells x features.
+///
+/// With `idf = None` this is the store's own norm layer (the store must be
+/// TF-IDF). With an explicit IDF the values are recomputed from the raw counts
+/// as `ln1p(x / lib * scale * idf_f)` through the same [`norm_value`], with the
+/// store's scale and library sizes; passing the store's own IDF gives the norm
+/// layer bit for bit.
+///
+/// ### Params
+///
+/// * `cell_path` - Cell-based file of the store (for the library sizes)
+/// * `gene_path` - Gene-based (feature-major) file of the store
+/// * `cells` - Cells, in output row order, no duplicates
+/// * `features` - Features, in output column order
+/// * `idf` - One weight per store feature, or `None` for the store's IDF
+///
+/// ### Returns
+///
+/// A CSR matrix with the raw counts in `data` and the TF-IDF in `data_2`.
+pub fn read_tf_idf(
+    cell_path: &str,
+    gene_path: &str,
+    cells: &[usize],
+    features: &[usize],
+    idf: Option<&[f32]>,
+) -> Result<CompressedSparseData2<f32>, AtacErrors> {
+    let gene_reader = ParallelSparseReader::new(gene_path)?;
+    let cell_set: IndexSet<u32> = cells.iter().map(|&c| c as u32).collect();
+    if cell_set.len() != cells.len() {
+        return Err(AtacErrors::InvalidArgument(
+            "read_tf_idf: duplicated cells".into(),
+        ));
+    }
+    let Some(idf) = idf else {
+        if gene_reader.norm_kind() != NormKind::TfIdf {
+            return Err(AtacErrors::NotTfIdf);
+        }
+        let layers = DataLayerReturn::BothLayers;
+        return Ok(gene_reader.read_genes_sparse_csr(features, Some(&cell_set), &layers)?);
+    };
+    if idf.len() != gene_reader.dims().total_genes {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "IDF has {} weights for {} features",
+            idf.len(),
+            gene_reader.dims().total_genes
+        )));
+    }
+    let scale = peek_target_size(gene_path)?
+        .ok_or_else(|| AtacErrors::InvalidArgument("the store records no target size".into()))?;
+    let lib = library_sizes(cell_path, cells)?;
+
+    let mut m: CompressedSparseData2<f32> =
+        gene_reader.read_genes_sparse_csr(features, Some(&cell_set), &DataLayerReturn::Raw)?;
+    let (indptr, indices, raw, lib) = (&m.indptr, &m.indices, &m.data, &lib);
+    let tf_idf: Vec<f32> = (0..cells.len())
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            (indptr[i] as usize..indptr[i + 1] as usize).map(move |p| {
+                let w = scale * idf[features[indices[p] as usize]];
+                norm_value(raw[p], lib[i], w)
+            })
+        })
+        .collect();
+    m.data_2 = Some(tf_idf);
+    Ok(m)
+}
+
+/// Project cells onto a fitted LSI.
+///
+/// `X V diag(1/d)`, Seurat's `ProjectSVD(mode = "lsi")` without centring or
+/// scaling. A cell of the fit itself projects onto its left singular vector,
+/// before the z-scoring of [`LsiResult::embedding`].
+///
+/// ### Params
+///
+/// * `tf_idf` - Cells x features CSR, TF-IDF in `data_2`, columns in the row
+///   order of `loadings`, see [`read_tf_idf`]
+/// * `loadings` - Features x components, [`LsiResult::loadings`]
+/// * `singular_values` - [`LsiResult::singular_values`]
+///
+/// ### Returns
+///
+/// Cells x components.
+pub fn project_lsi(
+    tf_idf: &CompressedSparseData2<f32>,
+    loadings: MatRef<f32>,
+    singular_values: &[f32],
+) -> Result<Mat<f32>, AtacErrors> {
+    let n_comp = loadings.ncols();
+    let values = tf_idf.data_2.as_ref().ok_or_else(|| {
+        AtacErrors::InvalidArgument("project_lsi needs the TF-IDF in data_2".into())
+    })?;
+    if !tf_idf.cs_type.is_csr() || tf_idf.shape.1 != loadings.nrows() {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "project_lsi needs a CSR with {} columns, got {:?}",
+            loadings.nrows(),
+            tf_idf.shape
+        )));
+    }
+    if singular_values.len() < n_comp {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "{} singular values for {n_comp} components",
+            singular_values.len()
+        )));
+    }
+    let n_cells = tf_idf.shape.0;
+    let mut rows = vec![0.0f32; n_cells * n_comp];
+    rows.par_chunks_mut(n_comp.max(1))
+        .enumerate()
+        .for_each(|(i, row)| {
+            let (lo, hi) = (tf_idf.indptr[i] as usize, tf_idf.indptr[i + 1] as usize);
+            for (&f, &x) in tf_idf.indices[lo..hi].iter().zip(&values[lo..hi]) {
+                for (j, r) in row.iter_mut().enumerate() {
+                    *r += x * loadings[(f as usize, j)];
+                }
+            }
+            for (r, &d) in row.iter_mut().zip(singular_values) {
+                *r /= d;
+            }
+        });
+    Ok(Mat::from_fn(n_cells, n_comp, |i, j| rows[i * n_comp + j]))
+}
+
 /// LSI of a TF-IDF store.
 ///
 /// ### Params
@@ -172,36 +301,67 @@ pub fn lsi_on_store(
     seed: usize,
     verbose: usize,
 ) -> Result<LsiResult, AtacErrors> {
-    let gene_reader = ParallelSparseReader::new(gene_path)?;
-    if gene_reader.norm_kind() != NormKind::TfIdf {
-        return Err(AtacErrors::NotTfIdf);
-    }
-    if cells.len() < 2 || features.is_empty() {
-        return Err(AtacErrors::InvalidArgument(format!(
-            "LSI needs at least two cells and one feature, got {} and {}",
-            cells.len(),
-            features.len()
-        )));
-    }
-    let n_comp = params.n_comp.min(cells.len() - 1);
+    let tf_idf = read_tf_idf(cell_path, gene_path, cells, features, None)?;
+    let depth = library_sizes(cell_path, cells)?;
+    lsi_on_matrix(tf_idf, &depth, params, seed, verbose)
+}
 
-    let pca_params = SingleCellPcaParams::new(false, false, params.solver, false, 1.0);
-    let (scores, loadings, singular_values) = pca_on_sc_sparse(
-        &gene_reader,
-        cells,
-        features,
-        n_comp,
-        &pca_params,
-        None,
-        seed,
-        verbose,
-    )?;
-
-    let depth: Vec<f32> = ParallelSparseReader::new(cell_path)?
+/// Library sizes of cells as `f32`.
+///
+/// ### Params
+///
+/// * `cell_path` - Cell-based file of the store
+/// * `cells` - The cells
+///
+/// ### Returns
+///
+/// One library size per cell.
+pub(crate) fn library_sizes(cell_path: &str, cells: &[usize]) -> Result<Vec<f32>, AtacErrors> {
+    Ok(ParallelSparseReader::new(cell_path)?
         .read_cell_library_sizes(cells)?
         .into_iter()
         .map(|x| x as f32)
-        .collect();
+        .collect())
+}
+
+/// LSI of a TF-IDF block, see [`lsi_on_store`].
+///
+/// ### Params
+///
+/// * `tf_idf` - Cells x features CSR from [`read_tf_idf`], TF-IDF in `data_2`
+/// * `depth` - Library size per row, for [`LsiResult::depth_cor`]
+/// * `params` - See [`LsiParams`]
+/// * `seed` - Seed of the solver
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The [`LsiResult`].
+pub fn lsi_on_matrix(
+    tf_idf: CompressedSparseData2<f32>,
+    depth: &[f32],
+    params: &LsiParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<LsiResult, AtacErrors> {
+    let n_cells = tf_idf.shape.0;
+    if n_cells < 2 || tf_idf.shape.1 == 0 {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "LSI needs at least two cells and one feature, got {} and {}",
+            n_cells, tf_idf.shape.1
+        )));
+    }
+    if depth.len() != n_cells {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "{} library sizes for {n_cells} cells",
+            depth.len()
+        )));
+    }
+    let n_comp = params.n_comp.min(n_cells - 1);
+
+    let pca_params = SingleCellPcaParams::new(false, false, params.solver, false, 1.0);
+    let (scores, loadings, singular_values, _, _) =
+        sparse_pca_on_matrix(tf_idf, n_comp, &pca_params, None, seed, verbose)?;
 
     // scores are U * diag(s); z-scoring makes the scale irrelevant, so only
     // the unscaled path divides it back out
@@ -229,10 +389,10 @@ pub fn lsi_on_store(
 
     let depth_cor: Vec<f32> = columns
         .par_iter()
-        .map(|col| pearson_correlation(col, &depth).map_or(f32::NAN, |r| r as f32))
+        .map(|col| pearson_correlation(col, depth).map_or(f32::NAN, |r| r as f32))
         .collect();
 
-    let embedding = Mat::from_fn(cells.len(), n_comp, |i, j| columns[j][i]);
+    let embedding = Mat::from_fn(n_cells, n_comp, |i, j| columns[j][i]);
 
     Ok(LsiResult {
         embedding,

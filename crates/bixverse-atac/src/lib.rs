@@ -18,5 +18,6 @@ pub mod lsi;
 pub mod prelude;
 pub mod qc;
 pub mod regions;
+pub mod rlsi;
 #[cfg(feature = "h5")]
 pub mod tenx_peaks;

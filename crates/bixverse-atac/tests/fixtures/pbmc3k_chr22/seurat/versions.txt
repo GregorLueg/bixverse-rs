@@ -1,0 +1,7 @@
+R 4.6.1
+Seurat 6.0.0
+SeuratObject 5.4.0
+Signac 1.17.1
+RANN 2.6.3
+RcppAnnoy 0.0.23
+Matrix 1.7.6

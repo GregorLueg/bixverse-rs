@@ -7,13 +7,14 @@ root, in order:
 ```
 Rscript dev/atac/gen_atac_inputs.R [data_dir]      # default ~/data/bixverse/atac
 Rscript dev/atac/gen_atac_signac.R
+Rscript dev/atac/gen_atac_seurat.R
 RAYON_NUM_THREADS=1 POLARS_MAX_THREADS=1 uv run --python 3.12 \
   --with snapatac2==2.10.0 --with muon==0.2.1 --with beartype \
   python dev/atac/gen_atac_scverse.py
 ```
 
 Tool versions are in each folder's `versions.txt` (R 4.6.1, Signac 1.17.1,
-SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0; muon 0.2.1, scipy
+Seurat 6.0.0, SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0; muon 0.2.1, scipy
 1.18.1).
 
 ## Conventions
@@ -87,6 +88,36 @@ SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0; muon 0.2.1, scipy
 - 2 cells have zero peak counts (one has a single fragment, one none). Their
   TF-IDF column is empty, blacklist ratio NaN (0 / 0); the fragment-free cell
   also has NaN FRiP and nucleosome signal. NaN prints as `NaN`.
+
+## seurat/
+
+`dev/atac/gen_atac_seurat.R` (Seurat 6.0.0, after `gen_atac_signac.R`), on the
+`signac/peaks` counts. Two batches by position (`batch.txt`: first 250 cells,
+last 250). Every LSI is `RunSVD(n = 30)` on one shared feature set
+(`features.txt`, the q5 top features of all cells); each batch has its own
+`RunTFIDF` (IDF over its own cells).
+
+- `batch{0,1}_lsi_*`: per-batch LSI, same layout as `signac/lsi_*`, `d` in
+  `*_d.tsv`. `combined_lsi_embeddings.tsv.gz`: the all-cell LSI.
+- Floats at 9 significant digits (they are read as f32), not 17.
+- `project_batch1_on_batch0.tsv.gz`: `ProjectSVD(mode = "lsi")` of batch 1's
+  TF-IDF onto batch 0's LSI, no centring (the `lsiproject` transfer path).
+- `rlsi_anchors.tsv`: `FindIntegrationAnchors(reduction = "rlsi", dims = 2:30,
+  nn.method = "rann")`, the batch 0 to batch 1 half, 0-based, 42 anchors.
+- `rlsi_integrated.tsv.gz`: `IntegrateEmbeddings` of `combined_lsi`,
+  `dims.to.integrate = 1:30`, `k.weight = 20` (29 anchor cells, so the
+  default 100 errors). Batch 0 is the reference and comes back unchanged.
+
+### Seurat caveats
+
+- `FindIntegrationAnchors` calls `ReciprocalProject` without `dims`, so the
+  column sd scaling and L2 normalisation of the anchor spaces run over all 30
+  components; `2:30` only applies to the kNN.
+- `IntegrateEmbeddings` ignores `nn.method`: its `FindWeights` runs annoy.
+  Replicated by hand with exact kNN it moves by 9e-7, so the fixture stands
+  in for an exact reference.
+- `FindWeightsC` caps a cell at `k.weight` anchor pairs in total, nearest
+  anchor cells first; an anchor cell with several pairs takes several slots.
 
 ## snapatac2/
 

@@ -1431,6 +1431,51 @@ fn sparse_pca<S: SingleCellReading>(
         println!("Sparse PCA: Loaded in data in {:.2?}", end_reading);
     }
 
+    let res = sparse_pca_on_matrix(matrix, no_pcs, params_pca, clr_offsets, seed, verbose)?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA: total run time -> {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    Ok(res)
+}
+
+/// Sparse PCA of an already loaded matrix
+///
+/// The SVD half of [`pca_on_sc_sparse`], for callers that build the values
+/// themselves (the ATAC rLSI computes TF-IDF with a per-batch IDF). Rows are
+/// cells, columns features, the values are read from the second layer
+/// (`data_2`). CSR or CSC both work.
+///
+/// ### Params
+///
+/// * `matrix` - Cells x features, values in `data_2`
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this run, see [SingleCellPcaParams].
+///   `clr` is not applied here; the values are taken as they are
+/// * `clr_offsets` - Pre-computed CLR offsets, if the values are CLR scaled
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResStats]
+pub fn sparse_pca_on_matrix(
+    matrix: CompressedSparseData2<f32>,
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaResStats {
+    let verbosity = parse_verbosity_level(verbose);
+    let (n_cells, n_genes) = matrix.shape;
+
     let start_data_prep = Instant::now();
 
     let (col_means, col_stds): (Vec<f64>, Vec<f64>) = if matrix.cs_type.is_csr() {
@@ -1493,27 +1538,19 @@ fn sparse_pca<S: SingleCellReading>(
         return Err(ScErrors::PcaTooFewComponents {
             requested: no_pcs,
             found: svd_res.s().len(),
-            n_cells: cell_set.len(),
-            n_genes: gene_indices.len(),
+            n_cells,
+            n_genes,
         });
     }
     let scores_f64 = compute_pc_scores(&svd_res);
-    let scores = Mat::<f32>::from_fn(cell_set.len(), no_pcs, |i, j| scores_f64[(i, j)] as f32);
-    let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
-        svd_res.v()[(i, j)] as f32
-    });
+    let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+    let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| svd_res.v()[(i, j)] as f32);
     let s: Vec<f32> = svd_res.s()[..no_pcs].iter().map(|&x| x as f32).collect();
 
     let end_svd = start_svd.elapsed();
 
     if verbosity.normal_verbosity() {
         println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
-    }
-
-    let end_total = start_total.elapsed();
-
-    if verbosity.normal_verbosity() {
-        println!("Sparse PCA: total run time -> {:.2?}", end_total);
     }
 
     let col_means = col_means.iter().map(|x| *x as f32).collect();

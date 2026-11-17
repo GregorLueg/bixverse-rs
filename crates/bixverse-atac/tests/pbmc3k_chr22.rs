@@ -10,13 +10,17 @@ use flate2::read::MultiGzDecoder;
 use bixverse_atac::annotation::{GeneActivityParams, gene_activity_regions, read_gtf_genes};
 use bixverse_atac::counting::{CountMode, FeatureCounts, count_fragments, write_counts_store};
 use bixverse_atac::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
-use bixverse_atac::lsi::{LsiParams, TF_IDF_SCALE, lsi_on_store, set_tf_idf_on_store};
+use bixverse_atac::lsi::{
+    LsiParams, TF_IDF_SCALE, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
+};
 use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
 use bixverse_atac::regions::{genome_tiles, read_bed, region};
+use bixverse_atac::rlsi::{BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store};
 use bixverse_sc::sc_processing::pca::PcaSolver;
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use bixverse_sc_data::interval_index::FeatureInterval;
-use bixverse_sc_data::v5_io::FeatureKind;
+use bixverse_sc_data::v5_io::{FeatureKind, tf_idf_weights};
+use faer::Mat;
 
 /// chr22 length in hg38, as in `chrom_sizes.tsv`.
 const CHR22_LEN: u32 = 50_818_468;
@@ -454,4 +458,166 @@ fn test_gene_activity_counts_match_signac() {
         our_triplets(&c),
         triplets("signac/gene_activity/matrix.tsv.gz")
     );
+}
+
+////////////////////////////
+// Seurat projection, rLSI //
+////////////////////////////
+
+/// A dense fixture matrix whose first column is a label (barcode or feature
+/// index).
+///
+/// ### Params
+///
+/// * `rel` - Path relative to the fixture directory
+///
+/// ### Returns
+///
+/// `(labels, values)`.
+fn dense(rel: &str) -> (Vec<String>, Mat<f32>) {
+    let (header, rows) = tsv(rel);
+    let n_col = header.len() - 1;
+    let labels = rows.iter().map(|r| r[0].clone()).collect();
+    let m = Mat::from_fn(rows.len(), n_col, |i, j| rows[i][j + 1].parse().unwrap());
+    (labels, m)
+}
+
+/// The fixture's batch split and shared LSI features.
+///
+/// ### Returns
+///
+/// `(batch per cell, features)`.
+fn seurat_design() -> (Vec<usize>, Vec<usize>) {
+    let parse =
+        |rel: &str| -> Vec<usize> { lines(rel).iter().map(|l| l.parse().unwrap()).collect() };
+    (parse("seurat/batch.txt"), parse("seurat/features.txt"))
+}
+
+/// One batch's LSI as Seurat computed it, with our TF-IDF of its cells.
+///
+/// ### Params
+///
+/// * `cf`, `gf` - The store
+/// * `b` - Batch
+///
+/// ### Returns
+///
+/// The [`BatchLsi`].
+fn seurat_batch_lsi(cf: &str, gf: &str, b: usize) -> BatchLsi {
+    let (batch, features) = seurat_design();
+    let cells_b: Vec<usize> = (0..batch.len()).filter(|&i| batch[i] == b).collect();
+    let (feat_idx, loadings) = dense(&format!("seurat/batch{b}_lsi_loadings.tsv.gz"));
+    let feat_idx: Vec<usize> = feat_idx.iter().map(|f| f.parse().unwrap()).collect();
+    assert_eq!(feat_idx, features);
+    let idf = tf_idf_weights(&ParallelSparseReader::new(gf).unwrap(), Some(&cells_b)).unwrap();
+    BatchLsi {
+        embedding: dense(&format!("seurat/batch{b}_lsi_embeddings.tsv.gz")).1,
+        loadings,
+        singular_values: column(&format!("seurat/batch{b}_lsi_d.tsv"), "d")
+            .iter()
+            .map(|&d| d as f32)
+            .collect(),
+        tf_idf: read_tf_idf(cf, gf, &cells_b, &features, Some(&idf)).unwrap(),
+    }
+}
+
+/// Max absolute difference of two matrices.
+///
+/// ### Params
+///
+/// * `a`, `b` - Same shape
+///
+/// ### Returns
+///
+/// `max |a - b|`.
+fn max_abs_diff(a: &Mat<f32>, b: &Mat<f32>) -> f32 {
+    assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()));
+    (0..a.ncols())
+        .flat_map(|j| (0..a.nrows()).map(move |i| (a[(i, j)] - b[(i, j)]).abs()))
+        .fold(0.0, f32::max)
+}
+
+/// [`RlsiParams`] of the fixture: Seurat defaults, exact kNN, `k.weight = 20`.
+///
+/// ### Returns
+///
+/// The params.
+fn fixture_rlsi_params() -> RlsiParams {
+    let mut p = RlsiParams {
+        k_weight: 20,
+        ..RlsiParams::default()
+    };
+    p.knn_params.knn_method = "exhaustive".into();
+    p.lsi.solver = PcaSolver::Exact;
+    p
+}
+
+#[test]
+fn test_lsi_projection_matches_seurat_project_svd() {
+    let dir = TempDir::new("project");
+    let (cf, gf) = signac_peak_store(&dir);
+    let ref_lsi = seurat_batch_lsi(&cf, &gf, 0);
+    let query = seurat_batch_lsi(&cf, &gf, 1);
+    let ours = project_lsi(
+        &query.tf_idf,
+        ref_lsi.loadings.as_ref(),
+        &ref_lsi.singular_values,
+    )
+    .unwrap();
+    let theirs = dense("seurat/project_batch1_on_batch0.tsv.gz").1;
+    let diff = max_abs_diff(&ours, &theirs);
+    assert!(diff < 1e-6, "max |diff| {diff}");
+}
+
+#[test]
+fn test_rlsi_anchors_match_seurat() {
+    let dir = TempDir::new("rlsi_anchors");
+    let (cf, gf) = signac_peak_store(&dir);
+    let (a, b) = (seurat_batch_lsi(&cf, &gf, 0), seurat_batch_lsi(&cf, &gf, 1));
+    let (pairs, scores) = rlsi_anchors(&a, &b, &fixture_rlsi_params(), 42, 0).unwrap();
+
+    let f = "seurat/rlsi_anchors.tsv";
+    let mut theirs: Vec<(u32, u32, f64)> = column(f, "cell_a")
+        .iter()
+        .zip(column(f, "cell_b"))
+        .zip(column(f, "score"))
+        .map(|((&x, y), s)| (x as u32, y as u32, s))
+        .collect();
+    theirs.sort_by_key(|t| (t.0, t.1));
+    let ours: Vec<(u32, u32)> = pairs.clone();
+    let their_pairs: Vec<(u32, u32)> = theirs.iter().map(|t| (t.0, t.1)).collect();
+    assert_eq!(ours, their_pairs);
+    for (s, t) in scores.iter().zip(&theirs) {
+        close(
+            *s as f64,
+            t.2,
+            1e-6,
+            &format!("score of ({}, {})", t.0, t.1),
+        );
+    }
+}
+
+#[test]
+fn test_rlsi_integration_matches_seurat() {
+    let dir = TempDir::new("rlsi_int");
+    let (cf, gf) = signac_peak_store(&dir);
+    let (batch, features) = seurat_design();
+    let combined = dense("seurat/combined_lsi_embeddings.tsv.gz").1;
+    let theirs = dense("seurat/rlsi_integrated.tsv.gz").1;
+    let params = fixture_rlsi_params();
+
+    // Seurat's per-batch LSIs: isolates the anchor and correction steps
+    let batches = vec![seurat_batch_lsi(&cf, &gf, 0), seurat_batch_lsi(&cf, &gf, 1)];
+    let ours = rlsi_integration(&batches, &batch, &combined, &params, 42, 0).unwrap();
+    let diff = max_abs_diff(&ours, &theirs);
+    assert!(diff < 1e-5, "Seurat LSIs: max |diff| {diff}");
+
+    // our own per-batch LSIs end to end
+    let cells: Vec<usize> = (0..batch.len()).collect();
+    let ours = rlsi_on_store(
+        &cf, &gf, &cells, &features, &batch, &combined, &params, 42, 0,
+    )
+    .unwrap();
+    let diff = max_abs_diff(&ours, &theirs);
+    assert!(diff < 1e-5, "own LSIs: max |diff| {diff}");
 }
