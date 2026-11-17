@@ -346,13 +346,13 @@ pub fn build_integration_matrix(
 ///      live in `[0, 1]` with `1 = closest` (Seurat's R-side transform,
 ///      `integration.R:4620`).
 ///   3. For every anchor pair `p` whose query end is that near unique cell,
-///      push `w[p, c] = 1 - exp(- d_norm * score_p / (2/sd)^2)`. Multiple pairs
-///      sharing the same query cell each get their own row entry with their own
-///      score.
+///      push `w[p, c] = 1 - exp(- d_norm * score_p / (2/sd)^2)`, nearest cells
+///      first, until `k_weight` pairs are taken. Pairs sharing a query cell
+///      each take a slot.
 ///   4. Column-normalise so each query cell's column sums to 1.
 ///
 /// The output is a CSC matrix of shape `(n_pairs, n_query)` with at most
-/// `k_weight * pairs_per_shared_cell_max` non-zeros per column.
+/// `k_weight` non-zeros per column.
 ///
 /// ### Params
 ///
@@ -435,13 +435,18 @@ pub fn find_weights(
 
             let mut entries: Vec<(u32, f32)> = Vec::with_capacity(safe_k);
             let mut total = 0.0_f32;
+            // Seurat caps a cell at `k` pairs in total, nearest anchor cells
+            // first, zero weights included: an anchor cell with several pairs
+            // uses several of the `k` slots
+            let mut taken = 0;
             for (&unique_idx, &d) in nn_idx[c].iter().zip(nn_dist[c].iter()) {
                 let d_norm = if d_max > 0.0 {
                     1.0 - d * d_max_inv
                 } else {
                     1.0
                 };
-                for &p in pairs_per_unique[unique_idx].iter() {
+                for &p in pairs_per_unique[unique_idx].iter().take(safe_k - taken) {
+                    taken += 1;
                     let score = anchors.scores[p as usize].max(0.0);
                     let arg = d_norm * score / kernel_denom;
                     let w = 1.0 - (-arg).exp();
@@ -449,6 +454,9 @@ pub fn find_weights(
                         entries.push((p, w));
                         total += w;
                     }
+                }
+                if taken == safe_k {
+                    break;
                 }
             }
             if total > 0.0 {
