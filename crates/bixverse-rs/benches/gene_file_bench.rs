@@ -322,7 +322,7 @@ fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
     };
     let (res, t) = timed(|| {
         stream_h5_counts(
-            h5ad, cell_path, format, no_cells, no_genes, qc, raw_slot, true,
+            h5ad, cell_path, format, no_cells, no_genes, qc, raw_slot, None, true,
         )
     });
     let (kept_cells, kept_genes, _) = res.expect("stream_h5_counts");

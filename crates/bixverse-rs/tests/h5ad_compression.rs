@@ -249,23 +249,33 @@ fn assert_round_trip(compression: Compression) {
     for mode in ["write", "stream"] {
         let bin = TempPath::new(&format!("{}_{mode}.bin", compression.label()));
 
-        let ingest = if mode == "write" {
-            write_h5_counts
+        let res = if mode == "write" {
+            write_h5_counts(
+                h5.path(),
+                bin.path(),
+                "csr",
+                NO_CELLS,
+                NO_GENES,
+                qc_params(),
+                RawDataSlot::DataX,
+                false,
+            )
         } else {
-            stream_h5_counts
+            stream_h5_counts(
+                h5.path(),
+                bin.path(),
+                "csr",
+                NO_CELLS,
+                NO_GENES,
+                qc_params(),
+                RawDataSlot::DataX,
+                None,
+                false,
+            )
         };
 
-        let (cells, genes, _) = ingest(
-            h5.path(),
-            bin.path(),
-            "csr",
-            NO_CELLS,
-            NO_GENES,
-            qc_params(),
-            RawDataSlot::DataX,
-            false,
-        )
-        .unwrap_or_else(|e| panic!("{} ingest of {} failed: {e}", mode, compression.label()));
+        let (cells, genes, _) = res
+            .unwrap_or_else(|e| panic!("{} ingest of {} failed: {e}", mode, compression.label()));
 
         assert_eq!(cells, NO_CELLS, "{mode} / {}", compression.label());
         assert_eq!(genes, NO_GENES, "{mode} / {}", compression.label());

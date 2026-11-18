@@ -334,6 +334,9 @@ pub struct CellOnFileQuality {
     pub cell_old_to_new: FxHashMap<usize, usize>,
     /// Mapping of old indices to new indices for the genes.
     pub gene_old_to_new: FxHashMap<usize, usize>,
+    /// Stored entries per kept cell over the kept genes, in new-index order.
+    /// Only the CSC h5ad parse fills it; empty otherwise.
+    pub cell_nnz: Vec<usize>,
 }
 
 impl CellOnFileQuality {
@@ -355,6 +358,7 @@ impl CellOnFileQuality {
             genes_to_keep_set: FxHashSet::default(),
             cell_old_to_new: FxHashMap::default(),
             gene_old_to_new: FxHashMap::default(),
+            cell_nnz: Vec::new(),
         }
     }
 
@@ -2521,6 +2525,58 @@ pub fn write_cell_rows(
                 let mut row = std::mem::take(row);
                 compress_cell_row(&mut row, first + k, target_size, format)
             })
+            .collect::<Result<Vec<_>, ScDataErrors>>()?;
+
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, payload) in built {
+            nnz.push(nnz_i);
+            lib_size.push(payload.library_size);
+            payloads.push(payload);
+        }
+        writer.write_compressed_cell_chunks(&payloads)?;
+    }
+
+    Ok((nnz, lib_size))
+}
+
+/// [`write_cell_rows`] over one flat buffer of rows.
+///
+/// ### Params
+///
+/// * `entries` - `(gene, count)` pairs of all rows back to back
+/// * `offsets` - Row `k` is `entries[offsets[k]..offsets[k + 1]]`
+/// * `cell_offset` - Index of the first row's cell in the output
+/// * `target_size` - Target size for the library normalisation
+/// * `writer` - Cell-based writer to append to
+///
+/// ### Returns
+///
+/// `(nnz, lib_size)` per written cell.
+pub fn write_cell_rows_flat(
+    entries: &mut [(u32, u32)],
+    offsets: &[usize],
+    cell_offset: usize,
+    target_size: f32,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<(Vec<usize>, Vec<usize>), ScDataErrors> {
+    let n_rows = offsets.len() - 1;
+    let mut nnz = Vec::with_capacity(n_rows);
+    let mut lib_size = Vec::with_capacity(n_rows);
+    let format = writer.format();
+
+    let mut rest = &mut entries[..offsets[n_rows]];
+    for start in (0..n_rows).step_by(CELL_WRITE_BATCH) {
+        let end = (start + CELL_WRITE_BATCH).min(n_rows);
+        let mut rows = Vec::with_capacity(end - start);
+        for k in start..end {
+            let (row, tail) = std::mem::take(&mut rest).split_at_mut(offsets[k + 1] - offsets[k]);
+            rows.push(row);
+            rest = tail;
+        }
+        let built = rows
+            .into_par_iter()
+            .enumerate()
+            .map(|(k, row)| compress_cell_row(row, cell_offset + start + k, target_size, format))
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
 
         let mut payloads = Vec::with_capacity(built.len());

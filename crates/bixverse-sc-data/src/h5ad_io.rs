@@ -17,7 +17,9 @@ use crate::ann_store::{AnnFile, NodeKind};
 use crate::data_io::{CellGeneSparseWriter, CellOnFileQuality};
 use crate::data_io::{
     INDEX_DROPPED, compress_cell_row, dense_index_map, write_cell_chunks_built, write_cell_rows,
+    write_cell_rows_flat,
 };
+use crate::gene_file_io::plan_phases;
 use crate::h5_filters::{check_h5_filters, check_h5ad_filters};
 use crate::prelude::*;
 
@@ -506,6 +508,9 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 ///   cell and gene quality + target size for library normalisation.
 /// * `raw_slot` - Where to find the raw counts in the h5ad object, see
 ///   [RawDataSlot]
+/// * `max_nnz_in_memory` - Entries held at once by the CSC transpose, the
+///   same unit as [crate::gene_file_io::write_gene_file]'s budget. `None`
+///   transposes in one phase. Ignored for the other layouts.
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -520,6 +525,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     no_genes: usize,
     cell_quality: MinCellQuality,
     raw_slot: RawDataSlot,
+    max_nnz_in_memory: Option<usize>,
     verbose: bool,
 ) -> Result<(usize, usize, CellQuality), ScDataErrors> {
     if verbose {
@@ -586,6 +592,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
             &file_quality,
             &raw_slot,
             cell_quality.target_size,
+            max_nnz_in_memory,
             verbose,
         ),
         H5ADFormat::DenseRow => write_h5_dense_row_streaming(
@@ -793,7 +800,12 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
         );
     }
 
+    let cell_nnz: Vec<usize> = cells_to_keep
+        .iter()
+        .map(|&c| cell_unique_genes[c])
+        .collect();
     let mut file_quality_data = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
+    file_quality_data.cell_nnz = cell_nnz;
     file_quality_data.generate_maps_sets();
 
     Ok(file_quality_data)
@@ -983,15 +995,23 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
 
 /// Helper function that streams CSC data to CSR format on disk
 ///
+/// Transposes in phases of contiguous kept cells, each holding at most
+/// `max_nnz_in_memory` entries (8 bytes each) in one flat buffer, plus 8 bytes
+/// per kept cell. Every phase re-reads the kept genes; `None` is one phase and
+/// one read.
+///
 /// ### Params
 ///
 /// * `file_path` - Path to the h5ad file.
 /// * `bin_path` - Path to the binary file on disk to write to.
 /// * `quality` - Information on the which cells and genes to include after a
-///   first pass of the file.
+///   first pass of the file. Needs `cell_nnz`, which [parse_h5_csc_quality]
+///   fills.
 /// * `raw_slot` - Where to find the raw counts in the h5ad object, see
 ///   [RawDataSlot]
 /// * `target_size` - Target size for the library normalisation.
+/// * `max_nnz_in_memory` - Entries held per phase, `None` for a single phase.
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
@@ -1003,105 +1023,105 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     quality: &CellOnFileQuality,
     raw_slot: &RawDataSlot,
     target_size: f32,
+    max_nnz_in_memory: Option<usize>,
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
+    let n_cells = quality.cells_to_keep.len();
+    if quality.cell_nnz.len() != n_cells {
+        return Err(ScDataErrors::InvalidArgument(format!(
+            "CSC transpose needs per-cell nnz for {} kept cells, got {}",
+            n_cells,
+            quality.cell_nnz.len()
+        )));
+    }
+
     let file = AnnFile::open(file_path)?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
-    let n_cells = quality.cells_to_keep.len();
     let data_rd = file.array(raw_slot.get_data())?;
     let indices_rd = file.array(raw_slot.get_indices())?;
     let indptr_raw = file.indptr(raw_slot.get_indptr())?;
 
-    // accumulate cells in memory (necessary for CSR)
-    // (gene_index, raw_count) - gene index is u32 to support >65k features
-    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
     let cell_map = dense_index_map(&quality.cells_to_keep);
+    let phases = plan_phases(&quality.cell_nnz, max_nnz_in_memory);
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
 
     if verbose {
         println!(
-            "  Processing {} genes in chunks...",
-            total_genes.separate_with_underscores()
+            "  Transposing {} genes x {} cells in {} phase(s)...",
+            total_genes.separate_with_underscores(),
+            n_cells.separate_with_underscores(),
+            phases.len()
         );
     }
 
-    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(GENE_CHUNK_SIZE).enumerate() {
-        if verbose && chunk_idx % 10 == 0 {
-            let processed = chunk_idx * GENE_CHUNK_SIZE;
-            println!(
-                "   Processed {} / {} genes",
-                processed.min(total_genes).separate_with_underscores(),
-                total_genes.separate_with_underscores()
-            );
+    let mut writer = CellGeneSparseWriter::new(bin_path, true, n_cells, total_genes, target_size)?;
+    let mut nnz = Vec::with_capacity(n_cells);
+    let mut lib_size = Vec::with_capacity(n_cells);
+
+    for (phase_idx, &(c0, c1)) in phases.iter().enumerate() {
+        let mut offsets = Vec::with_capacity(c1 - c0 + 1);
+        offsets.push(0usize);
+        for &n in &quality.cell_nnz[c0..c1] {
+            offsets.push(offsets.last().unwrap() + n);
         }
+        let mut cursor = offsets[..c1 - c0].to_vec();
+        let mut entries = vec![(0u32, 0u32); offsets[c1 - c0]];
 
-        let start_pos = gene_chunk.iter().map(|&g| indptr_raw[g]).min().unwrap_or(0);
-        let end_pos = gene_chunk
-            .iter()
-            .map(|&g| indptr_raw[g + 1])
-            .max()
-            .unwrap_or(0);
+        // genes are visited in ascending new index, so every row comes out sorted
+        for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(GENE_CHUNK_SIZE).enumerate() {
+            let start_pos = indptr_raw[gene_chunk[0]];
+            let end_pos = indptr_raw[gene_chunk[gene_chunk.len() - 1] + 1];
+            if start_pos >= end_pos {
+                continue;
+            }
 
-        if start_pos >= end_pos {
-            continue;
-        }
+            let chunk_data: Vec<f32> = data_rd.read(start_pos..end_pos)?;
+            let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
 
-        let chunk_data: Vec<f32> = data_rd.read(start_pos..end_pos)?;
-        let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
-
-        for &gene_idx in gene_chunk {
-            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u32;
-            let gene_start = indptr_raw[gene_idx];
-            let gene_end = indptr_raw[gene_idx + 1];
-
-            for idx in gene_start..gene_end {
-                let local_idx = idx - start_pos;
-                let old_cell_idx = chunk_indices[local_idx] as usize;
-
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_cell_idx != INDEX_DROPPED {
-                    let raw_count = chunk_data[local_idx] as u32;
-                    cell_data[new_cell_idx as usize].push((new_gene_idx, raw_count));
+            for (k, &gene_idx) in gene_chunk.iter().enumerate() {
+                let new_gene_idx = (chunk_idx * GENE_CHUNK_SIZE + k) as u32;
+                for idx in indptr_raw[gene_idx]..indptr_raw[gene_idx + 1] {
+                    let local_idx = idx - start_pos;
+                    let new_cell = cell_map
+                        .get(chunk_indices[local_idx] as usize)
+                        .copied()
+                        .unwrap_or(INDEX_DROPPED) as usize;
+                    if (c0..c1).contains(&new_cell) {
+                        let slot = &mut cursor[new_cell - c0];
+                        entries[*slot] = (new_gene_idx, chunk_data[local_idx] as u32);
+                        *slot += 1;
+                    }
                 }
             }
         }
-    }
 
-    if verbose {
-        println!(
-            "   Processed {} / {} genes (complete)",
-            total_genes.separate_with_underscores(),
-            total_genes.separate_with_underscores()
-        );
-        println!(
-            "  Writing {} cells to disk...",
-            n_cells.separate_with_underscores()
-        );
-    }
+        if cursor[..] != offsets[1..] {
+            return Err(ScDataErrors::InvalidArgument(
+                "CSC transpose: entries per cell differ from the QC pass".to_string(),
+            ));
+        }
 
-    // now write cells with correct normalisation
-    let mut writer = CellGeneSparseWriter::new(
-        bin_path,
-        true,
-        n_cells,
-        quality.genes_to_keep.len(),
-        target_size,
-    )?;
-    let (nnz, lib_size) = write_cell_rows(&mut cell_data, 0, target_size, &mut writer)?;
+        let (phase_nnz, phase_lib) =
+            write_cell_rows_flat(&mut entries, &offsets, c0, target_size, &mut writer)?;
+        nnz.extend(phase_nnz);
+        lib_size.extend(phase_lib);
+
+        if verbose {
+            println!(
+                "   Phase {} / {} written: cells {} / {}",
+                phase_idx + 1,
+                phases.len(),
+                c1.separate_with_underscores(),
+                n_cells.separate_with_underscores()
+            );
+        }
+    }
 
     writer.finalise()?;
-
-    if verbose {
-        println!(
-            "   Written {} / {} cells (complete).",
-            n_cells.separate_with_underscores(),
-            n_cells.separate_with_underscores()
-        );
-    }
 
     Ok(CellQuality {
         cell_indices: Vec::new(),
@@ -2876,5 +2896,127 @@ mod tests {
         let res = check_h5ad_is_raw(&file, &RawDataSlot::DataX, None);
         let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());
+    }
+
+    const CSC_TEST_CELLS: usize = 300;
+    const CSC_TEST_GENES: usize = 40;
+
+    /// Seeded dense count matrix, cells x genes, with sparse and empty cells.
+    fn csc_test_dense() -> Vec<Vec<u32>> {
+        let mut state = 0x5EED_CAFEu64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u32
+        };
+        (0..CSC_TEST_CELLS)
+            .map(|cell| {
+                (0..CSC_TEST_GENES)
+                    .map(|gene| {
+                        if cell % 17 == 0 || gene % 13 == 0 || next() % 3 != 0 {
+                            0
+                        } else {
+                            next() % 50 + 1
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Write the dense matrix as a CSR or CSC `X` group.
+    fn write_sparse_h5ad(path: &Path, dense: &[Vec<u32>], csc: bool) {
+        let (outer, inner) = if csc {
+            (CSC_TEST_GENES, CSC_TEST_CELLS)
+        } else {
+            (CSC_TEST_CELLS, CSC_TEST_GENES)
+        };
+        let mut data = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0i32];
+        for o in 0..outer {
+            for i in 0..inner {
+                let v = if csc { dense[i][o] } else { dense[o][i] };
+                if v > 0 {
+                    data.push(v as f32);
+                    indices.push(i as i32);
+                }
+            }
+            indptr.push(data.len() as i32);
+        }
+        let file = File::create(path).unwrap();
+        let x = file.create_group("X").unwrap();
+        x.new_dataset_builder()
+            .with_data(&data)
+            .create("data")
+            .unwrap();
+        x.new_dataset_builder()
+            .with_data(&indices)
+            .create("indices")
+            .unwrap();
+        x.new_dataset_builder()
+            .with_data(&indptr)
+            .create("indptr")
+            .unwrap();
+    }
+
+    fn csc_test_qc() -> MinCellQuality {
+        MinCellQuality {
+            min_unique_genes: 2,
+            min_lib_size: 10,
+            min_cells: 3,
+            target_size: 1e4,
+        }
+    }
+
+    /// Stream the dense matrix through `stream_h5_counts` and return the
+    /// cell file's bytes.
+    fn ingest_bytes(name: &str, csc: bool, max_nnz: Option<usize>) -> Vec<u8> {
+        let dir = std::env::temp_dir();
+        let h5 = dir.join(format!("bixverse_h5ad_io_{name}.h5ad"));
+        let bin = dir.join(format!("bixverse_h5ad_io_{name}.bin"));
+        write_sparse_h5ad(&h5, &csc_test_dense(), csc);
+        let res = stream_h5_counts(
+            &h5,
+            &bin,
+            if csc { "csc" } else { "csr" },
+            CSC_TEST_CELLS,
+            CSC_TEST_GENES,
+            csc_test_qc(),
+            RawDataSlot::DataX,
+            max_nnz,
+            false,
+        );
+        let bytes = std::fs::read(&bin);
+        let _ = std::fs::remove_file(&h5);
+        let _ = std::fs::remove_file(&bin);
+        res.unwrap();
+        bytes.unwrap()
+    }
+
+    #[test]
+    fn test_csc_transpose_phases_byte_identical() {
+        let budget = 300;
+        let h5 = std::env::temp_dir().join("bixverse_h5ad_io_csc_plan.h5ad");
+        write_sparse_h5ad(&h5, &csc_test_dense(), true);
+        let quality = parse_h5_csc_quality(
+            &h5,
+            (CSC_TEST_CELLS, CSC_TEST_GENES),
+            &csc_test_qc(),
+            &RawDataSlot::DataX,
+            false,
+        );
+        let _ = std::fs::remove_file(&h5);
+        let quality = quality.unwrap();
+        assert!(quality.cells_to_keep.len() < CSC_TEST_CELLS);
+        assert!(quality.genes_to_keep.len() < CSC_TEST_GENES);
+        assert!(plan_phases(&quality.cell_nnz, Some(budget)).len() >= 3);
+
+        let single = ingest_bytes("csc_single", true, None);
+        let phased = ingest_bytes("csc_phased", true, Some(budget));
+        let csr = ingest_bytes("csr_ref", false, None);
+        assert_eq!(single, phased);
+        assert_eq!(single, csr);
     }
 }

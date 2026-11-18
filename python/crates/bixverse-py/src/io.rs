@@ -399,6 +399,8 @@ pub fn csr_to_file<'py>(
 /// * `streaming` - Stream the counts instead of materialising the filtered
 ///   matrix first
 /// * `verbose` - Controls verbosity
+/// * `max_mem_gb` - Memory for the streamed CSC transpose buffers in GB,
+///   `None` for one phase
 ///
 /// ### Returns
 ///
@@ -406,7 +408,7 @@ pub fn csr_to_file<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cs_type, no_cells, no_genes, qc_params, slot = "X",
-    streaming = true, verbose = 1
+    streaming = true, verbose = 1, max_mem_gb = None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn h5ad_to_file<'py>(
@@ -420,27 +422,37 @@ pub fn h5ad_to_file<'py>(
     slot: &str,
     streaming: bool,
     verbose: usize,
+    max_mem_gb: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let slot = raw_slot(slot)?;
     let cs_type = cs_type.to_string();
     let (n_cells, n_genes, cell_qc) = py
         .detach(|| {
-            let run = if streaming {
-                stream_h5_counts
+            if streaming {
+                stream_h5_counts(
+                    h5_path.as_path(),
+                    f_path_cells.as_path(),
+                    &cs_type,
+                    no_cells,
+                    no_genes,
+                    qc,
+                    slot,
+                    max_nnz(max_mem_gb),
+                    verbose > 0,
+                )
             } else {
-                write_h5_counts
-            };
-            run(
-                h5_path.as_path(),
-                f_path_cells.as_path(),
-                &cs_type,
-                no_cells,
-                no_genes,
-                qc,
-                slot,
-                verbose > 0,
-            )
+                write_h5_counts(
+                    h5_path.as_path(),
+                    f_path_cells.as_path(),
+                    &cs_type,
+                    no_cells,
+                    no_genes,
+                    qc,
+                    slot,
+                    verbose > 0,
+                )
+            }
         })
         .map_err(BvErr::from)?;
     qc_dict(py, n_cells, n_genes, &cell_qc)

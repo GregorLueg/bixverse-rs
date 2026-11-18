@@ -87,6 +87,7 @@ def h5ad_to_file(
     slot: str = ...,
     streaming: bool = ...,
     verbose: int = ...,
+    max_mem_gb: float | None = ...,
 ) -> dict[str, Any]: ...
 def norm_h5ad_to_file(
     f_path_cells: Path,

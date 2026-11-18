@@ -101,7 +101,7 @@ fn count_gene_nnz(
     Ok(counts)
 }
 
-/// Cut the genes into contiguous phases that each fit the budget.
+/// Cut the genes (or cells) into contiguous phases that each fit the budget.
 ///
 /// A gene larger than the budget on its own gets a phase to itself.
 ///
@@ -113,7 +113,7 @@ fn count_gene_nnz(
 /// ### Returns
 ///
 /// Half-open gene ranges covering `0..gene_nnz.len()`.
-fn plan_phases(gene_nnz: &[usize], max_nnz: Option<usize>) -> Vec<(usize, usize)> {
+pub(crate) fn plan_phases(gene_nnz: &[usize], max_nnz: Option<usize>) -> Vec<(usize, usize)> {
     let n_genes = gene_nnz.len();
     let Some(max_nnz) = max_nnz else {
         return vec![(0, n_genes)];
