@@ -23,7 +23,7 @@ use statrs::distribution::{DiscreteCDF, Poisson};
 
 use crate::fragments::{fold_batch, plan_batches};
 use crate::prelude::*;
-use crate::regions::RegionIndex;
+use crate::regions::{ChromRegions, RegionIndex};
 
 /// Memory per compressed fragment file byte in flight: 12 bytes per fragment
 /// kept and roughly 10 compressed bytes per fragment line, plus vector
@@ -53,10 +53,11 @@ pub struct AmuletParams {
     /// chromosome at a time. Without a tabix index the whole file is read at
     /// once.
     pub max_mem_gb: Option<f64>,
-    /// Count a cell's trailing loci on a chromosome, those no later fragment
-    /// of the cell starts beyond. The reference implementation does not (it
-    /// reports a locus once a later fragment passes it), so `false`
-    /// reproduces its counts; the paper does not single them out.
+    /// Count a cell's trailing loci on the last chromosome used, those no
+    /// later fragment of the cell starts beyond. The reference
+    /// implementation loses them at the end of its input, so `false`
+    /// reproduces its counts when the file has a tabix index (which gives the
+    /// chromosome order); without one they are always counted.
     pub count_trailing_loci: bool,
 }
 
@@ -263,21 +264,30 @@ fn cell_overlaps(frags: &[(u32, u32)], max_overlap: u32, ends: &mut Vec<u32>) ->
 
 /// The overlap loci of every cell on one chromosome.
 ///
+/// Each locus is then checked against the restriction regions: the cell's
+/// fragments overlapping the locus that touch a region (the region's end
+/// counts as inside) are set aside, and the locus survives when the rest
+/// still overlap more than `max_overlap` deep. A region therefore removes a
+/// locus through its reads, not its coordinates; this is the reference
+/// implementation's behaviour, the paper only says sites were filtered.
+///
 /// ### Params
 ///
 /// * `frags` - The chromosome's valid fragments as `(cell, start, end)`
 /// * `max_overlap` - Depth a diploid cell can explain
-/// * `count_trailing` - Keep loci that no later fragment of the cell starts
+/// * `drop_trailing` - Drop loci that no later fragment of the cell starts
 ///   at or beyond
+/// * `restrict` - The chromosome's restriction regions
 ///
 /// ### Returns
 ///
-/// The loci as `(start, end, cell)`, any order.
+/// The loci as `(start, end, cell, survives the restriction)`, any order.
 fn chromosome_overlaps(
     mut frags: Vec<(u32, u32, u32)>,
     max_overlap: u32,
-    count_trailing: bool,
-) -> Vec<CellSite> {
+    drop_trailing: bool,
+    restrict: Option<&ChromRegions>,
+) -> Vec<(u32, u32, u32, bool)> {
     frags.par_sort_unstable();
     let mut bounds = vec![0];
     for i in 1..frags.len() {
@@ -286,6 +296,13 @@ fn chromosome_overlaps(
         }
     }
     bounds.push(frags.len());
+    let restricted = |s: u32, e: u32| {
+        let mut hit = false;
+        if let Some(r) = restrict {
+            r.for_each_overlap(s.saturating_sub(1), e, |_| hit = true);
+        }
+        hit
+    };
     bounds
         .par_windows(2)
         .flat_map_iter(|w| {
@@ -293,10 +310,22 @@ fn chromosome_overlaps(
             let id = cell.first().map_or(0, |f| f.0);
             let se: Vec<(u32, u32)> = cell.iter().map(|f| (f.1, f.2)).collect();
             let last_start = se.last().map_or(0, |f| f.0);
-            cell_overlaps(&se, max_overlap, &mut Vec::new())
-                .into_iter()
-                .filter(move |&(_, e)| count_trailing || last_start >= e)
-                .map(move |(s, e)| (s, e, id))
+            let loci = cell_overlaps(&se, max_overlap, &mut Vec::new());
+            loci.into_iter()
+                .filter(move |&(_, e)| !drop_trailing || last_start >= e)
+                .map(|(s, e)| {
+                    // fragments starting before the locus end, ending after its start
+                    let hi = se.partition_point(|f| f.0 < e);
+                    let rest: Vec<(u32, u32)> = se[..hi]
+                        .iter()
+                        .filter(|f| f.1 > s && !restricted(f.0, f.1))
+                        .copied()
+                        .collect();
+                    let keep = rest.len() > max_overlap as usize
+                        && !cell_overlaps(&rest, max_overlap, &mut Vec::new()).is_empty();
+                    (s, e, id, keep)
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -385,9 +414,16 @@ pub fn amulet(
     let n_cells = barcodes.len();
     let index = BarcodeIndex::new(barcodes)?;
     let restrict = RegionIndex::new(restrict);
-    let (batches, _) = plan_batches(path, params.max_mem_gb, MEM_PER_COMPRESSED_BYTE, |c| {
+    let (batches, order) = plan_batches(path, params.max_mem_gb, MEM_PER_COMPRESSED_BYTE, |c| {
         params.uses(c)
     })?;
+    // the reference flushes a cell's pending loci when the chromosome
+    // changes but not at the end of the file, so trailing loci are lost on
+    // the last chromosome used; the file order is only known with an index
+    let last_used = match batches.first() {
+        Some(Some(_)) => order.iter().rev().find(|c| params.uses(c)).cloned(),
+        _ => None,
+    };
 
     let mut n_fragments = vec![0u32; n_cells];
     let mut n_overlaps = vec![0u32; n_cells];
@@ -417,21 +453,22 @@ pub fn amulet(
             *a += b;
         }
         for (chrom, frags) in acc.chroms.into_iter().zip(acc.frags) {
-            let loci = chromosome_overlaps(frags, params.max_overlap, params.count_trailing_loci);
-            for &(_, _, cell) in &loci {
+            let drop_trailing =
+                !params.count_trailing_loci && last_used.as_deref() == Some(chrom.as_str());
+            let loci = chromosome_overlaps(
+                frags,
+                params.max_overlap,
+                drop_trailing,
+                restrict.chrom(&chrom),
+            );
+            for &(_, _, cell, _) in &loci {
                 n_overlaps[cell as usize] += 1;
             }
-            let kept: Vec<CellSite> = match restrict.chrom(&chrom) {
-                None => loci,
-                Some(r) => loci
-                    .into_iter()
-                    .filter(|&(s, e, _)| {
-                        let mut hit = false;
-                        r.for_each_overlap(s, e, |_| hit = true);
-                        !hit
-                    })
-                    .collect(),
-            };
+            let kept: Vec<CellSite> = loci
+                .into_iter()
+                .filter(|l| l.3)
+                .map(|(s, e, c, _)| (s, e, c))
+                .collect();
             sites.extend(merge_sites(kept));
         }
     }
