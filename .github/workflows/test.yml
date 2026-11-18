@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   test:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@feat-faster-metacrate-cicd
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@v1
     with:
       # No R on this lane: only bixverse-r links libR.
       cpu-runs: |
