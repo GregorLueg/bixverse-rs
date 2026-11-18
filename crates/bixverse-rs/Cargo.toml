@@ -211,6 +211,10 @@ name = "harmony_bench"
 harness = false
 required-features = ["single-cell"]
 
+[[bench]]
+name = "leiden_bench"
+harness = false
+
 #################
 # Documentation #
 #################
