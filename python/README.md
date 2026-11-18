@@ -142,6 +142,23 @@ latent = bvnn.scvi_latent(fit, reader, cells, batch)
 
 The docs have the [validation against scvi-tools](https://gregorlueg.github.io/bixverse-rs/scvi/).
 
+## Agent skill
+
+The wheel ships an Agent Skill that teaches coding
+agents (Claude Code, Codex) the bixverse API. Install it from the project's
+environment, so it matches the bixverse version the project uses:
+
+```bash
+uv run bixverse skill install --project                # ./.claude/skills
+uv run bixverse skill install --project --agent codex  # ./.agents/skills
+uv run bixverse skill status                           # installs and versions
+```
+
+Drop `--project` to install for your user instead (`~/.claude/skills`,
+`~/.agents/skills`). From Python: `bv.install_agent_skill()`. Each install is
+stamped with the package version, and `import bixverse` warns when an installed
+copy is outdated; `--force` updates it.
+
 ## Vignettes
 
 22 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
