@@ -22,6 +22,9 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   assume RNA counts refuse it (residuals, doublets, Bonsai, gene set
   proportions) or warn (AUCell, ScType, NMF, Hotspot gene correlations,
   SCENIC, CellPhoneDB).
+- `bv.atac.project_lsi` (Seurat's `lsiproject`), `bv.atac.run_rlsi` (rLSI
+  integration) and `bv.annotate.transfer_labels_seurat` (CCA anchors and
+  `TransferData`, RNA to RNA or RNA to gene activity).
 
 **Changes**
 
