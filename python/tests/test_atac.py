@@ -129,3 +129,39 @@ def test_tiles_and_cutoffs(exp):
         atac.add_atac_fragments(exp, FIX / "fragments.tsv.gz")
     with pytest.raises(ValueError, match="min_cutoff"):
         atac.find_top_features(exp, min_cutoff="x5")
+
+
+def test_gene_activity_matches_signac(exp):
+    ga = atac.gene_activity(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
+    assert ga.feature_kind == "gene_activity"
+    assert exp.feature_kind == "gene"
+    assert ga.cell_ids().tolist() == exp.cell_ids().tolist()
+
+    names = _tsv("signac/gene_activity/features.tsv.gz")["name"].to_list()
+    ref = _tsv("signac/gene_activity/matrix.tsv.gz")
+    want = {
+        (names[f], c): v
+        for f, c, v in ref.select("feature_idx", "cell_idx", "value").iter_rows()
+    }
+    gene_ids = ga.var()["gene_id"].to_list()
+    assert sorted(gene_ids) == sorted(names)
+    m = bv.get_counts(ga, layer="raw").scipy_csr().tocoo()
+    got = {
+        (gene_ids[g], int(c)): int(v)
+        for c, g, v in zip(m.row, m.col, m.data, strict=True)
+    }
+    assert got == want
+    np.testing.assert_array_equal(
+        ga.obs()["lib_size"].to_numpy(), np.asarray(m.tocsr().sum(axis=1)).ravel()
+    )
+
+
+def test_rna_methods_refuse_or_warn_on_gene_activity(exp):
+    from bixverse._core.single_cells import check_rna_counts
+
+    ga = atac.gene_activity(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
+    with pytest.raises(ValueError, match="needs RNA counts"):
+        bv.doublets.scrublet(ga)
+    with pytest.warns(UserWarning, match="holds gene activity"):
+        check_rna_counts(ga, "aucell", refuse=False)
+    check_rna_counts(exp, "scrublet", refuse=True)

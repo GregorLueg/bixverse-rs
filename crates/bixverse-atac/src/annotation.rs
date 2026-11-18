@@ -250,11 +250,11 @@ fn make_unique(names: &[String]) -> Vec<String> {
 ///
 /// ### Returns
 ///
-/// `(regions, gene names)`, parallel, names made unique.
+/// `(regions, gene names, gene ids)`, parallel, names made unique.
 pub fn gene_activity_regions(
     genes: &[GeneRecord],
     params: &GeneActivityParams,
-) -> (Vec<FeatureInterval>, Vec<String>) {
+) -> (Vec<FeatureInterval>, Vec<String>, Vec<String>) {
     let kept: Vec<&GeneRecord> = genes
         .iter()
         .filter(|g| keep_biotype(g, &params.biotypes) && g.end - g.start < params.max_width)
@@ -278,7 +278,8 @@ pub fn gene_activity_regions(
         })
         .collect();
     let names: Vec<String> = kept.iter().map(|g| g.gene_name.clone()).collect();
-    (regions, make_unique(&names))
+    let ids = kept.iter().map(|g| g.gene_id.clone()).collect();
+    (regions, make_unique(&names), ids)
 }
 
 ///////////
@@ -338,7 +339,8 @@ mod tests {
             gene("D", 500, 600_000, 1, "protein_coding"),
             gene("A", 100, 200, 1, "protein_coding"),
         ];
-        let (regions, names) = gene_activity_regions(&genes, &GeneActivityParams::default());
+        let (regions, names, ids) = gene_activity_regions(&genes, &GeneActivityParams::default());
+        assert_eq!(ids, vec!["ID_A", "ID_B", "ID_A"]);
         let got: Vec<(u32, u32)> = regions.iter().map(|r| (r.start, r.end)).collect();
         assert_eq!(got, vec![(3000, 6000), (5000, 8000), (0, 200)]);
         assert_eq!(names, vec!["A", "B", "A.1"]);

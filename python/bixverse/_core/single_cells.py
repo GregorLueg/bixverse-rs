@@ -87,6 +87,12 @@ class ScBase:
         """The gene-major store."""
         return self.dir / GENES_BIN
 
+    @property
+    def feature_kind(self) -> str:
+        """What the store's features are: `"gene"`, `"gene_activity"`,
+        `"peak"`, `"tile"`, `"snp"` or `"protein"`."""
+        return _bixverse.store_feature_kind(self.cells_path)
+
     ########
     # Dims #
     ########
@@ -200,6 +206,32 @@ class ScBase:
     def check_state(self, artefacts: Sequence[str]) -> bool | str:
         """`True` if the artefacts are fresh, else what is stale and why."""
         return check_state(self._artefacts(), self.cells_hash(), artefacts)
+
+
+def check_rna_counts(sc: object, method: str, *, refuse: bool) -> None:
+    """Stop or warn when a method that assumes RNA counts gets other features.
+
+    Peaks, tiles and the like are always refused. Gene activity is refused
+    when `refuse`, else it warns. Meta cells carry no feature kind and pass.
+
+    Raises:
+        ValueError: If the store does not hold RNA counts and the method
+            cannot take it.
+    """
+    if not isinstance(sc, ScBase):
+        return
+    kind = sc.feature_kind
+    if kind == "gene":
+        return
+    if kind == "gene_activity" and not refuse:
+        warnings.warn(
+            f"{method} assumes RNA counts, and this store holds gene activity: "
+            "long genes score high in every cell and neighbouring genes share "
+            "fragments. Read the result with that in mind.",
+            stacklevel=3,
+        )
+        return
+    raise ValueError(f"{method} needs RNA counts; this store holds {kind} features.")
 
 
 ###############

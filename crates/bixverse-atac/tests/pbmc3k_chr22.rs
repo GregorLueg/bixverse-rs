@@ -439,7 +439,7 @@ fn test_lsi_matches_signac_run_svd() {
 #[test]
 fn test_gene_activity_regions_match_signac() {
     let genes = read_gtf_genes(&fixtures().join("genes.gtf.gz")).unwrap();
-    let (regions, names) = gene_activity_regions(&genes, &GeneActivityParams::default());
+    let (regions, names, _) = gene_activity_regions(&genes, &GeneActivityParams::default());
     let mut ours: Vec<(String, String, u32, u32)> = regions
         .iter()
         .zip(&names)

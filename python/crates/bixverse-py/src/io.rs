@@ -946,6 +946,22 @@ pub fn file_version(path: PathBuf) -> PyResult<u32> {
     Ok(peek_file_version(&path).map_err(BvErr::from)?)
 }
 
+/// Read what the features of a store are from its header
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary (v4 or v5)
+///
+/// ### Returns
+///
+/// `"gene"`, `"peak"`, `"tile"`, `"snp"`, `"protein"` or `"gene_activity"`;
+/// a v4 file is `"gene"`.
+#[pyfunction]
+pub fn store_feature_kind(path: PathBuf) -> PyResult<&'static str> {
+    let reader = ParallelSparseReader::new(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(reader.feature_kind().name())
+}
+
 /// Convert both binaries (v3 or v4) to the v5 format in place
 ///
 /// ### Params

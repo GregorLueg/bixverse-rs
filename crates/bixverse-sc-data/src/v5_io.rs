@@ -98,6 +98,9 @@ pub enum FeatureKind {
     Snp,
     /// Antibody-derived tags (ADT).
     Protein,
+    /// Gene activity: fragments over gene body plus promoter (ATAC). Indexed
+    /// by gene, but not RNA counts.
+    GeneActivity,
 }
 
 impl FeatureKind {
@@ -113,6 +116,23 @@ impl FeatureKind {
             FeatureKind::Tile => 2,
             FeatureKind::Snp => 3,
             FeatureKind::Protein => 4,
+            FeatureKind::GeneActivity => 5,
+        }
+    }
+
+    /// The name [`parse_feature_kind`] reads.
+    ///
+    /// ### Returns
+    ///
+    /// The kind as a string.
+    pub fn name(self) -> &'static str {
+        match self {
+            FeatureKind::Gene => "gene",
+            FeatureKind::Peak => "peak",
+            FeatureKind::Tile => "tile",
+            FeatureKind::Snp => "snp",
+            FeatureKind::Protein => "protein",
+            FeatureKind::GeneActivity => "gene_activity",
         }
     }
 
@@ -132,6 +152,7 @@ impl FeatureKind {
             2 => Ok(FeatureKind::Tile),
             3 => Ok(FeatureKind::Snp),
             4 => Ok(FeatureKind::Protein),
+            5 => Ok(FeatureKind::GeneActivity),
             other => Err(ScDataErrors::V5HeaderInvalid(format!(
                 "unknown feature kind {other}"
             ))),
@@ -143,7 +164,8 @@ impl FeatureKind {
 ///
 /// ### Params
 ///
-/// * `s` - One of `"gene"`, `"peak"`, `"tile"`, `"snp"` or `"protein"`
+/// * `s` - One of `"gene"`, `"peak"`, `"tile"`, `"snp"`, `"protein"` or
+///   `"gene_activity"`
 ///
 /// ### Returns
 ///
@@ -155,6 +177,7 @@ pub fn parse_feature_kind(s: &str) -> Option<FeatureKind> {
         "tile" => Some(FeatureKind::Tile),
         "snp" => Some(FeatureKind::Snp),
         "protein" => Some(FeatureKind::Protein),
+        "gene_activity" => Some(FeatureKind::GeneActivity),
         _ => None,
     }
 }
@@ -902,4 +925,23 @@ pub fn check_same_cells(readers: &[&ParallelSparseReader]) -> Result<(), ScDataE
         ));
     }
     Ok(())
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_feature_kind_byte_and_name_round_trip() {
+        for b in 0..=5u8 {
+            let k = FeatureKind::from_u8(b).unwrap();
+            assert_eq!(k.to_u8(), b);
+            assert_eq!(parse_feature_kind(k.name()), Some(k));
+        }
+        assert!(FeatureKind::from_u8(6).is_err());
+    }
 }

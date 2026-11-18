@@ -19,7 +19,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.multimodal import AtacInfo, SingleCellsMultiModal
-from bixverse._core.single_cells import CELLS_BIN, GENES_BIN
+from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import ScCache
 from bixverse._validate import Verbose
 
@@ -242,6 +242,109 @@ def add_atac_fragments(
         res["nnz"],
         kind,
     )
+
+
+@beartype
+def gene_activity(
+    sc: SingleCells,
+    fragments: Path | str,
+    gtf: Path | str,
+    *,
+    dir_out: Path | str | None = None,
+    upstream: int = 2000,
+    downstream: int = 0,
+    max_width: int = 500_000,
+    biotypes: Sequence[str] = ("protein_coding",),
+    target_size: float | None = None,
+    overwrite: bool = False,
+    max_mem_gb: float | None = None,
+    verbose: Verbose = 1,
+) -> SingleCells:
+    """Count fragments over gene body plus promoter into a gene activity store.
+
+    Signac's `GeneActivity`: per gene, the longest span of its biotype, under
+    `max_width`, extended `upstream` of the TSS; each overlapping fragment
+    counts once. The result is a `SingleCells` over every cell of `sc`, in its
+    order and with its obs and cell filter, so it serves as the query of
+    `bv.annotate.transfer_labels_seurat` and of the RNA tools. Methods that
+    assume RNA counts refuse it or warn.
+
+    Args:
+        sc: The experiment whose cell IDs are the fragment barcodes.
+        fragments: The fragment file (BGZF, gzip or plain).
+        gtf: Gene annotation (GENCODE or Ensembl GTF).
+        dir_out: Output directory. `None` uses `gene_activity` inside the
+            experiment directory.
+        upstream: Bases added upstream of the TSS.
+        downstream: Bases added downstream of the gene end.
+        max_width: Genes this long or longer are dropped.
+        biotypes: Biotypes to keep, empty for all.
+        target_size: Target of the log-CPM norm. `None` uses the median RNA
+            `lib_size` of the kept cells, as the Signac vignettes do.
+        overwrite: Replace an existing store at `dir_out`.
+        max_mem_gb: Memory budget of the gene-major conversion.
+        verbose: `0` silent, `1` normal.
+
+    Returns:
+        The gene activity experiment. var holds `gene_id` (the gene name, made
+        unique), `gtf_gene_id`, `chrom`, `start`, `end`; obs's `lib_size` and
+        `nnz` are the gene activity's.
+
+    Raises:
+        FileExistsError: If a store exists at `dir_out` and `overwrite` is
+            false.
+        ValueError: If `target_size` is `None` and obs has no `lib_size`.
+    """
+    out = sc.dir / "gene_activity" if dir_out is None else Path(dir_out).expanduser()
+    cells, genes = out / CELLS_BIN, out / GENES_BIN
+    if genes.exists() and not overwrite:
+        raise FileExistsError(
+            f"A store already exists at '{out}'. Pass overwrite=True to replace it."
+        )
+    obs = sc.obs()
+    if target_size is None:
+        if "lib_size" not in obs.columns:
+            raise ValueError("obs has no lib_size; pass target_size.")
+        kept = obs.filter(pl.col("cell_idx").is_in(sc.cells_to_keep))
+        target_size = float(np.median(kept["lib_size"].to_numpy()))
+    out.mkdir(parents=True, exist_ok=True)
+
+    r = _bixverse.atac_gene_activity_regions(
+        Path(gtf), upstream, downstream, max_width, list(biotypes)
+    )
+    res = _bixverse.atac_fragments_to_store(
+        Path(fragments),
+        cells,
+        genes,
+        [str(b) for b in sc.cell_ids()],
+        list(r["chrom"]),
+        [int(x) for x in r["start"]],
+        [int(x) for x in r["end"]],
+        "fragment",
+        "gene_activity",
+        target_size,
+        max_mem_gb,
+        verbose,
+    )
+    var = pl.DataFrame(
+        {
+            "gene_id": pl.Series(list(r["name"]), dtype=pl.String),
+            "gtf_gene_id": pl.Series(list(r["gene_id"]), dtype=pl.String),
+            "chrom": pl.Series(list(r["chrom"]), dtype=pl.String),
+            "start": pl.Series(np.asarray(r["start"], dtype=np.int64)),
+            "end": pl.Series(np.asarray(r["end"], dtype=np.int64)),
+            "no_cells_exp": pl.Series(_bixverse.gene_nnz(genes).astype(np.int32)),
+        }
+    )
+    obs = obs.sort("cell_idx").drop("cell_idx")
+    obs = obs.with_columns(
+        lib_size=pl.Series(np.asarray(res["lib_size"], dtype=np.float64)),
+        nnz=pl.Series(np.asarray(res["nnz"], dtype=np.float64)),
+    )
+    with db.connect(db.db_path(out)) as con:
+        db.populate_from_frame(con, "obs", obs)
+        db.populate_from_frame(con, "var", var)
+    return SingleCells(out)
 
 
 ########

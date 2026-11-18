@@ -321,7 +321,7 @@ pub fn atac_tss_positions<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of `name`, `chrom`, `start`, `end`.
+/// Dict of `name` (unique), `gene_id` (as in the GTF), `chrom`, `start`, `end`.
 #[pyfunction]
 pub fn atac_gene_activity_regions<'py>(
     py: Python<'py>,
@@ -338,9 +338,10 @@ pub fn atac_gene_activity_regions<'py>(
         max_width,
         biotypes,
     };
-    let (regions, names) = gene_activity_regions(&genes, &params);
+    let (regions, names, ids) = gene_activity_regions(&genes, &params);
     let out = regions_dict(py, &regions)?;
     out.set_item("name", names)?;
+    out.set_item("gene_id", ids)?;
     Ok(out)
 }
 

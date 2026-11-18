@@ -33,7 +33,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 from bixverse.params import BonsaiParams, to_rust
 
@@ -254,6 +254,7 @@ def bonsai(
         >>> bv.pp.find_hvg(sc, hvg_no=500)
         >>> tree = bv.trees.bonsai(sc, hvg=sc.map.hvg)
     """
+    check_rna_counts(sc, "bonsai", refuse=True)
     return _bonsai(
         sc, hvg=hvg, bonsai_params=bonsai_params, verbose=verbose, ext=_bixverse
     )

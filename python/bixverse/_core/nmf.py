@@ -30,6 +30,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
+from bixverse._core.single_cells import check_rna_counts
 from bixverse._core.subset import ScOrMc
 from bixverse._validate import Verbose
 from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
@@ -405,6 +406,7 @@ def nmf(
         >>> res = bv.nmf.nmf(sc, k=5, preprocessing="sd")
         >>> sc.add_obs(bv.nmf.get_data(res))
     """
+    check_rna_counts(sc, "nmf", refuse=False)
     return _nmf(
         sc,
         k,
@@ -514,6 +516,7 @@ def stabilised_nmf(
         >>> stab = bv.nmf.stabilised_nmf(sc, k=5, n_runs=10)
         >>> best = bv.nmf.get_best_run(stab)
     """
+    check_rna_counts(sc, "stabilised_nmf", refuse=False)
     return _stabilised_nmf(
         sc,
         k,
@@ -679,6 +682,7 @@ def consensus_nmf(
         >>> sc.add_obs(bv.nmf.get_data(res))
         >>> stability = bv.nmf.get_stability(res)
     """
+    check_rna_counts(sc, "consensus_nmf", refuse=False)
     return _consensus_nmf(
         sc,
         k,
@@ -824,6 +828,7 @@ def nmf_k_sweep(
         >>> sweep = bv.nmf.nmf_k_sweep(sc, k_range=range(3, 8), n_runs=10)
         >>> sweep.frame
     """
+    check_rna_counts(sc, "nmf_k_sweep", refuse=False)
     return _nmf_k_sweep(
         sc,
         k_range,

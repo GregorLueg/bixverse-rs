@@ -31,7 +31,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 
 ###########
@@ -660,6 +660,7 @@ def gene_set_proportions(
         >>> bv.qc.gene_set_proportions(sc, {"mito": mito_genes})
         >>> bv.qc.gene_set_proportions(sc, {"mito": mito_genes}, streaming=True)
     """
+    check_rna_counts(sc, "gene_set_proportions", refuse=True)
     if not gene_set_list:
         raise ValueError("gene_set_list must not be empty")
     names = list(gene_set_list)

@@ -48,7 +48,7 @@ from bixverse._core.integrate import (
 )
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 from bixverse.params import (
     HarmonyParams,
@@ -370,6 +370,7 @@ def calc_sc_type_scores(
     Examples:
         >>> scores = bv.annotate.calc_sc_type_scores(sc, markers, sensitivity=False)
     """
+    check_rna_counts(sc, "calc_sc_type_scores", refuse=False)
     check_range("weight_floor", weight_floor, 0, 1, False, False)
     if not cell_marker_list:
         raise ValueError("cell_marker_list holds no cell types.")

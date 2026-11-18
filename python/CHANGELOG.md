@@ -18,6 +18,10 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 
 - `bv.atac`: an ATAC modality on `SingleCellsMultiModal` (10x peaks or
   fragments, fragment QC, TF-IDF, top features, LSI).
+- `bv.atac.gene_activity` writes a gene activity `SingleCells`. Methods that
+  assume RNA counts refuse it (residuals, doublets, Bonsai, gene set
+  proportions) or warn (AUCell, ScType, NMF, Hotspot gene correlations,
+  SCENIC, CellPhoneDB).
 
 **Changes**
 
@@ -25,6 +29,8 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   which changes results at the same seed.
 - rPCA and CCA integration cap each cell at `k_weight` anchor pairs, as
   Seurat does. Results differ at the same seed.
+- The normalised layer is read at f32, also from v4 stores, which gave f16
+  before. Values differ by up to about 2e-3.
 
 ## 0.3.3
 

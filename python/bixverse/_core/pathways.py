@@ -35,6 +35,7 @@ from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
+from bixverse._core.single_cells import check_rna_counts
 from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse._validate import Verbose
 from bixverse.params import (
@@ -381,6 +382,7 @@ def aucell(
         >>> res = bv.pathways.aucell(sc, gene_sets)
         >>> sc.add_obs(bv.pathways.get_data(res))
     """
+    check_rna_counts(sc, "aucell", refuse=False)
     _check_named(gs_list)
     params = to_rust(aucell_params or AucellParams())
     sets = [_gene_idx(sc, list(g)) for g in gs_list.values()]
@@ -864,6 +866,7 @@ def lm_activity(
         >>> res = bv.pathways.lm_activity(sc, net)
         >>> sc.add_obs(bv.pathways.get_data(res))
     """
+    check_rna_counts(sc, "lm_activity", refuse=False)
     params = lm_params or LmActivityParams()
     gs = prep_lm_network(net, sc.gene_ids().tolist(), params.tmin)
     if gs is None:
@@ -1094,6 +1097,7 @@ def hotspot_gene_cor(
     Examples:
         >>> hs = bv.pathways.hotspot_gene_cor(sc, genes_to_take=top)
     """
+    check_rna_counts(sc, "hotspot_gene_cor", refuse=False)
     params = to_rust(hotspot_params or HotspotParams())
     embd, cells, cell_ids, genes, gene_ids, knn_idx, knn_dist = _hotspot_inputs(
         sc, embd_to_use, use_knn, no_embd_to_use, cells_to_take, genes_to_take

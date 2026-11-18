@@ -33,6 +33,7 @@ from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args, csr_subset
 from bixverse._core.pathways import Hotspot, ScMatrixRes, _gene_idx, _streaming
 from bixverse._core.repr import compact_repr
+from bixverse._core.single_cells import check_rna_counts
 from bixverse._core.subset import ScOrMc
 from bixverse._validate import Verbose
 from bixverse.params import (
@@ -293,6 +294,7 @@ def scenic_grn(
     Examples:
         >>> grn = bv.pathways.scenic_grn(sc, tf_ids, genes_to_take=keep)
     """
+    check_rna_counts(sc, "scenic_grn", refuse=False)
     return _scenic_grn(
         sc,
         tf_ids,

@@ -24,6 +24,13 @@ a BED of peaks or fixed-width tiles; its default `mode="insertion"` counts
 each Tn5 insertion as Cell Ranger does, and reproduces the h5 matrix on
 Cell Ranger's peaks.
 
+**Gene activity.** `gene_activity` counts fragments over gene body plus
+promoter (Signac's `GeneActivity`) into its own `SingleCells`, the query side
+of an RNA to ATAC label transfer. It is not RNA: methods that assume an mRNA
+count model (residuals, doublets, Bonsai, gene set proportions) refuse it, and
+those biased by gene length or by fragments shared between neighbouring genes
+(AUCell, ScType, NMF, Hotspot gene correlations, SCENIC, CellPhoneDB) warn.
+
 **Gotchas.** `run_tfidf` computes the IDF over the kept cells: run it again,
 then the LSI, after changing them. `calculate_lsi` drops component 1 by
 default, as the Signac vignettes do; `get_lsi_depth_cor` shows whether that
@@ -36,6 +43,7 @@ from bixverse._core.atac import (
     atac_fragment_qc,
     calculate_lsi,
     find_top_features,
+    gene_activity,
     get_lsi_depth_cor,
     run_tfidf,
 )
@@ -48,6 +56,7 @@ __all__ = [
     "atac_fragment_qc",
     "calculate_lsi",
     "find_top_features",
+    "gene_activity",
     "get_lsi_depth_cor",
     "run_tfidf",
 ]

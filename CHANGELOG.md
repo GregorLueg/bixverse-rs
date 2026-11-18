@@ -20,6 +20,10 @@
   features, LSI, LSI projection and rLSI integration.
 - Seurat label transfer (`find_transfer_anchors`, `transfer_labels`) in
   `sc_annotation::seurat_transfer`, for RNA or gene activity queries.
+- Store format v5 (the writers' default): feature and norm kinds, raw layers,
+  TF-IDF, cell-ID hash and genome interval index in the header. v4 still
+  reads; `upgrade_store_to_v5` converts. `FeatureKind::GeneActivity` marks a
+  gene activity store.
 
 ### Changes
 
@@ -28,6 +32,8 @@
 - MLX Harmony runs its initial k-means on MLX. Results differ at the same seed.
 - Seurat anchor weighting caps each cell at `k_weight` anchor pairs, as
   Seurat does. rPCA and CCA integration results differ at the same seed.
+- The normalised layer is recomputed in f32, also for v4 stores, which read
+  it at f16 before. Values differ by up to about 2e-3.
 - Harmony is faster on every backend; apart from the two items above, results
   are unchanged.
 
