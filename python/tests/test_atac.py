@@ -167,6 +167,21 @@ def test_call_peaks_matches_macs3_and_feeds_counting(exp):
     assert exp.var(modality="atac").height == merged.height
 
 
+def test_amulet_matches_reference(exp):
+    res = atac.amulet(
+        exp, FIX / "fragments.tsv.gz", restrict_beds=[FIX / "blacklist.bed"]
+    )
+    ref = pl.read_csv(
+        FIX / "amulet/overlap2_MultipletProbabilities.txt.gz", separator="\t"
+    )
+    obs = exp.obs(cols=["cell_id", "amulet_p", "amulet_q", "amulet_multiplet"])
+    joined = obs.join(ref, left_on="cell_id", right_on="cell_id", how="inner")
+    assert joined.height == exp.n_cells == res.height
+    np.testing.assert_allclose(joined["amulet_p"], joined["p-value"], rtol=1e-9)
+    np.testing.assert_allclose(joined["amulet_q"], joined["q-value"], rtol=1e-9)
+    assert joined["amulet_multiplet"].sum() == (joined["q-value"] < 0.01).sum() > 0
+
+
 def test_gene_activity_matches_signac(exp):
     ga = atac.gene_activity(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
     assert ga.feature_kind == "gene_activity"

@@ -29,6 +29,10 @@ Cell Ranger's peaks.
 Cell Ranger's peak set under-calls rare populations. Its merged result goes
 straight into `add_atac_fragments(peaks=...)`.
 
+**Multiplets.** `amulet` flags multiplets from loci where more than two of a
+cell's fragments overlap (AMULET); it needs no clustering and no RNA. Pass
+repeat and blacklist BEDs as `restrict_beds`.
+
 **Gene activity.** `gene_activity` counts fragments over gene body plus
 promoter (Signac's `GeneActivity`) into its own `SingleCells`, the query side
 of an RNA to ATAC label transfer. It is not RNA: methods that assume an mRNA
@@ -49,6 +53,7 @@ is right for the data.
 from bixverse._core.atac import (
     add_atac_fragments,
     add_atac_tenx,
+    amulet,
     atac_fragment_qc,
     calculate_lsi,
     call_peaks,
@@ -65,6 +70,7 @@ __all__ = [
     "AtacInfo",
     "add_atac_fragments",
     "add_atac_tenx",
+    "amulet",
     "atac_fragment_qc",
     "calculate_lsi",
     "call_peaks",

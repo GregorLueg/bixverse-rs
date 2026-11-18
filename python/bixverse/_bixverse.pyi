@@ -1318,6 +1318,18 @@ def atac_call_peaks(
     max_mem_gb: float | None,
     tmp_dir: Path | None,
 ) -> dict[str, Any]: ...
+def atac_amulet(
+    fragments: Path,
+    barcodes: list[str],
+    restrict_beds: list[Path],
+    max_overlap: int,
+    max_fragment_len: int,
+    repeat_q: float,
+    multiplet_q: float,
+    chroms: list[str] | None,
+    max_mem_gb: float | None,
+    count_trailing_loci: bool,
+) -> dict[str, Any]: ...
 def atac_set_tf_idf(
     f_path_cells: Path,
     f_path_genes: Path,

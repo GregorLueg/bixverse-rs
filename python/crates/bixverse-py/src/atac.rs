@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use bixverse_atac::amulet::{AmuletParams, amulet};
 use bixverse_atac::annotation::{
     GeneActivityParams, gene_activity_regions, read_gtf_genes, tss_positions,
 };
@@ -626,6 +627,79 @@ pub fn atac_call_peaks<'py>(
     out.set_item("pscore", f32s(|p| p.pscore).into_pyarray(py))?;
     out.set_item("fold", f32s(|p| p.fold).into_pyarray(py))?;
     out.set_item("qscore", f32s(|p| p.qscore).into_pyarray(py))?;
+    Ok(out)
+}
+
+////////////////
+// Multiplets //
+////////////////
+
+/// AMULET multiplet detection from fragment overlaps.
+///
+/// ### Params
+///
+/// * `fragments` - The fragment file
+/// * `barcodes` - Cells to test
+/// * `restrict_beds` - BED files of regions to drop (repeats, blacklists)
+/// * `max_overlap` - Overlapping fragments a diploid cell can explain
+/// * `max_fragment_len` - Longest valid fragment
+/// * `repeat_q` - q-value under which a site is a repeat
+/// * `multiplet_q` - q-value under which a cell is a multiplet
+/// * `chroms` - Chromosomes to use, `None` for the autosomes
+/// * `max_mem_gb` - Read budget, `None` for one chromosome at a time
+/// * `count_trailing_loci` - Count loci no later fragment passes
+///
+/// ### Returns
+///
+/// Dict of per-cell `n_fragments`, `n_overlaps`, `n_sites` (`uint32`),
+/// `p_value`, `q_value` (`float64`), `multiplet` (`bool`), and the totals
+/// `n_merged_sites`, `n_repeat_sites`.
+#[pyfunction]
+#[pyo3(signature = (
+    fragments, barcodes, restrict_beds, max_overlap, max_fragment_len, repeat_q,
+    multiplet_q, chroms, max_mem_gb, count_trailing_loci
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn atac_amulet<'py>(
+    py: Python<'py>,
+    fragments: PathBuf,
+    barcodes: Vec<String>,
+    restrict_beds: Vec<PathBuf>,
+    max_overlap: u32,
+    max_fragment_len: u32,
+    repeat_q: f64,
+    multiplet_q: f64,
+    chroms: Option<Vec<String>>,
+    max_mem_gb: Option<f64>,
+    count_trailing_loci: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let params = AmuletParams {
+        max_overlap,
+        max_fragment_len,
+        repeat_q,
+        multiplet_q,
+        chroms,
+        max_mem_gb,
+        count_trailing_loci,
+    };
+    let res = py
+        .detach(|| {
+            let mut restrict = Vec::new();
+            for bed in &restrict_beds {
+                restrict.extend(read_bed(bed)?);
+            }
+            amulet(&fragments, &barcodes, &restrict, Some(params))
+        })
+        .map_err(atac_err)?;
+    let out = PyDict::new(py);
+    out.set_item("n_fragments", res.n_fragments.into_pyarray(py))?;
+    out.set_item("n_overlaps", res.n_overlaps.into_pyarray(py))?;
+    out.set_item("n_sites", res.n_sites.into_pyarray(py))?;
+    out.set_item("p_value", res.p_value.into_pyarray(py))?;
+    out.set_item("q_value", res.q_value.into_pyarray(py))?;
+    out.set_item("multiplet", res.multiplet.into_pyarray(py))?;
+    out.set_item("n_merged_sites", res.n_merged_sites)?;
+    out.set_item("n_repeat_sites", res.n_repeat_sites)?;
     Ok(out)
 }
 

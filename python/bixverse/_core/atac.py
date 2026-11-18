@@ -534,6 +534,82 @@ def call_peaks(
     )
 
 
+##############
+# Multiplets #
+##############
+
+
+@beartype
+def amulet(
+    sc: SingleCells,
+    fragments: Path | str,
+    *,
+    restrict_beds: Sequence[Path | str] = (),
+    max_overlap: int = 2,
+    max_fragment_len: int = 900,
+    repeat_q: float = 0.01,
+    multiplet_q: float = 0.01,
+    chroms: Sequence[str] | None = None,
+    max_mem_gb: float | None = None,
+    count_trailing_loci: bool = False,
+) -> pl.DataFrame:
+    """Flag multiplets from fragment overlaps (AMULET), written to obs.
+
+    A diploid nucleus yields at most two overlapping fragments at a locus.
+    Per cell, the loci with more are counted (autosomes, restriction regions
+    dropped), sites shared by too many cells are dropped as repeats, and the
+    count is tested against the mean (Poisson, Benjamini-Hochberg).
+    Implemented from Thibodeau et al. (Genome Biology, 2021); it reproduces
+    the reference implementation's counts and p-values. Needs no clustering
+    and no RNA, so it works for ATAC-only experiments too.
+
+    Adds `amulet_n_overlaps`, `amulet_n_sites`, `amulet_p`, `amulet_q` and
+    `amulet_multiplet` for every cell of the store.
+
+    Args:
+        sc: The experiment; every cell of its store is tested.
+        fragments: The fragment file.
+        restrict_beds: BED files of regions to ignore: repeats, segmental
+            duplications, blacklists. The paper uses all three.
+        max_overlap: Overlapping fragments a cell can explain; 2 for diploid.
+        max_fragment_len: Longest valid fragment.
+        repeat_q: q-value under which a site is a repeat.
+        multiplet_q: q-value under which a cell is a multiplet.
+        chroms: Chromosomes to use; `None` for the autosomes.
+        max_mem_gb: Read budget; `None` reads one chromosome at a time (with a
+            tabix index).
+        count_trailing_loci: Count a cell's last loci on a chromosome that no
+            later fragment passes; the reference implementation does not.
+
+    Returns:
+        The obs columns added, with `cell_idx`.
+    """
+    r = _bixverse.atac_amulet(
+        Path(fragments),
+        [str(b) for b in sc.cell_ids()],
+        [Path(b) for b in restrict_beds],
+        max_overlap,
+        max_fragment_len,
+        repeat_q,
+        multiplet_q,
+        None if chroms is None else list(chroms),
+        max_mem_gb,
+        count_trailing_loci,
+    )
+    frame = pl.DataFrame(
+        {
+            "cell_idx": sc._all_cells(),
+            "amulet_n_overlaps": r["n_overlaps"].astype(np.int64),
+            "amulet_n_sites": r["n_sites"].astype(np.int64),
+            "amulet_p": r["p_value"],
+            "amulet_q": r["q_value"],
+            "amulet_multiplet": r["multiplet"],
+        }
+    )
+    sc.add_obs(frame)
+    return frame
+
+
 ####################
 # TF-IDF, features #
 ####################
