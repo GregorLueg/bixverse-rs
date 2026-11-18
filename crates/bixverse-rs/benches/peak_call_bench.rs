@@ -15,6 +15,8 @@
 //! Optional: `PEAK_BENCH_GROUPS` (one group index per barcode line, default
 //! all in group 0), `PEAK_BENCH_TAG` (`insertion`, the default, or
 //! `fragment_start`), `PEAK_BENCH_KEEP_DUP` (`all`, the default, or a count),
+//! `PEAK_BENCH_MAX_MEM_GB` (tag budget, default one chromosome at a time),
+//! `PEAK_BENCH_SKIP_SCAN` (set to skip the scan, so the peak RSS is the call's),
 //! `PEAK_BENCH_OUT` (write the peaks as TSV: group, chrom, start, end,
 //! summit, pileup, pscore, fold, qscore).
 
@@ -84,24 +86,30 @@ fn main() {
     println!("| stage  | wall        | note |");
     println!("|--------|-------------|------|");
 
-    let index = BarcodeIndex::new(&barcodes).expect("barcodes");
-    let t = Instant::now();
-    let n: usize = fold_fragments(
-        &fragments,
-        &index,
-        || 0usize,
-        |acc, _, frags| *acc += frags.len(),
-        |a, b| a + b,
-    )
-    .expect("scan");
-    println!(
-        "| scan   | {:>9.2} s | {n} fragments |",
-        t.elapsed().as_secs_f64()
-    );
+    // the scan maps the whole file, which shows in the peak RSS of the call
+    if std::env::var("PEAK_BENCH_SKIP_SCAN").is_err() {
+        let index = BarcodeIndex::new(&barcodes).expect("barcodes");
+        let t = Instant::now();
+        let n: usize = fold_fragments(
+            &fragments,
+            &index,
+            || 0usize,
+            |acc, _, frags| *acc += frags.len(),
+            |a, b| a + b,
+        )
+        .expect("scan");
+        println!(
+            "| scan   | {:>9.2} s | {n} fragments |",
+            t.elapsed().as_secs_f64()
+        );
+    }
 
     let params = PeakCallParams {
         tag_source,
         keep_dup,
+        max_mem_gb: std::env::var("PEAK_BENCH_MAX_MEM_GB")
+            .ok()
+            .map(|v| v.parse().expect("PEAK_BENCH_MAX_MEM_GB")),
         ..PeakCallParams::default()
     };
     let t = Instant::now();

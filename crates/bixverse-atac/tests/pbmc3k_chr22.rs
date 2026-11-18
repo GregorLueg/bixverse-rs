@@ -865,11 +865,13 @@ fn assert_peaks_match_macs3(ours: &[NarrowPeak], rel: &str) {
 /// * `keep_dup` - Duplicate handling, with its fixture name
 /// * `genome_size` - Genome size, with its fixture name
 /// * `pooled` - Whether to check the pooled call too
+/// * `path` - The fragment file to call on
 fn check_macs3_case(
     source: (TagSource, &str),
     keep_dup: (KeepDup, &str),
     genome_size: (f64, &str),
     pooled: bool,
+    path: &Path,
 ) {
     let cells = cells();
     let params = PeakCallParams {
@@ -881,14 +883,14 @@ fn check_macs3_case(
     let suffix = format!("{}_dup{}_g{}.tsv.gz", source.1, keep_dup.1, genome_size.1);
     if pooled {
         let all = vec![0u32; cells.len()];
-        let peaks = call_peaks(&fragments(), &cells, &all, Some(params)).unwrap();
+        let peaks = call_peaks(path, &cells, &all, Some(params.clone())).unwrap();
         assert_peaks_match_macs3(&peaks[0], &format!("macs3/all_{suffix}"));
     }
     let groups: Vec<u32> = lines("macs3/groups.txt")
         .iter()
         .map(|g| g.parse().unwrap())
         .collect();
-    let per_group = call_peaks(&fragments(), &cells, &groups, Some(params)).unwrap();
+    let per_group = call_peaks(path, &cells, &groups, Some(params)).unwrap();
     for (g, peaks) in per_group.iter().enumerate() {
         assert_peaks_match_macs3(peaks, &format!("macs3/g{g}_{suffix}"));
     }
@@ -901,6 +903,7 @@ fn test_peak_calls_match_macs3_defaults() {
         (KeepDup::All, "all"),
         (2.7e9, "2.7e9"),
         true,
+        &fragments(),
     );
 }
 
@@ -912,7 +915,29 @@ fn test_peak_calls_match_macs3_signac_mode() {
         (KeepDup::AtMost(1), "1"),
         (1e7, "1e7"),
         false,
+        &fragments(),
     );
+}
+
+/// The fixture has a tabix index, so the tests above read by chromosome;
+/// without one the whole file is read at once.
+#[test]
+fn test_peak_calls_without_index_match_macs3() {
+    let dir = TempDir::new("noindex");
+    let copy = PathBuf::from(dir.file("fragments.tsv.gz"));
+    std::fs::copy(fragments(), &copy).unwrap();
+    for source in [
+        (TagSource::Insertion, "insertion"),
+        (TagSource::FragmentStart, "start"),
+    ] {
+        check_macs3_case(
+            source,
+            (KeepDup::AtMost(1), "1"),
+            (1e7, "1e7"),
+            false,
+            &copy,
+        );
+    }
 }
 
 #[test]
@@ -925,7 +950,7 @@ fn test_peak_calls_match_macs3_all_settings() {
     ] {
         for keep_dup in [(KeepDup::All, "all"), (KeepDup::AtMost(1), "1")] {
             for genome_size in [(2.7e9, "2.7e9"), (1e7, "1e7")] {
-                check_macs3_case(source, keep_dup, genome_size, true);
+                check_macs3_case(source, keep_dup, genome_size, true, &fragments());
             }
         }
     }

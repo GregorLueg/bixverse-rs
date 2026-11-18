@@ -1315,6 +1315,8 @@ def atac_call_peaks(
     q_value: float,
     min_length: int | None,
     max_gap: int | None,
+    max_mem_gb: float | None,
+    tmp_dir: Path | None,
 ) -> dict[str, Any]: ...
 def atac_set_tf_idf(
     f_path_cells: Path,

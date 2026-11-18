@@ -39,8 +39,8 @@ const TEXT_CHUNK_BYTES: usize = 4 << 20;
 /// Bytes of a BGZF block header up to and including the extra field length.
 const GZIP_FIXED_HEADER: usize = 12;
 
-/// Partial lines at the edges of a BGZF group: `(group, head, tail)`.
-type GroupEdges = (usize, Vec<u8>, Vec<u8>);
+/// Partial lines at the edges of a BGZF group: `(segment, group, head, tail)`.
+type GroupEdges = (usize, usize, Vec<u8>, Vec<u8>);
 
 ///////////
 // Types //
@@ -454,6 +454,270 @@ where
     }
 }
 
+///////////
+// Tabix //
+///////////
+
+/// Tabix pseudo-bin holding per-reference metadata rather than records.
+const TABIX_META_BIN: u32 = 37450;
+
+/// Where one chromosome lies in a BGZF fragment file, from its tabix index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChromSpan {
+    /// Chromosome name.
+    pub name: String,
+    /// Virtual offset of its first record.
+    beg: u64,
+    /// Virtual offset just past its last record.
+    end: u64,
+}
+
+impl ChromSpan {
+    /// Compressed bytes the chromosome spans, a proxy for its fragment count.
+    ///
+    /// ### Returns
+    ///
+    /// The byte count.
+    pub fn compressed_bytes(&self) -> u64 {
+        (self.end >> 16).saturating_sub(self.beg >> 16)
+    }
+}
+
+/// Little-endian reader over the inflated index.
+struct IndexCursor<'a> {
+    /// The inflated index.
+    bytes: &'a [u8],
+    /// Read position.
+    pos: usize,
+}
+
+impl IndexCursor<'_> {
+    /// Take `n` bytes.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Byte count
+    ///
+    /// ### Returns
+    ///
+    /// The bytes, or an error past the end.
+    fn take(&mut self, n: usize) -> Result<&[u8], AtacErrors> {
+        let out = self
+            .bytes
+            .get(self.pos..self.pos + n)
+            .ok_or_else(|| AtacErrors::InvalidArgument("truncated tabix index".into()))?;
+        self.pos += n;
+        Ok(out)
+    }
+
+    /// Read an `i32` used as a count.
+    ///
+    /// ### Returns
+    ///
+    /// The value, or an error for a negative count.
+    fn count(&mut self) -> Result<usize, AtacErrors> {
+        let v = i32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes"));
+        usize::try_from(v)
+            .map_err(|_| AtacErrors::InvalidArgument("negative count in tabix index".into()))
+    }
+
+    /// Read a `u32`.
+    ///
+    /// ### Returns
+    ///
+    /// The value.
+    fn u32(&mut self) -> Result<u32, AtacErrors> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
+    /// Read a `u64`.
+    ///
+    /// ### Returns
+    ///
+    /// The value.
+    fn u64(&mut self) -> Result<u64, AtacErrors> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+}
+
+/// Parse a tabix index into chromosome spans.
+///
+/// ### Params
+///
+/// * `raw` - The `.tbi` file bytes (BGZF compressed)
+///
+/// ### Returns
+///
+/// The spans of chromosomes with records, in file order, or an error for a
+/// malformed index.
+fn parse_tabix(raw: &[u8]) -> Result<Vec<ChromSpan>, AtacErrors> {
+    let mut bytes = Vec::new();
+    MultiGzDecoder::new(raw).read_to_end(&mut bytes)?;
+    let mut c = IndexCursor {
+        bytes: &bytes,
+        pos: 0,
+    };
+    if c.take(4)? != b"TBI\x01" {
+        return Err(AtacErrors::InvalidArgument("not a tabix index".into()));
+    }
+    let n_ref = c.count()?;
+    // format, col_seq, col_beg, col_end, meta, skip
+    c.take(24)?;
+    let l_nm = c.count()?;
+    let names: Vec<String> = c
+        .take(l_nm)?
+        .split(|&b| b == 0)
+        .filter(|n| !n.is_empty())
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect();
+    if names.len() != n_ref {
+        return Err(AtacErrors::InvalidArgument(
+            "tabix index names do not match its reference count".into(),
+        ));
+    }
+
+    let mut spans = Vec::new();
+    for name in names {
+        let (mut beg, mut end) = (u64::MAX, 0u64);
+        for _ in 0..c.count()? {
+            let bin = c.u32()?;
+            for _ in 0..c.count()? {
+                let (b, e) = (c.u64()?, c.u64()?);
+                if bin != TABIX_META_BIN {
+                    beg = beg.min(b);
+                    end = end.max(e);
+                }
+            }
+        }
+        let n_intv = c.count()?;
+        c.take(8 * n_intv)?;
+        if beg < end {
+            spans.push(ChromSpan { name, beg, end });
+        }
+    }
+    spans.sort_unstable_by_key(|s| s.beg);
+    Ok(spans)
+}
+
+/// The chromosomes of a BGZF fragment file from its tabix index
+/// (`<path>.tbi`), so that passes can read one chromosome at a time.
+///
+/// ### Params
+///
+/// * `path` - The fragment file
+///
+/// ### Returns
+///
+/// The spans in file order; `None` when the file is not BGZF or has no
+/// index next to it. An error for an unreadable or malformed index.
+pub fn chrom_spans(path: &Path) -> Result<Option<Vec<ChromSpan>>, AtacErrors> {
+    let mut tbi = path.as_os_str().to_owned();
+    tbi.push(".tbi");
+    let tbi = Path::new(&tbi);
+    if !tbi.exists() {
+        return Ok(None);
+    }
+    let mut head = [0u8; GZIP_FIXED_HEADER + 6];
+    let n = File::open(path)?.read(&mut head)?;
+    if detect_compression(&head[..n]) != Compression::Bgzf {
+        return Ok(None);
+    }
+    parse_tabix(&std::fs::read(tbi)?).map(Some)
+}
+
+/// Fold over the fragments of some chromosomes only, read through their
+/// tabix spans. Same contract as [`fold_fragments`].
+///
+/// ### Params
+///
+/// * `path` - The BGZF fragment file the spans come from
+/// * `spans` - Chromosomes to read, from [`chrom_spans`]
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer of `(accumulator, chromosome, fragments)`
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error, or an error for an
+/// index that does not match the file.
+pub fn fold_fragment_spans<A, I, F, R>(
+    path: &Path,
+    spans: &[ChromSpan],
+    barcodes: &BarcodeIndex,
+    init: I,
+    fold: F,
+    reduce: R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let file = File::open(path)?;
+    // SAFETY: the file is opened read-only and not modified while mapped.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let bytes: &[u8] = &mmap;
+    // only the spans' own block headers are walked, so pages elsewhere in
+    // the file are never touched
+    let stale = || AtacErrors::InvalidArgument("the tabix index does not match the file".into());
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    let mut segments = Vec::with_capacity(spans.len());
+    for s in spans {
+        let (first, last) = ((s.beg >> 16) as usize, (s.end >> 16) as usize);
+        let end_in = (s.end & 0xffff) as usize;
+        let b0 = blocks.len();
+        let mut pos = first;
+        // the end offset points into block `last`, or to its start when the
+        // span ends with the block before
+        while pos < last || (pos == last && end_in > 0) {
+            let len = bytes
+                .get(pos..)
+                .and_then(bgzf_block_len)
+                .filter(|&l| pos + l <= bytes.len())
+                .ok_or_else(stale)?;
+            blocks.push((pos, pos + len));
+            pos += len;
+        }
+        let lands = if end_in > 0 {
+            blocks.last().map(|b| b.0) == Some(last)
+        } else {
+            pos == last
+        };
+        if !lands || blocks.len() == b0 {
+            return Err(stale());
+        }
+        segments.push(BlockSegment {
+            b0,
+            b1: blocks.len(),
+            skip: (s.beg & 0xffff) as usize,
+            end: (end_in > 0).then_some(end_in),
+        });
+    }
+    fold_bgzf_segments(bytes, &blocks, &segments, barcodes, &init, &fold, &reduce)
+}
+
+/// A stretch of a BGZF file to parse: blocks `[b0, b1)`, minus `skip` bytes
+/// at the start of the first block's text, cut after `end` bytes of the last
+/// block's text when set.
+#[derive(Clone, Copy, Debug)]
+struct BlockSegment {
+    /// First block.
+    b0: usize,
+    /// One past the last block.
+    b1: usize,
+    /// Text bytes of block `b0` before the segment starts.
+    skip: usize,
+    /// Text bytes of block `b1 - 1` that belong to the segment; `None` for
+    /// all of them.
+    end: Option<usize>,
+}
+
 /// [`fold_fragments`] on a BGZF file.
 ///
 /// ### Params
@@ -481,26 +745,81 @@ where
     R: Fn(A, A) -> A + Sync + Send,
 {
     let offsets = bgzf_block_offsets(bytes)?;
-    let n_blocks = offsets.len() - 1;
-    let groups: Vec<(usize, usize)> = (0..n_blocks)
-        .step_by(BGZF_BLOCKS_PER_GROUP)
-        .map(|b| (b, (b + BGZF_BLOCKS_PER_GROUP).min(n_blocks)))
-        .collect();
+    let blocks: Vec<(usize, usize)> = offsets.windows(2).map(|w| (w[0], w[1])).collect();
+    let whole = BlockSegment {
+        b0: 0,
+        b1: blocks.len(),
+        skip: 0,
+        end: None,
+    };
+    fold_bgzf_segments(bytes, &blocks, &[whole], barcodes, init, fold, reduce)
+}
+
+/// Fold over BGZF segments that each start and end at a line boundary.
+///
+/// Segments are cut into groups of [`BGZF_BLOCKS_PER_GROUP`] blocks, inflated
+/// and parsed in parallel; lines cut by a group boundary are stitched back
+/// within their segment afterwards.
+///
+/// ### Params
+///
+/// * `bytes` - The mapped file
+/// * `blocks` - Byte ranges of the blocks the segments index into
+/// * `segments` - The stretches to read
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer
+/// * `reduce` - Merge
+///
+/// ### Returns
+///
+/// The combined accumulator.
+fn fold_bgzf_segments<A, I, F, R>(
+    bytes: &[u8],
+    blocks: &[(usize, usize)],
+    segments: &[BlockSegment],
+    barcodes: &BarcodeIndex,
+    init: &I,
+    fold: &F,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    // (segment, group in segment, first block, end block)
+    let mut groups: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for (s, seg) in segments.iter().enumerate() {
+        for (g, b) in (seg.b0..seg.b1).step_by(BGZF_BLOCKS_PER_GROUP).enumerate() {
+            groups.push((s, g, b, (b + BGZF_BLOCKS_PER_GROUP).min(seg.b1)));
+        }
+    }
     let edges: Mutex<Vec<GroupEdges>> = Mutex::new(Vec::new());
 
     let acc = groups
         .par_iter()
-        .enumerate()
         .try_fold(
             || (init(), Vec::new(), Vec::new()),
-            |(mut acc, mut text, mut buf), (g, &(b0, b1))| {
+            |(mut acc, mut text, mut buf), &(s, g, b0, b1)| {
+                let seg = segments[s];
                 text.clear();
-                for b in b0..b1 {
-                    GzDecoder::new(&bytes[offsets[b]..offsets[b + 1]]).read_to_end(&mut text)?;
+                let mut last_start = 0;
+                for &(from, to) in &blocks[b0..b1] {
+                    last_start = text.len();
+                    GzDecoder::new(&bytes[from..to]).read_to_end(&mut text)?;
                 }
-                let (head, body, tail) = split_edges(&text, g == 0);
+                if b1 == seg.b1
+                    && let Some(end) = seg.end
+                {
+                    text.truncate(last_start + end);
+                }
+                let skip = if g == 0 { seg.skip.min(text.len()) } else { 0 };
+                let (head, body, tail) = split_edges(&text[skip..], g == 0);
                 parse_lines(body, barcodes, &mut acc, fold, &mut buf)?;
                 edges.lock().expect("edge list lock poisoned").push((
+                    s,
                     g,
                     head.to_vec(),
                     tail.to_vec(),
@@ -512,16 +831,16 @@ where
         .try_reduce(init, |a, b| Ok(reduce(a, b)))?;
 
     // a line cut at a group boundary is the tail of one group plus the head
-    // of the next
+    // of the next one of the same segment
     let mut edges = edges.into_inner().expect("edge list lock poisoned");
-    edges.sort_unstable_by_key(|e| e.0);
+    edges.sort_unstable_by_key(|e| (e.0, e.1));
     let mut stitched = Vec::new();
     for w in 0..edges.len() {
-        stitched.extend_from_slice(&edges[w].2);
-        if let Some(next) = edges.get(w + 1) {
-            stitched.extend_from_slice(&next.1);
+        stitched.extend_from_slice(&edges[w].3);
+        if let Some(next) = edges.get(w + 1).filter(|n| n.0 == edges[w].0) {
+            stitched.extend_from_slice(&next.2);
         }
-        if !stitched.ends_with(b"\n") {
+        if !stitched.is_empty() && !stitched.ends_with(b"\n") {
             stitched.push(b'\n');
         }
     }
@@ -824,6 +1143,105 @@ mod tests {
         let idx = BarcodeIndex::new(&cells).unwrap();
         let r = fold_fragments(&f.0, &idx, || 0usize, |a, _, f| *a += f.len(), |a, b| a + b);
         assert!(r.is_err());
+    }
+
+    /// A minimal tabix index for text written by [`bgzf_bytes`]: one bin and
+    /// one chunk per chromosome spanning its lines.
+    ///
+    /// ### Params
+    ///
+    /// * `text` - The file text
+    /// * `bgzf` - Its BGZF bytes
+    /// * `block` - Text bytes per block used for `bgzf`
+    ///
+    /// ### Returns
+    ///
+    /// The gzip compressed index.
+    fn tabix_bytes(text: &str, bgzf: &[u8], block: usize) -> Vec<u8> {
+        let coff = bgzf_block_offsets(bgzf).unwrap();
+        let voff = |u: usize| ((coff[u / block] as u64) << 16) | (u % block) as u64;
+        let mut spans: Vec<(String, usize, usize)> = Vec::new();
+        let mut pos = 0;
+        for line in text.split_inclusive('\n') {
+            if !line.starts_with('#') {
+                let chrom = line.split('\t').next().unwrap().to_string();
+                match spans.last_mut() {
+                    Some(s) if s.0 == chrom => s.2 = pos + line.len(),
+                    _ => spans.push((chrom, pos, pos + line.len())),
+                }
+            }
+            pos += line.len();
+        }
+        let mut idx: Vec<u8> = b"TBI\x01".to_vec();
+        let i32s = |v: &mut Vec<u8>, xs: &[i32]| xs.iter().for_each(|x| v.extend(x.to_le_bytes()));
+        let names: Vec<u8> = spans
+            .iter()
+            .flat_map(|s| s.0.bytes().chain(std::iter::once(0)))
+            .collect();
+        i32s(
+            &mut idx,
+            &[spans.len() as i32, 0, 1, 2, 3, 35, 0, names.len() as i32],
+        );
+        idx.extend(&names);
+        for (_, b, e) in &spans {
+            i32s(&mut idx, &[1, 4681, 1]);
+            idx.extend(voff(*b).to_le_bytes());
+            idx.extend(voff(*e).to_le_bytes());
+            i32s(&mut idx, &[0]);
+        }
+        let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
+        gz.write_all(&idx).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn test_span_folds_read_exactly_their_chromosomes() {
+        let text = synthetic_text(3000);
+        let cells: Vec<String> = ["CCCG-1", "TTTA-1", "AAAC-1"].map(String::from).to_vec();
+        // small blocks so chromosome boundaries fall inside blocks
+        let bgzf = bgzf_bytes(text.as_bytes(), 997);
+        let file = temp_file("spans", &bgzf);
+        let mut tbi = file.0.clone().into_os_string();
+        tbi.push(".tbi");
+        let tbi = TempPath(tbi.into());
+        std::fs::write(&tbi.0, tabix_bytes(&text, &bgzf, 997)).unwrap();
+
+        let spans = chrom_spans(&file.0).unwrap().unwrap();
+        let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["chr1", "chr2", "chrX"]);
+
+        let all = collect(&file.0, &cells);
+        let idx = BarcodeIndex::new(&cells).unwrap();
+        for pick in [vec![1], vec![0, 2], vec![0, 1, 2]] {
+            let chosen: Vec<ChromSpan> = pick.iter().map(|&i| spans[i].clone()).collect();
+            let mut got = fold_fragment_spans(
+                &file.0,
+                &chosen,
+                &idx,
+                Vec::new,
+                |acc: &mut Vec<(String, Fragment)>, chrom, frags| {
+                    acc.extend(frags.iter().map(|f| (chrom.to_string(), *f)))
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
+            )
+            .unwrap();
+            got.sort_by(|a, b| (&a.0, a.1.start, a.1.cell).cmp(&(&b.0, b.1.start, b.1.cell)));
+            let want: Vec<_> = all
+                .iter()
+                .filter(|(c, _)| chosen.iter().any(|s| &s.name == c))
+                .cloned()
+                .collect();
+            assert_eq!(got, want, "spans {pick:?}");
+        }
+    }
+
+    #[test]
+    fn test_no_index_means_no_spans() {
+        let f = temp_file("noidx", &bgzf_bytes(synthetic_text(10).as_bytes(), 997));
+        assert!(chrom_spans(&f.0).unwrap().is_none());
     }
 
     #[test]

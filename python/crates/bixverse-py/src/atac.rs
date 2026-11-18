@@ -547,6 +547,9 @@ pub fn atac_fragment_qc<'py>(
 /// * `q_value` - q-value cutoff
 /// * `min_length` - Minimum peak length, `None` for `extsize`
 /// * `max_gap` - Largest merged gap, `None` for MACS's tag size
+/// * `max_mem_gb` - Tag budget of the first pass, `None` for one chromosome
+///   at a time
+/// * `tmp_dir` - Directory of the tag scratch file, `None` for the system one
 ///
 /// ### Returns
 ///
@@ -556,7 +559,7 @@ pub fn atac_fragment_qc<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     fragments, barcodes, groups, tag_source, keep_dup, shift, extsize,
-    genome_size, llocal, q_value, min_length, max_gap
+    genome_size, llocal, q_value, min_length, max_gap, max_mem_gb, tmp_dir
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn atac_call_peaks<'py>(
@@ -573,6 +576,8 @@ pub fn atac_call_peaks<'py>(
     q_value: f64,
     min_length: Option<u32>,
     max_gap: Option<u32>,
+    max_mem_gb: Option<f64>,
+    tmp_dir: Option<PathBuf>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let tag_source = parse_tag_source(tag_source)
         .ok_or_else(|| PyValueError::new_err(format!("unknown tag_source '{tag_source}'")))?;
@@ -586,6 +591,8 @@ pub fn atac_call_peaks<'py>(
         q_value,
         min_length,
         max_gap,
+        max_mem_gb,
+        tmp_dir,
     };
     let peaks = py
         .detach(|| call_peaks(&fragments, &barcodes, &groups, Some(params)))

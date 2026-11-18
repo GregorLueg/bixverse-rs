@@ -430,6 +430,8 @@ def call_peaks(
     q_value: float = 0.05,
     min_length: int | None = None,
     max_gap: int | None = None,
+    max_mem_gb: float | None = None,
+    tmp_dir: Path | str | None = None,
 ) -> pl.DataFrame:
     """Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
 
@@ -437,6 +439,11 @@ def call_peaks(
     call per group, as Signac's `CallPeaks(group.by = ...)` runs MACS. It
     reproduces MACS3 3.1.0's peaks exactly. Pass the result as `peaks` to
     `add_atac_fragments` to count against it.
+
+    Memory: with a tabix index next to the fragment file (`.tbi`, which Cell
+    Ranger writes), the file is read one chromosome at a time and the sorted
+    tags wait in a scratch file (4 bytes per tag) between passes. Without an
+    index every tag is held at once while reading.
 
     Args:
         sc: The experiment; its kept cells are pooled.
@@ -459,6 +466,10 @@ def call_peaks(
         max_gap: Largest gap merged into a peak; `None` for MACS's tag size (1
             for insertions, the mean length of the group's first fragments
             for fragment starts).
+        max_mem_gb: Tag budget of the reading pass; `None` reads one
+            chromosome at a time.
+        tmp_dir: Directory of the scratch file; `None` for the system
+            temporary directory.
 
     Returns:
         With `combine`: `chrom`, `start`, `end` (0-based, half-open) and
@@ -485,6 +496,8 @@ def call_peaks(
         q_value,
         min_length,
         max_gap,
+        max_mem_gb,
+        None if tmp_dir is None else Path(tmp_dir),
     )
     peaks = pl.DataFrame(
         {
