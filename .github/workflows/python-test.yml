@@ -40,4 +40,7 @@ jobs:
       # runners have no adapter, so test_gpu.py skips anyway.
       # Cold macOS runs land close to the shared 30 min default.
       timeout-minutes: 45
+      # The bindings have no Rust tests, and `cargo test` compiles both wheels'
+      # trees under unified features that maturin then cannot reuse.
+      rust-test: false
       install-args: '--extra sparse --extra torch --extra mlx --extra jax --extra embed --extra plots --torch-backend cpu'
