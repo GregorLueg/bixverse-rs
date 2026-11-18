@@ -53,6 +53,7 @@ approx.workspace = true
 bincode.workspace = true
 bixverse-core = { workspace = true, optional = true }
 bixverse-sparse.workspace = true
+crc32fast.workspace = true
 document-features.workspace = true
 faer = { workspace = true, optional = true }
 flate2.workspace = true

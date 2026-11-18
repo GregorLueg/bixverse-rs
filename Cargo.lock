@@ -700,6 +700,7 @@ dependencies = [
  "bincode",
  "bixverse-core",
  "bixverse-sparse",
+ "crc32fast",
  "document-features",
  "faer",
  "flate2",
