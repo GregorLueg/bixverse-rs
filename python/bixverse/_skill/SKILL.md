@@ -54,7 +54,7 @@ did not need.
 |---|---|
 | Installing, extras, building from source, the GPU wheel, nn backends | `references/install.md` |
 | The store, obs / var, params classes, cells to keep, indices, cache and staleness, errors | `references/conventions.md` |
-| Single cell: load, write, read counts, QC, doublets, HVG, PCA, residuals, batch correction, neighbours, clustering, embeddings, markers, CellSweep | `references/single-cell.md` |
+| Single cell: load, write (incl. streaming a gene subset of a large store to h5ad), read counts, QC, doublets, HVG, PCA, residuals, batch correction, neighbours, clustering, embeddings, markers, CellSweep | `references/single-cell.md` |
 | Single cell downstream: DE, differential abundance, annotation, ligand-receptor, gene set scores, HotSpot, SCENIC, NMF, DIALOGUE, trajectories, Bonsai, metacells, CITE-seq / WNN, pipelines, loader, scVI | `references/single-cell-analysis.md` |
 | Does function X exist? What is it called? | `references/api-index.md` |
 

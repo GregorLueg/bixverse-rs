@@ -107,6 +107,10 @@ reversible.
   that order and returns the first whose sampled non-zeros are at least 99 %
   integral (`threshold=0.99`, `n_sample=10_000`), else `None`.
   `load_h5ad(raw_count_slot="auto")` raises if it finds none.
+- The detection samples 10,000 values, and READMEs rarely say which slot
+  holds raw counts. Confirm the slot after loading: the store's obs
+  `lib_size` should equal an author per-cell total (e.g. `total_counts`) for
+  at least 99 % of cells.
 - The `RawSlot` literal is not exported. Pass the string, e.g. `"raw.X"`.
 - `load_h5ad_norm(directory, h5_path, obs_lib_size_col, target_size)` rebuilds
   counts assuming `X = log1p(x / lib_size * target_size)`. It cannot invert
@@ -137,7 +141,11 @@ sc = bv.io.load_multi_h5ad("exp/pooled", prescan)
 
 `csc_mem_gb` caps the buffers of the CSR-to-CSC conversion that builds the
 gene-major store (`None` is one pass); pass e.g. `8.0` for million-cell
-inputs. The QC passes, `find_hvg` and the doublet callers stream cells in
+inputs. With `None` the buffers need about 8 bytes per non-zero (about 21 GB
+for 2.6e9 non-zeros, estimate); above physical RAM the conversion swaps and
+dominates the load time. Half of physical RAM is a safe cap: data that fits
+still converts in one phase. Every load builds both stores; there is no
+cell-major-only load. The QC passes, `find_hvg` and the doublet callers stream cells in
 batches above `bv.qc.N_CELLS_STREAMING_THRESHOLD` (100,000 kept cells);
 `streaming=` overrides it.
 
@@ -169,7 +177,55 @@ from the genes the PCA ran on, only alongside `X_pca`) and
 `obsp/connectivities`. Stale artefacts are skipped with a warning.
 
 `write_h5ad_sc()` holds the whole matrix in memory and writes `X` as `float32`
-CSR, the first obs / var column as index.
+CSR, the first obs / var column as index. It converts its input to contiguous
+`float32` values and `uint32` indices, about 8 bytes per non-zero plus a copy
+when the input dtypes differ. The file it writes has resizable, chunked,
+gzip-compressed `X/data` and `X/indices` and an `int32` `X/indptr`.
+
+### Writing a gene subset without materialising the matrix
+
+`save_h5ad()` streams but writes every store gene and the store's obs / var;
+`write_h5ad_sc()` takes a gene subset and new obs / var but needs the whole
+matrix in memory. For a store too large for RAM (e.g. counts restricted to
+genes mapped to a reference release, with harmonised obs), combine the two:
+
+```python
+import h5py
+import numpy as np
+import scipy.sparse as sp
+
+partial = out.with_name(out.name + ".partial")
+empty = sp.csr_matrix((obs.height, var.height), dtype=np.float32)
+bv.io.write_h5ad_sc(partial, empty, obs, var)   # obs / var encoded by bixverse
+
+indptr = np.zeros(cells.size + 1, dtype=np.int64)
+nnz = 0
+with h5py.File(partial, "r+") as f:
+    data, indices = f["X"]["data"], f["X"]["indices"]
+    for start in range(0, cells.size, 50_000):
+        chunk = cells[start : start + 50_000]
+        counts = bv.get_counts(sc, cells=chunk, genes=gene_idx)
+        assert np.array_equal(counts.cells, chunk)
+        m = counts.scipy_csr()
+        m.sort_indices()                            # see Reading counts
+        n = m.data.size
+        data.resize((nnz + n,)); data[nnz:] = m.data
+        indices.resize((nnz + n,)); indices[nnz:] = m.indices.astype(np.int32)
+        indptr[start + 1 : start + chunk.size + 1] = nnz + m.indptr[1:].astype(np.int64)
+        nnz += n
+    del f["X"]["indptr"]
+    f["X"].create_dataset("indptr", data=indptr, compression="gzip")
+partial.replace(out)                                # only after validation
+```
+
+- Peak memory is obs plus one chunk, independent of the number of cells.
+- Replace `X/indptr` with `int64`: the empty file's `int32` row pointers
+  overflow above 2^31 - 1 non-zeros. Cast each chunk's `indptr` to `int64`
+  before adding the offset; under NumPy 2, `int + int32 array` stays `int32`.
+- Validate before the rename, e.g. that per-cell sums of the written genes
+  plus those of the excluded genes equal `lib_size`. Writing under a
+  temporary name means a crash never leaves a file that looks complete.
+- Keep the gzip compression: the bixverse loaders do not read LZF or Blosc.
 
 **Trap:** `save()` does not persist the residual model. It warns; refit after
 `load_existing()`.
@@ -189,6 +245,10 @@ scipy). `layer="norm"` reads the normalised layer.
   `counts.genes` against what you asked for.
 - Columns follow the gene order passed. Rows follow the cell order passed, or
   `sc.cells_to_keep` when `cells=None`.
+- A gene selection that is not in ascending store order returns unsorted
+  column indices within each row (`scipy_csr().has_sorted_indices` is
+  `False`). Values are correct, but call `sort_indices()` before writing the
+  matrix anywhere a reader may assume sorted CSR.
 
 ## obs, var and indices
 
