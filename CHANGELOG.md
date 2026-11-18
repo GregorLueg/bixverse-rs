@@ -4,7 +4,7 @@
 
 ### Breaking
 
-- Needs `ann-search-rs` 0.13. e-means is now the default k-means for
+- Needs `ann-search-rs` 0.13.1. e-means is now the default k-means for
   `KMeansParamsWrappers::default()`, Harmony v1 and v2 (CPU, MLX and GPU),
   fast_cluster (`km_type = "emeans"`, CPU and GPU) and SCENIC. Results differ
   at the same seed; `k_means_algorithm = "lloyd"` (or `km_type = "standard"`)
