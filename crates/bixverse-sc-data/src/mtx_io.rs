@@ -1472,42 +1472,72 @@ impl MtxReader {
                 raw
             };
 
-            let mut entries: Vec<(u32, u32, u32)> = bytes
-                .par_chunks_exact(BUCKET_RECORD_LEN)
-                .filter_map(|r| {
-                    let word =
-                        |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().expect("4 bytes"));
-                    Some((
-                        lookup(&cell_map, word(0))?,
-                        lookup(&gene_map, word(4))?,
-                        word(8),
-                    ))
-                })
-                .collect();
-            drop(bytes);
-            if !spill.cell_major {
-                entries.par_sort_unstable();
-            }
-
             let first_cell = bucket_idx * spill.cells_per_bucket;
             let end_cell = first_cell + spill.cells_per_bucket;
             let k0 = kept.partition_point(|&c| c < first_cell);
             let k1 = kept.partition_point(|&c| c < end_cell);
-            let run_starts: Vec<usize> = (k0..=k1)
-                .map(|k| entries.partition_point(|e| (e.0 as usize) < k))
-                .collect();
 
-            let built = (k0..k1)
-                .into_par_iter()
-                .map(|k| {
-                    let j = k - k0;
-                    let mut row: Vec<(u32, u32)> = entries[run_starts[j]..run_starts[j + 1]]
-                        .iter()
-                        .map(|&(_, g, v)| (g, v))
-                        .collect();
-                    compress_cell_row(&mut row, k, target_size, writer.format())
-                })
-                .collect::<Result<Vec<_>, ScDataErrors>>()?;
+            let built = if spill.cell_major {
+                // records sorted by original cell: each kept cell's run is
+                // found by binary search and built straight from the bytes
+                let word =
+                    |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+                let n_rec = bytes.len() / BUCKET_RECORD_LEN;
+                let run_start = |cell: usize| {
+                    let (mut lo, mut hi) = (0, n_rec);
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if (word(mid * BUCKET_RECORD_LEN) as usize) < cell {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    lo
+                };
+                (k0..k1)
+                    .into_par_iter()
+                    .map_init(Vec::<(u32, u32)>::new, |row, k| {
+                        row.clear();
+                        for r in run_start(kept[k])..run_start(kept[k] + 1) {
+                            let at = r * BUCKET_RECORD_LEN;
+                            if let Some(g) = lookup(&gene_map, word(at + 4)) {
+                                row.push((g, word(at + 8)));
+                            }
+                        }
+                        compress_cell_row(row, k, target_size, writer.format())
+                    })
+                    .collect::<Result<Vec<_>, ScDataErrors>>()?
+            } else {
+                let mut entries: Vec<(u32, u32, u32)> = bytes
+                    .par_chunks_exact(BUCKET_RECORD_LEN)
+                    .filter_map(|r| {
+                        let word =
+                            |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().expect("4 bytes"));
+                        Some((
+                            lookup(&cell_map, word(0))?,
+                            lookup(&gene_map, word(4))?,
+                            word(8),
+                        ))
+                    })
+                    .collect();
+                entries.par_sort_unstable();
+                let run_starts: Vec<usize> = (k0..=k1)
+                    .map(|k| entries.partition_point(|e| (e.0 as usize) < k))
+                    .collect();
+                (k0..k1)
+                    .into_par_iter()
+                    .map(|k| {
+                        let j = k - k0;
+                        let mut row: Vec<(u32, u32)> = entries[run_starts[j]..run_starts[j + 1]]
+                            .iter()
+                            .map(|&(_, g, v)| (g, v))
+                            .collect();
+                        compress_cell_row(&mut row, k, target_size, writer.format())
+                    })
+                    .collect::<Result<Vec<_>, ScDataErrors>>()?
+            };
+            drop(bytes);
 
             let mut payloads = Vec::with_capacity(built.len());
             for (nnz_i, payload) in built {
