@@ -8,6 +8,7 @@ __version__: str
 
 def gpu_available() -> bool: ...
 def gpu_plane_ops() -> bool: ...
+def mlx_available() -> bool: ...
 def pca(
     f_path_gene: str,
     f_path_cell: str,
@@ -234,5 +235,52 @@ def nebula(
     design: np.ndarray,
     params: dict[str, object],
     offset: np.ndarray | None = None,
+    verbose: int = 1,
+) -> dict[str, Any]: ...
+
+# The MLX twins, present only in a build with the `mlx` feature
+# (`mlx_available()`); each takes its wgpu namesake's arguments.
+def pca_mlx(
+    f_path_gene: str,
+    f_path_cell: str,
+    cell_indices: np.ndarray,
+    gene_indices: np.ndarray,
+    no_pcs: int,
+    params: dict[str, object],
+    sparse: bool = True,
+    seed: int = 42,
+    verbose: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+def knn_with_dist_mlx(
+    embd: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: int = 1,
+) -> tuple[np.ndarray, np.ndarray]: ...
+def fast_cluster_mlx(
+    embd: np.ndarray,
+    resolutions: list[float],
+    params: dict[str, object],
+    n_seeds: int = 1,
+    seed: int = 42,
+    verbose: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]: ...
+def harmony_v2_mlx(
+    pca: np.ndarray,
+    params: dict[str, object],
+    batch_labels: list[np.ndarray],
+    seed: int = 42,
+    verbose: int = 1,
+) -> np.ndarray: ...
+def seacells_mlx(
+    f_path_cell: str,
+    embd: np.ndarray,
+    knn_indices: np.ndarray | None,
+    knn_distances: np.ndarray | None,
+    cells_to_keep: np.ndarray,
+    cells_to_use: np.ndarray | None,
+    params: dict[str, object],
+    target_size: float,
+    seed: int,
     verbose: int = 1,
 ) -> dict[str, Any]: ...

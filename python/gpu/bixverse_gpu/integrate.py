@@ -25,6 +25,7 @@ from bixverse._core.subset import ScOrScSubset
 from bixverse._validate import Verbose
 from bixverse.params import to_rust
 from bixverse_gpu import _bixverse_gpu
+from bixverse_gpu._backend import Backend, pick
 from bixverse_gpu.params import BbknnGpuParams, FastmnnGpuParams, HarmonyV2GpuParams
 
 __all__ = [
@@ -45,11 +46,13 @@ def harmony(
     harmony_params: HarmonyV2GpuParams | None = None,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> None:
     """Harmony v2 on the PCA on the GPU.
 
     One batch covariate only. The corrected embedding goes to the modality's
-    `embeddings["harmony_gpu"]`, stamped as derived from `"pca"`.
+    `embeddings["harmony_gpu"]`, stamped as derived from `"pca"`, on either
+    backend.
 
     Args:
         sc: The experiment, with a PCA.
@@ -61,11 +64,14 @@ def harmony(
         seed: Seed.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
         ValueError: If the PCA is stale, or the batch column is missing or
             incomplete.
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
 
     References:
         Patikas, et al., bioRxiv, 2026.
@@ -76,7 +82,7 @@ def harmony(
         None,
         harmony_params or HarmonyV2GpuParams(),
         "harmony_gpu",
-        _bixverse_gpu.harmony_v2,
+        pick("harmony_v2", backend),
         modality,
         seed,
         verbose,

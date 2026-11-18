@@ -8,6 +8,9 @@
 #
 # `--no-sync` stops uv from first building the member through the PEP 517
 # backend. A wheel: `uv run --no-sync maturin build --release`.
+#
+# The MLX twins (`backend="mlx"`, Apple Silicon) need `brew install mlx-c` and
+# `--features mlx` on the develop command. Never in a published wheel.
 
 [build-system]
 requires = ["maturin>=1.15,<2.0"]

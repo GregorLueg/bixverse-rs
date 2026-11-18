@@ -6,14 +6,26 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [lib]
 name = "_bixverse_gpu"
 crate-type = ["cdylib"]
 
+# Experimental, Apple Silicon only: the `*_mlx` twins on the MLX backend via
+# mlx-c. Never on in a published wheel, since the wheel cannot assume
+# `libmlxc` on the user's machine. Build from source with `brew install mlx-c`
+# and `maturin develop --release --features mlx`.
+[features]
+mlx = ["dep:bixverse-mlx", "dep:ann-search-rs"]
+
 [dependencies]
 py-common.workspace = true
-# wgpu through cubecl; no MLX in the wheel. No HDF5 either: the GPU methods
+bixverse-mlx = { workspace = true, optional = true }
+# Direct dependency only so the build script sees `DEP_MLXC_AVAILABLE`, which
+# cargo hands to direct dependents of the `links = "mlxc"` crate alone.
+ann-search-rs = { workspace = true, optional = true, features = ["mlx"] }
+# wgpu through cubecl; MLX only behind the `mlx` feature. No HDF5 either: the GPU methods
 # only read stores the `bixverse` wheel wrote.
 bixverse-sc-gpu = { workspace = true, features = ["bonsai"] }
 bixverse-gpu.workspace = true

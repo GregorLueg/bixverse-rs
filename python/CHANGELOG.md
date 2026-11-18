@@ -15,6 +15,10 @@ Builds against `bixverse-rs` workspace at 0.10.3.
   installs.
 - Installs are version-stamped; `import bixverse` warns when one is outdated.
   A test fails when the generated API index is stale.
+- `bixverse-gpu`: an experimental MLX backend on Apple Silicon. PCA, the kNN,
+  fast clustering, Harmony and SEACells take `backend="mlx"`; build from source
+  with mlx-c and `--features mlx`. `bixverse_gpu.mlx_available()` probes it.
+  Published wheels are unchanged.
 
 ## 0.3.2
 

@@ -14,6 +14,10 @@ functions, so a pipeline swaps one import for the other:
 The GPU-specific knobs live in `bixverse_gpu.params`; everything else
 takes the `bixverse.params` bundles. Probe the device with `gpu_available()`;
 the twins raise `bixverse.BixverseError` without one.
+
+On Apple Silicon, PCA, the kNN, fast clustering, Harmony and SEACells also run
+on MLX with `backend="mlx"`, in a source build with the `mlx` feature; probe
+it with `mlx_available()`.
 """
 
 from bixverse._log import attach
@@ -30,7 +34,12 @@ from bixverse_gpu import (
     pp,
     trees,
 )
-from bixverse_gpu._bixverse_gpu import __version__, gpu_available, gpu_plane_ops
+from bixverse_gpu._bixverse_gpu import (
+    __version__,
+    gpu_available,
+    gpu_plane_ops,
+    mlx_available,
+)
 
 attach("bixverse_gpu")
 
@@ -44,6 +53,7 @@ __all__ = [
     "graph",
     "integrate",
     "metacells",
+    "mlx_available",
     "nmf",
     "params",
     "pathways",

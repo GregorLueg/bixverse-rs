@@ -16,7 +16,7 @@ from bixverse._core.metacells_generate import _generate_seacells
 from bixverse._core.subset import ScOrScSubset
 from bixverse._validate import Verbose
 from bixverse.params import SeacellsParams
-from bixverse_gpu import _bixverse_gpu
+from bixverse_gpu._backend import Backend, pick
 
 __all__ = [
     "generate_seacells",
@@ -35,6 +35,7 @@ def generate_seacells(
     target_size: float = 1e5,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> MetaCells:
     """SEACells with the fit on the GPU.
 
@@ -53,10 +54,13 @@ def generate_seacells(
         seed: Seed.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
         ValueError: If the embedding is missing, or it or the kNN is stale.
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
 
     References:
         Persad, et al., Nat Biotechnol, 2023.
@@ -71,5 +75,5 @@ def generate_seacells(
         target_size=target_size,
         seed=seed,
         verbose=verbose,
-        run=_bixverse_gpu.seacells,
+        run=pick("seacells", backend),
     )

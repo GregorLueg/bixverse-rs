@@ -271,6 +271,9 @@ Python has no 1-based entry point.
 
 - `sc.obs()` defaults to `filtered=False`: every cell in the store, removed
   ones included.
+- String obs columns come back as polars `Enum`. A join with a `String`
+  column from another table fails (`datatypes of join keys don't match`);
+  cast the key first, `pl.col("site_id").cast(pl.String)`.
 - `sc.add_obs(frame)` joins on `cell_idx` when present. Without it, the frame
   must have one row per kept cell in ascending order and is matched by
   position; wrong order silently mislabels cells. Always include `cell_idx`.

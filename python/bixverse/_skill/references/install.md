@@ -119,6 +119,32 @@ cd bixverse-rs/python/gpu
 uv run --no-sync maturin develop --release
 ```
 
+### MLX backend (Apple Silicon, experimental)
+
+On Apple Silicon, PCA, the kNN, fast clustering, Harmony and SEACells can run
+on Apple's MLX through mlx-c instead of wgpu. The PyPI wheel does not carry
+it; build from source with mlx-c installed:
+
+```bash
+brew install mlx-c
+cd bixverse-rs/python/gpu
+uv run --no-sync maturin develop --release --features mlx
+```
+
+Then pass `backend="mlx"`; the default `"wgpu"` is unchanged:
+
+```python
+bvg.mlx_available()                                  # True in this build
+bvg.pp.calculate_pca(sc, 30, backend="mlx")
+bvg.graph.find_neighbours(sc, backend="mlx")
+bvg.integrate.harmony(sc, "batch", backend="mlx")   # still writes harmony_gpu
+```
+
+MLX is f32 only. `backend="mlx"` on a build without the feature raises
+`bixverse.BixverseError` with these instructions. A `brew upgrade mlx-c` can
+break the import until you rebuild. Without mlx-c the build fails rather than
+silently dropping the MLX functions.
+
 ## bixverse.nn backends
 
 `import bixverse.nn` needs no framework. The framework is imported when
