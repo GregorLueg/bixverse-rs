@@ -15,12 +15,19 @@
 - New keys `k_means_algorithm` (`"emeans"` or `"lloyd"`) and `e_means_epochs`
   on the Harmony and GPU k-means parameters, read by the R list conversions;
   `parse_kmeans_algorithm` parses the first.
+- New crate `bixverse-atac` (facade feature `atac`): 10x peaks and fragment
+  files into peak or tile stores, fragment QC, gene activity, TF-IDF, top
+  features, LSI, LSI projection and rLSI integration.
+- Seurat label transfer (`find_transfer_anchors`, `transfer_labels`) in
+  `sc_annotation::seurat_transfer`, for RNA or gene activity queries.
 
 ### Changes
 
 - Harmony v1 and v2 draw their random block order once per run instead of
   once per sweep. Results differ at the same seed.
 - MLX Harmony runs its initial k-means on MLX. Results differ at the same seed.
+- Seurat anchor weighting caps each cell at `k_weight` anchor pairs, as
+  Seurat does. rPCA and CCA integration results differ at the same seed.
 - Harmony is faster on every backend; apart from the two items above, results
   are unchanged.
 

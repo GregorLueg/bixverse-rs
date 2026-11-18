@@ -14,10 +14,17 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   `e_means_epochs` keys are not in the generated parameters yet; they follow
   once the R specs land and `dev/gen_params.py` is rerun.
 
+**Features**
+
+- `bv.atac`: an ATAC modality on `SingleCellsMultiModal` (10x peaks or
+  fragments, fragment QC, TF-IDF, top features, LSI).
+
 **Changes**
 
 - Harmony is faster on CPU and GPU. Its block order is now drawn once per run,
   which changes results at the same seed.
+- rPCA and CCA integration cap each cell at `k_weight` anchor pairs, as
+  Seurat does. Results differ at the same seed.
 
 ## 0.3.3
 
