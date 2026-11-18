@@ -126,8 +126,9 @@ reversible.
 ### Several files
 
 ```python
-prescan = bv.io.prescan_h5ad_files({"d1": "d1.h5ad", "d2": "d2.h5ad"},
-                                   gene_universe="intersection")
+prescan = bv.io.prescan_h5ad_files(
+    {"d1": "d1.h5ad", "d2": "d2.h5ad"}, gene_universe="intersection"
+)
 sc = bv.io.load_multi_h5ad("exp/pooled", prescan)
 ```
 
@@ -196,7 +197,7 @@ import scipy.sparse as sp
 
 partial = out.with_name(out.name + ".partial")
 empty = sp.csr_matrix((obs.height, var.height), dtype=np.float32)
-bv.io.write_h5ad_sc(partial, empty, obs, var)   # obs / var encoded by bixverse
+bv.io.write_h5ad_sc(partial, empty, obs, var)  # obs / var encoded by bixverse
 
 indptr = np.zeros(cells.size + 1, dtype=np.int64)
 nnz = 0
@@ -207,15 +208,17 @@ with h5py.File(partial, "r+") as f:
         counts = bv.get_counts(sc, cells=chunk, genes=gene_idx)
         assert np.array_equal(counts.cells, chunk)
         m = counts.scipy_csr()
-        m.sort_indices()                            # see Reading counts
+        m.sort_indices()  # see Reading counts
         n = m.data.size
-        data.resize((nnz + n,)); data[nnz:] = m.data
-        indices.resize((nnz + n,)); indices[nnz:] = m.indices.astype(np.int32)
+        data.resize((nnz + n,))
+        data[nnz:] = m.data
+        indices.resize((nnz + n,))
+        indices[nnz:] = m.indices.astype(np.int32)
         indptr[start + 1 : start + chunk.size + 1] = nnz + m.indptr[1:].astype(np.int64)
         nnz += n
     del f["X"]["indptr"]
     f["X"].create_dataset("indptr", data=indptr, compression="gzip")
-partial.replace(out)                                # only after validation
+partial.replace(out)  # only after validation
 ```
 
 - Peak memory is obs plus one chunk, independent of the number of cells.
@@ -296,8 +299,13 @@ metrics = {
     "MT": obs["MT"].to_numpy(),
 }
 dirs = {"log10_lib_size": "twosided", "log10_nnz": "twosided", "MT": "above"}
-qc = bv.qc.run_cell_qc(metrics, obs["cell_idx"].to_numpy(), directions=dirs,
-                       threshold=3.0, hard_thresholds={"MT": {"upper": 0.2}})
+qc = bv.qc.run_cell_qc(
+    metrics,
+    obs["cell_idx"].to_numpy(),
+    directions=dirs,
+    threshold=3.0,
+    hard_thresholds={"MT": {"upper": 0.2}},
+)
 sc.add_obs(bv.qc.get_data(qc))
 sc.set_cells_to_keep(qc.cell_idx[~qc.combined])
 ```
@@ -544,6 +552,7 @@ bv.graph.find_clusters(sc, res=1.0, name="leiden_clusters")
 
 ```python
 import bixverse.embed
+
 bv.embed.umap(sc)
 bv.embed.tsne(sc, params=bv.embed.tsne_defaults().set_params(perplexity=20.0))
 bv.embed.phate(sc)
@@ -589,12 +598,18 @@ annotate.
 ```python
 from bixverse.params import EmptyDropletsParams, MinQualityParams
 
-raw = bv.io.load_tenx_h5("exp/raw", h5_path, qc=MinQualityParams(
-    min_unique_genes=0, min_lib_size=1, min_cells=0))
+raw = bv.io.load_tenx_h5(
+    "exp/raw",
+    h5_path,
+    qc=MinQualityParams(min_unique_genes=0, min_lib_size=1, min_cells=0),
+)
 # join `cell_type` from the annotated object onto raw by cell_id (left join,
 # unmatched barcodes stay null), add a `sample_id` column, then:
 clean = bv.doublets.cellsweep(
-    "exp/clean", raw, "cell_type", "sample_id",
+    "exp/clean",
+    raw,
+    "cell_type",
+    "sample_id",
     EmptyDropletsParams(method="umi_cutoff", umi_cutoff=257),
 )
 ```
@@ -690,7 +705,10 @@ sim = bv.io.generate_single_cell_test_data(
     SyntheticDataParams(n_cells=1000, n_genes=100), seed=42
 )
 sc = bv.io.load_csr(
-    f"{tmp.name}/mwe", sim.counts, sim.obs, sim.var,
+    f"{tmp.name}/mwe",
+    sim.counts,
+    sim.obs,
+    sim.var,
     qc=MinQualityParams(min_unique_genes=45, min_lib_size=300, min_cells=500),
 )
 bv.pp.find_hvg(sc, hvg_no=30)

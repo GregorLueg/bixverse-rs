@@ -153,7 +153,15 @@ import importlib.util
 import bixverse as bv
 
 print(bv.__version__, bv.__core_version__)
-for mod in ("manifolds_rs", "matplotlib", "scipy", "bixverse_gpu", "torch", "mlx", "jax"):
+for mod in (
+    "manifolds_rs",
+    "matplotlib",
+    "scipy",
+    "bixverse_gpu",
+    "torch",
+    "mlx",
+    "jax",
+):
     print(f"{mod:14} {importlib.util.find_spec(mod) is not None}")
 ```
 

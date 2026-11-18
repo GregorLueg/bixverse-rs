@@ -25,8 +25,8 @@ and returns the handle; `bv.io.load_existing(path)` reopens it.
 import bixverse as bv
 
 sc = bv.io.load_h5ad("experiments/pbmc", "pbmc.h5ad")
-sc.obs()                      # polars frame, every cell
-sc.obs(filtered=True)         # only the cells to keep
+sc.obs()  # polars frame, every cell
+sc.obs(filtered=True)  # only the cells to keep
 ```
 
 **2. Module functions mutate the object in place and return `None`.**

@@ -39,12 +39,12 @@ independent, so use pseudobulk edgeR or NEBULA for it. `bv.de` takes
 **Markers (Wilcoxon / Mann-Whitney).**
 
 ```python
-markers = bv.de.find_all_markers(sc, "leiden_clustering")    # one-vs-rest
+markers = bv.de.find_all_markers(sc, "leiden_clustering")  # one-vs-rest
 obs = sc.obs(filtered=True)
 t = obs.filter(pl.col("cell_type") == "T")["cell_id"].to_list()
 b = obs.filter(pl.col("cell_type") == "B")["cell_id"].to_list()
-pair = bv.de.find_markers(sc, t, b)                           # two groups
-spec = bv.de.find_specific_markers(sc, "cell_type")           # one-vs-many
+pair = bv.de.find_markers(sc, t, b)  # two groups
+spec = bv.de.find_specific_markers(sc, "cell_type")  # one-vs-many
 bv.de.get_marker_summary(spec).sort("min_auroc", descending=True)
 ```
 
@@ -65,10 +65,12 @@ frame, not a formula; its rows follow the order of `cell_list`.
 obs = sc.obs(filtered=True).with_columns(pl.col("donor").cast(pl.String))
 groups = obs.group_by("donor", "condition").agg("cell_id").sort("donor", "condition")
 cell_list = {f"{d}_{c}": cells for d, c, cells in groups.iter_rows()}
-design = pl.DataFrame({
-    "(Intercept)": np.ones(groups.height),
-    "conditiontreated": (groups["condition"] == "treated").cast(pl.Float64),
-})
+design = pl.DataFrame(
+    {
+        "(Intercept)": np.ones(groups.height),
+        "conditiontreated": (groups["condition"] == "treated").cast(pl.Float64),
+    }
+)
 res = bv.de.pseudobulk_dge(sc, cell_list, design, coef="conditiontreated")
 ```
 
@@ -93,13 +95,17 @@ formula over obs; the subject is the random effect, not a design term.
 mono = bv.SingleCellsSubset(sc, "cell_type", "CD14+ Monocytes")
 bv.pp.find_hvg(mono, hvg_no=500)
 res = bv.de.nebula(
-    mono, subject_col="donor", design="~ condition + age",
-    coef="conditiontreated",                     # or `contrast`, not both
+    mono,
+    subject_col="donor",
+    design="~ condition + age",
+    coef="conditiontreated",  # or `contrast`, not both
     genes_to_use=mono.gene_ids(mono.map.hvg),
     nebula_params=bv.params.NebulaParams(nebula_method="ln"),
 )
-res                      # repr reports n_failed and n_collapsed
-res.results.sort("p_value"); res.coefficients; res.se
+res  # repr reports n_failed and n_collapsed
+res.results.sort("p_value")
+res.coefficients
+res.se
 ```
 
 - `results`: `gene_id`, `log_fc` (**natural log**), `effect_se`, `z`,
@@ -128,13 +134,17 @@ first level and named `<column><level>`. Strings sort their levels; a polars
 ```python
 bv.graph.find_neighbours(sc, neighbours_params=bv.params.NeighboursParams(k=60))
 milo = bv.de.get_milor_abundances(
-    sc, "sample", milor_params=bv.de.MiloRParams(prop=0.1))
+    sc, "sample", milor_params=bv.de.MiloRParams(prop=0.1)
+)
 design_df = pl.DataFrame({"sample": milo.samples}).join(
     sc.obs(filtered=True).select("sample", "run", "age").unique(),
-    on="sample", how="left", maintain_order="left",
+    on="sample",
+    how="left",
+    maintain_order="left",
 )
-milo = bv.de.test_nhoods(milo, "~ run + age", design_df,
-                         sample_col="sample", coef="ageWk16")
+milo = bv.de.test_nhoods(
+    milo, "~ run + age", design_df, sample_col="sample", coef="ageWk16"
+)
 milo = bv.de.add_nhoods_info(milo, sc.obs(filtered=True)["cell_type"])
 da = bv.de.get_differential_abundance_res(milo)
 da.filter(pl.col("SpatialFDR") <= 0.1)
@@ -159,7 +169,7 @@ kNN. No design, no p-values.
 
 ```python
 meld_res = bv.de.meld(sc, "age")
-meld_res.norm_scores     # cell_id + one column per level, rows sum to 1
+meld_res.norm_scores  # cell_id + one column per level, rows sum to 1
 ```
 
 The argument is named `sample_id_col`, but the vignette passes the condition.
@@ -178,9 +188,15 @@ scores = bv.annotate.calc_sc_type_scores(sc, markers)
 labels = sc.obs(filtered=True)["leiden_clustering"].to_numpy()
 per_cluster = bv.annotate.score_clusters(scores, labels)
 calls = bv.annotate.assign_sc_type(sc, scores, cluster_col="leiden_clustering")
-sc.add_obs(pl.DataFrame({"cell_idx": sc.cells_to_keep,
-                         "sc_type": calls.assignments,
-                         "sc_type_hybrid": calls.hybrid}))
+sc.add_obs(
+    pl.DataFrame(
+        {
+            "cell_idx": sc.cells_to_keep,
+            "sc_type": calls.assignments,
+            "sc_type_hybrid": calls.hybrid,
+        }
+    )
+)
 ```
 
 - `marker_df` gene ids must be in the experiment's id type.
@@ -197,8 +213,9 @@ sc.add_obs(pl.DataFrame({"cell_idx": sc.cells_to_keep,
 
 ```python
 bv.pp.find_hvg(ref_sc, hvg_no=2000)
-ref = bv.annotate.build_symphony_ref(ref_sc, "sample_id", ref_sc.map.hvg,
-                                     no_pcs=30, label_columns=["cell_type"])
+ref = bv.annotate.build_symphony_ref(
+    ref_sc, "sample_id", ref_sc.map.hvg, no_pcs=30, label_columns=["cell_type"]
+)
 bv.annotate.save_symphony_ref(ref, "ref.npz")
 bv.annotate.map_symphony_query(ref, query_sc, batch_column="sample_id")
 pred = bv.annotate.transfer_labels_symphony(ref, query_sc, "cell_type")
@@ -224,10 +241,15 @@ pred = bv.annotate.transfer_labels_symphony(ref, query_sc, "cell_type")
 **CellPhoneDB.**
 
 ```python
-lr_db = bv.lr.get_cellphonedb_db()        # v5, downloaded once then cached
-cpdb = bv.lr.cellphonedb(sc, "cell_type", lr_db, method="statistical",
-                         gene_id_col="gene_symbol",   # a var column of symbols
-                         params=bv.params.CellphonedbParams(n_perm=1000))
+lr_db = bv.lr.get_cellphonedb_db()  # v5, downloaded once then cached
+cpdb = bv.lr.cellphonedb(
+    sc,
+    "cell_type",
+    lr_db,
+    method="statistical",
+    gene_id_col="gene_symbol",  # a var column of symbols
+    params=bv.params.CellphonedbParams(n_perm=1000),
+)
 ```
 
 - The database uses gene symbols; with Ensembl var ids set `gene_id_col`.
@@ -245,9 +267,12 @@ activity = bv.lr.ligand_activity_scores(
 ).filter(pl.col("gene_set") == "degs")
 expr = bv.lr.compute_expression_info(sc, "cell_type", ligands + receptors)
 prio = bv.lr.prioritise_interactions(
-    celltype_de, expr, activity,      # celltype_de: cluster_id, gene, lfc, pval
+    celltype_de,
+    expr,
+    activity,  # celltype_de: cluster_id, gene, lfc, pval
     pl.DataFrame({"ligand": ligands, "receptor": receptors}),
-    senders_oi=["Myeloid"], receivers_oi=["Malignant"],
+    senders_oi=["Myeloid"],
+    receivers_oi=["Malignant"],
     scenario="one_condition",
 )
 ```
@@ -272,7 +297,7 @@ prio = bv.lr.prioritise_interactions(
 
 ```python
 res = bv.pathways.aucell(sc, {"hypoxia": [...], "mes_like": [...]})
-sc.add_obs(bv.pathways.get_data(res))       # cell_idx + one column per set
+sc.add_obs(bv.pathways.get_data(res))  # cell_idx + one column per set
 ```
 
 - `lm_activity` returns `ScMatrixRes`, or `LmActivityRes` (`es`, `pvals`,
@@ -281,7 +306,7 @@ sc.add_obs(bv.pathways.get_data(res))       # cell_idx + one column per set
 **HotSpot.**
 
 ```python
-autocor = bv.pathways.hotspot_autocor(sc)   # gene_id, gearys_c, z_score, pval, fdr
+autocor = bv.pathways.hotspot_autocor(sc)  # gene_id, gearys_c, z_score, pval, fdr
 top = autocor.sort("z_score", descending=True)["gene_id"].head(500).to_list()
 hs = bv.pathways.hotspot_gene_cor(sc, genes_to_take=top)
 hs = bv.pathways.generate_hotspot_membership(hs, min_size=10)
@@ -297,11 +322,12 @@ autocorrelation first.
 grn = bv.pathways.scenic_grn(sc, tf_ids)
 grn = bv.pathways.identify_tf_to_genes(grn, n_sd=2.0)
 grn = bv.pathways.tf_to_genes_correlations(grn, sc)
-grn = bv.pathways.tf_to_genes_motif_enrichment(          # optional
-    grn, rankings, rank_genes, rank_motifs, annot_data)
+grn = bv.pathways.tf_to_genes_motif_enrichment(  # optional
+    grn, rankings, rank_genes, rank_motifs, annot_data
+)
 regulons = bv.pathways.build_regulons(grn)
 auc = bv.pathways.aucell(sc, regulons)
-on_off = bv.pathways.binarise_regulon_activity(auc)      # .binary, .thresholds
+on_off = bv.pathways.binarise_regulon_activity(auc)  # .binary, .thresholds
 ```
 
 - Python ships no TF list and no motif download. `rankings` is a genes x
@@ -320,9 +346,9 @@ HALS NMF of genes x cells into `w` (genes x k) and `h` (k x cells), on
 
 ```python
 sweep = bv.nmf.nmf_k_sweep(sc, k_range=range(5, 21), n_runs=20)
-sweep.frame                                   # stability and error per k
+sweep.frame  # stability and error per k
 res = bv.nmf.consensus_nmf(sc, k=10, n_runs=30)
-sc.add_obs(bv.nmf.get_data(res))              # comp_01, ... + cell_idx
+sc.add_obs(bv.nmf.get_data(res))  # comp_01, ... + cell_idx
 bv.nmf.get_w(res)
 ```
 
@@ -347,12 +373,17 @@ for ct in ["Malignant", "Myeloid", "T"]:
     sub = bv.SingleCellsSubset(sc, "cell_type", ct)
     bv.pp.find_hvg(sub, hvg_no=2000)
     bv.pp.calculate_pca(sub, no_pcs=10)
-    pcs = sub.cache.pca_factors                  # rows = subset kept cells
-    features[ct] = pl.DataFrame({"cell_id": sub.cell_ids(filtered=True),
-                                 **{f"PC_{i+1}": pcs[:, i] for i in range(10)}})
+    pcs = sub.cache.pca_factors  # rows = subset kept cells
+    features[ct] = pl.DataFrame(
+        {
+            "cell_id": sub.cell_ids(filtered=True),
+            **{f"PC_{i + 1}": pcs[:, i] for i in range(10)},
+        }
+    )
 bv.pp.find_hvg(sc, hvg_no=2000)
-res = bv.dialogue.dialogue(sc, "cell_type", "sample_id", features,
-                           pmd_params=bv.params.DialoguePmdParams(k=3))
+res = bv.dialogue.dialogue(
+    sc, "cell_type", "sample_id", features, pmd_params=bv.params.DialoguePmdParams(k=3)
+)
 bv.dialogue.get_results(res)
 res.signatures.filter(pl.col("list") == "strict")
 ```
@@ -376,13 +407,17 @@ cached kNN and returns frozen results keyed by `cell_id`.
 
 ```python
 paga = bv.traj.run_paga(sc, "leiden_clusters")
-pal = bv.traj.run_palantir(sc, early_cell="AAACCTG-1",
-                           terminal_states={"mes": "TTTGG-1", "npc": "CCGTA-1"})
-bv.pp.run_magic(sc, features=genes)          # writes sc.cache.magic
+pal = bv.traj.run_palantir(
+    sc, early_cell="AAACCTG-1", terminal_states={"mes": "TTTGG-1", "npc": "CCGTA-1"}
+)
+bv.pp.run_magic(sc, features=genes)  # writes sc.cache.magic
 trends = bv.traj.run_gene_trends(sc, pal, features=genes, use_magic=True)
 obs = sc.obs(cols=["cell_idx", "cell_id"], filtered=True)
-sc.add_obs(obs.join(pal.pseudotime, on="cell_id").select(
-    "cell_idx", pl.col("pseudotime").alias("palantir_pt")))
+sc.add_obs(
+    obs.join(pal.pseudotime, on="cell_id").select(
+        "cell_idx", pl.col("pseudotime").alias("palantir_pt")
+    )
+)
 ```
 
 - Start and terminal cells are cell ids the kNN was built over.
@@ -406,7 +441,7 @@ A tree with every cell as a leaf, on Sanity posterior log fold changes of the
 ```python
 tree = bv.trees.bonsai(sc)
 tree = bv.trees.relayout_bonsai(tree, layout="equal_daylight")
-bv.trees.set_bonsai_embedding(sc, tree)      # sc.cache.embeddings["bonsai"]
+bv.trees.set_bonsai_embedding(sc, tree)  # sc.cache.embeddings["bonsai"]
 ```
 
 - Takes `SingleCells` or `MetaCells`, **not** `SingleCellsSubset`.
@@ -422,16 +457,18 @@ bv.trees.set_bonsai_embedding(sc, tree)      # sc.cache.embeddings["bonsai"]
 Four generators return a new in-memory `MetaCells` and leave the source alone.
 
 ```python
-mc = bv.metacells.generate_bt_meta_cells(                 # hdWGCNA-style
-    sc, params=bv.params.BtMetacellsParams(target_no_metacells=250))
+mc = bv.metacells.generate_bt_meta_cells(  # hdWGCNA-style
+    sc, params=bv.params.BtMetacellsParams(target_no_metacells=250)
+)
 mc = bv.metacells.generate_seacells(sc, bv.params.SeacellsParams(n_sea_cells=200))
 mc = bv.metacells.generate_supercells(
-    sc, params=bv.params.SupercellParams(graining_factor=20))
-mc = bv.metacells.generate_metacells2(sc)                 # raw counts, no kNN
+    sc, params=bv.params.SupercellParams(graining_factor=20)
+)
+mc = bv.metacells.generate_metacells2(sc)  # raw counts, no kNN
 
 bv.metacells.calc_meta_cell_purity(mc, sc.obs()["cell_type"].to_list())
 bv.metacells.calc_diffusion_coordinates(mc, sc.cache.knn)
-bv.metacells.calc_manifold_metrics(mc)                    # compactness, separation
+bv.metacells.calc_manifold_metrics(mc)  # compactness, separation
 ```
 
 - The first three read the source's PCA and kNN. Without a kNN, bootstrapped
@@ -447,11 +484,18 @@ bv.metacells.calc_manifold_metrics(mc)                    # compactness, separat
 **Sample-pure meta cells.**
 
 ```python
-pipe = (bv.pipeline.step_hvg(hvg_no=2000) >> bv.pipeline.step_pca(30)
-        >> bv.pipeline.step_neighbours())
+pipe = (
+    bv.pipeline.step_hvg(hvg_no=2000)
+    >> bv.pipeline.step_pca(30)
+    >> bv.pipeline.step_neighbours()
+)
 mc = bv.metacells.meta_cells_per_group(
-    sc, "sample_id", method="bootstrapped", pipeline=pipe,
-    mc_params={"params": bv.params.BtMetacellsParams(target_no_metacells=50)})
+    sc,
+    "sample_id",
+    method="bootstrapped",
+    pipeline=pipe,
+    mc_params={"params": bv.params.BtMetacellsParams(target_no_metacells=50)},
+)
 ```
 
 - Merging (`merge_meta_cells`, `meta_cells_per_group`) sets `is_merged`, adds
@@ -470,14 +514,19 @@ mc = bv.metacells.meta_cells_per_group(
 bv.io.load_tenx_h5(rna_dir, h5_path)
 mm = bv.SingleCellsMultiModal(rna_dir)
 # ... RNA QC, mm.set_cells_to_keep(...) ...
-adt_sc = bv.io.load_tenx_h5(adt_dir, h5_path, feature_type="Antibody Capture",
-    qc=bv.params.MinQualityParams(min_unique_genes=0, min_lib_size=0, min_cells=0))
-adt = bv.get_counts(adt_sc).scipy_csr().toarray()        # dense cells x proteins
+adt_sc = bv.io.load_tenx_h5(
+    adt_dir,
+    h5_path,
+    feature_type="Antibody Capture",
+    qc=bv.params.MinQualityParams(min_unique_genes=0, min_lib_size=0, min_cells=0),
+)
+adt = bv.get_counts(adt_sc).scipy_csr().toarray()  # dense cells x proteins
 ids = adt_sc.gene_ids().tolist()
 iso = [f for f in ids if "isotype" in f.lower()]
 
 bv.mm.add_adt_counts(mm, adt, adt_sc.cell_ids(), ids, method="dsb", isotype_names=iso)
-bv.pp.find_hvg(mm, hvg_no=2000); bv.pp.calculate_pca(mm, no_pcs=30)
+bv.pp.find_hvg(mm, hvg_no=2000)
+bv.pp.calculate_pca(mm, no_pcs=30)
 bv.mm.calculate_pca_adt(mm, no_pcs=10, features=[f for f in ids if f not in iso])
 bv.mm.generate_wnn_graph(mm)
 bv.graph.find_clusters(mm, modality="wnn")
@@ -499,9 +548,12 @@ bv.graph.find_clusters(mm, modality="wnn")
 Chain preprocessing once, apply to many subsets.
 
 ```python
-pipe = (bv.pipeline.step_hvg(hvg_no=2000) >> bv.pipeline.step_pca(30)
-        >> bv.pipeline.step_neighbours()
-        >> bv.pipeline.step_clusters(res=0.5, name="sub_leiden"))
+pipe = (
+    bv.pipeline.step_hvg(hvg_no=2000)
+    >> bv.pipeline.step_pca(30)
+    >> bv.pipeline.step_neighbours()
+    >> bv.pipeline.step_clusters(res=0.5, name="sub_leiden")
+)
 per_sample = bv.pipeline.apply_pipeline_per_group(pipe, sc, "sample_id")
 ```
 
@@ -517,11 +569,12 @@ per_sample = bv.pipeline.apply_pipeline_per_group(pipe, sc, "sample_id")
 
 ```python
 reader = bv.CellReader(str(sc.cells_path))
-loader = bv.CellLoader(reader, sc.cells_to_keep, batch_size=256,
-                       layer="norm", seed=42, genes=sc.map.hvg)
+loader = bv.CellLoader(
+    reader, sc.cells_to_keep, batch_size=256, layer="norm", seed=42, genes=sc.map.hvg
+)
 for batch in loader:
-    x = batch.scipy_csr()          # CSR, rows = cells
-    idx = batch.cell_ids           # store index per row
+    x = batch.scipy_csr()  # CSR, rows = cells
+    idx = batch.cell_ids  # store index per row
 ```
 
 - `indices` and `genes` are 0-based store indices. `indices=None` iterates
@@ -544,9 +597,15 @@ import bixverse.nn as bvnn
 obs = sc.obs(cols=["cell_idx", "sample_id"], filtered=True)
 cells, batch = obs["cell_idx"].to_numpy(), obs["sample_id"].to_numpy()
 store = str(sc.cells_path)
-fit = bvnn.train_scvi(store, cells, sc.map.hvg, batch,
-                      params=bvnn.ScviParams(n_latent=10), backend="torch")
-latent = bvnn.scvi_latent(fit, store, cells, batch)       # (n_cells, 10)
+fit = bvnn.train_scvi(
+    store,
+    cells,
+    sc.map.hvg,
+    batch,
+    params=bvnn.ScviParams(n_latent=10),
+    backend="torch",
+)
+latent = bvnn.scvi_latent(fit, store, cells, batch)  # (n_cells, 10)
 bvnn.scvi_elbo(fit, store, held_out_cells, held_out_batch)
 ```
 

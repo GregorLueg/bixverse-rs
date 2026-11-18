@@ -166,8 +166,8 @@ boundary. A raw `duckdb` query on `sc_duckdb.db` sees 1-based keys.
 is stale. Two finer probes:
 
 ```python
-sc.cache_status()            # artefact, stamped, stale, reason, id, parents
-sc.check_state(["knn"])      # True, or why it is stale
+sc.cache_status()  # artefact, stamped, stale, reason, id, parents
+sc.check_state(["knn"])  # True, or why it is stale
 ```
 
 Each cached artefact carries a stamp: a hash of the cell set and the ids of
