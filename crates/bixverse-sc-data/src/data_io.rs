@@ -1525,6 +1525,9 @@ pub struct CellGeneSparseWriter {
     writer: BufWriter<File>,
     /// Where the chunks start: the end of the fixed file header.
     chunks_start_pos: u64,
+    /// Bytes of chunks written so far. Tracked by hand: `stream_position` on a
+    /// `BufWriter` flushes the buffer, once per chunk.
+    chunks_len: u64,
     /// Boolean indicating if the writer is designed to write in an efficient
     /// manner for cells.
     cell_based: bool,
@@ -1713,6 +1716,7 @@ impl CellGeneSparseWriter {
             original_indices: Vec::new(),
             writer,
             chunks_start_pos: header_len as u64,
+            chunks_len: 0,
             cell_based,
             chunks_since_flush: 0_usize,
             flush_frequency,
@@ -1953,13 +1957,13 @@ impl CellGeneSparseWriter {
         compressed: &[u8],
         original_index: usize,
     ) -> Result<(), ScDataErrors> {
-        let current_pos = self.writer.stream_position()?;
-        self.chunk_offsets.push(current_pos - self.chunks_start_pos);
+        self.chunk_offsets.push(self.chunks_len);
         self.original_indices.push(original_index);
 
         self.writer
             .write_all(&(compressed.len() as u64).to_le_bytes())?;
         self.writer.write_all(compressed)?;
+        self.chunks_len += 8 + compressed.len() as u64;
 
         self.chunks_since_flush += 1;
 
@@ -2479,6 +2483,18 @@ pub fn compress_cell_row(
     }
     let genes: Vec<u32> = row.iter().map(|&(g, _)| g).collect();
     let counts: Vec<u32> = row.iter().map(|&(_, c)| c).collect();
+    // a norm scaled to another target than the file's does not recompute
+    let fast = (target_size.to_bits() == format.target_size.to_bits())
+        .then(|| format.encode_cell_counts(&genes, &counts, original_index))
+        .flatten();
+    if let Some((library_size, bytes)) = fast {
+        let payload = CellPayload {
+            original_index,
+            library_size,
+            bytes,
+        };
+        return Ok((row.len(), payload));
+    }
     let chunk = CsrCellChunk::from_data(&counts, &genes, original_index, target_size, true);
     let (nnz, library_size) = chunk.get_qc_info();
     let payload = CellPayload {

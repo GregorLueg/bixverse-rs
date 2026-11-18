@@ -174,19 +174,19 @@ fn pack(vals: &[u32], out: &mut Vec<u8>) {
         let max = block.iter().copied().max().unwrap_or(0);
         let width = (32 - max.leading_zeros()) as usize;
         out.push(width as u8);
+        out.reserve((block.len() * width).div_ceil(8));
+        // at most 31 bits carry over, plus 32 new: fits the u64
         let (mut acc, mut nbits) = (0u64, 0usize);
         for &v in block {
             acc |= (v as u64) << nbits;
             nbits += width;
-            while nbits >= 8 {
-                out.push(acc as u8);
-                acc >>= 8;
-                nbits -= 8;
+            if nbits >= 32 {
+                out.extend_from_slice(&(acc as u32).to_le_bytes());
+                acc >>= 32;
+                nbits -= 32;
             }
         }
-        if nbits > 0 {
-            out.push(acc as u8);
-        }
+        out.extend_from_slice(&acc.to_le_bytes()[..nbits.div_ceil(8)]);
     }
 }
 
@@ -1269,6 +1269,51 @@ impl ChunkFormat {
         } else {
             Ok(chunk.to_compressed_bytes()?)
         }
+    }
+
+    /// Encode a cell chunk straight from its integer counts.
+    ///
+    /// Same bytes as [`Self::encode_cell`] on the chunk
+    /// [`CsrCellChunk::from_data`] builds from these counts. A sequential f32
+    /// sum of integers is a whole number, so the stored library size converts
+    /// back to the same f32 and the norm recomputes bit for bit: it is never
+    /// built.
+    ///
+    /// ### Params
+    ///
+    /// * `genes` - Gene indices, ascending
+    /// * `counts` - Raw count per gene
+    /// * `original_index` - Index the cell is stored under
+    ///
+    /// ### Returns
+    ///
+    /// `(library size, payload)`, or `None` where the norm would be stored (v3,
+    /// or a target size of `0.0`); build the chunk then.
+    pub fn encode_cell_counts(
+        &self,
+        genes: &[u32],
+        counts: &[u32],
+        original_index: usize,
+    ) -> Option<(usize, Vec<u8>)> {
+        if !self.uses_v4_codec() || self.target_size == 0.0 {
+            return None;
+        }
+        // must stay the sum `CsrCellChunk::from_data` takes
+        let library_size = counts.iter().map(|&x| x as f32).sum::<f32>() as usize;
+        let bytes = encode_chunk(
+            &EncodeIn {
+                indices: genes,
+                layers: &[counts],
+                norm: &[],
+                aux: library_size as u64,
+                original_index,
+                to_keep: true,
+                norm_derivable: true,
+                norm_f32: self.norm_f32(),
+            },
+            self.codec,
+        );
+        Some((library_size, bytes))
     }
 
     /// Encode a gene chunk for a file of this format.
