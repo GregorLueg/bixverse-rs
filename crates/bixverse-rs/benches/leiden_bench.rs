@@ -12,6 +12,9 @@
 //! * `stable` - Leiden until stable, with `min_gain` 0 and 1e-4.
 //! * `louvain` - Louvain at R's default of 2 iterations.
 //!
+//! Every row prints an `FxHash` of its labels, so two builds of the engine can
+//! be checked for identical partitions.
+//!
 //! Run with:
 //! ```text
 //! LEIDEN_BENCH_GRAPH=/path/graph.bin cargo bench -p bixverse-rs --bench leiden_bench
@@ -24,9 +27,11 @@
 //! * `LEIDEN_BENCH_REPS` - timed repeats per configuration, default 3
 //! * `LEIDEN_BENCH_MAX_ITERS` - largest iteration count, default 5
 //! * `LEIDEN_BENCH_RES` - resolution, default 1
+//! * `LEIDEN_BENCH_SEED` - seed, default 42
 //! * `LEIDEN_BENCH_ONLY` - comma-separated subset of
 //!   `level0,iters,stable,louvain`
 
+use std::hash::BuildHasher;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -34,6 +39,7 @@ use bixverse_rs::graph::graph_structures::SparseGraph;
 use bixverse_rs::graph::leiden::{LeidenParams, community_detection, modularity};
 use bixverse_rs::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_rs::prelude::*;
+use rustc_hash::FxBuildHasher;
 
 /// One configuration of the engine.
 struct Config {
@@ -125,8 +131,10 @@ where
     let only = std::env::var("LEIDEN_BENCH_ONLY").unwrap_or_default();
     let want = |s: &str| only.is_empty() || only.split(',').any(|o| o.trim() == s);
 
+    let seed = env("LEIDEN_BENCH_SEED", 42) as u64;
     let leiden = |iters: Option<usize>, min_gain: f64| LeidenParams {
         resolution: res,
+        seed,
         n_iterations: iters,
         min_gain,
         ..LeidenParams::default()
@@ -190,8 +198,8 @@ where
         .iter()
         .position(|c| c.name == format!("leiden it={max_iters}"));
     println!(
-        "{:<26} {:>9} {:>9} {:>10} {:>6} {:>9} {:>9}",
-        "config", "median s", "marg s", "modularity", "k", "ARI ref", "ARI truth"
+        "{:<26} {:>9} {:>9} {:>10} {:>6} {:>9} {:>9} {:>17}",
+        "config", "median s", "marg s", "modularity", "k", "ARI ref", "ARI truth", "labels hash"
     );
     let mut prev_iter_time = 0.0;
     for (i, c) in configs.iter().enumerate() {
@@ -211,14 +219,15 @@ where
             format!("{:.4}", adjusted_rand_index(tr, &labels[i]))
         });
         println!(
-            "{:<26} {:>9.3} {:>9} {:>10.6} {:>6} {:>9} {:>9}",
+            "{:<26} {:>9.3} {:>9} {:>10.6} {:>6} {:>9} {:>9} {:>17x}",
             c.name,
             t,
             marg,
             q,
             n_clusters(&labels[i]),
             ari_ref,
-            ari_truth
+            ari_truth,
+            FxBuildHasher.hash_one(&labels[i])
         );
     }
 }

@@ -53,7 +53,7 @@ from bixverse.params import (
 # Globals #
 ###########
 
-DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 5, "louvain": 2}
+DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 2, "louvain": 2}
 
 ClusterAlgorithm = Literal["leiden", "louvain"]
 LocalMoving = Literal["queue", "coloured"]
@@ -438,8 +438,7 @@ def find_clusters(
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.
         n_iterations: Full iterations, each starting from the previous
-            partition; negative iterates until stable. `None` is 5 for
-            Leiden and 2 for Louvain.
+            partition; negative iterates until stable. `None` is 2.
         min_gain: With a negative `n_iterations`, also stop once an
             iteration gains no more than this.
         local_moving: `"queue"` (Traag's sequential queue) or `"coloured"`
@@ -547,7 +546,7 @@ def fast_cluster(
         resolutions: Modularity resolutions.
         fc_params: The parameters. `None` uses the defaults; a `None`
             `n_centroids` becomes `floor(4 * sqrt(n_cells))` and a `None`
-            `n_iterations` 2 for Louvain, 5 for Leiden.
+            `n_iterations` 2.
         n_seeds: Seeds per resolution; 1 skips the stability statistics.
         return_kmeans: Return the k-means assignments and centroids.
         seed: Seed.

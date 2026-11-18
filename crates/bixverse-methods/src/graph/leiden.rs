@@ -147,7 +147,8 @@ pub fn parse_leiden_iterations(v: f64) -> Option<Option<usize>> {
 ///   probability proportional to `exp(gain / beta)`. igraph default 0.01.
 /// * `n_iterations` - Number of full Leiden iterations, each starting from
 ///   the previous partition. `None` iterates until an iteration changes
-///   nothing (capped at 1000). Default 5; igraph's R default is 2.
+///   nothing (capped at 1000). Default 2, as igraph; across seeds, later
+///   iterations gain less modularity than the seed changes.
 /// * `min_gain` - With `n_iterations: None`, also stop once an iteration
 ///   raises the modularity by no more than this. 0 waits for a fixed point.
 /// * `refine` - Run the Leiden refinement phase. `false` gives Louvain.
@@ -218,7 +219,7 @@ impl Default for LeidenParams {
         Self {
             resolution: 1.0,
             beta: 0.01,
-            n_iterations: Some(5),
+            n_iterations: Some(2),
             min_gain: 0.0,
             refine: true,
             seed: 42,
