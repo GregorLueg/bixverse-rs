@@ -292,15 +292,15 @@ fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
     }
     let raw_slot =
         parse_raw_slot(slot).expect("GENE_FILE_BENCH_H5AD_SLOT: X, raw.X or layers.counts");
+    // through AnnFile, so an anndata Zarr store works too (feature `zarr`)
     let (no_cells, no_genes, indptr_len) = {
-        let file = hdf5::File::open(h5ad).expect("open h5ad");
-        let shape: Vec<i64> = file
-            .group(raw_slot.get_dense_path())
-            .and_then(|g| g.attr("shape"))
-            .and_then(|a| a.read_raw::<i64>())
-            .expect("sparse count group with a shape attribute (dense X is not supported here)");
-        let indptr_len = file.dataset(raw_slot.get_indptr()).expect("indptr").size();
-        (shape[0] as usize, shape[1] as usize, indptr_len)
+        use bixverse_rs::single_cell::sc_data::ann_store::AnnFile;
+        use bixverse_rs::single_cell::sc_data::h5_scan::get_h5ad_dimensions;
+        let dims = get_h5ad_dimensions(h5ad).expect("h5ad or Zarr dimensions");
+        let indptr_len = AnnFile::open(h5ad)
+            .and_then(|f| f.shape(raw_slot.get_indptr()))
+            .expect("indptr")[0];
+        (dims.n_obs, dims.n_var, indptr_len)
     };
     let format = if no_cells == no_genes {
         panic!("square matrix, cannot tell CSR from CSC by indptr length");
