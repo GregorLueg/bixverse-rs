@@ -215,6 +215,7 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(atac::atac_tenx_peaks_to_store, m)?,
         wrap_pyfunction!(atac::atac_fragments_to_store, m)?,
         wrap_pyfunction!(atac::atac_fragment_qc, m)?,
+        wrap_pyfunction!(atac::atac_call_peaks, m)?,
         wrap_pyfunction!(atac::atac_set_tf_idf, m)?,
         wrap_pyfunction!(atac::atac_feature_totals, m)?,
         wrap_pyfunction!(atac::atac_lsi, m)?,

@@ -131,6 +131,42 @@ def test_tiles_and_cutoffs(exp):
         atac.find_top_features(exp, min_cutoff="x5")
 
 
+def test_call_peaks_matches_macs3_and_feeds_counting(exp):
+    assert exp.n_cells == len(exp.cells_to_keep)
+    groups = [f"g{i % 3}" for i in range(exp.n_cells)]
+    exp.add_obs(pl.DataFrame({"cell_idx": exp._all_cells(), "macs_group": groups}))
+    fragments = FIX / "fragments.tsv.gz"
+
+    per_group = atac.call_peaks(exp, fragments, group_by="macs_group", combine=False)
+    for g in ["g0", "g1", "g2"]:
+        ref = _tsv(f"macs3/{g}_insertion_dupall_g2.7e9.tsv.gz")
+        ours = per_group.filter(pl.col("group") == g)
+        for col in ["chrom", "start", "end", "summit"]:
+            assert ours[col].to_list() == ref[col].to_list(), (g, col)
+        np.testing.assert_allclose(ours["qscore"], ref["qscore"], rtol=1e-5)
+
+    signac = atac.call_peaks(
+        exp,
+        fragments,
+        combine=False,
+        tag_source="fragment_start",
+        keep_dup=1,
+        genome_size=1e7,
+    )
+    ref = _tsv("macs3/all_start_dup1_g1e7.tsv.gz")
+    assert signac["start"].to_list() == ref["start"].to_list()
+    assert set(signac["group"].to_list()) == {"all"}
+
+    merged = atac.call_peaks(exp, fragments, group_by="macs_group")
+    assert merged.columns == ["chrom", "start", "end", "peak_called_in"]
+    assert 0 < merged.height < per_group.height
+    assert all(
+        set(c.split(",")) <= {"g0", "g1", "g2"} for c in merged["peak_called_in"]
+    )
+    atac.add_atac_fragments(exp, fragments, peaks=merged)
+    assert exp.var(modality="atac").height == merged.height
+
+
 def test_gene_activity_matches_signac(exp):
     ga = atac.gene_activity(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
     assert ga.feature_kind == "gene_activity"

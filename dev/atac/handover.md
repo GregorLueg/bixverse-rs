@@ -12,7 +12,8 @@ Signac and Seurat quirks) first. Workspace 0.11.0, Python 0.4.0.
 | 0 to 4: crate, 10x peaks, fragments, QC, counting, gene activity | done | done | handover written |
 | 5: modality and bindings | | `bv.atac` on `SingleCellsMultiModal` | handover written |
 | 6: LSI projection, rLSI, label transfer | done | done (`project_lsi`, `run_rlsi`, `transfer_labels_seurat`) | handover written |
-| 7: peak caller, AMULET, LinkPeaks, motifs, footprinting | not started | | |
+| 7a: peak caller (MACS3 port, per group) | done | done (`call_peaks`) | handover written |
+| 7b: AMULET, LinkPeaks, motifs, footprinting | not started | | |
 
 R handover: `~/Desktop/handovers/handover_atac.md`.
 

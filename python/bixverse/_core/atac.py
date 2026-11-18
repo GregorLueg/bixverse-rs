@@ -38,6 +38,8 @@ MITO_CHROMS: tuple[str, ...] = ("chrM", "MT", "chrMT", "M")
 
 CountMode = Literal["insertion", "paired-insertion", "fragment"]
 
+TagSource = Literal["insertion", "fragment_start"]
+
 ###########
 # Helpers #
 ###########
@@ -405,6 +407,118 @@ def atac_fragment_qc(
             )
     mm.add_obs(frame)
     return frame
+
+
+################
+# Peak calling #
+################
+
+
+@beartype
+def call_peaks(
+    sc: SingleCells,
+    fragments: Path | str,
+    *,
+    group_by: str | None = None,
+    combine: bool = True,
+    tag_source: TagSource = "insertion",
+    keep_dup: int | None = None,
+    shift: int = -100,
+    extsize: int = 200,
+    genome_size: float = 2.7e9,
+    llocal: int = 10_000,
+    q_value: float = 0.05,
+    min_length: int | None = None,
+    max_gap: int | None = None,
+) -> pl.DataFrame:
+    """Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
+
+    A native port of MACS3 `callpeak --nomodel` without a control track, one
+    call per group, as Signac's `CallPeaks(group.by = ...)` runs MACS. It
+    reproduces MACS3 3.1.0's peaks exactly. Pass the result as `peaks` to
+    `add_atac_fragments` to count against it.
+
+    Args:
+        sc: The experiment; its kept cells are pooled.
+        fragments: The fragment file.
+        group_by: obs column to call per level of (clusters, samples); `None`
+            pools all kept cells into one group, `"all"`.
+        combine: Merge overlapping peaks across groups into one set, with the
+            groups each was called in. `False` returns every group's peaks.
+        tag_source: `"insertion"` (both Tn5 insertions per fragment) or
+            `"fragment_start"` (the fragment start only: what MACS reads from
+            the fragment file Signac hands it).
+        keep_dup: Tags kept per position; `None` keeps all (MACS's default,
+            and so Signac's, is 1).
+        shift: Tag shift before extension (`--shift`).
+        extsize: Tag extension, the fragment size (`--extsize`).
+        genome_size: Effective genome size (`-g`).
+        llocal: Window of the local lambda (`--llocal`).
+        q_value: q-value cutoff (`-q`).
+        min_length: Minimum peak length; `None` for `extsize`.
+        max_gap: Largest gap merged into a peak; `None` for MACS's tag size (1
+            for insertions, the mean length of the group's first fragments
+            for fragment starts).
+
+    Returns:
+        With `combine`: `chrom`, `start`, `end` (0-based, half-open) and
+        `peak_called_in`, the comma-separated groups. Without: one row per
+        group and peak, with `group`, `summit` and the summit's `pileup`,
+        `pscore` (`-log10 p`), `fold` and `qscore` (`-log10 q`).
+    """
+    kept = sc.cells_to_keep
+    if group_by is None:
+        codes = np.zeros(len(kept), dtype=np.uint32)
+        levels = ["all"]
+    else:
+        codes, levels = _factor_codes(_obs_aligned(sc, [group_by])[group_by], group_by)
+    r = _bixverse.atac_call_peaks(
+        Path(fragments),
+        [str(b) for b in sc.cell_ids(kept)],
+        [int(c) for c in codes],
+        tag_source,
+        keep_dup,
+        shift,
+        extsize,
+        genome_size,
+        llocal,
+        q_value,
+        min_length,
+        max_gap,
+    )
+    peaks = pl.DataFrame(
+        {
+            "group": pl.Series([levels[g] for g in r["group"]], dtype=pl.Enum(levels)),
+            "chrom": pl.Series(r["chrom"], dtype=pl.String),
+            "start": r["start"],
+            "end": r["end"],
+            "summit": r["summit"],
+            "pileup": r["pileup"],
+            "pscore": r["pscore"],
+            "fold": r["fold"],
+            "qscore": r["qscore"],
+        }
+    )
+    if not combine:
+        return peaks
+    merged = _bixverse.atac_reduce_regions(
+        peaks["chrom"].to_list(),
+        [int(x) for x in peaks["start"]],
+        [int(x) for x in peaks["end"]],
+    )
+    group = peaks["group"].cast(pl.String).to_list()
+    called_in = []
+    for members in merged["members"]:
+        present = {group[i] for i in members}
+        called_in.append(",".join(lev for lev in levels if lev in present))
+    return pl.DataFrame(
+        {
+            "chrom": pl.Series(merged["chrom"], dtype=pl.String),
+            "start": merged["start"],
+            "end": merged["end"],
+            "peak_called_in": called_in,
+        }
+    )
 
 
 ####################

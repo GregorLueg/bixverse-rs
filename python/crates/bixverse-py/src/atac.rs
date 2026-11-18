@@ -13,6 +13,9 @@ use bixverse_atac::counting::{count_fragments, parse_count_mode, write_counts_st
 use bixverse_atac::errors::AtacErrors;
 use bixverse_atac::features::feature_total_stats;
 use bixverse_atac::lsi::{LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store};
+use bixverse_atac::peak_calling::{
+    KeepDup, NarrowPeak, PeakCallParams, call_peaks, parse_tag_source,
+};
 use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
 use bixverse_atac::regions::{genome_tiles, read_bed, reduce_regions, region};
 use bixverse_atac::rlsi::{RlsiParams, rlsi_on_store};
@@ -521,6 +524,101 @@ pub fn atac_fragment_qc<'py>(
     out.set_item("nucleosome_free", qc.nucleosome_free.into_pyarray(py))?;
     out.set_item("mononucleosomal", qc.mononucleosomal.into_pyarray(py))?;
     out.set_item("n_mito", qc.n_mito.into_pyarray(py))?;
+    Ok(out)
+}
+
+//////////////////
+// Peak calling //
+//////////////////
+
+/// Call peaks per group of cells (MACS3 `callpeak`, no control).
+///
+/// ### Params
+///
+/// * `fragments` - The fragment file
+/// * `barcodes` - Cells
+/// * `groups` - Group of each cell, `0..n_groups`
+/// * `tag_source` - `"insertion"` or `"fragment_start"`
+/// * `keep_dup` - Tags kept per position, `None` for all
+/// * `shift` - Tag shift before extension
+/// * `extsize` - Tag extension
+/// * `genome_size` - Effective genome size
+/// * `llocal` - Local lambda window
+/// * `q_value` - q-value cutoff
+/// * `min_length` - Minimum peak length, `None` for `extsize`
+/// * `max_gap` - Largest merged gap, `None` for MACS's tag size
+///
+/// ### Returns
+///
+/// Dict of `group` (`uint32`), `chrom`, `start`, `end`, `summit` (`uint32`,
+/// 0-based) and `pileup`, `pscore`, `fold`, `qscore` (`float32`), groups in
+/// order, peaks by chromosome name and position.
+#[pyfunction]
+#[pyo3(signature = (
+    fragments, barcodes, groups, tag_source, keep_dup, shift, extsize,
+    genome_size, llocal, q_value, min_length, max_gap
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn atac_call_peaks<'py>(
+    py: Python<'py>,
+    fragments: PathBuf,
+    barcodes: Vec<String>,
+    groups: Vec<u32>,
+    tag_source: &str,
+    keep_dup: Option<u32>,
+    shift: i32,
+    extsize: u32,
+    genome_size: f64,
+    llocal: u32,
+    q_value: f64,
+    min_length: Option<u32>,
+    max_gap: Option<u32>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let tag_source = parse_tag_source(tag_source)
+        .ok_or_else(|| PyValueError::new_err(format!("unknown tag_source '{tag_source}'")))?;
+    let params = PeakCallParams {
+        tag_source,
+        keep_dup: keep_dup.map_or(KeepDup::All, KeepDup::AtMost),
+        shift,
+        extsize,
+        genome_size,
+        llocal,
+        q_value,
+        min_length,
+        max_gap,
+    };
+    let peaks = py
+        .detach(|| call_peaks(&fragments, &barcodes, &groups, Some(params)))
+        .map_err(atac_err)?;
+
+    let flat: Vec<(u32, &NarrowPeak)> = peaks
+        .iter()
+        .enumerate()
+        .flat_map(|(g, ps)| ps.iter().map(move |p| (g as u32, p)))
+        .collect();
+    let u32s = |f: fn(&NarrowPeak) -> u32| flat.iter().map(|(_, p)| f(p)).collect::<Vec<u32>>();
+    let f32s = |f: fn(&NarrowPeak) -> f32| flat.iter().map(|(_, p)| f(p)).collect::<Vec<f32>>();
+    let out = PyDict::new(py);
+    out.set_item(
+        "group",
+        flat.iter()
+            .map(|&(g, _)| g)
+            .collect::<Vec<u32>>()
+            .into_pyarray(py),
+    )?;
+    out.set_item(
+        "chrom",
+        flat.iter()
+            .map(|(_, p)| p.chrom.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    out.set_item("start", u32s(|p| p.start).into_pyarray(py))?;
+    out.set_item("end", u32s(|p| p.end).into_pyarray(py))?;
+    out.set_item("summit", u32s(|p| p.summit).into_pyarray(py))?;
+    out.set_item("pileup", f32s(|p| p.pileup).into_pyarray(py))?;
+    out.set_item("pscore", f32s(|p| p.pscore).into_pyarray(py))?;
+    out.set_item("fold", f32s(|p| p.fold).into_pyarray(py))?;
+    out.set_item("qscore", f32s(|p| p.qscore).into_pyarray(py))?;
     Ok(out)
 }
 

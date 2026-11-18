@@ -1302,6 +1302,20 @@ def atac_fragment_qc(
     tss_pos: list[int],
     mito_chroms: list[str],
 ) -> dict[str, np.ndarray]: ...
+def atac_call_peaks(
+    fragments: Path,
+    barcodes: list[str],
+    groups: list[int],
+    tag_source: str,
+    keep_dup: int | None,
+    shift: int,
+    extsize: int,
+    genome_size: float,
+    llocal: int,
+    q_value: float,
+    min_length: int | None,
+    max_gap: int | None,
+) -> dict[str, Any]: ...
 def atac_set_tf_idf(
     f_path_cells: Path,
     f_path_genes: Path,

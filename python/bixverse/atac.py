@@ -24,6 +24,11 @@ a BED of peaks or fixed-width tiles; its default `mode="insertion"` counts
 each Tn5 insertion as Cell Ranger does, and reproduces the h5 matrix on
 Cell Ranger's peaks.
 
+**Calling peaks.** `call_peaks` calls peaks on the fragments per cluster
+(`group_by`), a native port of MACS3 `callpeak` that reproduces its peaks;
+Cell Ranger's peak set under-calls rare populations. Its merged result goes
+straight into `add_atac_fragments(peaks=...)`.
+
 **Gene activity.** `gene_activity` counts fragments over gene body plus
 promoter (Signac's `GeneActivity`) into its own `SingleCells`, the query side
 of an RNA to ATAC label transfer. It is not RNA: methods that assume an mRNA
@@ -46,6 +51,7 @@ from bixverse._core.atac import (
     add_atac_tenx,
     atac_fragment_qc,
     calculate_lsi,
+    call_peaks,
     find_top_features,
     gene_activity,
     get_lsi_depth_cor,
@@ -61,6 +67,7 @@ __all__ = [
     "add_atac_tenx",
     "atac_fragment_qc",
     "calculate_lsi",
+    "call_peaks",
     "find_top_features",
     "gene_activity",
     "get_lsi_depth_cor",
