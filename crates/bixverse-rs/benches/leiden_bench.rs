@@ -28,6 +28,7 @@
 //! * `LEIDEN_BENCH_MAX_ITERS` - largest iteration count, default 5
 //! * `LEIDEN_BENCH_RES` - resolution, default 1
 //! * `LEIDEN_BENCH_SEED` - seed, default 42
+//! * `LEIDEN_BENCH_LOCAL_MOVING` - `queue` (default) or `coloured`
 //! * `LEIDEN_BENCH_ONLY` - comma-separated subset of
 //!   `level0,iters,stable,louvain`
 
@@ -36,7 +37,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use bixverse_rs::graph::graph_structures::SparseGraph;
-use bixverse_rs::graph::leiden::{LeidenParams, community_detection, modularity};
+use bixverse_rs::graph::leiden::{LeidenParams, LocalMoving, community_detection, modularity};
 use bixverse_rs::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_rs::prelude::*;
 use rustc_hash::FxBuildHasher;
@@ -132,9 +133,14 @@ where
     let want = |s: &str| only.is_empty() || only.split(',').any(|o| o.trim() == s);
 
     let seed = env("LEIDEN_BENCH_SEED", 42) as u64;
+    let local_moving = match std::env::var("LEIDEN_BENCH_LOCAL_MOVING").as_deref() {
+        Ok("coloured") => LocalMoving::Coloured,
+        _ => LocalMoving::Queue,
+    };
     let leiden = |iters: Option<usize>, min_gain: f64| LeidenParams {
         resolution: res,
         seed,
+        local_moving,
         n_iterations: iters,
         min_gain,
         ..LeidenParams::default()
