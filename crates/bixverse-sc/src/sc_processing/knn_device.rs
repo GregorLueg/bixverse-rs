@@ -50,18 +50,17 @@ pub enum KnnSearchGpu {
 /// ### Params
 ///
 /// * `s` - Method name, case-insensitive. `"exhaustive"`, `"ivf"`,
-///   `"nndescent"` or `"cagra"`, each also accepted with a `_gpu` or `_mlx`
-///   suffix.
+///   `"nndescent"` or `"cagra"`, each also accepted with a `_gpu` suffix.
 ///
 /// ### Returns
 ///
 /// The matching [`KnnSearchGpu`], or `None` if the string is unrecognised.
 pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
     match s.to_lowercase().as_str() {
-        "exhaustive" | "exhaustive_gpu" | "exhaustive_mlx" => Some(KnnSearchGpu::ExhaustiveGpu),
-        "ivf" | "ivf_gpu" | "ivf_mlx" => Some(KnnSearchGpu::IvfGpu),
-        "nndescent" | "nndescent_gpu" | "nndescent_mlx" => Some(KnnSearchGpu::NNDescentGraphGpu),
-        "cagra" | "cagra_gpu" | "cagra_mlx" => Some(KnnSearchGpu::CagraGpu),
+        "exhaustive" | "exhaustive_gpu" => Some(KnnSearchGpu::ExhaustiveGpu),
+        "ivf" | "ivf_gpu" => Some(KnnSearchGpu::IvfGpu),
+        "nndescent" | "nndescent_gpu" => Some(KnnSearchGpu::NNDescentGraphGpu),
+        "cagra" | "cagra_gpu" => Some(KnnSearchGpu::CagraGpu),
         _ => None,
     }
 }

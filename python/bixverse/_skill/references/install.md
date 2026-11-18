@@ -134,10 +134,10 @@ uv run --no-sync maturin develop --release --features mlx
 Then pass `backend="mlx"`; the default `"wgpu"` is unchanged:
 
 ```python
-bvg.mlx_available()                                  # True in this build
+bvg.mlx_available()  # True in this build
 bvg.pp.calculate_pca(sc, 30, backend="mlx")
 bvg.graph.find_neighbours(sc, backend="mlx")
-bvg.integrate.harmony(sc, "batch", backend="mlx")   # still writes harmony_gpu
+bvg.integrate.harmony(sc, "batch", backend="mlx")  # still writes harmony_gpu
 ```
 
 MLX is f32 only. `backend="mlx"` on a build without the feature raises

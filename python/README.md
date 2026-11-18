@@ -103,6 +103,32 @@ bvg.graph.find_neighbours(sc)
 `bvg.gpu_available()` probes for an adapter. Without one the twins raise
 `bixverse.BixverseError`.
 
+### MLX on Apple Silicon (experimental)
+
+PCA, the kNN, fast clustering, Harmony and SEACells can also run on MLX via
+mlx-c instead of wgpu. The PyPI wheel does not carry it, so build both wheels
+from a checkout with mlx-c installed:
+
+```bash
+brew install mlx-c                 # or point MLX_C_PREFIX at an install
+cd bixverse-rs/python
+uv sync --group dev
+uv run --no-sync maturin develop --release
+cd gpu && uv run --no-sync maturin develop --release --features mlx
+```
+
+Then pass `backend="mlx"`; the default stays `"wgpu"`:
+
+```python
+bvg.mlx_available()  # True in this build
+bvg.pp.calculate_pca(sc, 30, backend="mlx")
+bvg.graph.find_neighbours(sc, backend="mlx")
+```
+
+MLX runs in f32. `backend="mlx"` on a build without it raises
+`bixverse.BixverseError`; `--features mlx` without mlx-c fails the build. After
+a `brew upgrade mlx-c`, rebuild.
+
 ## Loader and scVI
 
 `CellLoader` streams shuffled minibatches off the cell-major store. A feeder thread

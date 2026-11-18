@@ -174,4 +174,3 @@ def test_seacells_matches_cpu(sc):
         np.asarray(want.other_data["rss"]),
         rtol=1e-4,
     )
-
