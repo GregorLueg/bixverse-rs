@@ -162,6 +162,11 @@ harness = false
 required-features = ["atac"]
 
 [[bench]]
+name = "peak_call_bench"
+harness = false
+required-features = ["atac"]
+
+[[bench]]
 name = "dge_scan_bench"
 harness = false
 required-features = ["single-cell"]

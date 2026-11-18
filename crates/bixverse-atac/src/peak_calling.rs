@@ -24,7 +24,11 @@
 //! decimals, p-scores and q-scores as f32. That is why this module fixes its
 //! float types rather than being generic.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+
+use flate2::read::MultiGzDecoder;
 
 use bixverse_sc_data::interval_index::FeatureInterval;
 use rayon::prelude::*;
@@ -112,7 +116,8 @@ pub struct PeakCallParams {
     pub min_length: Option<u32>,
     /// Largest gap merged into one peak; `None` takes MACS's tag size: 1 for
     /// insertions, the truncated mean length of the group's first
-    /// [`TAG_SIZE_SAMPLE`] fragments for fragment starts.
+    /// [`TAG_SIZE_SAMPLE`] fragments on the file's first chromosome for
+    /// fragment starts.
     pub max_gap: Option<u32>,
 }
 
@@ -365,23 +370,58 @@ fn collect_tags(
         .collect())
 }
 
-/// MACS's tag size of a fragment start group: the truncated mean length of
-/// its first fragments on its first chromosome.
+/// The chromosome of the first fragment line of a file.
 ///
-/// MACS reads them off the top of the file; this takes the chromosome first
-/// in name order, which is the file order for single chromosome inputs and
-/// for most others starts at `chr1` either way.
+/// ### Params
+///
+/// * `path` - Fragment file, gzip, BGZF or plain
+///
+/// ### Returns
+///
+/// The chromosome, `None` for a file without fragment lines, or an I/O
+/// error.
+fn first_chromosome(path: &Path) -> Result<Option<String>, AtacErrors> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 2];
+    let gz = file.read(&mut magic)? == 2 && magic == [0x1f, 0x8b];
+    file.seek(SeekFrom::Start(0))?;
+    let reader: Box<dyn BufRead> = if gz {
+        Box::new(BufReader::new(MultiGzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        return Ok(line.split('\t').next().map(str::to_string));
+    }
+    Ok(None)
+}
+
+/// MACS's tag size of a fragment start group: the truncated mean length of
+/// its first fragments.
+///
+/// MACS takes the first lines of the file it reads, which for a group is the
+/// group's first fragments on the file's first chromosome. A group without
+/// fragments there falls back to its chromosome first in name order.
 ///
 /// ### Params
 ///
 /// * `group` - The group's tags
+/// * `file_first` - The file's first chromosome
 ///
 /// ### Returns
 ///
 /// The tag size, 0 for an empty group.
-fn fragment_tag_size(group: &GroupTags) -> u32 {
-    let Some((chrom, _)) = group.chroms.first() else {
-        return 0;
+fn fragment_tag_size(group: &GroupTags, file_first: Option<&str>) -> u32 {
+    let chrom = match file_first.filter(|c| group.first.contains_key(*c)) {
+        Some(c) => c,
+        None => match group.chroms.first() {
+            Some((c, _)) => c.as_str(),
+            None => return 0,
+        },
     };
     let mut first = group.first.get(chrom).cloned().unwrap_or_default();
     first.sort_unstable();
@@ -709,14 +749,20 @@ fn score_tables(hist: &FxHashMap<PKey, i64>) -> (FxHashMap<PKey, f32>, FxHashMap
 ///
 /// * `group` - The group's tags
 /// * `params` - Validated parameters
+/// * `file_first` - The fragment file's first chromosome, for the default
+///   `max_gap` of fragment start tags
 ///
 /// ### Returns
 ///
 /// The peaks, chromosomes in name order, peaks by position.
-fn call_group(mut group: GroupTags, params: &PeakCallParams) -> Vec<NarrowPeak> {
+fn call_group(
+    mut group: GroupTags,
+    params: &PeakCallParams,
+    file_first: Option<&str>,
+) -> Vec<NarrowPeak> {
     let tag_size = match params.tag_source {
         TagSource::Insertion => 1,
-        TagSource::FragmentStart => fragment_tag_size(&group),
+        TagSource::FragmentStart => fragment_tag_size(&group, file_first),
     };
     group
         .chroms
@@ -902,9 +948,13 @@ pub fn call_peaks(
     }
     let n_groups = groups.iter().max().map_or(0, |&g| g as usize + 1);
     let tags = collect_tags(path, barcodes, groups, n_groups, params.tag_source)?;
+    let file_first = match params.tag_source {
+        TagSource::FragmentStart if params.max_gap.is_none() => first_chromosome(path)?,
+        _ => None,
+    };
     Ok(tags
         .into_par_iter()
-        .map(|g| call_group(g, &params))
+        .map(|g| call_group(g, &params, file_first.as_deref()))
         .collect())
 }
 
