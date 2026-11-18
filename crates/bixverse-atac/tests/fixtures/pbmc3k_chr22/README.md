@@ -11,6 +11,8 @@ Rscript dev/atac/gen_atac_seurat.R
 RAYON_NUM_THREADS=1 POLARS_MAX_THREADS=1 uv run --python 3.12 \
   --with snapatac2==2.10.0 --with muon==0.2.1 --with beartype \
   python dev/atac/gen_atac_scverse.py
+uv run --python 3.12 --with macs3==3.1.0 --with beartype \
+  python dev/atac/gen_atac_macs3.py
 ```
 
 Tool versions are in each folder's `versions.txt` (R 4.6.1, Signac 1.17.1,
@@ -178,6 +180,22 @@ for zero-count peaks, which never multiply a stored value).
 `np.random.seed(0)`) on all 1883 peaks, no top-feature selection, components
 reversed to descending, embeddings z-scored with population sd (ddof 0),
 `stdev = d / sqrt(n_cells - 1)` (Signac divides by `n_features - 1`).
+
+## macs3/
+
+MACS3 3.1.0 `callpeak -f BED --nomodel --extsize 200 --shift -100 -q 0.05`,
+no control. `groups.txt`: group of each cell, `i % 3` in `cells.txt` order.
+One file per call, `<all|g0|g1|g2>_<source>_dup<keep>_g<gsize>.tsv.gz`, columns
+`chrom start end summit pileup pscore fold qscore` (start and summit 0-based,
+scores as MACS prints them, six significant digits), merged from the
+narrowPeak and xls outputs.
+
+- `insertion`: both raw insertions per fragment as 1 bp plus strand reads.
+- `start`: the fragment lines as Signac passes them (no strand column, so
+  MACS reads a plus strand tag at the start and ignores the end).
+- `dup`: `--keep-dup all` or `1` (MACS's and Signac's default).
+- `g`: `-g 2.7e9` (Signac's default; the 10 kb local lambda dominates on one
+  chromosome) or `1e7` (the genome background dominates).
 
 ## tenx/
 

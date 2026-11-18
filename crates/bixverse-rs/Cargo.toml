@@ -67,7 +67,7 @@ sc-gpu = ["gpu", "single-cell", "dep:bixverse-sc-gpu"]
 mlx = ["single-cell", "dep:bixverse-mlx"]
 ## Slow but asserting tests: the GPU parity gates and the large-scale numerical
 ## checks. Run in release or the CPU reference solves dominate.
-large-test = ["bixverse-methods/large-test", "bixverse-sc?/large-test", "bixverse-gpu?/large-test", "bixverse-sc-gpu?/large-test", "bixverse-mlx?/large-test"]
+large-test = ["bixverse-methods/large-test", "bixverse-sc?/large-test", "bixverse-gpu?/large-test", "bixverse-sc-gpu?/large-test", "bixverse-mlx?/large-test", "bixverse-atac?/large-test"]
 ## Unasserted diagnostic sweeps that print tables for a human to read.
 large_scale_diagnostics = ["bixverse-methods/large_scale_diagnostics", "bixverse-sc?/large_scale_diagnostics", "bixverse-gpu?/large_scale_diagnostics", "bixverse-sc-gpu?/large_scale_diagnostics", "bixverse-mlx?/large_scale_diagnostics"]
 

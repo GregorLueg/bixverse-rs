@@ -17,6 +17,8 @@ exclude = ["tests/"]
 h5 = ["bixverse-sc-data/h5"]
 ## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
 hdf5-static = ["h5", "bixverse-sc-data/hdf5-static"]
+## Slow but asserting tests. Run in release.
+large-test = []
 
 [dependencies]
 bixverse-core.workspace = true

@@ -16,6 +16,7 @@ pub use crate::lsi::{
     LsiParams, LsiResult, TF_IDF_SCALE, lsi_on_matrix, lsi_on_store, project_lsi, read_tf_idf,
     set_tf_idf_on_store,
 };
+pub use crate::peak_calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};
 pub use crate::qc::{FragmentQc, FragmentQcParams, fragment_qc};
 pub use crate::regions::{RegionIndex, genome_tiles, read_bed, reduce_regions};
 pub use crate::rlsi::{BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store};

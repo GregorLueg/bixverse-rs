@@ -13,6 +13,7 @@ use bixverse_atac::features::{TopFeatureCutoff, feature_total_stats, select_top_
 use bixverse_atac::lsi::{
     LsiParams, TF_IDF_SCALE, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
 };
+use bixverse_atac::peak_calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};
 use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
 use bixverse_atac::regions::{genome_tiles, read_bed, region};
 use bixverse_atac::rlsi::{BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store};
@@ -810,6 +811,122 @@ fn test_transfer_labels_match_seurat() {
                 1e-5,
                 &format!("cell {i}, {name}"),
             );
+        }
+    }
+}
+
+//////////////////
+// Peak calling //
+//////////////////
+
+/// Compare our peaks with one MACS3 call.
+///
+/// Positions and pileup must agree exactly. Scores within the six significant
+/// digits MACS prints.
+///
+/// ### Params
+///
+/// * `ours` - Our peaks
+/// * `rel` - The MACS3 fixture, relative to the fixture directory
+fn assert_peaks_match_macs3(ours: &[NarrowPeak], rel: &str) {
+    let (_, rows) = tsv(rel);
+    assert_eq!(ours.len(), rows.len(), "{rel}: peak count");
+    let rel_close = |a: f32, b: &str, what: &str| {
+        let b: f64 = b.parse().unwrap();
+        assert!(
+            (a as f64 - b).abs() <= 1e-5 * b.abs().max(1.0),
+            "{rel} {what}: {a} vs {b}"
+        );
+    };
+    for (p, r) in ours.iter().zip(&rows) {
+        let at = format!("{}:{}-{}", r[0], r[1], r[2]);
+        assert_eq!(
+            (p.chrom.as_str(), p.start, p.end, p.summit),
+            (
+                r[0].as_str(),
+                r[1].parse().unwrap(),
+                r[2].parse().unwrap(),
+                r[3].parse().unwrap()
+            ),
+            "{rel}: peak {at}"
+        );
+        assert_eq!(p.pileup, r[4].parse::<f32>().unwrap(), "{rel} {at}: pileup");
+        rel_close(p.pscore, &r[5], &format!("{at} pscore"));
+        rel_close(p.fold, &r[6], &format!("{at} fold"));
+        rel_close(p.qscore, &r[7], &format!("{at} qscore"));
+    }
+}
+
+/// Call the fixture cells pooled and per group, and compare with MACS3.
+///
+/// ### Params
+///
+/// * `source` - Tag source, with its fixture name
+/// * `keep_dup` - Duplicate handling, with its fixture name
+/// * `genome_size` - Genome size, with its fixture name
+/// * `pooled` - Whether to check the pooled call too
+fn check_macs3_case(
+    source: (TagSource, &str),
+    keep_dup: (KeepDup, &str),
+    genome_size: (f64, &str),
+    pooled: bool,
+) {
+    let cells = cells();
+    let params = PeakCallParams {
+        tag_source: source.0,
+        keep_dup: keep_dup.0,
+        genome_size: genome_size.0,
+        ..PeakCallParams::default()
+    };
+    let suffix = format!("{}_dup{}_g{}.tsv.gz", source.1, keep_dup.1, genome_size.1);
+    if pooled {
+        let all = vec![0u32; cells.len()];
+        let peaks = call_peaks(&fragments(), &cells, &all, Some(params)).unwrap();
+        assert_peaks_match_macs3(&peaks[0], &format!("macs3/all_{suffix}"));
+    }
+    let groups: Vec<u32> = lines("macs3/groups.txt")
+        .iter()
+        .map(|g| g.parse().unwrap())
+        .collect();
+    let per_group = call_peaks(&fragments(), &cells, &groups, Some(params)).unwrap();
+    for (g, peaks) in per_group.iter().enumerate() {
+        assert_peaks_match_macs3(peaks, &format!("macs3/g{g}_{suffix}"));
+    }
+}
+
+#[test]
+fn test_peak_calls_match_macs3_defaults() {
+    check_macs3_case(
+        (TagSource::Insertion, "insertion"),
+        (KeepDup::All, "all"),
+        (2.7e9, "2.7e9"),
+        true,
+    );
+}
+
+/// Signac's tag source with MACS's dedup, under the genome background.
+#[test]
+fn test_peak_calls_match_macs3_signac_mode() {
+    check_macs3_case(
+        (TagSource::FragmentStart, "start"),
+        (KeepDup::AtMost(1), "1"),
+        (1e7, "1e7"),
+        false,
+    );
+}
+
+#[test]
+#[cfg(feature = "large-test")]
+// 32 MACS3 calls: 2 tag sources x 2 dedup modes x 2 genome sizes, pooled and 3 groups
+fn test_peak_calls_match_macs3_all_settings() {
+    for source in [
+        (TagSource::Insertion, "insertion"),
+        (TagSource::FragmentStart, "start"),
+    ] {
+        for keep_dup in [(KeepDup::All, "all"), (KeepDup::AtMost(1), "1")] {
+            for genome_size in [(2.7e9, "2.7e9"), (1e7, "1e7")] {
+                check_macs3_case(source, keep_dup, genome_size, true);
+            }
         }
     }
 }
