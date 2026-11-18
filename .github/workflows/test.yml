@@ -3,8 +3,20 @@ name: Test the package
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'python/**'
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.github/workflows/python-*.yml'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'python/**'
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.github/workflows/python-*.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,7 +24,7 @@ concurrency:
 
 jobs:
   test:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@v1
+    uses: GregorLueg/personal-actions/.github/workflows/rust-workspace-test.yml@feat-faster-metacrate-cicd
     with:
       # No R on this lane: only bixverse-r links libR.
       cpu-runs: |
@@ -30,10 +42,13 @@ jobs:
         -p bixverse-r --features single-cell,multi-modal,hdf5-static
       # The expensive GPU tests sit behind large-test and
       # large_scale_diagnostics, which this lane deliberately does not enable.
+      # This lane also runs cpu-runs, so the CPU lane is Windows only.
       gpu-runs: |
         -p bixverse-gpu
         -p bixverse-sc-gpu
         -p bixverse-rs --features sc-gpu,hdf5-static
+      # The bixverse R package's own R CMD check links libR on macOS.
+      r-macos: false
       check-exclude: bixverse-r
       gpu-malloc-check: true
     secrets: inherit

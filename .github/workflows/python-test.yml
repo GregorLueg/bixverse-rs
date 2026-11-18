@@ -8,16 +8,22 @@ on:
     branches: [ main ]
     paths:
       - 'python/**'
-      - 'crates/bixverse-core/**'
-      - 'crates/bixverse-sc-data/**'
+      # Every member the wheels build against; only the facade and bixverse-r
+      # are outside both trees.
+      - 'crates/**'
+      - '!crates/bixverse-r/**'
+      - '!crates/bixverse-rs/**'
       - 'Cargo.toml'
       - '.github/workflows/python-test.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'python/**'
-      - 'crates/bixverse-core/**'
-      - 'crates/bixverse-sc-data/**'
+      # Every member the wheels build against; only the facade and bixverse-r
+      # are outside both trees.
+      - 'crates/**'
+      - '!crates/bixverse-r/**'
+      - '!crates/bixverse-rs/**'
       - 'Cargo.toml'
       - '.github/workflows/python-test.yml'
 
@@ -40,6 +46,9 @@ jobs:
       # runners have no adapter, so test_gpu.py skips anyway.
       # Cold macOS runs land close to the shared 30 min default.
       timeout-minutes: 45
+      # macOS on pushes to main only: the account-wide macOS cap queues PR jobs
+      # for hours, and the release wheel build covers macOS before PyPI.
+      macos: ${{ github.event_name == 'push' }}
       # The bindings have no Rust tests, and `cargo test` compiles both wheels'
       # trees under unified features that maturin then cannot reuse.
       rust-test: false
