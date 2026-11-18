@@ -6,8 +6,9 @@ Run from `python/`, with the package installed in the environment:
 
 The index lists every name in each public module's `__all__` with the first
 line of its docstring, grouped by module. The output is committed and never
-edited by hand. Re-run on every release, otherwise the index drifts from the
-code.
+edited by hand. `tests/test_agent_skill.py` fails when the committed index
+differs from a fresh render, so re-run this after any change to a public name,
+a docstring summary or the version.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ MODULES: tuple[str, ...] = (
 )
 # Modules that need an optional extra; a failed import is listed, not fatal.
 OPTIONAL: frozenset[str] = frozenset({"embed", "pl", "nn"})
+NOT_IMPORTABLE = "Not importable here"
 HEADER = """# bixverse (Python) API index
 
 Every public entry point, grouped by module. Generated from each module's
@@ -130,11 +132,17 @@ def section(title: str, module: ModuleType) -> list[str]:
 
 
 @beartype
-def main() -> None:
-    """Write the API index.
+def render() -> str:
+    """Render the API index from the installed package.
+
+    Returns:
+        The markdown text, as written to `OUT`. An optional module that does
+        not import here is listed as such, so the text depends on the extras
+        installed.
 
     Examples:
-        >>> main()  # doctest: +SKIP
+        >>> render().startswith("# bixverse (Python) API index")  # doctest: +SKIP
+        True
     """
     import bixverse
 
@@ -146,11 +154,21 @@ def main() -> None:
         except ImportError as err:
             if name not in OPTIONAL:
                 raise
-            lines += [f"## bv.{name}", "", f"Not importable here: {err}.", ""]
+            lines += [f"## bv.{name}", "", f"{NOT_IMPORTABLE}: {err}.", ""]
             continue
         lines += section(f"bv.{name}", module)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@beartype
+def main() -> None:
+    """Write the API index.
+
+    Examples:
+        >>> main()  # doctest: +SKIP
+    """
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text("\n".join(lines).rstrip() + "\n")
+    OUT.write_text(render())
     print(f"wrote {OUT}")
 
 

@@ -23,6 +23,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
+[project.scripts]
+bixverse = "bixverse._cli:main"
+
 [project.urls]
 Repository = "https://github.com/GregorLueg/bixverse-rs"
 Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"

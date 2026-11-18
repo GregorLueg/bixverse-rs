@@ -180,21 +180,27 @@ print(sc)
 
 ## Keeping this skill current
 
-The skill ships in the wheel and is versioned with the package. Install it, and
-re-install after every upgrade:
+The skill ships in the wheel and is versioned with the package. Install it
+through the project's environment, so it matches the bixverse version the
+project uses:
 
-```python
-import bixverse as bv
-
-bv.install_agent_skill(overwrite=True)  # ~/.claude/skills/bixverse-python
+```bash
+uv run bixverse skill install --project              # ./.claude/skills
+uv run bixverse skill install --project --agent codex  # ./.agents/skills
+uv run bixverse skill install                        # ~/.claude/skills
+uv run bixverse skill status                         # installs and versions
 ```
 
-Other agents work too. `agent="codex"` (or `"generic"` with an explicit
-`dest`) writes the entry file as `AGENTS.md` with the Claude-specific
-frontmatter stripped. The `references/` files are plain markdown and portable as
-they are. Only Claude Code auto-discovers the skill, so elsewhere you have to
-point the agent at the directory yourself. `overwrite=True` replaces a symlink
-to a development checkout without touching the checkout.
+The Python equivalent is
+`bv.install_agent_skill(agent="claude", scope="project", overwrite=True)`.
+
+`SKILL.md` follows the Agent Skills open standard, so Claude Code, Codex and
+other agents that scan `.agents/skills` discover it without further setup.
+Each install is stamped with the package version (`.bixverse-version`);
+`import bixverse` warns when an installed copy is older than the package, and
+`--force` (`overwrite=True`) updates it. A symlink to a development checkout is
+never flagged, and `--force` replaces the symlink without touching the
+checkout.
 
 ## Common failures
 

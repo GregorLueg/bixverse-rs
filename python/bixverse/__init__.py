@@ -44,7 +44,7 @@ from ._bixverse import (
     __core_version__,
     __version__,
 )
-from ._core.agent_skill import install_agent_skill
+from ._core.agent_skill import install_agent_skill, warn_stale_agent_skills
 from ._core.db import TableNotFoundError
 from ._core.metacells import MetaCells
 from ._core.multimodal import SingleCellsMultiModal
@@ -55,6 +55,7 @@ from ._log import attach
 from .loader import Batch, CellLoader
 
 attach("bixverse")
+warn_stale_agent_skills()
 
 __all__ = [
     "Batch",
