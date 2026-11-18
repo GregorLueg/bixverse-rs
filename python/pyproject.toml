@@ -84,7 +84,7 @@ manifest-path = "crates/bixverse-py/Cargo.toml"
 module-name = "bixverse._bixverse"
 python-source = "."
 strip = true
-include = ["bixverse/py.typed", "bixverse/*.pyi"]
+include = ["bixverse/py.typed", "bixverse/*.pyi", "bixverse/_skill/**/*.md"]
 # A local build otherwise packs whatever bytecode the dev venv left behind.
 exclude = ["**/__pycache__/**"]
 

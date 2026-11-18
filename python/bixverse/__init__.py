@@ -44,6 +44,7 @@ from ._bixverse import (
     __core_version__,
     __version__,
 )
+from ._core.agent_skill import install_agent_skill
 from ._core.db import TableNotFoundError
 from ._core.metacells import MetaCells
 from ._core.multimodal import SingleCellsMultiModal
@@ -82,6 +83,7 @@ __all__ = [
     "doublets",
     "get_counts",
     "graph",
+    "install_agent_skill",
     "integrate",
     "io",
     "lr",
