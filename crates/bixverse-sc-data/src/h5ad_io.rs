@@ -1529,11 +1529,17 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 /// and caps the queued raw data at two slices.
 const H5_READ_AHEAD: usize = 2;
 
+/// Cells per slice of the sparse cell-major writer. Larger than
+/// [`H5_CELL_SLICE_SIZE`], which also sizes dense reads: a sparse slice holds
+/// only its nonzeros (8 bytes each, about 70 MB at 1,000 genes per cell), and
+/// smaller slices leave the encoder idle between serial appends.
+const H5_CSR_SLICE_CELLS: usize = 8_192;
+
 /// Write cells from cell-major compressed h5 data into the cell-based binary.
 ///
 /// Shared by the h5ad CSR and the 10x paths, which store the same layout: one
 /// `indptr` run per cell over `data` and `indices`. A dedicated thread reads
-/// the next [`H5_CELL_SLICE_SIZE`] cells from the h5 file (HDF5 decompression
+/// the next [`H5_CSR_SLICE_CELLS`] cells from the h5 file (HDF5 decompression
 /// is single-threaded) while the current slice is filtered, normalised,
 /// serialised and lz4-compressed in parallel. Payloads are then appended in
 /// cell order.
@@ -1568,7 +1574,7 @@ pub(crate) fn write_h5_cell_major_cells(
     verbose: bool,
 ) -> Result<(Vec<usize>, Vec<usize>), ScDataErrors> {
     let total_cells = cells_to_keep.len();
-    let batches: Vec<&[usize]> = cells_to_keep.chunks(H5_CELL_SLICE_SIZE).collect();
+    let batches: Vec<&[usize]> = cells_to_keep.chunks(H5_CSR_SLICE_CELLS).collect();
     let num_batches = batches.len();
 
     let mut nnz = Vec::with_capacity(total_cells);
@@ -1578,7 +1584,7 @@ pub(crate) fn write_h5_cell_major_cells(
         println!(
             "  Processing {} cells in batches of {}...",
             total_cells.separate_with_underscores(),
-            H5_CELL_SLICE_SIZE.separate_with_underscores()
+            H5_CSR_SLICE_CELLS.separate_with_underscores()
         );
     }
 
@@ -1668,7 +1674,7 @@ pub(crate) fn write_h5_cell_major_cells(
 
 /// Stream h5 CSR data directly to disk with batched reading
 ///
-/// Memory stays bounded by a few slices of [`H5_CELL_SLICE_SIZE`] cells, see
+/// Memory stays bounded by a few slices of [`H5_CSR_SLICE_CELLS`] cells, see
 /// [`write_h5_cell_major_cells`].
 ///
 /// ### Params
