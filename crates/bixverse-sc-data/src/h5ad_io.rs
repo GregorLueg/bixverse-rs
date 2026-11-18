@@ -1135,17 +1135,152 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
 // CSR //
 /////////
 
-/// Statistics of one chunk of cells in [`parse_h5_csr_quality`].
+/// Statistics of one chunk of cells in [`csr_quality_stats`].
 struct CsrChunkStats {
     /// Stored entries per gene
     gene_counts: Vec<u32>,
-    /// Genes per cell, over every gene
+    /// Genes per cell, over every counted gene
     unique: Vec<usize>,
-    /// Library size per cell, over every gene
+    /// Library size per cell, over every counted gene
     lib: Vec<f64>,
-    /// `(gene, cell in chunk, value)` of genes with fewer than `min_cells`
-    /// entries in this chunk
+    /// `(gene, cell in chunk, value)` of counted genes with fewer than
+    /// `min_cells` entries in this chunk
     rare: Vec<(u32, u32, f32)>,
+}
+
+/// Gene and cell QC statistics of a cell-major (CSR) matrix.
+pub(crate) struct CsrQualityStats {
+    /// Cells per gene, every gene
+    pub gene_cells: Vec<usize>,
+    /// Kept genes per cell
+    pub cell_genes: Vec<usize>,
+    /// Library size per cell over the kept genes
+    pub cell_lib: Vec<f64>,
+}
+
+/// Cell QC statistics over the genes that pass `min_cells`, in one read of
+/// the matrix.
+///
+/// Cell statistics are taken over every counted gene, and the entries of the
+/// genes that turn out to be dropped are subtracted afterwards. A gene below
+/// `min_cells` overall is below it in every chunk, so each chunk records the
+/// entries of its locally rare genes, which cover all of them. Library sizes
+/// are summed in f64, exact for counts.
+///
+/// ### Params
+///
+/// * `indptr` - Per-cell offsets, `n_cells + 1` long
+/// * `n_genes` - Genes (columns)
+/// * `counted` - Genes that can be kept (a 10x modality), `None` for all
+/// * `min_cells` - Cells a gene needs to be kept
+/// * `verbose` - Report chunk progress
+/// * `read` - Reads the `(data, indices)` of an entry range
+///
+/// ### Returns
+///
+/// The [`CsrQualityStats`], or the first read error.
+pub(crate) fn csr_quality_stats<R>(
+    indptr: &[usize],
+    n_genes: usize,
+    counted: Option<&[bool]>,
+    min_cells: usize,
+    verbose: bool,
+    read: R,
+) -> Result<CsrQualityStats, ScDataErrors>
+where
+    R: Fn(std::ops::Range<usize>) -> Result<(Vec<f32>, Vec<u32>), ScDataErrors> + Sync,
+{
+    const CELL_CHUNK_SIZE: usize = 10000;
+    let n_cells = indptr.len() - 1;
+    let chunks: Vec<usize> = (0..n_cells).step_by(CELL_CHUNK_SIZE).collect();
+    let num_chunks = chunks.len();
+    let completed_chunks = AtomicUsize::new(0);
+    let report_interval = (num_chunks / 10).max(1);
+    let is_counted = |g: usize| g < n_genes && counted.is_none_or(|m| m[g]);
+
+    let chunk_stats: Vec<CsrChunkStats> = chunks
+        .par_iter()
+        .map(|&chunk_start| {
+            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(n_cells);
+            let n = chunk_end - chunk_start;
+            let mut st = CsrChunkStats {
+                gene_counts: vec![0u32; n_genes],
+                unique: vec![0usize; n],
+                lib: vec![0.0f64; n],
+                rare: Vec::new(),
+            };
+            let data_start = indptr[chunk_start];
+            let data_end = indptr[chunk_end];
+            if data_start >= data_end {
+                return Ok(st);
+            }
+            let (chunk_data, chunk_indices) = read(data_start..data_end)?;
+            let cell_range = |c: usize| {
+                indptr[chunk_start + c] - data_start..indptr[chunk_start + c + 1] - data_start
+            };
+
+            for c in 0..n {
+                for k in cell_range(c) {
+                    let g = chunk_indices[k] as usize;
+                    if g < n_genes {
+                        st.gene_counts[g] += 1;
+                    }
+                    if is_counted(g) {
+                        st.unique[c] += 1;
+                        st.lib[c] += chunk_data[k] as f64;
+                    }
+                }
+            }
+            for c in 0..n {
+                for k in cell_range(c) {
+                    let g = chunk_indices[k] as usize;
+                    if is_counted(g) && (st.gene_counts[g] as usize) < min_cells {
+                        st.rare.push((g as u32, c as u32, chunk_data[k]));
+                    }
+                }
+            }
+
+            if verbose {
+                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                if completed.is_multiple_of(report_interval) || completed == num_chunks {
+                    let progress =
+                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
+                    println!(
+                        "  Processed {}% of chunks ({}/{})",
+                        progress, completed, num_chunks
+                    );
+                }
+            }
+            Ok(st)
+        })
+        .collect::<Result<_, ScDataErrors>>()?;
+
+    let mut gene_cells = vec![0usize; n_genes];
+    for st in &chunk_stats {
+        for (total, &c) in gene_cells.iter_mut().zip(&st.gene_counts) {
+            *total += c as usize;
+        }
+    }
+
+    let mut cell_genes = vec![0usize; n_cells];
+    let mut cell_lib = vec![0.0f64; n_cells];
+    for (st, &chunk_start) in chunk_stats.into_iter().zip(&chunks) {
+        let n = st.unique.len();
+        cell_genes[chunk_start..chunk_start + n].copy_from_slice(&st.unique);
+        cell_lib[chunk_start..chunk_start + n].copy_from_slice(&st.lib);
+        for (g, c, v) in st.rare {
+            if gene_cells[g as usize] < min_cells {
+                cell_genes[chunk_start + c as usize] -= 1;
+                cell_lib[chunk_start + c as usize] -= v as f64;
+            }
+        }
+    }
+
+    Ok(CsrQualityStats {
+        gene_cells,
+        cell_genes,
+        cell_lib,
+    })
 }
 
 /// Get the cell quality data from a CSR file
@@ -1190,112 +1325,24 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 
     let indptr = file.indptr(raw_slot.get_indptr())?;
 
-    const CELL_CHUNK_SIZE: usize = 10000;
-    let chunks: Vec<usize> = (0..shape.0).step_by(CELL_CHUNK_SIZE).collect();
-    let num_chunks = chunks.len();
     let min_cells = cell_quality.min_cells;
-
     if verbose {
         println!("Quality pass - gene and cell statistics:");
     }
-
     let pass_time = Instant::now();
-    let completed_chunks = Arc::new(AtomicUsize::new(0));
-    let report_interval = (num_chunks / 10).max(1);
-
     let indices_rd = file.array(raw_slot.get_indices())?;
     let data_rd = file.array(raw_slot.get_data())?;
-
-    // One read per chunk. Cell statistics are taken over every gene, and the
-    // entries of genes that turn out to be dropped are subtracted afterwards.
-    // A gene below `min_cells` overall is below it in every chunk, so each
-    // chunk records the entries of its locally rare genes, which cover all of
-    // them. Library sizes are summed in f64, exact for counts.
-    let chunk_stats: Vec<CsrChunkStats> = chunks
-        .par_iter()
-        .map(|&chunk_start| {
-            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
-            let n = chunk_end - chunk_start;
-            let mut st = CsrChunkStats {
-                gene_counts: vec![0u32; shape.1],
-                unique: vec![0usize; n],
-                lib: vec![0.0f64; n],
-                rare: Vec::new(),
-            };
-            let data_start = indptr[chunk_start];
-            let data_end = indptr[chunk_end];
-            if data_start >= data_end {
-                return Ok(st);
-            }
-
-            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
-            let chunk_indices = indices_rd.read::<u32>(data_start..data_end)?;
-
-            for c in 0..n {
-                for k in
-                    indptr[chunk_start + c] - data_start..indptr[chunk_start + c + 1] - data_start
-                {
-                    let g = chunk_indices[k] as usize;
-                    if g < shape.1 {
-                        st.gene_counts[g] += 1;
-                        st.unique[c] += 1;
-                        st.lib[c] += chunk_data[k] as f64;
-                    }
-                }
-            }
-            for c in 0..n {
-                for k in
-                    indptr[chunk_start + c] - data_start..indptr[chunk_start + c + 1] - data_start
-                {
-                    let g = chunk_indices[k] as usize;
-                    if g < shape.1 && (st.gene_counts[g] as usize) < min_cells {
-                        st.rare.push((g as u32, c as u32, chunk_data[k]));
-                    }
-                }
-            }
-
-            if verbose {
-                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                if completed.is_multiple_of(report_interval) || completed == num_chunks {
-                    let progress =
-                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
-                    println!(
-                        "  Processed {}% of chunks ({}/{})",
-                        progress, completed, num_chunks
-                    );
-                }
-            }
-
-            Ok(st)
-        })
-        .collect::<Result<_, ScDataErrors>>()?;
-
-    let mut no_cells_exp_gene = vec![0usize; shape.1];
-    for st in &chunk_stats {
-        for (total, &c) in no_cells_exp_gene.iter_mut().zip(&st.gene_counts) {
-            *total += c as usize;
-        }
-    }
-
+    let stats = csr_quality_stats(&indptr, shape.1, None, min_cells, verbose, |r| {
+        Ok((data_rd.read::<f32>(r.clone())?, indices_rd.read::<u32>(r)?))
+    })?;
+    let CsrQualityStats {
+        gene_cells: no_cells_exp_gene,
+        cell_genes: cell_unique_genes,
+        cell_lib: cell_lib_size,
+    } = stats;
     let genes_to_keep: Vec<usize> = (0..shape.1)
         .filter(|&i| no_cells_exp_gene[i] >= min_cells)
         .collect();
-
-    let mut cell_unique_genes = vec![0usize; shape.0];
-    let mut cell_lib_size = vec![0.0f64; shape.0];
-    let mut n_rare = 0usize;
-    for (st, &chunk_start) in chunk_stats.into_iter().zip(&chunks) {
-        let n = st.unique.len();
-        cell_unique_genes[chunk_start..chunk_start + n].copy_from_slice(&st.unique);
-        cell_lib_size[chunk_start..chunk_start + n].copy_from_slice(&st.lib);
-        n_rare += st.rare.len();
-        for (g, c, v) in st.rare {
-            if no_cells_exp_gene[g as usize] < min_cells {
-                cell_unique_genes[chunk_start + c as usize] -= 1;
-                cell_lib_size[chunk_start + c as usize] -= v as f64;
-            }
-        }
-    }
 
     if verbose {
         let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
@@ -1312,10 +1359,9 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
             avg_expr.separate_with_underscores()
         );
         println!(
-            "  Genes passing filter: {} / {} ({} entries of locally rare genes held)",
+            "  Genes passing filter: {} / {}",
             genes_to_keep.len().separate_with_underscores(),
-            shape.1.separate_with_underscores(),
-            n_rare.separate_with_underscores()
+            shape.1.separate_with_underscores()
         );
         let max_genes = cell_unique_genes.iter().max().unwrap_or(&0);
         let min_genes = cell_unique_genes.iter().min().unwrap_or(&0);

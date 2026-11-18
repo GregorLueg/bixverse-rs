@@ -6,13 +6,10 @@ use hdf5::{
     Container, File, Group,
     types::{FixedAscii, FixedUnicode, TypeDescriptor, VarLenAscii, VarLenUnicode},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
@@ -20,7 +17,7 @@ use crate::data_io::CellOnFileQuality;
 use crate::data_io::*;
 use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::check_tenx_filters;
-use crate::h5ad_io::write_h5_cell_major_cells;
+use crate::h5ad_io::{CsrQualityStats, csr_quality_stats, write_h5_cell_major_cells};
 use crate::prelude::*;
 
 /////////////////
@@ -473,10 +470,9 @@ pub fn validate_feature_types_tenx<P: AsRef<Path>>(
 
 /// Get the cell quality data from a 10x file
 ///
-/// Two passes over the cells: first counting how many cells express each gene
-/// (for gene filtering), then computing per-cell unique genes and library size
-/// over the kept genes only. Non-gene modalities are excluded because they are
-/// never part of `genes_to_keep`.
+/// One pass over the cells, see [`csr_quality_stats`]: per-cell unique genes
+/// and library size over the kept genes only. Non-gene modalities are excluded
+/// because they are never part of `genes_to_keep`.
 ///
 /// ### Params
 ///
@@ -525,71 +521,29 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
         );
     }
 
-    const CELL_CHUNK_SIZE: usize = 10000;
-    let chunks: Vec<usize> = (0..n_cells).step_by(CELL_CHUNK_SIZE).collect();
-    let num_chunks = chunks.len();
-    let report_interval = (num_chunks / 10).max(1);
-
     if verbose {
-        println!("First pass - gene expression statistics:");
+        println!("Quality pass - gene and cell statistics:");
     }
-
-    let first_pass_time = Instant::now();
-    let completed_chunks = Arc::new(AtomicUsize::new(0));
-
+    let pass_time = Instant::now();
     let indices_rd = H5ChunkedReader::new(file.dataset(version.get_indices())?);
-
-    let gene_counts: Vec<Vec<usize>> = chunks
-        .par_iter()
-        .map(|&chunk_start_cell| {
-            let mut local_counts = vec![0usize; n_genes];
-
-            let chunk_end_cell = (chunk_start_cell + CELL_CHUNK_SIZE).min(n_cells) - 1;
-            let data_start = indptr[chunk_start_cell];
-            let data_end = indptr[chunk_end_cell + 1];
-
-            if data_start >= data_end {
-                return local_counts;
-            }
-
-            let Ok(chunk_indices) = indices_rd.read::<i64>(data_start..data_end) else {
-                return local_counts;
-            };
-
-            for cell_idx in chunk_start_cell..=chunk_end_cell {
-                let cell_data_start = indptr[cell_idx] - data_start;
-                let cell_data_end = indptr[cell_idx + 1] - data_start;
-
-                for local_idx in cell_data_start..cell_data_end {
-                    let gene_idx = chunk_indices[local_idx] as usize;
-                    if gene_idx < n_genes {
-                        local_counts[gene_idx] += 1;
-                    }
-                }
-            }
-
-            if verbose {
-                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                if completed.is_multiple_of(report_interval) || completed == num_chunks {
-                    let progress =
-                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
-                    println!(
-                        "  Processed {}% of chunks ({}/{})",
-                        progress, completed, num_chunks
-                    );
-                }
-            }
-
-            local_counts
-        })
-        .collect();
-
-    let mut no_cells_exp_gene = vec![0usize; n_genes];
-    for local_counts in gene_counts {
-        for (i, count) in local_counts.into_iter().enumerate() {
-            no_cells_exp_gene[i] += count;
-        }
+    let data_rd = H5ChunkedReader::new(file.dataset(version.get_data())?);
+    let mut counted = vec![false; n_genes];
+    for &g in &feature_indices {
+        counted[g] = true;
     }
+    let stats = csr_quality_stats(
+        &indptr,
+        n_genes,
+        Some(&counted),
+        cell_quality.min_cells,
+        verbose,
+        |r| Ok((data_rd.read::<f32>(r.clone())?, indices_rd.read::<u32>(r)?)),
+    )?;
+    let CsrQualityStats {
+        gene_cells: no_cells_exp_gene,
+        cell_genes: cell_unique_genes,
+        cell_lib: cell_lib_size,
+    } = stats;
 
     let genes_to_keep: Vec<usize> = feature_indices
         .iter()
@@ -598,92 +552,22 @@ pub fn parse_h5_tenx_quality<P: AsRef<Path>>(
         .collect();
 
     if verbose {
-        println!("First pass done: {:.2?}", first_pass_time.elapsed());
         println!(
             "  Genes passing filter: {} / {}",
             genes_to_keep.len().separate_with_underscores(),
             feature_indices.len().separate_with_underscores()
         );
-        println!("Second pass - cell statistics:");
-    }
-
-    let mut genes_to_keep_lookup = vec![false; n_genes];
-    for &gene_idx in &genes_to_keep {
-        genes_to_keep_lookup[gene_idx] = true;
-    }
-
-    let second_pass_time = Instant::now();
-    let completed_chunks = Arc::new(AtomicUsize::new(0));
-
-    let data_rd = H5ChunkedReader::new(file.dataset(version.get_data())?);
-
-    let cell_stats: Vec<(Vec<usize>, Vec<f32>)> = chunks
-        .par_iter()
-        .map(|&chunk_start_cell| {
-            let chunk_end_cell = (chunk_start_cell + CELL_CHUNK_SIZE).min(n_cells) - 1;
-            let mut local_unique = vec![0usize; chunk_end_cell - chunk_start_cell + 1];
-            let mut local_lib_size = vec![0.0f32; chunk_end_cell - chunk_start_cell + 1];
-
-            let data_start = indptr[chunk_start_cell];
-            let data_end = indptr[chunk_end_cell + 1];
-
-            if data_start >= data_end {
-                return Ok((local_unique, local_lib_size));
-            }
-
-            let chunk_data = data_rd.read::<f32>(data_start..data_end)?;
-            let chunk_indices = indices_rd.read::<usize>(data_start..data_end)?;
-
-            for cell_idx in chunk_start_cell..=chunk_end_cell {
-                let cell_data_start = indptr[cell_idx] - data_start;
-                let cell_data_end = indptr[cell_idx + 1] - data_start;
-                let local_cell_idx = cell_idx - chunk_start_cell;
-
-                for local_idx in cell_data_start..cell_data_end {
-                    let gene_idx = chunk_indices[local_idx];
-                    if genes_to_keep_lookup[gene_idx] {
-                        local_unique[local_cell_idx] += 1;
-                        local_lib_size[local_cell_idx] += chunk_data[local_idx];
-                    }
-                }
-            }
-
-            if verbose {
-                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                if completed.is_multiple_of(report_interval) || completed == num_chunks {
-                    let progress =
-                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
-                    println!(
-                        "  Processed {}% of chunks ({}/{})",
-                        progress, completed, num_chunks
-                    );
-                }
-            }
-
-            Ok((local_unique, local_lib_size))
-        })
-        .collect::<Result<_, ScDataErrors>>()?;
-
-    let mut cell_unique_genes = vec![0usize; n_cells];
-    let mut cell_lib_size = vec![0.0f32; n_cells];
-
-    for (chunk_idx, (local_unique, local_lib)) in cell_stats.into_iter().enumerate() {
-        let chunk_start = chunks[chunk_idx];
-        for (i, (unique, lib)) in local_unique.into_iter().zip(local_lib).enumerate() {
-            cell_unique_genes[chunk_start + i] = unique;
-            cell_lib_size[chunk_start + i] = lib;
-        }
     }
 
     let cells_to_keep: Vec<usize> = (0..n_cells)
         .filter(|&i| {
             cell_unique_genes[i] >= cell_quality.min_unique_genes
-                && cell_lib_size[i] >= cell_quality.min_lib_size as f32
+                && cell_lib_size[i] >= cell_quality.min_lib_size as f64
         })
         .collect();
 
     if verbose {
-        println!("Second pass done: {:.2?}", second_pass_time.elapsed());
+        println!("Quality pass done: {:.2?}", pass_time.elapsed());
         println!(
             "  Cells passing filter: {} / {}",
             cells_to_keep.len().separate_with_underscores(),
@@ -915,6 +799,103 @@ pub fn write_tenx_h5<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one-pass QC keeps exactly the cells and genes of the two-pass
+    /// rule: genes of the asked modality in at least `min_cells` cells, then
+    /// cells by their genes and library size over those genes only.
+    #[test]
+    fn test_tenx_quality_matches_two_pass_rule() {
+        const N_CELLS: usize = 25_000;
+        const N_FEAT: usize = 40;
+        let mut state = 0x5EED_10A5u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u32
+        };
+        // genes 0-3 rare, 30-39 antibodies
+        let mut dense = vec![vec![0u32; N_FEAT]; N_CELLS];
+        for (c, row) in dense.iter_mut().enumerate() {
+            for (g, v) in row.iter_mut().enumerate() {
+                let hit = if g < 4 {
+                    c % 13_000 == g
+                } else {
+                    next() % 4 == 0
+                };
+                if hit {
+                    *v = next() % 20 + 1;
+                }
+            }
+        }
+        let (mut data, mut indices, mut indptr) = (Vec::new(), Vec::new(), vec![0u32]);
+        for row in &dense {
+            for (g, &v) in row.iter().enumerate() {
+                if v > 0 {
+                    data.push(v);
+                    indices.push(g as u32);
+                }
+            }
+            indptr.push(data.len() as u32);
+        }
+        let counts = CompressedSparseData2::<u32>::new_csr(
+            &data,
+            &indices,
+            &indptr,
+            None,
+            (N_CELLS, N_FEAT),
+        );
+        let names: Vec<String> = (0..N_FEAT).map(|g| format!("f{g}")).collect();
+        let types: Vec<String> = (0..N_FEAT)
+            .map(|g| {
+                if g >= 30 {
+                    "Antibody Capture"
+                } else {
+                    "Gene Expression"
+                }
+                .to_string()
+            })
+            .collect();
+        let barcodes: Vec<String> = (0..N_CELLS).map(|c| format!("c{c}")).collect();
+        let features = TenxFeatures {
+            ids: &names,
+            names: &names,
+            feature_types: Some(&types),
+        };
+        let path = std::env::temp_dir().join(format!("bixverse_tenx_qc_{}.h5", std::process::id()));
+        write_tenx_h5(&path, TenxVersion::V3, &counts, &barcodes, &features).unwrap();
+
+        let qc = MinCellQuality {
+            min_unique_genes: 8,
+            min_lib_size: 60,
+            min_cells: 3,
+            target_size: 1e4,
+        };
+        let got = parse_h5_tenx_quality(
+            &path,
+            TenxVersion::V3,
+            (N_CELLS, N_FEAT),
+            &qc,
+            Some("Gene Expression"),
+            false,
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let genes: Vec<usize> = (0..30)
+            .filter(|&g| dense.iter().filter(|r| r[g] > 0).count() >= qc.min_cells)
+            .collect();
+        let cells: Vec<usize> = (0..N_CELLS)
+            .filter(|&c| {
+                let n = genes.iter().filter(|&&g| dense[c][g] > 0).count();
+                let lib: u32 = genes.iter().map(|&g| dense[c][g]).sum();
+                n >= qc.min_unique_genes && lib as usize >= qc.min_lib_size
+            })
+            .collect();
+        assert!(genes.len() < 30 && cells.len() < N_CELLS && !cells.is_empty());
+        assert_eq!(got.genes_to_keep, genes);
+        assert_eq!(got.cells_to_keep, cells);
+    }
 
     #[test]
     fn test_write_tenx_h5_round_trips_layout() {
