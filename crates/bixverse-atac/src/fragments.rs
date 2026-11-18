@@ -17,7 +17,7 @@
 //! is dropped while parsing.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -700,6 +700,119 @@ where
         });
     }
     fold_bgzf_segments(bytes, &blocks, &segments, barcodes, &init, &fold, &reduce)
+}
+
+/// One read of a multi-pass method: some chromosomes through the index, or
+/// the whole file (`None`).
+pub(crate) type FragmentBatch = Option<Vec<ChromSpan>>;
+
+/// Plan the reads of a pass: chromosome batches under a memory budget when
+/// the file has a tabix index, the whole file otherwise.
+///
+/// ### Params
+///
+/// * `path` - Fragment file
+/// * `max_mem_gb` - Budget, `None` for one chromosome per batch
+/// * `mem_per_compressed_byte` - The caller's memory per compressed byte
+///   read, to turn the budget into bytes
+/// * `keep` - Chromosomes to read; the rest are skipped (only possible with
+///   an index)
+///
+/// ### Returns
+///
+/// The batches, and the chromosomes in file order (only the first one when
+/// there is no index), or an I/O or index error.
+pub(crate) fn plan_batches(
+    path: &Path,
+    max_mem_gb: Option<f64>,
+    mem_per_compressed_byte: f64,
+    keep: impl Fn(&str) -> bool,
+) -> Result<(Vec<FragmentBatch>, Vec<String>), AtacErrors> {
+    let Some(spans) = chrom_spans(path)? else {
+        let order = first_chromosome(path)?.into_iter().collect();
+        return Ok((vec![None], order));
+    };
+    let order = spans.iter().map(|s| s.name.clone()).collect();
+    let cap = max_mem_gb.map_or(0.0, |gb| gb * 1e9 / mem_per_compressed_byte);
+    let mut batches: Vec<Vec<ChromSpan>> = Vec::new();
+    let mut size = 0.0;
+    for span in spans.into_iter().filter(|s| keep(&s.name)) {
+        let bytes = span.compressed_bytes() as f64;
+        match batches.last_mut() {
+            Some(b) if size + bytes <= cap => b.push(span),
+            _ => {
+                size = 0.0;
+                batches.push(vec![span]);
+            }
+        }
+        size += bytes;
+    }
+    Ok((batches.into_iter().map(Some).collect(), order))
+}
+
+/// [`fold_fragment_spans`] for a batch, [`fold_fragments`] for the whole
+/// file.
+///
+/// ### Params
+///
+/// * `path` - Fragment file
+/// * `batch` - From [`plan_batches`]
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer of `(accumulator, chromosome, fragments)`
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error.
+pub(crate) fn fold_batch<A, I, F, R>(
+    path: &Path,
+    batch: &FragmentBatch,
+    barcodes: &BarcodeIndex,
+    init: I,
+    fold: F,
+    reduce: R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    match batch {
+        Some(spans) => fold_fragment_spans(path, spans, barcodes, init, fold, reduce),
+        None => fold_fragments(path, barcodes, init, fold, reduce),
+    }
+}
+
+/// The chromosome of the first fragment line of a file.
+///
+/// ### Params
+///
+/// * `path` - Fragment file, gzip, BGZF or plain
+///
+/// ### Returns
+///
+/// The chromosome, `None` for a file without fragment lines, or an I/O
+/// error.
+pub(crate) fn first_chromosome(path: &Path) -> Result<Option<String>, AtacErrors> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 2];
+    let gz = file.read(&mut magic)? == 2 && magic == [0x1f, 0x8b];
+    file.seek(SeekFrom::Start(0))?;
+    let reader: Box<dyn BufRead> = if gz {
+        Box::new(BufReader::new(MultiGzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        return Ok(line.split('\t').next().map(str::to_string));
+    }
+    Ok(None)
 }
 
 /// A stretch of a BGZF file to parse: blocks `[b0, b1)`, minus `skip` bytes

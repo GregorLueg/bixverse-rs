@@ -29,6 +29,7 @@ faer.workspace = true
 flate2.workspace = true
 indexmap.workspace = true
 memmap2.workspace = true
+statrs.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true

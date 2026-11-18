@@ -3,6 +3,7 @@
 
 pub use bixverse_sc::prelude::*;
 
+pub use crate::amulet::{AmuletParams, AmuletResult, amulet};
 pub use crate::annotation::{
     GeneActivityParams, GeneRecord, gene_activity_regions, read_gtf_genes, tss_positions,
 };

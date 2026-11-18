@@ -35,18 +35,17 @@
 //! after. Without an index pass 1 holds the whole file's tags.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 
-use flate2::read::MultiGzDecoder;
 use memmap2::{Mmap, MmapOptions};
 
 use bixverse_sc_data::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::fragments::{ChromSpan, chrom_spans, fold_fragment_spans};
+use crate::fragments::{FragmentBatch, fold_batch, plan_batches};
 use crate::prelude::*;
 
 /// Fragments per group whose mean length MACS takes as the tag size, which
@@ -302,9 +301,6 @@ impl NarrowPeak {
     }
 }
 
-/// Tags of one read: per group, per chromosome, unsorted.
-type BatchTags = Vec<FxHashMap<String, Vec<u32>>>;
-
 /// First fragments of one read, as `(start, length)`, at most
 /// [`TAG_SIZE_SAMPLE`] per group and chromosome.
 type FirstFragments = Vec<FxHashMap<String, Vec<(u32, u32)>>>;
@@ -313,16 +309,11 @@ type FirstFragments = Vec<FxHashMap<String, Vec<(u32, u32)>>>;
 /// p-score key.
 type ScoreKey = (u32, u32);
 
+/// One group's tags of one chromosome: `(group, chromosome, tags)`.
+type TagJob = (usize, String, Vec<u32>);
+
 /// One segment: `(start, end, treatment count, lambda count)`.
 type Segment = (i32, i32, u32, u32);
-
-/// How the fragment file is read.
-enum Reads {
-    /// Chromosome batches through the tabix index, in file order.
-    Batches(Vec<Vec<ChromSpan>>),
-    /// The whole file at once.
-    Whole,
-}
 
 /// Extension of the tags of both pileups.
 #[derive(Clone, Copy)]
@@ -1155,73 +1146,82 @@ fn group_scores(
 // Reading //
 /////////////
 
-/// The chromosome of the first fragment line of a file.
+/// One worker's tags while reading: per chromosome seen, per group.
 ///
-/// ### Params
-///
-/// * `path` - Fragment file, gzip, BGZF or plain
-///
-/// ### Returns
-///
-/// The chromosome, `None` for a file without fragment lines, or an I/O
-/// error.
-fn first_chromosome(path: &Path) -> Result<Option<String>, AtacErrors> {
-    let mut file = File::open(path)?;
-    let mut magic = [0u8; 2];
-    let gz = file.read(&mut magic)? == 2 && magic == [0x1f, 0x8b];
-    file.seek(SeekFrom::Start(0))?;
-    let reader: Box<dyn BufRead> = if gz {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
-    for line in reader.lines() {
-        let line = line?;
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        return Ok(line.split('\t').next().map(str::to_string));
-    }
-    Ok(None)
+/// Chromosomes are resolved once per run of fragments, never per fragment.
+#[derive(Default)]
+struct ReadAcc {
+    /// Chromosomes seen, in the order first met.
+    chroms: Vec<String>,
+    /// Tags, indexed `[chromosome][group]`.
+    tags: Vec<Vec<Vec<u32>>>,
+    /// First fragments as `(start, length)`, indexed like `tags`; only
+    /// filled when the tag size is needed.
+    first: Vec<Vec<Vec<(u32, u32)>>>,
 }
 
-/// Plan the reads: chromosome batches under the memory budget when the file
-/// has a tabix index, the whole file otherwise.
-///
-/// ### Params
-///
-/// * `path` - Fragment file
-/// * `max_mem_gb` - Budget, `None` for one chromosome per batch
-///
-/// ### Returns
-///
-/// The reads and the chromosomes in file order (only the first one when
-/// there is no index), or an I/O or index error.
-fn plan_reads(path: &Path, max_mem_gb: Option<f64>) -> Result<(Reads, Vec<String>), AtacErrors> {
-    let Some(spans) = chrom_spans(path)? else {
-        let order = first_chromosome(path)?.into_iter().collect();
-        return Ok((Reads::Whole, order));
-    };
-    let order = spans.iter().map(|s| s.name.clone()).collect();
-    let cap = max_mem_gb.map_or(0.0, |gb| gb * 1e9 / MEM_PER_COMPRESSED_BYTE);
-    let mut batches: Vec<Vec<ChromSpan>> = Vec::new();
-    let mut size = 0.0;
-    for span in spans {
-        let bytes = span.compressed_bytes() as f64;
-        match batches.last_mut() {
-            Some(b) if size + bytes <= cap => b.push(span),
-            _ => {
-                size = 0.0;
-                batches.push(vec![span]);
+impl ReadAcc {
+    /// Index of a chromosome, adding it when new.
+    ///
+    /// ### Params
+    ///
+    /// * `chrom` - Chromosome
+    /// * `n_groups` - Number of groups
+    ///
+    /// ### Returns
+    ///
+    /// The index.
+    fn chrom_index(&mut self, chrom: &str, n_groups: usize) -> usize {
+        match self.chroms.iter().position(|c| c == chrom) {
+            Some(i) => i,
+            None => {
+                self.chroms.push(chrom.to_string());
+                self.tags.push(vec![Vec::new(); n_groups]);
+                self.first.push(vec![Vec::new(); n_groups]);
+                self.chroms.len() - 1
             }
         }
-        size += bytes;
     }
-    Ok((Reads::Batches(batches), order))
+
+    /// Add another worker's tags.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - The other accumulator
+    /// * `n_groups` - Number of groups
+    ///
+    /// ### Returns
+    ///
+    /// The union.
+    fn merge(mut self, other: ReadAcc, n_groups: usize) -> ReadAcc {
+        for ((chrom, tags), first) in other.chroms.iter().zip(other.tags).zip(other.first) {
+            let i = self.chrom_index(chrom, n_groups);
+            for (a, mut b) in self.tags[i].iter_mut().zip(tags) {
+                if a.len() < b.len() {
+                    std::mem::swap(a, &mut b);
+                }
+                a.extend_from_slice(&b);
+            }
+            for (a, b) in self.first[i].iter_mut().zip(first) {
+                a.extend(b);
+                keep_first_fragments(a);
+            }
+        }
+        self
+    }
 }
 
-/// Read the tags of every group, plus their first fragments, from one batch
-/// or the whole file.
+/// Keep the [`TAG_SIZE_SAMPLE`] smallest `(start, length)` pairs.
+///
+/// ### Params
+///
+/// * `first` - The pairs
+fn keep_first_fragments(first: &mut Vec<(u32, u32)>) {
+    first.sort_unstable();
+    first.truncate(TAG_SIZE_SAMPLE);
+}
+
+/// Read the tags of every group from one batch or the whole file.
 ///
 /// ### Params
 ///
@@ -1231,72 +1231,63 @@ fn plan_reads(path: &Path, max_mem_gb: Option<f64>) -> Result<(Reads, Vec<String
 /// * `groups` - Group of each cell
 /// * `n_groups` - Number of groups
 /// * `source` - What becomes a tag
+/// * `track_first` - Whether to keep the first fragments, for the tag size
 ///
 /// ### Returns
 ///
-/// The tags and first fragments per group, or an I/O or parse error.
+/// The unsorted tags as `(group, chromosome, tags)` and the first fragments
+/// per group, or an I/O or parse error.
 fn read_tags(
     path: &Path,
-    batch: Option<&[ChromSpan]>,
+    batch: &FragmentBatch,
     index: &BarcodeIndex,
     groups: &[u32],
     n_groups: usize,
     source: TagSource,
-) -> Result<(BatchTags, FirstFragments), AtacErrors> {
-    let init = || {
-        (
-            vec![FxHashMap::default(); n_groups],
-            vec![FxHashMap::default(); n_groups],
-        )
-    };
-    let fold = |acc: &mut (BatchTags, FirstFragments), chrom: &str, frags: &[Fragment]| {
+    track_first: bool,
+) -> Result<(Vec<TagJob>, FirstFragments), AtacErrors> {
+    let fold = |acc: &mut ReadAcc, chrom: &str, frags: &[Fragment]| {
+        let ci = acc.chrom_index(chrom, n_groups);
+        let tags = &mut acc.tags[ci];
         for f in frags {
             let g = groups[f.cell as usize] as usize;
-            let tags = match acc.0[g].get_mut(chrom) {
-                Some(t) => t,
-                None => acc.0[g].entry(chrom.to_string()).or_default(),
-            };
-            tags.push(f.start);
+            tags[g].push(f.start);
             if source == TagSource::Insertion {
-                tags.push(f.end);
-            }
-            let first = match acc.1[g].get_mut(chrom) {
-                Some(fs) => fs,
-                None => acc.1[g].entry(chrom.to_string()).or_default(),
-            };
-            // runs reach a worker in any order, so keep the smallest starts
-            // seen, not the first ones
-            first.push((f.start, f.len()));
-            if first.len() > 2 * TAG_SIZE_SAMPLE {
-                first.sort_unstable();
-                first.truncate(TAG_SIZE_SAMPLE);
+                tags[g].push(f.end);
             }
         }
-    };
-    let reduce = |mut a: (BatchTags, FirstFragments), b: (BatchTags, FirstFragments)| {
-        for (ta, tb) in a.0.iter_mut().zip(b.0) {
-            for (chrom, mut t) in tb {
-                let e = ta.entry(chrom).or_default();
-                if e.len() < t.len() {
-                    std::mem::swap(e, &mut t);
+        if track_first {
+            let first = &mut acc.first[ci];
+            for f in frags {
+                // runs reach a worker in any order, so keep the smallest
+                // starts seen, not the first ones
+                let fs = &mut first[groups[f.cell as usize] as usize];
+                fs.push((f.start, f.len()));
+                if fs.len() > 2 * TAG_SIZE_SAMPLE {
+                    keep_first_fragments(fs);
                 }
-                e.extend_from_slice(&t);
             }
         }
-        for (fa, fb) in a.1.iter_mut().zip(b.1) {
-            for (chrom, f) in fb {
-                let e = fa.entry(chrom).or_default();
-                e.extend(f);
-                e.sort_unstable();
-                e.truncate(TAG_SIZE_SAMPLE);
-            }
-        }
-        a
     };
-    match batch {
-        Some(spans) => fold_fragment_spans(path, spans, index, init, fold, reduce),
-        None => fold_fragments(path, index, init, fold, reduce),
+    let reduce = |a: ReadAcc, b: ReadAcc| a.merge(b, n_groups);
+    let acc = fold_batch(path, batch, index, ReadAcc::default, fold, reduce)?;
+
+    let mut firsts: FirstFragments = vec![FxHashMap::default(); n_groups];
+    let mut jobs = Vec::new();
+    for ((chrom, tags), first) in acc.chroms.into_iter().zip(acc.tags).zip(acc.first) {
+        for (g, mut f) in first.into_iter().enumerate() {
+            if !f.is_empty() {
+                keep_first_fragments(&mut f);
+                firsts[g].insert(chrom.clone(), f);
+            }
+        }
+        for (g, t) in tags.into_iter().enumerate() {
+            if !t.is_empty() {
+                jobs.push((g, chrom.clone(), t));
+            }
+        }
     }
+    Ok((jobs, firsts))
 }
 
 /// Sort tags and drop duplicates above `keep`.
@@ -1654,11 +1645,8 @@ pub fn call_peaks(
     }
     let n_groups = groups.iter().max().map_or(0, |&g| g as usize + 1);
     let index = BarcodeIndex::new(barcodes)?;
-    let (reads, order) = plan_reads(path, params.max_mem_gb)?;
-    let batches: Vec<Option<&[ChromSpan]>> = match &reads {
-        Reads::Batches(b) => b.iter().map(|s| Some(s.as_slice())).collect(),
-        Reads::Whole => vec![None],
-    };
+    let (batches, order) =
+        plan_batches(path, params.max_mem_gb, MEM_PER_COMPRESSED_BYTE, |_| true)?;
     let tmp_dir = params.tmp_dir.clone().unwrap_or_else(std::env::temp_dir);
     let mut spill = TagSpill::create(&tmp_dir)?;
 
@@ -1666,16 +1654,20 @@ pub fn call_peaks(
     let mut n_tags = vec![0usize; n_groups];
     let mut c_max = vec![0u32; n_groups];
     let mut firsts: FirstFragments = vec![FxHashMap::default(); n_groups];
-    for &batch in &batches {
-        let (tags, first) = read_tags(path, batch, &index, groups, n_groups, params.tag_source)?;
+    let track_first = params.tag_source == TagSource::FragmentStart && params.max_gap.is_none();
+    for batch in &batches {
+        let (mut jobs, first) = read_tags(
+            path,
+            batch,
+            &index,
+            groups,
+            n_groups,
+            params.tag_source,
+            track_first,
+        )?;
         for (g, f) in first.into_iter().enumerate() {
             firsts[g].extend(f);
         }
-        let mut jobs: Vec<(usize, String, Vec<u32>)> = tags
-            .into_iter()
-            .enumerate()
-            .flat_map(|(g, chroms)| chroms.into_iter().map(move |(c, t)| (g, c, t)))
-            .collect();
         let window_max: Vec<u32> = jobs
             .par_iter_mut()
             .map(|(_, _, t)| {

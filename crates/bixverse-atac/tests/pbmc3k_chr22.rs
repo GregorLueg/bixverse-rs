@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
 
+use bixverse_atac::amulet::{AmuletParams, amulet};
 use bixverse_atac::annotation::{GeneActivityParams, gene_activity_regions, read_gtf_genes};
 use bixverse_atac::counting::{CountMode, FeatureCounts, count_fragments, write_counts_store};
 use bixverse_atac::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
@@ -954,4 +955,77 @@ fn test_peak_calls_match_macs3_all_settings() {
             }
         }
     }
+}
+
+////////////
+// AMULET //
+////////////
+
+/// Compare one AMULET run with the black-box reference.
+///
+/// ### Params
+///
+/// * `max_overlap` - The overlap threshold of the run
+fn check_amulet_case(max_overlap: u32) {
+    let cells = cells();
+    let restrict = read_bed(&fixtures().join("blacklist.bed")).unwrap();
+    let params = AmuletParams {
+        max_overlap,
+        ..AmuletParams::default()
+    };
+    let res = amulet(&fragments(), &cells, &restrict, Some(params)).unwrap();
+    let at: FxHashMap<&str, usize> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
+    let (_, summary) = tsv(&format!(
+        "amulet/overlap{max_overlap}_OverlapSummary.txt.gz"
+    ));
+    assert_eq!(summary.len(), cells.len());
+    for r in &summary {
+        let i = at[r[0].as_str()];
+        assert_eq!(
+            res.n_fragments[i],
+            r[1].parse::<u32>().unwrap(),
+            "{} fragments",
+            r[0]
+        );
+        assert_eq!(
+            res.n_overlaps[i],
+            r[2].parse::<u32>().unwrap(),
+            "{} overlaps",
+            r[0]
+        );
+    }
+
+    let (_, probs) = tsv(&format!(
+        "amulet/overlap{max_overlap}_MultipletProbabilities.txt.gz"
+    ));
+    assert_eq!(probs.len(), cells.len());
+    for r in &probs {
+        let i = at[r[0].as_str()];
+        for (ours, theirs, what) in [(res.p_value[i], &r[2], "p"), (res.q_value[i], &r[3], "q")] {
+            let theirs: f64 = theirs.parse().unwrap();
+            assert!(
+                (ours - theirs).abs() <= 1e-9 * theirs.abs().max(1e-300)
+                    || (ours - theirs).abs() < 1e-15,
+                "{} {what}: {ours} vs {theirs}",
+                r[0]
+            );
+        }
+        assert_eq!(res.multiplet[i], res.q_value[i] < 0.01);
+    }
+}
+
+#[test]
+fn test_amulet_matches_reference() {
+    check_amulet_case(2);
+}
+
+/// A lower threshold gives many more loci and exercises the repeat filter.
+#[test]
+fn test_amulet_threshold_one_matches_reference() {
+    check_amulet_case(1);
 }
