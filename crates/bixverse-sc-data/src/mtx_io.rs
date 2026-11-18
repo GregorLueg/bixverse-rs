@@ -21,9 +21,9 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use thousands::Separable;
 
@@ -223,6 +223,11 @@ const GZ_PAR_MEMBER_CAP: usize = 16 * 1024 * 1024;
 /// Members inflated per parallel round, per worker thread.
 const GZ_MEMBERS_PER_THREAD: usize = 2;
 
+/// Compressed bytes the read-ahead thread of [`ParGzMembers`] stays ahead of
+/// the verified member start. Without it a cold file faults in page by page
+/// under the candidate scan, at half the speed.
+const GZ_PREFETCH_BYTES: usize = 512 * 1024 * 1024;
+
 /// One gzip member inflated whole.
 enum Member {
     /// The text and the member's length in the file, header and trailer
@@ -312,6 +317,41 @@ struct ParGzMembers {
     /// Own threads for the inflate: the global pool's workers sit in the
     /// parsers' `par_bridge`, blocked on the channel this reader fills
     pool: rayon::ThreadPool,
+    /// `pos` shared with the read-ahead thread; `usize::MAX` stops it
+    progress: Arc<AtomicUsize>,
+}
+
+impl Drop for ParGzMembers {
+    fn drop(&mut self) {
+        self.progress.store(usize::MAX, Ordering::Relaxed);
+    }
+}
+
+/// Read a file sequentially into the page cache, at most
+/// [`GZ_PREFETCH_BYTES`] past `progress`, until the end or until `progress`
+/// is `usize::MAX`. Read errors end it quietly: the mapped reads still work.
+///
+/// ### Params
+///
+/// * `file` - The file, at its start
+/// * `progress` - Verified position of the reader
+fn read_ahead(mut file: File, progress: &AtomicUsize) {
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let mut at = 0usize;
+    loop {
+        let p = progress.load(Ordering::Relaxed);
+        if p == usize::MAX {
+            return;
+        }
+        if at > p + GZ_PREFETCH_BYTES {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        }
+        match file.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => at += n,
+        }
+    }
 }
 
 impl ParGzMembers {
@@ -344,6 +384,10 @@ impl ParGzMembers {
             .num_threads(rayon::current_num_threads())
             .build()
             .map_err(std::io::Error::other)?;
+        let progress = Arc::new(AtomicUsize::new(0));
+        let ahead = Arc::clone(&progress);
+        let file = File::open(path)?;
+        std::thread::spawn(move || read_ahead(file, &ahead));
         Ok(Box::new(Self {
             pattern,
             pos: first.1,
@@ -355,6 +399,7 @@ impl ParGzMembers {
             path: path.to_path_buf(),
             map,
             pool,
+            progress,
         }))
     }
 
@@ -391,6 +436,7 @@ impl ParGzMembers {
                 Member::Text(text, len) => {
                     self.ready.push_back(text);
                     self.pos += len;
+                    self.progress.store(self.pos, Ordering::Relaxed);
                 }
                 Member::TooBig => {
                     let mut file = File::open(&self.path)?;
