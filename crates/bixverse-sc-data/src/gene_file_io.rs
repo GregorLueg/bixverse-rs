@@ -352,9 +352,13 @@ fn write_gene_file_impl(
     };
 
     let mut extra_raw = vec![vec![0u32; max_phase_nnz]; n_layers - 1];
-    let mut raw = vec![0u32; max_phase_nnz];
+    // single layer without the norm: count and cell scatter as one pair, so
+    // each gene run keeps one hot cache line rather than two
+    let pairs_path = skip_norm && n_layers == 1;
+    let mut raw = vec![0u32; if pairs_path { 0 } else { max_phase_nnz }];
     let mut norm = vec![0.0f32; if skip_norm { 0 } else { max_phase_nnz }];
-    let mut cell_idx = vec![0u32; max_phase_nnz];
+    let mut cell_idx = vec![0u32; if pairs_path { 0 } else { max_phase_nnz }];
+    let mut pairs = vec![[0u32; 2]; if pairs_path { max_phase_nnz } else { 0 }];
 
     for (phase_i, &(g0, g1)) in phases.iter().enumerate() {
         let start_phase = Instant::now();
@@ -384,6 +388,7 @@ fn write_gene_file_impl(
         let raw_ptr = ScatterPtr(raw.as_mut_ptr());
         let norm_ptr = ScatterPtr(norm.as_mut_ptr());
         let idx_ptr = ScatterPtr(cell_idx.as_mut_ptr());
+        let pair_ptr = ScatterPtr(pairs.as_mut_ptr());
         let extra_ptrs: Vec<ScatterPtr<u32>> = extra_raw
             .iter_mut()
             .map(|b| ScatterPtr(b.as_mut_ptr()))
@@ -431,8 +436,12 @@ fn write_gene_file_impl(
                                     cursor[local] += 1;
                                     // SAFETY: as below
                                     unsafe {
-                                        raw_ptr.write(pos, counts[k]);
-                                        idx_ptr.write(pos, cell as u32);
+                                        if pairs_path {
+                                            pair_ptr.write(pos, [counts[k], cell as u32]);
+                                        } else {
+                                            raw_ptr.write(pos, counts[k]);
+                                            idx_ptr.write(pos, cell as u32);
+                                        }
                                     }
                                 }
                             },
@@ -480,7 +489,13 @@ fn write_gene_file_impl(
                         return Ok((g, format.encode_layers(&cell_idx[s..e], &layers, g, true)?));
                     }
                     if skip_norm {
-                        let (cells, counts) = (&cell_idx[s..e], &raw[s..e]);
+                        let unzipped: (Vec<u32>, Vec<u32>);
+                        let (cells, counts) = if pairs_path {
+                            unzipped = pairs[s..e].iter().map(|&[r, c]| (c, r)).unzip();
+                            (&unzipped.0[..], &unzipped.1[..])
+                        } else {
+                            (&cell_idx[s..e], &raw[s..e])
+                        };
                         let avg_exp = if derive_avg_exp {
                             derived_avg_exp(cells, counts, &cell_lib, &cell_norm, target_size)
                         } else {
