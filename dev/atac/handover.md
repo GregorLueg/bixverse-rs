@@ -13,7 +13,8 @@ Signac and Seurat quirks) first. Workspace 0.11.0, Python 0.4.0.
 | 5: modality and bindings | | `bv.atac` on `SingleCellsMultiModal` | handover written |
 | 6: LSI projection, rLSI, label transfer | done | done (`project_lsi`, `run_rlsi`, `transfer_labels_seurat`) | handover written |
 | 7a: peak caller (MACS3 port, per group) | done | done (`call_peaks`) | handover written |
-| 7b: AMULET, LinkPeaks, motifs, footprinting | not started | | |
+| 7b: AMULET multiplets (clean room from the paper, black-box parity) | done | done (`amulet`) | handover written |
+| 7c: LinkPeaks, motifs, footprinting | not started | | |
 
 R handover: `~/Desktop/handovers/handover_atac.md`.
 
@@ -30,6 +31,26 @@ Gene activity is its own `SingleCells` with `FeatureKind::GeneActivity` in
 the v5 header. Python methods that assume RNA counts refuse it or warn
 (`check_rna_counts` in `python/bixverse/_core/single_cells.py`); the tiers
 are in the R handover.
+
+## AMULET state
+
+AMULET (UcarLab, GPL-3.0) was implemented from the paper only; the reference
+ran as a black box (`/Users/gregorlueg/repos/others/blackbox-amulet`, Python
+3.11, numpy < 1.24). Behaviour pinned from outputs and synthetic probes, not
+code: per-base depth over half-open fragments, loci merged across cells when
+they overlap or touch, `P(X > x)` tails for the repeat and multiplet tests, a
+restriction region removes a locus through its reads (reads touching it are
+set aside, the locus survives if the rest still exceed the threshold),
+trailing loci lost only on the last chromosome in file order.
+
+Parity: exact on the chr22 fixture at thresholds 2 and 1 (`amulet/`,
+`dev/atac/gen_atac_amulet.sh`). On 10k PBMC with the hg38 repeat list:
+valid fragments and overlap counts exact for all 11,898 cells, 46,289 merged
+sites vs 46,312, multiplet calls differ for 14 cells. The residual is in how
+dense repeat clusters remove loci: one chr21 region
+(`chr21:29298750-29298814`) splits a site in AMULET and not in ours; no rule
+tried explains it. Probe and bisection scripts: `helpers/probes/` in the
+black-box folder.
 
 ## Next steps
 
