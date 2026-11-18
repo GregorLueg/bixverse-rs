@@ -16,6 +16,8 @@
 
 use flate2::{Decompress, FlushDecompress, Status};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -213,6 +215,226 @@ impl<R: BufRead> Read for GzMembers<R> {
     }
 }
 
+/// Largest member text [`ParGzMembers`] inflates whole. A larger member, and
+/// any single-member file, streams through [`GzMembers`] instead. With
+/// [`GZ_MEMBERS_PER_THREAD`] it bounds the text of one round.
+const GZ_PAR_MEMBER_CAP: usize = 16 * 1024 * 1024;
+
+/// Members inflated per parallel round, per worker thread.
+const GZ_MEMBERS_PER_THREAD: usize = 2;
+
+/// One gzip member inflated whole.
+enum Member {
+    /// The text and the member's length in the file, header and trailer
+    /// included
+    Text(Vec<u8>, usize),
+    /// The text would exceed [`GZ_PAR_MEMBER_CAP`]
+    TooBig,
+    /// Not a valid member at this offset
+    Bad,
+}
+
+/// Inflate the member at the start of `src`, CRC32 and size checked.
+///
+/// ### Params
+///
+/// * `src` - The file from a member start
+///
+/// ### Returns
+///
+/// The [`Member`].
+fn inflate_member(src: &[u8]) -> Member {
+    let mut head = GzMembers::new(src);
+    if head.skip_header().is_err() {
+        return Member::Bad;
+    }
+    let hdr = src.len() - head.inner.len();
+    let mut d = Decompress::new(false);
+    let mut out = Vec::with_capacity((4 * (src.len() - hdr)).clamp(1 << 16, 1 << 24));
+    loop {
+        if out.len() == out.capacity() {
+            if out.len() >= GZ_PAR_MEMBER_CAP {
+                return Member::TooBig;
+            }
+            out.reserve(out.len());
+        }
+        let input = &src[hdr + d.total_in() as usize..];
+        let (before_in, before_out) = (d.total_in(), d.total_out());
+        match d.decompress_vec(input, &mut out, FlushDecompress::None) {
+            Ok(Status::StreamEnd) => break,
+            Ok(_) if d.total_in() == before_in && d.total_out() == before_out => {
+                return Member::Bad;
+            }
+            Ok(_) => {}
+            Err(_) => return Member::Bad,
+        }
+    }
+    let end = hdr + d.total_in() as usize;
+    let Some(trailer) = src.get(end..end + 8) else {
+        return Member::Bad;
+    };
+    if u32::from_le_bytes(trailer[..4].try_into().expect("4 bytes")) != crc32fast::hash(&out)
+        || u32::from_le_bytes(trailer[4..].try_into().expect("4 bytes")) != out.len() as u32
+    {
+        return Member::Bad;
+    }
+    Member::Text(out, end + 8)
+}
+
+/// Multi-member gzip inflated in parallel, member by member, in file order.
+///
+/// Member starts are only known once the member before them is inflated, so
+/// each round inflates the next verified start plus the next offsets that
+/// carry the first member's header bytes, all in parallel, then keeps the
+/// chain of members that starts at the verified offset. A header pattern
+/// inside compressed data only costs a failed inflate. bgzip files and
+/// writers that flush a member per block (splatter-sc) read in parallel this
+/// way; one member streams.
+struct ParGzMembers {
+    /// The mapped gzip file
+    map: memmap2::Mmap,
+    /// Path, for the streaming fallback
+    path: PathBuf,
+    /// Leading header bytes the members share
+    pattern: Vec<u8>,
+    /// Start of the next member, verified
+    pos: usize,
+    /// Scanned for candidates up to here
+    scan: usize,
+    /// Inflated candidates past `pos`, by offset
+    spec: FxHashMap<usize, Member>,
+    /// Members inflated in order, not yet handed out
+    ready: VecDeque<Vec<u8>>,
+    /// The member being handed out and the position in it
+    cur: (Vec<u8>, usize),
+    /// From a member over the cap on: the rest of the file streamed
+    stream: Option<GzMembers<BufReader<File>>>,
+    /// Own threads for the inflate: the global pool's workers sit in the
+    /// parsers' `par_bridge`, blocked on the channel this reader fills
+    pool: rayon::ThreadPool,
+}
+
+impl ParGzMembers {
+    /// Open a gzip file, in parallel if it has more than one member.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - The gzip file
+    ///
+    /// ### Returns
+    ///
+    /// The text stream.
+    fn open(path: &Path) -> std::io::Result<Box<dyn Read + Send>> {
+        let file = File::open(path)?;
+        // SAFETY: the input is read only; a file changed under the map reads
+        // as a corrupt member and fails its CRC32
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        let first = match inflate_member(&map) {
+            Member::Text(text, len) if len < map.len() => (text, len),
+            _ => {
+                return Ok(Box::new(GzMembers::new(BufReader::with_capacity(
+                    GZ_INPUT_BYTES,
+                    file,
+                ))));
+            }
+        };
+        let flg = map[3];
+        let pattern = map[..if flg == 0 { 10 } else { 4 }].to_vec();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(rayon::current_num_threads())
+            .build()
+            .map_err(std::io::Error::other)?;
+        Ok(Box::new(Self {
+            pattern,
+            pos: first.1,
+            scan: first.1,
+            spec: FxHashMap::default(),
+            ready: VecDeque::new(),
+            cur: (first.0, 0),
+            stream: None,
+            path: path.to_path_buf(),
+            map,
+            pool,
+        }))
+    }
+
+    /// Inflate the next round and move the verified chain to `ready`.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or `InvalidData` when the member at the verified offset is
+    /// corrupt.
+    fn refill(&mut self) -> std::io::Result<()> {
+        let want = rayon::current_num_threads() * GZ_MEMBERS_PER_THREAD;
+        let mut cands = vec![self.pos];
+        let from = self.scan.max(self.pos + 1).min(self.map.len());
+        self.scan = self.map.len();
+        for hit in memchr::memmem::find_iter(&self.map[from..], &self.pattern) {
+            cands.push(from + hit);
+            if cands.len() == want {
+                self.scan = from + hit + 1;
+                break;
+            }
+        }
+        let (map, spec) = (&self.map, &self.spec);
+        let new: Vec<(usize, Member)> = self.pool.install(|| {
+            cands
+                .par_iter()
+                .filter(|c| !spec.contains_key(c))
+                .map(|&c| (c, inflate_member(&map[c..])))
+                .collect()
+        });
+        self.spec.extend(new);
+
+        while let Some(m) = self.spec.remove(&self.pos) {
+            match m {
+                Member::Text(text, len) => {
+                    self.ready.push_back(text);
+                    self.pos += len;
+                }
+                Member::TooBig => {
+                    let mut file = File::open(&self.path)?;
+                    file.seek(SeekFrom::Start(self.pos as u64))?;
+                    self.stream = Some(GzMembers::new(BufReader::with_capacity(
+                        GZ_INPUT_BYTES,
+                        file,
+                    )));
+                    break;
+                }
+                Member::Bad => return Err(gz_invalid("corrupt gzip member")),
+            }
+        }
+        let pos = self.pos;
+        self.spec.retain(|&k, _| k > pos);
+        Ok(())
+    }
+}
+
+impl Read for ParGzMembers {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let (text, at) = &mut self.cur;
+            if *at < text.len() {
+                let n = out.len().min(text.len() - *at);
+                out[..n].copy_from_slice(&text[*at..*at + n]);
+                *at += n;
+                return Ok(n);
+            }
+            if let Some(next) = self.ready.pop_front() {
+                self.cur = (next, 0);
+                continue;
+            }
+            if let Some(s) = &mut self.stream {
+                return s.read(out);
+            }
+            if self.pos >= self.map.len() {
+                return Ok(0);
+            }
+            self.refill()?;
+        }
+    }
+}
+
 ////////////
 // Header //
 ////////////
@@ -398,10 +620,7 @@ impl MtxSource {
     fn stream(&self) -> Result<Box<dyn Read + Send>, ScDataErrors> {
         let file = File::open(&self.path)?;
         Ok(if self.gz {
-            Box::new(GzMembers::new(BufReader::with_capacity(
-                GZ_INPUT_BYTES,
-                file,
-            )))
+            ParGzMembers::open(&self.path)?
         } else {
             Box::new(file)
         })
@@ -1878,7 +2097,7 @@ mod tests {
                 for (gz, block_bytes) in [(false, MTX_BLOCK_BYTES), (false, 101), (true, 101)] {
                     let name = format!("layout_{cells_as_rows}_{order:?}_{gz}_{block_bytes}");
                     let mtx = if gz {
-                        write_gz(&name, &body, 2)
+                        write_gz(&name, &body, 40)
                     } else {
                         write_mtx(&name, &body)
                     };
@@ -1926,6 +2145,21 @@ mod tests {
         }
         std::fs::write(&temp.0, out).expect("gz file written");
         temp
+    }
+
+    /// Many members read in parallel give back the text in order.
+    #[test]
+    fn test_par_gz_members_round_trip() {
+        let body: String = (0..20_000)
+            .map(|i| format!("{} {} {}\n", i % 97 + 1, i, i * 7))
+            .collect();
+        let gz = write_gz("par_members", &body, 137);
+        let mut out = String::new();
+        ParGzMembers::open(&gz.0)
+            .expect("open")
+            .read_to_string(&mut out)
+            .expect("read");
+        assert_eq!(out, body);
     }
 
     /// Optional header fields are skipped, members concatenate, and a member

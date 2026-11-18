@@ -710,6 +710,7 @@ dependencies = [
  "indexmap",
  "libc",
  "lz4_flex",
+ "memchr",
  "memmap2",
  "ndarray",
  "num-traits",
