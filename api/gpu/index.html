@@ -2892,6 +2892,9 @@ functions, so a pipeline swaps one import for the other:</p>
 <p>The GPU-specific knobs live in <code>bixverse_gpu.params</code>; everything else
 takes the <code>bixverse.params</code> bundles. Probe the device with <code>gpu_available()</code>;
 the twins raise <code>bixverse.BixverseError</code> without one.</p>
+<p>On Apple Silicon, PCA, the kNN, fast clustering, Harmony and SEACells also run
+on MLX with <code>backend="mlx"</code>, in a source build with the <code>mlx</code> feature; probe
+it with <code>mlx_available()</code>.</p>
 
 
 

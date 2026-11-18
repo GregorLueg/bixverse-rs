@@ -2928,7 +2928,8 @@ archetype initialisation, the kNN and the aggregation are the CPU steps.</p>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">target_size</span><span class="p">:</span> <span class="n"><span title="float">float</span></span> <span class="o">=</span> <span class="mf">100000.0</span><span class="p">,</span>
 <a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">seed</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">=</span> <span class="mi">42</span><span class="p">,</span>
 <a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">verbose</span><span class="p">:</span> <span class="n"><span title="bixverse._validate.Verbose">Verbose</span></span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            MetaCells (bixverse._core.metacells.MetaCells)" href="../../core/#bixverse.MetaCells">MetaCells</a></span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">backend</span><span class="p">:</span> <span class="n"><span title="bixverse_gpu._backend.Backend">Backend</span></span> <span class="o">=</span> <span class="s2">"wgpu"</span><span class="p">,</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            MetaCells (bixverse._core.metacells.MetaCells)" href="../../core/#bixverse.MetaCells">MetaCells</a></span>
 </code></pre></div>
 
     <div class="doc doc-contents ">
@@ -3100,6 +3101,23 @@ method has it.</p>
                   <code>True</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>backend</code>
+            </td>
+            <td>
+                  <code><span title="bixverse_gpu._backend.Backend">Backend</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"wgpu"</code> (any GPU), or <code>"mlx"</code> (Apple Silicon, needs a
+source build with the <code>mlx</code> feature; see <code>mlx_available()</code>).</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;wgpu&#39;</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -3129,7 +3147,8 @@ method has it.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Without a GPU adapter.</p>
+                <p>Without a GPU adapter, or with <code>backend="mlx"</code> on a
+build without the MLX twins.</p>
               </div>
             </td>
           </tr>

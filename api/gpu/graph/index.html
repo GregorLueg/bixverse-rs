@@ -2995,7 +2995,8 @@ on the GPU; the graph built from it is the CPU one.</p>
    (bixverse_gpu.params.KnnGpuDefaults)" href="../params/#bixverse_gpu.params.KnnGpuDefaults">KnnGpuDefaults</a></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">seed</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">=</span> <span class="mi">42</span><span class="p">,</span>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">verbose</span><span class="p">:</span> <span class="n"><span title="bixverse._validate.Verbose">Verbose</span></span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            KnnGraph
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">backend</span><span class="p">:</span> <span class="n"><span title="bixverse_gpu._backend.Backend">Backend</span></span> <span class="o">=</span> <span class="s2">"wgpu"</span><span class="p">,</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            KnnGraph
 
 
   
@@ -3142,6 +3143,23 @@ method has it.</p>
                   <code>True</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>backend</code>
+            </td>
+            <td>
+                  <code><span title="bixverse_gpu._backend.Backend">Backend</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"wgpu"</code> (any GPU), or <code>"mlx"</code> (Apple Silicon, needs a
+source build with the <code>mlx</code> feature; see <code>mlx_available()</code>).</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;wgpu&#39;</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -3204,7 +3222,8 @@ method has it.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Without a GPU adapter.</p>
+                <p>Without a GPU adapter, or with <code>backend="mlx"</code> on a
+build without the MLX twins.</p>
               </div>
             </td>
           </tr>
@@ -3244,7 +3263,8 @@ method has it.</p>
    (bixverse.params.KnnGraphDefaults)" href="../../params/#bixverse.params.KnnGraphDefaults">KnnGraphDefaults</a></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">seed</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">=</span> <span class="mi">42</span><span class="p">,</span>
 <a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">verbose</span><span class="p">:</span> <span class="n"><span title="bixverse._validate.Verbose">Verbose</span></span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">backend</span><span class="p">:</span> <span class="n"><span title="bixverse_gpu._backend.Backend">Backend</span></span> <span class="o">=</span> <span class="s2">"wgpu"</span><span class="p">,</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
 </code></pre></div>
 
     <div class="doc doc-contents ">
@@ -3407,6 +3427,23 @@ method has it.</p>
                   <code>True</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>backend</code>
+            </td>
+            <td>
+                  <code><span title="bixverse_gpu._backend.Backend">Backend</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"wgpu"</code> (any GPU), or <code>"mlx"</code> (Apple Silicon, needs a
+source build with the <code>mlx</code> feature; see <code>mlx_available()</code>).</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;wgpu&#39;</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -3436,7 +3473,8 @@ method has it.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Without a GPU adapter.</p>
+                <p>Without a GPU adapter, or with <code>backend="mlx"</code> on a
+build without the MLX twins.</p>
               </div>
             </td>
           </tr>
@@ -3726,7 +3764,8 @@ iteration gains no more than this.</p>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">return_kmeans</span><span class="p">:</span> <span class="n"><span title="bool">bool</span></span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
 <a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">seed</span><span class="p">:</span> <span class="n"><span title="int">int</span></span> <span class="o">=</span> <span class="mi">42</span><span class="p">,</span>
 <a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">verbose</span><span class="p">:</span> <span class="n"><span title="bixverse._validate.Verbose">Verbose</span></span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
-<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            FastClusters
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">backend</span><span class="p">:</span> <span class="n"><span title="bixverse_gpu._backend.Backend">Backend</span></span> <span class="o">=</span> <span class="s2">"wgpu"</span><span class="p">,</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="            FastClusters
 
 
   
@@ -3740,7 +3779,8 @@ iteration gains no more than this.</p>
 on it.</p>
 <p>Returns what <code>bixverse.graph.fast_cluster</code> returns. Only the k-means (and
 the cell-mediated top-m search) run on the GPU; it is full-batch Lloyd's,
-so there are no mini-batch knobs.</p>
+so there are no mini-batch knobs. MLX runs every iteration and holds the
+data at f32, so it ignores <code>fixed</code> and <code>quantise</code>.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3905,6 +3945,23 @@ method has it.</p>
                   <code>True</code>
             </td>
           </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>backend</code>
+            </td>
+            <td>
+                  <code><span title="bixverse_gpu._backend.Backend">Backend</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"wgpu"</code> (any GPU), or <code>"mlx"</code> (Apple Silicon, needs a
+source build with the <code>mlx</code> feature; see <code>mlx_available()</code>).</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;wgpu&#39;</code>
+            </td>
+          </tr>
       </tbody>
     </table>
 
@@ -3935,7 +3992,8 @@ list or <code>n_seeds &lt; 1</code>.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Without a GPU adapter.</p>
+                <p>Without a GPU adapter, or with <code>backend="mlx"</code> on a
+build without the MLX twins.</p>
               </div>
             </td>
           </tr>
