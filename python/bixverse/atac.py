@@ -31,6 +31,10 @@ count model (residuals, doublets, Bonsai, gene set proportions) refuse it, and
 those biased by gene length or by fragments shared between neighbouring genes
 (AUCell, ScType, NMF, Hotspot gene correlations, SCENIC, CellPhoneDB) warn.
 
+**Mapping and integration.** `project_lsi` puts a query onto a reference
+LSI (Seurat's `lsiproject`); `run_rlsi` integrates batches through
+reciprocal LSI anchors.
+
 **Gotchas.** `run_tfidf` computes the IDF over the kept cells: run it again,
 then the LSI, after changing them. `calculate_lsi` drops component 1 by
 default, as the Signac vignettes do; `get_lsi_depth_cor` shows whether that
@@ -45,6 +49,8 @@ from bixverse._core.atac import (
     find_top_features,
     gene_activity,
     get_lsi_depth_cor,
+    project_lsi,
+    run_rlsi,
     run_tfidf,
 )
 from bixverse._core.multimodal import AtacInfo
@@ -58,5 +64,7 @@ __all__ = [
     "find_top_features",
     "gene_activity",
     "get_lsi_depth_cor",
+    "project_lsi",
+    "run_rlsi",
     "run_tfidf",
 ]

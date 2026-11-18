@@ -19,9 +19,11 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core import db
 from bixverse._core.multimodal import AtacInfo, SingleCellsMultiModal
+from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import ScCache
 from bixverse._validate import Verbose
+from bixverse.params import KnnParams, to_rust
 
 ###########
 # Globals #
@@ -569,7 +571,171 @@ def calculate_lsi(
     mm.stamp("lsi", modality="atac")
     info.depth_cor = np.asarray(res["depth_cor"])
     info.lsi_dropped = dropped
+    info.lsi_features = feats.astype(np.uint32)
+    info.lsi_loadings = np.asarray(res["loadings"], dtype=np.float32)
+    info.lsi_singular_values = np.asarray(res["singular_values"], dtype=np.float32)
     return info.depth_cor
+
+
+@beartype
+def project_lsi(
+    reference: SingleCellsMultiModal, query: SingleCellsMultiModal
+) -> np.ndarray:
+    """Project the query's kept cells onto the reference LSI.
+
+    Seurat's `ProjectSVD(mode = "lsi")` as `FindTransferAnchors(reduction =
+    "lsiproject")` runs it: the query's own TF-IDF times the reference
+    loadings, divided by the singular values, with no centring or scaling.
+    The reference `"lsi"` embedding is z-scored, the projection is not; L2
+    normalise both per cell before comparing them, as Seurat does. Components
+    the reference dropped are dropped here too.
+
+    Written to `query.atac_cache.embeddings` as `"lsi_projected"`.
+
+    Args:
+        reference: The experiment after `calculate_lsi`.
+        query: The experiment to project, after `run_tfidf`, counted over the
+            reference features (`add_atac_fragments(query, ...,
+            peaks=reference.var(modality="atac"))`).
+
+    Returns:
+        Kept query cells x components.
+
+    Raises:
+        ValueError: Without a reference LSI or a query TF-IDF, or if a
+            reference LSI feature is not in the query.
+    """
+    ref = require_atac(reference)
+    if ref.lsi_loadings is None or ref.lsi_features is None:
+        raise ValueError("Run calculate_lsi() on the reference first.")
+    if ref.lsi_singular_values is None:
+        raise ValueError("Run calculate_lsi() on the reference first.")
+    if not require_atac(query).tf_idf:
+        raise ValueError("Run run_tfidf() on the query first.")
+
+    def regions(v: pl.DataFrame) -> list[tuple[str, int, int]]:
+        return list(zip(v["chrom"], v["start"], v["end"], strict=True))
+
+    ref_regions = regions(reference.var(modality="atac"))
+    lookup = {r: i for i, r in enumerate(regions(query.var(modality="atac")))}
+    wanted = [ref_regions[i] for i in ref.lsi_features]
+    missing = [r for r in wanted if r not in lookup]
+    if missing:
+        c, s, e = missing[0]
+        raise ValueError(
+            f"{len(missing)} reference LSI features are not in the query, e.g. "
+            f"{c}:{s}-{e}. Count the query over the reference features."
+        )
+    cells, genes = atac_paths(query)
+    emb = _bixverse.atac_project_lsi(
+        cells,
+        genes,
+        np.asarray(query.cells_to_keep, dtype=np.uint32),
+        np.asarray([lookup[r] for r in wanted], dtype=np.uint32),
+        np.ascontiguousarray(ref.lsi_loadings, dtype=np.float32),
+        np.ascontiguousarray(ref.lsi_singular_values, dtype=np.float32),
+    )
+    keep = [j for j in range(emb.shape[1]) if j not in ref.lsi_dropped]
+    emb = np.ascontiguousarray(emb[:, keep])
+    query.atac_cache.embeddings["lsi_projected"] = emb
+    query.stamp("lsi_projected", modality="atac")
+    return emb
+
+
+@beartype
+def run_rlsi(
+    mm: SingleCellsMultiModal,
+    batch_column: str,
+    *,
+    embedding: str = "lsi",
+    features: np.ndarray | Sequence[int] | None = None,
+    dims: Sequence[int] = tuple(range(1, 30)),
+    n_comp: int = 30,
+    k_anchor: int = 5,
+    k_score: int = 30,
+    k_weight: int = 100,
+    sd: float = 1.0,
+    l2_norm: bool = True,
+    solver: Literal["auto", "exact", "randomised", "covariance"] = "auto",
+    knn_params: KnnParams | None = None,
+    seed: int = 42,
+    verbose: Verbose = 0,
+) -> np.ndarray:
+    """rLSI integration (Signac's `FindIntegrationAnchors(reduction = "rlsi")`
+    plus `IntegrateEmbeddings`).
+
+    Per batch: IDF over its own cells, TF-IDF and LSI of `features`; anchors
+    between every batch pair in the reciprocal LSI spaces; then `embedding`
+    is corrected along the anchor tree. Written to `mm.atac_cache.embeddings`
+    as `"rlsi"`.
+
+    Signac integrates all LSI components and leaves component 1 out
+    afterwards: `calculate_lsi(mm, drop_first=False)`, `run_rlsi(mm, ...)`,
+    then `"rlsi"[:, 1:]`. With the default `drop_first=True` the depth
+    component is left out of the integration too, which changes the
+    correction weights.
+
+    Args:
+        mm: The experiment, after `calculate_lsi`.
+        batch_column: obs column with the batch of each cell.
+        embedding: The ATAC embedding to integrate.
+        features: 0-based `var_atac` rows of the per-batch LSIs. `None` uses
+            those of `calculate_lsi`.
+        dims: 0-based per-batch LSI components the anchors use; the default
+            is Signac's `dims = 2:30`.
+        n_comp: Components of the per-batch LSIs; must exceed `max(dims)`.
+        k_anchor: Neighbours for the anchors.
+        k_score: Neighbours for the anchor scores.
+        k_weight: Anchors per cell in the correction weights.
+        sd: Bandwidth divisor of the weights.
+        l2_norm: Scale and L2 normalise the anchor spaces.
+        solver: SVD solver of the per-batch LSIs.
+        knn_params: kNN backend. `None` uses the defaults.
+        seed: Seed of the solvers and the kNN backend.
+        verbose: `0` silent, `1` normal, `2` detailed.
+
+    Returns:
+        The integrated embedding, kept cells x its dimensions.
+
+    Raises:
+        ValueError: Without the embedding, or with fewer than two batches.
+    """
+    info = require_atac(mm)
+    emb = mm.atac_cache.embeddings.get(embedding)
+    if emb is None:
+        raise ValueError(f"No '{embedding}' ATAC embedding. Run calculate_lsi() first.")
+    if features is None:
+        if info.lsi_features is None:
+            raise ValueError("Run calculate_lsi() first or pass features.")
+        feats = info.lsi_features
+    else:
+        feats = np.asarray(features)
+    codes, _ = _factor_codes(
+        _obs_aligned(mm, [batch_column])[batch_column], batch_column
+    )
+    cells, genes = atac_paths(mm)
+    out = _bixverse.atac_rlsi(
+        cells,
+        genes,
+        np.asarray(mm.cells_to_keep, dtype=np.uint32),
+        np.asarray(feats, dtype=np.uint32),
+        codes,
+        np.ascontiguousarray(emb, dtype=np.float32),
+        np.asarray(dims, dtype=np.uint32),
+        n_comp,
+        solver,
+        k_anchor,
+        k_score,
+        k_weight,
+        sd,
+        l2_norm,
+        to_rust(knn_params or KnnParams()),
+        seed,
+        verbose,
+    )
+    mm.atac_cache.embeddings["rlsi"] = out
+    mm.stamp("rlsi", parents=[embedding], modality="atac")
+    return out
 
 
 @beartype

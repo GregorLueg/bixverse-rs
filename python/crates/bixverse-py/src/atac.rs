@@ -12,17 +12,19 @@ use bixverse_atac::annotation::{
 use bixverse_atac::counting::{count_fragments, parse_count_mode, write_counts_store};
 use bixverse_atac::errors::AtacErrors;
 use bixverse_atac::features::feature_total_stats;
-use bixverse_atac::lsi::{LsiParams, lsi_on_store, set_tf_idf_on_store};
+use bixverse_atac::lsi::{LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store};
 use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
 use bixverse_atac::regions::{genome_tiles, read_bed, reduce_regions, region};
+use bixverse_atac::rlsi::{RlsiParams, rlsi_on_store};
 use bixverse_atac::tenx_peaks::tenx_peaks_to_store;
+use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::parse_pca_solver;
 use bixverse_sc_data::data_io::ParallelSparseReader;
 use bixverse_sc_data::gene_file_io::GENE_FILE_BYTES_PER_NNZ;
 use bixverse_sc_data::interval_index::FeatureInterval;
 use bixverse_sc_data::v5_io::parse_feature_kind;
-use numpy::{IntoPyArray, PyReadonlyArray1};
-use py_common::convert::{f64_array, index_vec, mat_array, u32_array};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
+use py_common::convert::{f64_array, from_py, index_vec, mat_array, mat_view, u32_array};
 use py_common::error::BvErr;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -643,4 +645,124 @@ pub fn atac_lsi<'py>(
     out.set_item("singular_values", f64_array(py, &res.singular_values))?;
     out.set_item("depth_cor", f64_array(py, &res.depth_cor))?;
     Ok(out)
+}
+
+/// Project cells of a TF-IDF store onto a fitted LSI (Seurat
+/// `ProjectSVD(mode = "lsi")`, no centring or scaling).
+///
+/// ### Params
+///
+/// * `f_path_cells` - Cell-based file of the query store
+/// * `f_path_genes` - Gene-based file of the query store (TF-IDF norm)
+/// * `cells` - Query cells, output row order
+/// * `features` - Query features, in the row order of `loadings`
+/// * `loadings` - `(features, n_comp)` loadings of the fit
+/// * `singular_values` - Singular values of the fit
+///
+/// ### Returns
+///
+/// `(cells, n_comp)` `float32`.
+#[pyfunction]
+pub fn atac_project_lsi<'py>(
+    py: Python<'py>,
+    f_path_cells: PathBuf,
+    f_path_genes: PathBuf,
+    cells: PyReadonlyArray1<'py, u32>,
+    features: PyReadonlyArray1<'py, u32>,
+    loadings: PyReadonlyArray2<'py, f32>,
+    singular_values: PyReadonlyArray1<'py, f32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let cells = index_vec(&cells)?;
+    let features = index_vec(&features)?;
+    let loadings = mat_view(&loadings)?;
+    let sv = singular_values.as_slice()?;
+    let (cf, gf) = (path_str(&f_path_cells)?, path_str(&f_path_genes)?);
+    let res = py
+        .detach(|| {
+            let tf_idf = read_tf_idf(cf, gf, &cells, &features, None)?;
+            project_lsi(&tf_idf, loadings, sv)
+        })
+        .map_err(atac_err)?;
+    mat_array(py, &res)
+}
+
+/// rLSI integration of an embedding over a peak or tile store.
+///
+/// ### Params
+///
+/// * `f_path_cells` - Cell-based file of the store
+/// * `f_path_genes` - Gene-based file of the store
+/// * `cells` - Cells, rows of `embedding`
+/// * `features` - Features of the per-batch LSIs
+/// * `batch` - 0-based batch per cell
+/// * `embedding` - `(cells, d)` embedding to integrate
+/// * `dims` - 0-based LSI components the anchors use
+/// * `n_comp` - Components of the per-batch LSIs
+/// * `solver` - SVD solver
+/// * `k_anchor` - Neighbours for the anchors
+/// * `k_score` - Neighbours for the anchor scores
+/// * `k_weight` - Anchors per cell in the correction weights
+/// * `sd` - Bandwidth divisor of the weights
+/// * `l2_norm` - Scale and L2 normalise the anchor spaces
+/// * `knn_params` - `to_rust(KnnParams)`
+/// * `seed` - Seed
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The integrated `(cells, d)` `float32` embedding.
+#[pyfunction]
+#[pyo3(signature = (
+    f_path_cells, f_path_genes, cells, features, batch, embedding, dims, n_comp, solver,
+    k_anchor, k_score, k_weight, sd, l2_norm, knn_params, seed = 42, verbose = 0
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn atac_rlsi<'py>(
+    py: Python<'py>,
+    f_path_cells: PathBuf,
+    f_path_genes: PathBuf,
+    cells: PyReadonlyArray1<'py, u32>,
+    features: PyReadonlyArray1<'py, u32>,
+    batch: PyReadonlyArray1<'py, u32>,
+    embedding: PyReadonlyArray2<'py, f32>,
+    dims: PyReadonlyArray1<'py, u32>,
+    n_comp: usize,
+    solver: &str,
+    k_anchor: usize,
+    k_score: usize,
+    k_weight: usize,
+    sd: f32,
+    l2_norm: bool,
+    knn_params: &Bound<'py, PyAny>,
+    seed: usize,
+    verbose: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let solver = parse_pca_solver(solver).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "solver must be 'auto', 'exact', 'randomised' or 'covariance', got '{solver}'"
+        ))
+    })?;
+    let params = RlsiParams {
+        dims: index_vec(&dims)?,
+        k_anchor,
+        k_score,
+        k_weight,
+        sd,
+        l2_norm,
+        lsi: LsiParams::new(n_comp, solver, true, None),
+        knn_params: from_py::<KnnParams>(knn_params, "knn params")?,
+    };
+    let cells = index_vec(&cells)?;
+    let features = index_vec(&features)?;
+    let batch = index_vec(&batch)?;
+    let embedding = mat_view(&embedding)?.to_owned();
+    let (cf, gf) = (path_str(&f_path_cells)?, path_str(&f_path_genes)?);
+    let res = py
+        .detach(|| {
+            rlsi_on_store(
+                cf, gf, &cells, &features, &batch, &embedding, &params, seed, verbose,
+            )
+        })
+        .map_err(atac_err)?;
+    mat_array(py, &res)
 }

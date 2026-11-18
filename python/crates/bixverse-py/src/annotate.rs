@@ -15,6 +15,9 @@ use bixverse_sc::sc_annotation::sc_type::{
     CellTypeMarkers, ScTypeCellParams, ScTypeHybridRes, SctypeRes, assign_cells, assign_clusters,
     assign_hybrid, run_sctype,
 };
+use bixverse_sc::sc_annotation::seurat_transfer::{
+    TransferAnchorParams, TransferDataParams, find_transfer_anchors, transfer_labels,
+};
 use bixverse_sc::sc_annotation::symphony::{
     HarmonyBackend, SymphonyMapParams, build_symphony_reference_on_store,
     generate_knn_cross_with_dist, knn_majority_vote, symphony_map_query_parts,
@@ -618,4 +621,124 @@ pub fn transfer_labels_symphony<'py>(
         .map_err(BvErr::from)?;
     let pred: Vec<u32> = pred.into_iter().map(|x| x as u32).collect();
     Ok((pred.into_pyarray(py).into_any(), f64_array(py, &conf)))
+}
+
+/// Seurat label transfer: CCA transfer anchors, then `TransferData`
+///
+/// ### Params
+///
+/// * `ref_genes` - Gene-based file of the reference
+/// * `ref_cells` - Reference cells
+/// * `ref_features` - Reference features
+/// * `query_genes` - Gene-based file of the query
+/// * `query_cells` - Query cells, rows of `weight_embedding`
+/// * `query_features` - Query features, matching `ref_features` in order
+/// * `ref_labels` - 0-based label code per reference cell
+/// * `n_labels` - Number of codes
+/// * `weight_embedding` - `(query cells, d)` `float32` embedding of the weights
+/// * `n_cc` - Canonical correlation vectors
+/// * `k_anchor` - Neighbours for the anchors
+/// * `k_score` - Neighbours for the anchor scores
+/// * `scale_max` - Clip of the scaled features
+/// * `l2_norm` - L2 normalise the CCA space
+/// * `k_weight` - Anchors per query cell in the weights
+/// * `sd` - Bandwidth divisor of the weights
+/// * `knn_params` - `to_rust(KnnParams)`
+/// * `seed` - Seed
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// Dict of `scores` (`(query cells, n_labels)` `float32`) and `n_anchors`.
+#[pyfunction]
+#[pyo3(signature = (
+    ref_genes, ref_cells, ref_features, query_genes, query_cells, query_features,
+    ref_labels, n_labels, weight_embedding, n_cc, k_anchor, k_score, scale_max, l2_norm,
+    k_weight, sd, knn_params, seed = 42, verbose = 0
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_labels_seurat<'py>(
+    py: Python<'py>,
+    ref_genes: &str,
+    ref_cells: PyReadonlyArray1<'py, u32>,
+    ref_features: PyReadonlyArray1<'py, u32>,
+    query_genes: &str,
+    query_cells: PyReadonlyArray1<'py, u32>,
+    query_features: PyReadonlyArray1<'py, u32>,
+    ref_labels: PyReadonlyArray1<'py, u32>,
+    n_labels: usize,
+    weight_embedding: PyReadonlyArray2<'py, f32>,
+    n_cc: usize,
+    k_anchor: usize,
+    k_score: usize,
+    scale_max: f32,
+    l2_norm: bool,
+    k_weight: usize,
+    sd: f32,
+    knn_params: &Bound<'py, PyAny>,
+    seed: usize,
+    verbose: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let knn_params: KnnParams = from_py(knn_params, "knn params")?;
+    let ref_cells = index_vec(&ref_cells)?;
+    let query_cells = index_vec(&query_cells)?;
+    let ref_features = index_vec(&ref_features)?;
+    let query_features = index_vec(&query_features)?;
+    let labels = index_vec(&ref_labels)?;
+    if labels.len() != ref_cells.len() {
+        return Err(PyValueError::new_err(
+            "ref_labels needs one code per reference cell.",
+        ));
+    }
+    let weight_embedding = mat_view(&weight_embedding)?;
+    if weight_embedding.nrows() != query_cells.len() {
+        return Err(PyValueError::new_err(format!(
+            "weight_embedding has {} rows for {} query cells.",
+            weight_embedding.nrows(),
+            query_cells.len()
+        )));
+    }
+    let anchor_params = TransferAnchorParams {
+        n_cc,
+        k_anchor,
+        k_score,
+        scale_max,
+        l2_norm,
+        knn_params: knn_params.clone(),
+    };
+    let data_params = TransferDataParams {
+        k_weight,
+        sd,
+        knn_params,
+    };
+    let ref_reader = ParallelSparseReader::new(ref_genes).map_err(BvErr::from)?;
+    let query_reader = ParallelSparseReader::new(query_genes).map_err(BvErr::from)?;
+    let (scores, n_anchors) = py
+        .detach(|| {
+            let anchors = find_transfer_anchors(
+                &ref_reader,
+                &ref_cells,
+                &ref_features,
+                &query_reader,
+                &query_cells,
+                &query_features,
+                &anchor_params,
+                seed,
+                verbose,
+            )?;
+            let scores = transfer_labels(
+                &anchors,
+                &labels,
+                n_labels,
+                weight_embedding,
+                &data_params,
+                seed,
+            )?;
+            Ok::<_, bixverse_sc::prelude::ScErrors>((scores, anchors.pairs.len()))
+        })
+        .map_err(BvErr::from)?;
+    let out = PyDict::new(py);
+    out.set_item("scores", mat_array(py, &scores)?)?;
+    out.set_item("n_anchors", n_anchors)?;
+    Ok(out)
 }

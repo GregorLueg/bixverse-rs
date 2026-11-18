@@ -154,12 +154,19 @@ class AtacInfo:
         depth_cor: Correlation of each LSI component with the library size,
             all components including any dropped one.
         lsi_dropped: 0-based LSI components left out of the `"lsi"` embedding.
+        lsi_features: 0-based `var_atac` rows the LSI was fitted on.
+        lsi_loadings: Features x components loadings of the LSI, all
+            components, for projecting other cells onto it.
+        lsi_singular_values: Singular values of the LSI.
     """
 
     kind: Literal["peak", "tile"]
     tf_idf: bool = False
     depth_cor: np.ndarray | None = None
     lsi_dropped: tuple[int, ...] = ()
+    lsi_features: np.ndarray | None = None
+    lsi_loadings: np.ndarray | None = None
+    lsi_singular_values: np.ndarray | None = None
 
     def __repr__(self) -> str:
         return compact_repr(
@@ -626,8 +633,10 @@ def mm_payload(mm: SingleCellsMultiModal) -> tuple[dict[str, np.ndarray], dict]:
     }
     if mm.atac is not None:
         a = mm.atac
-        if a.depth_cor is not None:
-            arrays["atac/depth_cor"] = a.depth_cor
+        for k in ("depth_cor", "lsi_features", "lsi_loadings", "lsi_singular_values"):
+            v = getattr(a, k)
+            if v is not None:
+                arrays[f"atac/{k}"] = v
         meta["atac"] = {
             "kind": a.kind,
             "tf_idf": a.tf_idf,
@@ -682,6 +691,9 @@ def mm_from_payload(
             tf_idf=a["tf_idf"],
             depth_cor=arrays.get("atac/depth_cor"),
             lsi_dropped=tuple(a["lsi_dropped"]),
+            lsi_features=arrays.get("atac/lsi_features"),
+            lsi_loadings=arrays.get("atac/lsi_loadings"),
+            lsi_singular_values=arrays.get("atac/lsi_singular_values"),
         )
     if meta["adt"] is not None:
         dsb = meta["adt"]["dsb"]

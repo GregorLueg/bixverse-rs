@@ -1222,6 +1222,54 @@ def atac_reduce_regions(
 ) -> dict[str, Any]: ...
 def atac_gtf_genes(path: Path) -> dict[str, Any]: ...
 def atac_tss_positions(path: Path, biotypes: list[str]) -> dict[str, Any]: ...
+def atac_project_lsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    loadings: np.ndarray,
+    singular_values: np.ndarray,
+) -> np.ndarray: ...
+def atac_rlsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    batch: np.ndarray,
+    embedding: np.ndarray,
+    dims: np.ndarray,
+    n_comp: int,
+    solver: str,
+    k_anchor: int,
+    k_score: int,
+    k_weight: int,
+    sd: float,
+    l2_norm: bool,
+    knn_params: dict[str, Any],
+    seed: int = ...,
+    verbose: int = ...,
+) -> np.ndarray: ...
+def transfer_labels_seurat(
+    ref_genes: str,
+    ref_cells: np.ndarray,
+    ref_features: np.ndarray,
+    query_genes: str,
+    query_cells: np.ndarray,
+    query_features: np.ndarray,
+    ref_labels: np.ndarray,
+    n_labels: int,
+    weight_embedding: np.ndarray,
+    n_cc: int,
+    k_anchor: int,
+    k_score: int,
+    scale_max: float,
+    l2_norm: bool,
+    k_weight: int,
+    sd: float,
+    knn_params: dict[str, Any],
+    seed: int = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...
 def atac_gene_activity_regions(
     path: Path, upstream: int, downstream: int, max_width: int, biotypes: list[str]
 ) -> dict[str, Any]: ...

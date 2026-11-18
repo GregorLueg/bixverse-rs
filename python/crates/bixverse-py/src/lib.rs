@@ -144,6 +144,7 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(annotate::build_symphony_ref, m)?,
         wrap_pyfunction!(annotate::symphony_map_query, m)?,
         wrap_pyfunction!(annotate::transfer_labels_symphony, m)?,
+        wrap_pyfunction!(annotate::transfer_labels_seurat, m)?,
         wrap_pyfunction!(metacells::bootstrapped_metacells, m)?,
         wrap_pyfunction!(metacells::seacells, m)?,
         wrap_pyfunction!(metacells::supercells, m)?,
@@ -217,6 +218,8 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(atac::atac_set_tf_idf, m)?,
         wrap_pyfunction!(atac::atac_feature_totals, m)?,
         wrap_pyfunction!(atac::atac_lsi, m)?,
+        wrap_pyfunction!(atac::atac_project_lsi, m)?,
+        wrap_pyfunction!(atac::atac_rlsi, m)?,
     ] {
         m.add_function(f)?;
     }
