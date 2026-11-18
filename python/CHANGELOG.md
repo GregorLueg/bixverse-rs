@@ -3,6 +3,24 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.3.3
+
+Builds against `bixverse-rs` workspace at 0.10.3.
+
+**Features**
+
+- Agent skill: `bixverse/_skill/` teaches coding agents the package API. It
+  ships in the wheel. `bixverse skill install [--agent codex] [--project]`
+  (or `bv.install_agent_skill()`) installs it; `bixverse skill status` lists
+  installs.
+- Installs are version-stamped; `import bixverse` warns when one is outdated.
+  A test fails when the generated API index is stale.
+- `bixverse-gpu`: an experimental MLX backend (mlx-c) on Apple Silicon. PCA,
+  the kNN, fast clustering, Harmony and SEACells take `backend="mlx"`. Source
+  build only (`--features mlx`, see the README); published wheels are
+  unchanged. `bixverse_gpu.mlx_available()` probes it. Results on the default
+  `backend="wgpu"` are unchanged.
+
 ## 0.3.2
 
 Builds against `bixverse-rs` workspace at 0.10.3.

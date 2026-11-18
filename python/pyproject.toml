@@ -23,6 +23,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
+[project.scripts]
+bixverse = "bixverse._cli:main"
+
 [project.urls]
 Repository = "https://github.com/GregorLueg/bixverse-rs"
 Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"
@@ -84,7 +87,7 @@ manifest-path = "crates/bixverse-py/Cargo.toml"
 module-name = "bixverse._bixverse"
 python-source = "."
 strip = true
-include = ["bixverse/py.typed", "bixverse/*.pyi"]
+include = ["bixverse/py.typed", "bixverse/*.pyi", "bixverse/_skill/**/*.md"]
 # A local build otherwise packs whatever bytecode the dev venv left behind.
 exclude = ["**/__pycache__/**"]
 

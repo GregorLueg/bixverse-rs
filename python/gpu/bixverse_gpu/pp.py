@@ -17,7 +17,7 @@ from bixverse._core.pp import _set_pca
 from bixverse._core.single_cells import SingleCells
 from bixverse._validate import Verbose
 from bixverse.params import PcaParams, to_rust
-from bixverse_gpu import _bixverse_gpu
+from bixverse_gpu._backend import Backend, pick
 
 __all__ = [
     "calculate_pca",
@@ -35,6 +35,7 @@ def calculate_pca(
     hvg: np.ndarray | Sequence[int] | Sequence[str] | None = None,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> None:
     """Sparse PCA over the kept cells and the HVGs on the GPU.
 
@@ -52,9 +53,12 @@ def calculate_pca(
         seed: Seed for the sketch or the Lanczos starting block.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
     """
     params = pca_params or PcaParams()
     if sc.map.hvg is None and hvg is None:
@@ -72,11 +76,12 @@ def calculate_pca(
     assert selected is not None
     if verbose:
         logger.info(
-            "Using GPU-accelerated sparse SVD (%s) with %i HVG.",
+            "Using GPU-accelerated sparse SVD (%s, %s) with %i HVG.",
             "randomised" if params.svd_solver == "randomised" else "block Lanczos",
+            backend,
             selected.size,
         )
-    scores, loadings, sv = _bixverse_gpu.pca(
+    scores, loadings, sv = pick("pca", backend)(
         str(sc.genes_path),
         str(sc.cells_path),
         sc.cells_to_keep,

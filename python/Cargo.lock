@@ -532,11 +532,13 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu-py"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
+ "ann-search-rs",
  "bixverse-core",
  "bixverse-gpu",
  "bixverse-methods",
+ "bixverse-mlx",
  "bixverse-sc",
  "bixverse-sc-data",
  "bixverse-sc-gpu",
@@ -573,8 +575,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bixverse-mlx"
+version = "0.10.3"
+dependencies = [
+ "ann-search-rs",
+ "approx 0.5.1",
+ "bixverse-core",
+ "bixverse-methods",
+ "bixverse-sc",
+ "bixverse-sc-data",
+ "faer",
+ "rand 0.9.5",
+ "rand_distr 0.5.1",
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bixverse-py"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bixverse-core",
  "bixverse-methods",
@@ -4568,7 +4587,7 @@ checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
 name = "py-common"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bixverse-methods",
  "bixverse-sc",

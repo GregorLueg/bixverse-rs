@@ -484,11 +484,7 @@ mod tests {
         );
         assert_eq!(parse_knn_method_gpu("IVF_GPU"), Some(KnnSearchGpu::IvfGpu));
         assert_eq!(parse_knn_method_gpu("cagra"), Some(KnnSearchGpu::CagraGpu));
-        assert_eq!(
-            parse_knn_method_gpu("CAGRA_MLX"),
-            Some(KnnSearchGpu::CagraGpu)
-        );
-        for name in ["nndescent", "nndescent_gpu", "NNDescent_MLX"] {
+        for name in ["nndescent", "nndescent_gpu", "NNDescent_GPU"] {
             assert_eq!(
                 parse_knn_method_gpu(name),
                 Some(KnnSearchGpu::NNDescentGraphGpu),
@@ -500,6 +496,8 @@ mod tests {
         assert_eq!(parse_knn_method_gpu("nndescent_graph_gpu"), None);
         assert_eq!(parse_knn_method_gpu("kmknn"), None);
         assert_eq!(parse_knn_method_gpu("annoy"), None);
+        assert_eq!(parse_knn_method_gpu("cagra_mlx"), None);
+        assert_eq!(parse_knn_method_gpu("nndescent_mlx"), None);
     }
 
     /// CAGRA and the graph-only NN-Descent build at the low `k` they are

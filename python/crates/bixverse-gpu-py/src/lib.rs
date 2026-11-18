@@ -2,8 +2,10 @@
 //!
 //! The GPU twins of the CPU functions in `bixverse._bixverse`, on wgpu via
 //! cubecl. Where a twin keeps its CPU signature, the Python layer runs the
-//! CPU code path with this module swapped in. The two extensions share no
-//! Rust objects: stores are read from their paths and arrays cross as NumPy.
+//! CPU code path with this module swapped in. With the `mlx` feature, the
+//! `*_mlx` twins run the same calls on MLX (Apple Silicon, via mlx-c). The
+//! two extensions share no Rust objects: stores are read from their paths and
+//! arrays cross as NumPy.
 
 use pyo3::prelude::*;
 
@@ -14,6 +16,7 @@ mod error;
 mod graph;
 mod integrate;
 mod metacells;
+mod mlx;
 mod nmf;
 mod pathways;
 mod pp;
@@ -55,6 +58,17 @@ fn _bixverse_gpu(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(pathways::scenic_grn, m)?,
         wrap_pyfunction!(pathways::mc_scenic_grn, m)?,
         wrap_pyfunction!(de::nebula, m)?,
+        wrap_pyfunction!(mlx::mlx_available, m)?,
+    ] {
+        m.add_function(f)?;
+    }
+    #[cfg(feature = "mlx")]
+    for f in [
+        wrap_pyfunction!(mlx::twins::pca_mlx, m)?,
+        wrap_pyfunction!(mlx::twins::knn_with_dist_mlx, m)?,
+        wrap_pyfunction!(mlx::twins::fast_cluster_mlx, m)?,
+        wrap_pyfunction!(mlx::twins::harmony_v2_mlx, m)?,
+        wrap_pyfunction!(mlx::twins::seacells_mlx, m)?,
     ] {
         m.add_function(f)?;
     }

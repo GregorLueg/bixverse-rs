@@ -55,7 +55,6 @@ cubecl-utils-rs = "0.2.0"
 cubek = { version = "0.3.0", features = ["matmul"] }
 document-features = "0.2.12"
 edge-rs = "0.3.3"
-either = "1.15.0"
 extendr-api = "0.9.0"
 extendr-engine = "0.9.0"
 # Pure-Rust zlib backend: no C toolchain on any target.

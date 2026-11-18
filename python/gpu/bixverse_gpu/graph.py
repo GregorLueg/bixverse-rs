@@ -40,6 +40,7 @@ from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse._validate import Verbose
 from bixverse.params import KnnGraphDefaults, to_rust
 from bixverse_gpu import _bixverse_gpu
+from bixverse_gpu._backend import Backend, pick
 from bixverse_gpu.params import FastClusterGpuParams, KnnGpuDefaults
 
 __all__ = [
@@ -59,10 +60,14 @@ logger = logging.getLogger(__name__)
 
 @beartype
 def _knn(
-    embd: np.ndarray, params: KnnGpuDefaults, seed: int, verbose: Verbose
+    embd: np.ndarray,
+    params: KnnGpuDefaults,
+    seed: int,
+    verbose: Verbose,
+    backend: Backend,
 ) -> KnnGraph:
     """`knn_with_dist` on the GPU over an embedding."""
-    indices, distances = _bixverse_gpu.knn_with_dist(
+    indices, distances = pick("knn_with_dist", backend)(
         embd, to_rust(params), seed, verbose
     )
     return KnnGraph(indices=indices, distances=distances, dist_metric=params.ann_dist)
@@ -83,6 +88,7 @@ def generate_knn(
     knn_params: KnnGpuDefaults | None = None,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> KnnGraph | None:
     """A GPU kNN over an embedding, without touching the experiment.
 
@@ -101,13 +107,16 @@ def generate_knn(
         seed: Seed for the index build.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Returns:
         The kNN, indices into the rows used; `None` (with a warning) if the
         embedding is absent.
 
     Raises:
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
     """
     params = knn_params or KnnGpuDefaults(knn_method="nndescent")
     embd = _embedding(sc, embd_to_use)
@@ -118,7 +127,7 @@ def generate_knn(
         return None
     if cells_to_use is not None:
         embd = embd[np.isin(sc.cell_ids(filtered=True), list(cells_to_use))]
-    return _knn(_first_dims(embd, no_embd_to_use), params, seed, verbose)
+    return _knn(_first_dims(embd, no_embd_to_use), params, seed, verbose, backend)
 
 
 @beartype
@@ -132,6 +141,7 @@ def find_neighbours(
     graph_params: KnnGraphDefaults | None = None,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> None:
     """The GPU kNN and its neighbour graph over an embedding.
 
@@ -151,10 +161,13 @@ def find_neighbours(
         seed: Seed for the index build.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
         ValueError: If the embedding is stale.
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
     """
     params = knn_params or KnnGpuDefaults(knn_method="nndescent")
     graph = graph_params or KnnGraphDefaults()
@@ -169,8 +182,10 @@ def find_neighbours(
     require_fresh(sc, [embd_to_use], modality)
 
     if verbose:
-        logger.info("Generating GPU kNN data with %s method.", params.knn_method)
-    knn = _knn(_first_dims(embd, no_embd_to_use), params, seed, verbose)
+        logger.info(
+            "Generating GPU kNN data with %s method (%s).", params.knn_method, backend
+        )
+    knn = _knn(_first_dims(embd, no_embd_to_use), params, seed, verbose, backend)
     cache.knn = knn
     stamp(sc, "knn", parents=(embd_to_use,), modality=modality)
 
@@ -264,13 +279,15 @@ def fast_cluster(
     return_kmeans: bool = False,
     seed: int = 42,
     verbose: Verbose = True,
+    backend: Backend = "wgpu",
 ) -> FastClusters:
     """k-means coarsening on the GPU, a centroid graph and Louvain / Leiden
     on it.
 
     Returns what `bixverse.graph.fast_cluster` returns. Only the k-means (and
     the cell-mediated top-m search) run on the GPU; it is full-batch Lloyd's,
-    so there are no mini-batch knobs.
+    so there are no mini-batch knobs. MLX runs every iteration and holds the
+    data at f32, so it ignores `fixed` and `quantise`.
 
     Args:
         sc: The experiment.
@@ -284,11 +301,14 @@ def fast_cluster(
         seed: Seed.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
+        backend: `"wgpu"` (any GPU), or `"mlx"` (Apple Silicon, needs a
+            source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
         ValueError: If the embedding is absent, or on an empty resolution
             list or `n_seeds < 1`.
-        BixverseError: Without a GPU adapter.
+        BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
+            build without the MLX twins.
 
     References:
         Wei, et al., PLoS Comput Biol, 2022.
@@ -303,5 +323,5 @@ def fast_cluster(
         return_kmeans=return_kmeans,
         seed=seed,
         verbose=verbose,
-        run=_bixverse_gpu.fast_cluster,
+        run=pick("fast_cluster", backend),
     )
