@@ -525,6 +525,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "rustc-hash 2.1.3",
+ "statrs",
  "thiserror 2.0.21",
 ]
 
