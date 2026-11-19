@@ -164,7 +164,7 @@ impl<'a> Cursor<'a> {
 }
 
 /// Little-endian `u32`s from a byte slice of exact length.
-fn le_u32(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+fn le_u32s(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
         .as_chunks::<4>()
         .0
@@ -173,7 +173,7 @@ fn le_u32(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
 }
 
 /// Little-endian `u64`s from a byte slice of exact length.
-fn le_u64(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
+fn le_u64s(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
     bytes
         .as_chunks::<8>()
         .0
@@ -316,11 +316,11 @@ fn decode_block(
     let mut cur = Cursor { buf, pos: 0 };
     let n = u32::from_le_bytes(cur.take(4)?.try_into().expect("4 bytes")) as usize;
 
-    let nnz: Vec<usize> = le_u32(&cur.take_shuffled(n, 4)?)
+    let nnz: Vec<usize> = le_u32s(&cur.take_shuffled(n, 4)?)
         .map(|v| v as usize)
         .collect();
-    let lib: Vec<u64> = le_u64(&cur.take_shuffled(n, 8)?).collect();
-    let orig_delta: Vec<u64> = le_u64(&cur.take_shuffled(n, 8)?).collect();
+    let lib: Vec<u64> = le_u64s(&cur.take_shuffled(n, 8)?).collect();
+    let orig_delta: Vec<u64> = le_u64s(&cur.take_shuffled(n, 8)?).collect();
     let elem = cur.take(n)?;
     let keep = cur.take(n)?;
     let norm_flag = cur.take(n)?;
@@ -333,8 +333,8 @@ fn decode_block(
         .map(|(&k, _)| k)
         .sum();
 
-    let idx: Vec<u32> = le_u32(&cur.take_shuffled(total_nnz, 4)?).collect();
-    let raw: Vec<u32> = le_u32(&cur.take_shuffled(total_nnz, 4)?).collect();
+    let idx: Vec<u32> = le_u32s(&cur.take_shuffled(total_nnz, 4)?).collect();
+    let raw: Vec<u32> = le_u32s(&cur.take_shuffled(total_nnz, 4)?).collect();
     let stored: Vec<f32> = if norm_f16 {
         cur.take_shuffled(n_norm, 2)?
             .as_chunks::<2>()
@@ -566,7 +566,7 @@ pub fn restore_archive(
     if &head[0..8] != ARCHIVE_MAGIC {
         return Err(ScDataErrors::ArchiveMagicMismatch);
     }
-    let version = u32::from_le_bytes(head[8..12].try_into().expect("4 bytes"));
+    let version = le_u32(&head, 8);
     if version != ARCHIVE_VERSION && version != ARCHIVE_VERSION_F16_NORM {
         return Err(ScDataErrors::ArchiveVersionMismatch {
             expected: ARCHIVE_VERSION,
@@ -574,9 +574,9 @@ pub fn restore_archive(
         });
     }
     let target_size = f32::from_le_bytes(head[12..16].try_into().expect("4 bytes"));
-    let total_cells = u64::from_le_bytes(head[16..24].try_into().expect("8 bytes")) as usize;
-    let total_genes = u64::from_le_bytes(head[24..32].try_into().expect("8 bytes")) as usize;
-    let n_chunks = u64::from_le_bytes(head[32..40].try_into().expect("8 bytes")) as usize;
+    let total_cells = le_u64(&head, 16) as usize;
+    let total_genes = le_u64(&head, 24) as usize;
+    let n_chunks = le_u64(&head, 32) as usize;
 
     let mut writer =
         CellGeneSparseWriter::new(cell_path, true, total_cells, total_genes, target_size)?;

@@ -393,16 +393,11 @@ impl V4Header {
                 found: chunk.len(),
             });
         }
-        let u32_at = |at: usize| {
-            u32::from_le_bytes(chunk[at..at + 4].try_into().expect("4-byte slice")) as usize
-        };
-        let u64_at =
-            |at: usize| u64::from_le_bytes(chunk[at..at + 8].try_into().expect("8-byte slice"));
         Ok(Self {
-            nnz: u32_at(0),
-            body_len: u32_at(4),
-            aux: u64_at(8),
-            original_index: u64_at(16) as usize,
+            nnz: le_u32(chunk, 0) as usize,
+            body_len: le_u32(chunk, 4) as usize,
+            aux: le_u64(chunk, 8),
+            original_index: le_u64(chunk, 16) as usize,
             to_keep: chunk[24] != 0,
             flags: chunk[25],
             codec: ChunkCodec::from_u8(chunk[26])?,
@@ -1872,7 +1867,7 @@ pub(crate) mod tests {
         // the first directory entry is the offsets: make it an unknown kind
         let dir = |p: &str| {
             let b = std::fs::read(p).unwrap();
-            crate::store::v5::le_u64(&b, 48)
+            le_u64(&b, 48)
         };
         small_v5(s.path(0));
         patch_bytes(s.path(0), dir(s.path(0)), &99u32.to_le_bytes());

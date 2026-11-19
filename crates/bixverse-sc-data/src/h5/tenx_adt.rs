@@ -5,6 +5,7 @@
 use hdf5::File;
 use std::path::Path;
 
+use crate::h5::H5_SCAN_CHUNK;
 use crate::h5::chunked::H5ChunkedReader;
 use crate::h5::filters::check_tenx_filters;
 use crate::h5::tenx::*;
@@ -99,9 +100,8 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
     let data_rd = H5ChunkedReader::new(file.dataset(version.get_data())?);
     let indices_rd = H5ChunkedReader::new(file.dataset(version.get_indices())?);
 
-    const CELL_CHUNK: usize = 10000;
-    for chunk_start in (0..n_cells).step_by(CELL_CHUNK) {
-        let chunk_end = (chunk_start + CELL_CHUNK).min(n_cells) - 1;
+    for chunk_start in (0..n_cells).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(n_cells) - 1;
         let data_start = indptr[chunk_start];
         let data_end = indptr[chunk_end + 1];
         if data_start >= data_end {

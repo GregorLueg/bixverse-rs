@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::h5::H5_CELL_SLICE_SIZE;
 use crate::h5::ann_store::{AnnFile, NodeKind};
 use crate::h5::filters::{check_h5_filters, check_h5ad_filters};
+use crate::h5::{H5_GENE_CHUNK, H5_SCAN_CHUNK, H5_SLICE_SIZE};
 use crate::prelude::*;
 use crate::store::chunk::{dense_index_map, remap};
 use crate::store::gene_file::plan_phases;
@@ -327,7 +327,7 @@ pub fn check_h5ad_dense_is_raw(
 /// ### Returns
 ///
 /// `Ok(())`, or [`ScDataErrors::UnsupportedH5Filter`].
-fn check_ann_filters(
+pub(crate) fn check_ann_filters(
     path: &Path,
     raw_slot: &RawDataSlot,
     format: &H5ADFormat,
@@ -336,6 +336,63 @@ fn check_ann_filters(
         Some(file) => check_h5ad_filters(file, raw_slot, format),
         None => Ok(()),
     }
+}
+
+/// Parse the format, check the filters and run the QC pass that fits it.
+///
+/// The shared first step of [`write_h5_counts`] and [`stream_h5_counts`].
+///
+/// ### Params
+///
+/// * `h5_path` - The h5ad file or Zarr store
+/// * `h5ad_format` - How `X` is stored, see [`parse_h5ad_format`]
+/// * `shape` - `(no_cells, no_genes)`
+/// * `cell_quality` - Minimum cell and gene quality
+/// * `raw_slot` - Where the raw counts are
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// The parsed format and the cells and genes passing QC.
+fn h5ad_quality(
+    h5_path: &Path,
+    h5ad_format: &str,
+    shape: (usize, usize),
+    cell_quality: &MinCellQuality,
+    raw_slot: &RawDataSlot,
+    verbose: bool,
+) -> Result<(H5ADFormat, CellOnFileQuality), ScDataErrors> {
+    let format = parse_h5ad_format(h5ad_format)
+        .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
+    check_ann_filters(h5_path, raw_slot, &format)?;
+    let quality = match format {
+        H5ADFormat::Csr => parse_h5_csr_quality(h5_path, shape, raw_slot, cell_quality, verbose)?,
+        H5ADFormat::Csc => parse_h5_csc_quality(h5_path, shape, raw_slot, cell_quality, verbose)?,
+        H5ADFormat::DenseRow => {
+            parse_h5_dense_row_quality(h5_path, shape, raw_slot, cell_quality, verbose)?
+        }
+        H5ADFormat::DenseCol => return dense_col_not_supported(),
+    };
+    Ok((format, quality))
+}
+
+/// Print how many genes and cells passed QC.
+///
+/// ### Params
+///
+/// * `quality` - Result of the QC pass
+/// * `shape` - `(no_cells, no_genes)` before QC
+fn print_h5ad_quality(quality: &CellOnFileQuality, shape: (usize, usize)) {
+    println!(
+        "  Genes passing QC: {} / {}",
+        quality.genes_to_keep.len().separate_with_underscores(),
+        shape.1.separate_with_underscores()
+    );
+    println!(
+        "  Cells passing QC: {} / {}",
+        quality.cells_to_keep.len().separate_with_underscores(),
+        shape.0.separate_with_underscores()
+    );
 }
 
 /////////////
@@ -382,48 +439,18 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         );
     }
 
-    let file_format = parse_h5ad_format(h5ad_format)
-        .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
-
-    check_ann_filters(h5_path.as_ref(), &raw_slot, &file_format)?;
-
-    let file_quality = match file_format {
-        H5ADFormat::Csr => parse_h5_csr_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &raw_slot,
-            &cell_quality,
-            verbose,
-        )?,
-        H5ADFormat::Csc => parse_h5_csc_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &cell_quality,
-            &raw_slot,
-            verbose,
-        )?,
-        H5ADFormat::DenseRow => parse_h5_dense_row_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &raw_slot,
-            &cell_quality,
-            verbose,
-        )?,
-        H5ADFormat::DenseCol => return dense_col_not_supported(),
-    };
+    let (file_format, file_quality) = h5ad_quality(
+        h5_path.as_ref(),
+        h5ad_format,
+        (no_cells, no_genes),
+        &cell_quality,
+        &raw_slot,
+        verbose,
+    )?;
 
     if verbose {
         println!("Step 2/4: QC Results:");
-        println!(
-            "  Genes passing QC (i.e., getting included): {} / {}",
-            file_quality.genes_to_keep.len().separate_with_underscores(),
-            no_genes.separate_with_underscores()
-        );
-        println!(
-            "  Cells passing QC (i.e., getting included): {} / {}",
-            file_quality.cells_to_keep.len().separate_with_underscores(),
-            no_cells.separate_with_underscores()
-        );
+        print_h5ad_quality(&file_quality, (no_cells, no_genes));
         println!("Step 3/4: Loading filtered data from h5...");
     }
 
@@ -532,48 +559,18 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
         println!("Step 1/3: Analysing data structure and calculating QC metrics...");
     }
 
-    let file_format = parse_h5ad_format(h5ad_format)
-        .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
-
-    check_ann_filters(h5_path.as_ref(), &raw_slot, &file_format)?;
-
-    let file_quality = match file_format {
-        H5ADFormat::Csr => parse_h5_csr_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &raw_slot,
-            &cell_quality,
-            verbose,
-        )?,
-        H5ADFormat::Csc => parse_h5_csc_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &cell_quality,
-            &raw_slot,
-            verbose,
-        )?,
-        H5ADFormat::DenseRow => parse_h5_dense_row_quality(
-            &h5_path,
-            (no_cells, no_genes),
-            &raw_slot,
-            &cell_quality,
-            verbose,
-        )?,
-        H5ADFormat::DenseCol => return dense_col_not_supported(),
-    };
+    let (file_format, file_quality) = h5ad_quality(
+        h5_path.as_ref(),
+        h5ad_format,
+        (no_cells, no_genes),
+        &cell_quality,
+        &raw_slot,
+        verbose,
+    )?;
 
     if verbose {
         println!("Step 2/3: QC Results:");
-        println!(
-            "  Genes passing QC: {} / {}",
-            file_quality.genes_to_keep.len().separate_with_underscores(),
-            no_genes.separate_with_underscores()
-        );
-        println!(
-            "  Cells passing QC: {} / {}",
-            file_quality.cells_to_keep.len().separate_with_underscores(),
-            no_cells.separate_with_underscores()
-        );
+        print_h5ad_quality(&file_quality, (no_cells, no_genes));
         println!("Step 3/3: Writing cells to CSR format...");
     }
 
@@ -629,10 +626,10 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
 ///
 /// * `file_path` - Path to the h5ad file
 /// * `shape` - Tuple with `(no_cells, no_genes)`.
-/// * `cell_quality` - Structure defining the minimum quality values that are
-///   expected here.
 /// * `raw_slot` - Where to find the raw counts in the h5ad object, see
 ///   [RawDataSlot]
+/// * `cell_quality` - Structure defining the minimum quality values that are
+///   expected here.
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -642,8 +639,8 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
 pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     file_path: P,
     shape: (usize, usize),
-    cell_quality: &MinCellQuality,
     raw_slot: &RawDataSlot,
+    cell_quality: &MinCellQuality,
     verbose: bool,
 ) -> Result<CellOnFileQuality, ScDataErrors> {
     let file_path = file_path.as_ref();
@@ -695,8 +692,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
         println!("Calculating cell metrics in parallel...");
     }
 
-    const GENE_CHUNK_SIZE: usize = 10000;
-    let gene_chunks: Vec<&[usize]> = genes_to_keep.chunks(GENE_CHUNK_SIZE).collect();
+    let gene_chunks: Vec<&[usize]> = genes_to_keep.chunks(H5_SCAN_CHUNK).collect();
     let num_chunks = gene_chunks.len();
 
     let calc_time = Instant::now();
@@ -859,11 +855,10 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     }
 
     // Process genes in chunks to reduce memory usage
-    const CHUNK_SIZE: usize = 1000;
 
-    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(CHUNK_SIZE).enumerate() {
+    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(H5_SLICE_SIZE).enumerate() {
         if verbose && chunk_idx % 10 == 0 {
-            let processed = chunk_idx * CHUNK_SIZE;
+            let processed = chunk_idx * H5_SLICE_SIZE;
             println!(
                 "   Processed {} / {} genes",
                 processed.min(total_genes).separate_with_underscores(),
@@ -978,7 +973,6 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     let cell_map = dense_index_map(&quality.cells_to_keep);
     let phases = plan_phases(&quality.cell_nnz, max_nnz_in_memory);
 
-    const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
 
     if verbose {
@@ -1004,7 +998,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
         let mut entries = vec![(0u32, 0u32); offsets[c1 - c0]];
 
         // genes are visited in ascending new index, so every row comes out sorted
-        for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(GENE_CHUNK_SIZE).enumerate() {
+        for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(H5_GENE_CHUNK).enumerate() {
             let start_pos = indptr_raw[gene_chunk[0]];
             let end_pos = indptr_raw[gene_chunk[gene_chunk.len() - 1] + 1];
             if start_pos >= end_pos {
@@ -1015,7 +1009,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
             let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
 
             for (k, &gene_idx) in gene_chunk.iter().enumerate() {
-                let new_gene_idx = (chunk_idx * GENE_CHUNK_SIZE + k) as u32;
+                let new_gene_idx = (chunk_idx * H5_GENE_CHUNK + k) as u32;
                 for idx in indptr_raw[gene_idx]..indptr_raw[gene_idx + 1] {
                     let local_idx = idx - start_pos;
                     if let Some(new_cell) = remap(&cell_map, chunk_indices[local_idx] as usize)
@@ -1121,9 +1115,8 @@ pub(crate) fn csr_quality_stats<R>(
 where
     R: Fn(std::ops::Range<usize>) -> Result<(Vec<f32>, Vec<u32>), ScDataErrors> + Sync,
 {
-    const CELL_CHUNK_SIZE: usize = 10000;
     let n_cells = indptr.len() - 1;
-    let chunks: Vec<usize> = (0..n_cells).step_by(CELL_CHUNK_SIZE).collect();
+    let chunks: Vec<usize> = (0..n_cells).step_by(H5_SCAN_CHUNK).collect();
     let num_chunks = chunks.len();
     let completed_chunks = AtomicUsize::new(0);
     let report_interval = (num_chunks / 10).max(1);
@@ -1132,7 +1125,7 @@ where
     let chunk_stats: Vec<CsrChunkStats> = chunks
         .par_iter()
         .map(|&chunk_start| {
-            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(n_cells);
+            let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(n_cells);
             let n = chunk_end - chunk_start;
             let mut st = CsrChunkStats {
                 gene_counts: vec![0u32; n_genes],
@@ -1386,11 +1379,9 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
         );
     }
 
-    const CHUNK_SIZE: usize = 1000;
-
-    for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
+    for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(H5_SLICE_SIZE).enumerate() {
         if verbose && chunk_idx % 100 == 0 {
-            let processed = chunk_idx * CHUNK_SIZE;
+            let processed = chunk_idx * H5_SLICE_SIZE;
             println!(
                 "   Processed {} / {} cells",
                 processed.min(total_cells).separate_with_underscores(),
@@ -1475,7 +1466,7 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 const H5_READ_AHEAD: usize = 2;
 
 /// Cells per slice of the sparse cell-major writer. Larger than
-/// [`H5_CELL_SLICE_SIZE`], which also sizes dense reads: a sparse slice holds
+/// [`H5_SLICE_SIZE`], which also sizes dense reads: a sparse slice holds
 /// only its nonzeros (8 bytes each, about 70 MB at 1,000 genes per cell), and
 /// smaller slices leave the encoder idle between serial appends.
 const H5_CSR_SLICE_CELLS: usize = 8_192;
@@ -1740,8 +1731,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
         check_h5ad_dense_is_raw(&file, raw_slot, None)?;
     }
 
-    const CELL_CHUNK_SIZE: usize = 10_000;
-    let chunk_starts: Vec<usize> = (0..shape.0).step_by(CELL_CHUNK_SIZE).collect();
+    let chunk_starts: Vec<usize> = (0..shape.0).step_by(H5_SCAN_CHUNK).collect();
     let num_chunks = chunk_starts.len();
 
     if verbose {
@@ -1760,7 +1750,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
 
             let file = AnnFile::open(file_path)?;
 
-            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+            let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(shape.0);
             let block: Array2<f32> = file.read_2d::<f32>(
                 raw_slot.get_dense_path(),
                 chunk_start..chunk_end,
@@ -1841,7 +1831,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
         .par_iter()
         .map(
             |&chunk_start| -> Result<(Vec<usize>, Vec<f32>), ScDataErrors> {
-                let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+                let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(shape.0);
                 let n = chunk_end - chunk_start;
                 let mut local_unique = vec![0usize; n];
                 let mut local_lib_size = vec![0.0f32; n];
@@ -1968,11 +1958,9 @@ pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
         );
     }
 
-    const CHUNK_SIZE: usize = 1000;
-
-    for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
+    for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(H5_SLICE_SIZE).enumerate() {
         if verbose && chunk_idx % 100 == 0 {
-            let processed = chunk_idx * CHUNK_SIZE;
+            let processed = chunk_idx * H5_SLICE_SIZE;
             println!(
                 "   Processed {} / {} cells",
                 processed.min(total_cells).separate_with_underscores(),
@@ -2085,13 +2073,13 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
     let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
 
     let total_cells = quality.cells_to_keep.len();
-    let num_batches = total_cells.div_ceil(H5_CELL_SLICE_SIZE);
+    let num_batches = total_cells.div_ceil(H5_SLICE_SIZE);
 
     if verbose {
         println!(
             "  Processing {} cells in batches of {}...",
             total_cells.separate_with_underscores(),
-            H5_CELL_SLICE_SIZE.separate_with_underscores()
+            H5_SLICE_SIZE.separate_with_underscores()
         );
     }
 
@@ -2100,12 +2088,12 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
     let gene_map = dense_index_map(&quality.genes_to_keep);
     let mut offset = 0;
 
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_SLICE_SIZE).enumerate() {
         if verbose
             && (batch_idx.is_multiple_of((num_batches / 10).max(1)) || batch_idx == num_batches - 1)
         {
             let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
-            let processed = (batch_idx + 1) * H5_CELL_SLICE_SIZE;
+            let processed = (batch_idx + 1) * H5_SLICE_SIZE;
             println!(
                 "  Processed {}% ({} / {} cells)",
                 progress,
@@ -2235,11 +2223,10 @@ pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
     }
 
     // Still need unique genes per cell - requires scanning indices
-    const GENE_CHUNK_SIZE: usize = 10000;
     let mut cell_unique_genes = vec![0usize; shape.0];
 
     let indices_rd = file.array("X/indices")?;
-    for gene_chunk in genes_to_keep.chunks(GENE_CHUNK_SIZE) {
+    for gene_chunk in genes_to_keep.chunks(H5_SCAN_CHUNK) {
         let start_pos = gene_chunk.iter().map(|&g| indptr[g]).min().unwrap_or(0);
         let end_pos = gene_chunk.iter().map(|&g| indptr[g + 1]).max().unwrap_or(0);
 
@@ -2328,11 +2315,10 @@ pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
     let cell_unique_genes: Vec<usize> = (0..shape.0).map(|i| indptr[i + 1] - indptr[i]).collect();
 
     // Still need cells-per-gene for gene filtering - requires scanning
-    const CELL_CHUNK_SIZE: usize = 10000;
     let mut no_cells_exp_gene = vec![0usize; shape.1];
 
-    for chunk_start in (0..shape.0).step_by(CELL_CHUNK_SIZE) {
-        let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0) - 1;
+    for chunk_start in (0..shape.0).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(shape.0) - 1;
         let data_start = indptr[chunk_start];
         let data_end = indptr[chunk_end + 1];
 
@@ -2462,9 +2448,9 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
     // (gene_index, raw_count) - gene index as usize, count as u32
     let gene_map = dense_index_map(&quality.genes_to_keep);
     let cell_map = dense_index_map(&quality.cells_to_keep);
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_SLICE_SIZE).enumerate() {
         if verbose && batch_idx % 10 == 0 {
-            let processed = (batch_idx * H5_CELL_SLICE_SIZE).min(total_cells);
+            let processed = (batch_idx * H5_SLICE_SIZE).min(total_cells);
             println!(
                 "   Processed {} / {} cells",
                 processed.separate_with_underscores(),
@@ -2579,12 +2565,11 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
     let cell_map = dense_index_map(&quality.cells_to_keep);
 
-    const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
 
-    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(GENE_CHUNK_SIZE).enumerate() {
+    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(H5_GENE_CHUNK).enumerate() {
         if verbose && chunk_idx % 10 == 0 {
-            let processed = (chunk_idx * GENE_CHUNK_SIZE).min(total_genes);
+            let processed = (chunk_idx * H5_GENE_CHUNK).min(total_genes);
             println!(
                 "   Processed {} / {} genes",
                 processed.separate_with_underscores(),
@@ -2948,8 +2933,8 @@ mod tests {
         let quality = parse_h5_csc_quality(
             &h5,
             (CSC_TEST_CELLS, CSC_TEST_GENES),
-            &csc_test_qc(),
             &RawDataSlot::DataX,
+            &csc_test_qc(),
             false,
         );
         let _ = std::fs::remove_file(&h5);

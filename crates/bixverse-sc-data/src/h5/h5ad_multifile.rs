@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::h5::filters::check_h5ad_filters;
 use crate::h5::h5ad::*;
+use crate::h5::{H5_GENE_CHUNK, H5_SCAN_CHUNK, H5_SLICE_SIZE};
 use crate::prelude::*;
 use crate::store::chunk::{dense_gene_map_from_options, dense_index_map, remap};
 use crate::store::{quality::*, writer::*};
@@ -77,10 +77,8 @@ fn scan_gene_nnz_csr(
 
     let mut gene_nnz = vec![0usize; universe_size];
 
-    const CHUNK_SIZE: usize = 10_000;
-
-    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
-        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+    for chunk_start in (0..task.no_cells).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(task.no_cells);
         let data_start = indptr[chunk_start];
         let data_end = indptr[chunk_end];
 
@@ -158,9 +156,8 @@ fn scan_gene_nnz_dense_row(
 
     let mut gene_nnz = vec![0usize; universe_size];
 
-    const CHUNK_SIZE: usize = 10_000;
-    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
-        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+    for chunk_start in (0..task.no_cells).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(task.no_cells);
         let block: Array2<f32> = file.read_2d::<f32>(
             task.raw_slot.get_dense_path(),
             chunk_start..chunk_end,
@@ -229,10 +226,8 @@ fn scan_cell_stats_csr(
 
     let mut cell_stats = Vec::with_capacity(task.no_cells);
 
-    const CHUNK_SIZE: usize = 10_000;
-
-    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
-        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+    for chunk_start in (0..task.no_cells).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(task.no_cells);
         let data_start = indptr[chunk_start];
         let data_end = indptr[chunk_end];
 
@@ -299,9 +294,7 @@ fn scan_cell_stats_csc(
         .filter_map(|(local, opt)| opt.map(|_| local))
         .collect();
 
-    const GENE_CHUNK_SIZE: usize = 5_000;
-
-    for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
+    for gene_chunk in genes_with_final.chunks(H5_GENE_CHUNK) {
         let start_pos = gene_chunk.iter().map(|&g| indptr[g]).min().unwrap_or(0);
         let end_pos = gene_chunk.iter().map(|&g| indptr[g + 1]).max().unwrap_or(0);
 
@@ -348,9 +341,8 @@ fn scan_cell_stats_dense_row(
 
     let mut cell_stats: Vec<(usize, f32)> = Vec::with_capacity(task.no_cells);
 
-    const CHUNK_SIZE: usize = 10_000;
-    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
-        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+    for chunk_start in (0..task.no_cells).step_by(H5_SCAN_CHUNK) {
+        let chunk_end = (chunk_start + H5_SCAN_CHUNK).min(task.no_cells);
         let block: Array2<f32> = file.read_2d::<f32>(
             task.raw_slot.get_dense_path(),
             chunk_start..chunk_end,
@@ -517,9 +509,7 @@ fn write_h5_csc_cells(
         .filter_map(|(local, opt)| opt.map(|f| (local, f)))
         .collect();
 
-    const GENE_CHUNK_SIZE: usize = 5_000;
-
-    for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
+    for gene_chunk in genes_with_final.chunks(H5_GENE_CHUNK) {
         let start_pos = gene_chunk
             .iter()
             .map(|&(local, _)| indptr[local])
@@ -596,10 +586,9 @@ fn write_h5_dense_row_cells(
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
     let mut nnz = Vec::with_capacity(cells_to_keep.len());
 
-    const BATCH_SIZE: usize = 1_000;
     let mut written = 0usize;
 
-    for cell_batch in cells_to_keep.chunks(BATCH_SIZE) {
+    for cell_batch in cells_to_keep.chunks(H5_SLICE_SIZE) {
         let row_start = *cell_batch
             .iter()
             .min()
@@ -738,9 +727,7 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
     let total_start = Instant::now();
 
     for task in tasks {
-        if let Some(h5) = AnnFile::open(&task.h5_path)?.h5() {
-            check_h5ad_filters(h5, &task.raw_slot, &task.cs_type)?;
-        }
+        check_ann_filters(Path::new(&task.h5_path), &task.raw_slot, &task.cs_type)?;
     }
 
     if verbose {

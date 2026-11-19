@@ -15,7 +15,7 @@ use std::{fs::File, marker::Sync, path::Path, sync::Arc};
 use crate::prelude::*;
 use crate::store::chunk::{
     FILE_MAGIC, FileHeader, RunSource, SparseDataHeader, csc_payload, csr_payload,
-    extend_raw_checked, keep_set_index_map, le_u64_at, raw_to, remap,
+    extend_raw_checked, keep_set_index_map, le_u64, raw_to, remap,
 };
 use crate::store::interval_index::GenomeIntervals;
 use crate::store::v4::{
@@ -640,7 +640,7 @@ impl ParallelSparseReader {
         let chunks_len = mmap.len() - V5_HEADER_LEN;
         let mut prev = 0u64;
         for c in 0..=h.n_chunks {
-            let off = le_u64_at(&mmap, offsets.offset + 8 * c);
+            let off = le_u64(&mmap, offsets.offset + 8 * c);
             if off < prev || off as usize > chunks_len {
                 return Err(ScDataErrors::V5HeaderInvalid(format!(
                     "chunk offset {c} out of order or outside the file"
@@ -674,7 +674,7 @@ impl ParallelSparseReader {
                 }
                 Some(Arc::new(
                     (0..s.len / 8)
-                        .map(|i| le_u64_at(&mmap, s.offset + 8 * i) as f32)
+                        .map(|i| le_u64(&mmap, s.offset + 8 * i) as f32)
                         .collect::<Vec<f32>>(),
                 ))
             }
@@ -754,11 +754,7 @@ impl ParallelSparseReader {
             return Err(ScDataErrors::HeaderDecodeFailed);
         }
 
-        let header_size = u64::from_le_bytes(
-            mmap[main_header_offset..main_header_offset + 8]
-                .try_into()
-                .expect("8-byte slice, bounds checked above"),
-        ) as usize;
+        let header_size = le_u64(&mmap, main_header_offset) as usize;
 
         let header_end = main_header_offset
             .saturating_add(8)
@@ -942,7 +938,7 @@ impl ParallelSparseReader {
         match &self.offsets {
             ChunkOffsets::Owned(v) => v.get(c).copied(),
             ChunkOffsets::Mapped(at) => {
-                (c <= self.n_chunks).then(|| le_u64_at(&self.mmap, at + 8 * c))
+                (c <= self.n_chunks).then(|| le_u64(&self.mmap, at + 8 * c))
             }
         }
     }
@@ -970,8 +966,8 @@ impl ParallelSparseReader {
             &ChunkLookup::Sorted(at, n) => {
                 let mut order = vec![usize::MAX; self.n_chunks];
                 for i in 0..n {
-                    let orig = le_u64_at(&self.mmap, at + 16 * i) as usize;
-                    let chunk = le_u64_at(&self.mmap, at + 16 * i + 8) as usize;
+                    let orig = le_u64(&self.mmap, at + 16 * i) as usize;
+                    let chunk = le_u64(&self.mmap, at + 16 * i + 8) as usize;
                     *order.get_mut(chunk).ok_or_else(|| outside(chunk))? = orig;
                 }
                 Ok(order)
@@ -1002,7 +998,7 @@ impl ParallelSparseReader {
         if offset.saturating_add(8) > mmap.len() {
             return Err(ScDataErrors::HeaderDecodeFailed);
         }
-        let count = le_u64_at(mmap, offset) as usize;
+        let count = le_u64(mmap, offset) as usize;
         let end = count
             .checked_mul(8)
             .and_then(|bytes| bytes.checked_add(offset + 8));
@@ -1011,7 +1007,7 @@ impl ParallelSparseReader {
         }
         Ok(Some(Arc::new(
             (0..count)
-                .map(|i| le_u64_at(mmap, offset + 8 + 8 * i) as f32)
+                .map(|i| le_u64(mmap, offset + 8 + 8 * i) as f32)
                 .collect(),
         )))
     }
@@ -1087,7 +1083,7 @@ impl ParallelSparseReader {
         if !cell_based || offset.saturating_add(8) > mmap.len() {
             return Err(ScDataErrors::HeaderDecodeFailed);
         }
-        let count = le_u64_at(mmap, offset) as usize;
+        let count = le_u64(mmap, offset) as usize;
         let end = count
             .checked_mul(8)
             .and_then(|bytes| bytes.checked_add(offset + 8));
@@ -1116,7 +1112,7 @@ impl ParallelSparseReader {
             .iter()
             .map(|&original_index| {
                 let chunk = self.chunk_index_of(original_index)?;
-                Ok(le_u64_at(&self.mmap, start + 8 * chunk) as usize)
+                Ok(le_u64(&self.mmap, start + 8 * chunk) as usize)
             })
             .collect()
     }
@@ -1148,7 +1144,7 @@ impl ParallelSparseReader {
             ChunkLookup::Identity => Some(original_index),
             ChunkLookup::Hash(map) => map.get(&original_index).copied(),
             &ChunkLookup::Sorted(at, n) => {
-                let key = |i: usize| le_u64_at(&self.mmap, at + 16 * i) as usize;
+                let key = |i: usize| le_u64(&self.mmap, at + 16 * i) as usize;
                 let (mut lo, mut hi) = (0usize, n);
                 while lo < hi {
                     let mid = lo + (hi - lo) / 2;
@@ -1159,7 +1155,7 @@ impl ParallelSparseReader {
                     }
                 }
                 (lo < n && key(lo) == original_index)
-                    .then(|| le_u64_at(&self.mmap, at + 16 * lo + 8) as usize)
+                    .then(|| le_u64(&self.mmap, at + 16 * lo + 8) as usize)
             }
         };
         chunk.filter(|&c| c < self.n_chunks).ok_or(missing)
@@ -1259,11 +1255,7 @@ impl ParallelSparseReader {
                 .chunk_offset(chunk_index)
                 .expect("chunk below n_chunks")) as usize;
 
-        let compressed_size = u64::from_le_bytes(
-            self.mmap[chunk_offset..chunk_offset + 8]
-                .try_into()
-                .expect("8-byte slice by construction"),
-        ) as usize;
+        let compressed_size = le_u64(&self.mmap, chunk_offset) as usize;
 
         Ok((
             &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size],
@@ -2543,16 +2535,7 @@ impl SingleCellReading for ParallelSparseReader {
             .map(|&original_index| {
                 let decompressed = self.decompress_chunk(original_index)?;
 
-                Ok(u64::from_le_bytes([
-                    decompressed[12],
-                    decompressed[13],
-                    decompressed[14],
-                    decompressed[15],
-                    decompressed[16],
-                    decompressed[17],
-                    decompressed[18],
-                    decompressed[19],
-                ]) as usize)
+                Ok(le_u64(&decompressed, 12) as usize)
             })
             .collect()
     }
@@ -2592,16 +2575,7 @@ impl SingleCellReading for ParallelSparseReader {
             .map(|&original_index| {
                 let decompressed = self.decompress_chunk(original_index)?;
 
-                Ok(u64::from_le_bytes([
-                    decompressed[16],
-                    decompressed[17],
-                    decompressed[18],
-                    decompressed[19],
-                    decompressed[20],
-                    decompressed[21],
-                    decompressed[22],
-                    decompressed[23],
-                ]) as usize)
+                Ok(le_u64(&decompressed, 16) as usize)
             })
             .collect()
     }

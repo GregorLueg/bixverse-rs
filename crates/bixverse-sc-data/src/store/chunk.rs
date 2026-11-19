@@ -633,21 +633,6 @@ impl RunSource for ChunkPayload<'_> {
     }
 }
 
-/// Read a little-endian `u32` length field from a chunk header.
-///
-/// ### Params
-///
-/// * `header` - The header bytes
-/// * `at` - Byte offset of the field
-///
-/// ### Returns
-///
-/// The field as `usize`.
-#[inline]
-fn header_u32(header: &[u8], at: usize) -> usize {
-    u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]) as usize
-}
-
 //////////////////
 // CsrChunkView //
 //////////////////
@@ -690,15 +675,15 @@ impl<'a> CsrChunkView<'a> {
 
         let header = &buffer[0..CSR_CHUNK_HEADER_LEN];
         let lens = (
-            header_u32(header, 0),
-            header_u32(header, 4),
-            header_u32(header, 8),
+            le_u32(header, 0) as usize,
+            le_u32(header, 4) as usize,
+            le_u32(header, 8) as usize,
         );
 
         Ok(Self {
             payload: ChunkPayload::slice(buffer, CSR_CHUNK_HEADER_LEN, lens, header[29])?,
-            library_size: le_u64_at(header, 12) as usize,
-            original_index: le_u64_at(header, 20) as usize,
+            library_size: le_u64(header, 12) as usize,
+            original_index: le_u64(header, 20) as usize,
             to_keep: header[28] != 0,
         })
     }
@@ -740,9 +725,9 @@ pub(crate) fn csc_payload(buffer: &[u8]) -> Result<ChunkPayload<'_>, ScDataError
     }
 
     let lens = (
-        header_u32(buffer, 0),
-        header_u32(buffer, 4),
-        header_u32(buffer, 8),
+        le_u32(buffer, 0) as usize,
+        le_u32(buffer, 4) as usize,
+        le_u32(buffer, 8) as usize,
     );
 
     ChunkPayload::slice(buffer, CSC_CHUNK_HEADER_LEN, lens, buffer[33])
@@ -1204,9 +1189,9 @@ impl CscGeneChunk {
         Ok(Self {
             data_raw: payload.raw_counts()?,
             data_norm: payload.norm_iter().collect(),
-            nnz: le_u64_at(buffer, 16) as usize,
+            nnz: le_u64(buffer, 16) as usize,
             indices: payload.index_iter().collect(),
-            original_index: le_u64_at(buffer, 24) as usize,
+            original_index: le_u64(buffer, 24) as usize,
             to_keep: buffer[32] != 0,
         })
     }
@@ -1318,13 +1303,34 @@ pub struct SparseDataHeader {
 /// a foreign file is refused rather than parsed as one of ours.
 pub(crate) const FILE_MAGIC: &[u8; 8] = b"SCRNASEQ";
 
-/// The little-endian `u64` at byte `at`.
-pub(crate) fn le_u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(
-        bytes[at..at + 8]
-            .try_into()
-            .expect("an 8-byte slice converts to [u8; 8]"),
-    )
+/// The little-endian `u32` at `at`.
+///
+/// ### Params
+///
+/// * `b` - The bytes, at least `at + 4` long
+/// * `at` - Offset
+///
+/// ### Returns
+///
+/// The value.
+#[inline]
+pub(crate) fn le_u32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(b[at..at + 4].try_into().expect("4-byte slice"))
+}
+
+/// The little-endian `u64` at `at`.
+///
+/// ### Params
+///
+/// * `b` - The bytes, at least `at + 8` long
+/// * `at` - Offset
+///
+/// ### Returns
+///
+/// The value.
+#[inline]
+pub(crate) fn le_u64(b: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(b[at..at + 8].try_into().expect("8-byte slice"))
 }
 
 /// Fixed-size file header that points to the main header location

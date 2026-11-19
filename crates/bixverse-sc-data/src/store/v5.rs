@@ -53,7 +53,8 @@ use std::path::Path;
 use indexmap::IndexSet;
 
 use crate::prelude::*;
-use crate::store::{chunk::DataLayerReturn, reader::ParallelSparseReader};
+use crate::store::chunk::{DataLayerReturn, le_u32, le_u64};
+use crate::store::reader::ParallelSparseReader;
 
 ////////////
 // Consts //
@@ -411,36 +412,6 @@ impl V5FileHeader {
             cell_id_hash,
         })
     }
-}
-
-/// The little-endian `u32` at `at`.
-///
-/// ### Params
-///
-/// * `b` - The bytes, at least `at + 4` long
-/// * `at` - Offset
-///
-/// ### Returns
-///
-/// The value.
-#[inline]
-pub(crate) fn le_u32(b: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(b[at..at + 4].try_into().expect("4-byte slice"))
-}
-
-/// The little-endian `u64` at `at`.
-///
-/// ### Params
-///
-/// * `b` - The bytes, at least `at + 8` long
-/// * `at` - Offset
-///
-/// ### Returns
-///
-/// The value.
-#[inline]
-pub(crate) fn le_u64(b: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(b[at..at + 8].try_into().expect("8-byte slice"))
 }
 
 //////////////

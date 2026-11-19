@@ -31,7 +31,7 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::store::{
-    chunk::{dense_index_map, remap},
+    chunk::{dense_index_map, le_u32, remap},
     quality::CellOnFileQuality,
     writer::{CellGeneSparseWriter, compress_cell_row},
 };
@@ -1527,8 +1527,7 @@ impl MtxReader {
             let built = if spill.cell_major {
                 // records sorted by original cell: each kept cell's run is
                 // found by binary search and built straight from the bytes
-                let word =
-                    |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+                let word = |at: usize| le_u32(&bytes, at);
                 let n_rec = bytes.len() / BUCKET_RECORD_LEN;
                 let run_start = |cell: usize| {
                     let (mut lo, mut hi) = (0, n_rec);
@@ -1559,8 +1558,7 @@ impl MtxReader {
                 let mut entries: Vec<(u32, u32, u32)> = bytes
                     .par_chunks_exact(BUCKET_RECORD_LEN)
                     .filter_map(|r| {
-                        let word =
-                            |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().expect("4 bytes"));
+                        let word = |k: usize| le_u32(r, k);
                         Some((
                             remap(&cell_map, word(0) as usize)?,
                             remap(&gene_map, word(4) as usize)?,
