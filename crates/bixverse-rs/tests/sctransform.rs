@@ -23,8 +23,8 @@ use approx::assert_relative_eq;
 use faer::Mat;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::pca::{
     PcaSolver, SingleCellPcaParams, pca_on_sc_residuals,
 };

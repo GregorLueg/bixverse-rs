@@ -31,7 +31,7 @@ use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
     SparseYBatch, fit_multi_trees_sparse,
 };
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 #[cfg(feature = "large-test")]
 use bixverse_rs::{

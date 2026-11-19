@@ -24,7 +24,11 @@ use crate::errors::ScErrors;
 use crate::prelude::*;
 use bixverse_core::core::base::kernel_smooth::bw_nrd;
 use bixverse_core::core::math::vector_helpers::{interp_linear_at, median};
-use bixverse_sc_data::data_io::{CellGeneSparseWriter, CscGeneChunk, RawCounts, SingleCellReading};
+use bixverse_sc_data::store::{
+    chunk::{CscGeneChunk, RawCounts},
+    reader::SingleCellReading,
+    writer::CellGeneSparseWriter,
+};
 
 use crate::sc_processing::residuals::{
     ResidualSource, distinct_cell_set, intersect_gene_sets, residual_variance, validate_groups,

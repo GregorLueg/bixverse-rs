@@ -4,8 +4,8 @@
 use std::path::Path;
 use thousands::Separable;
 
-use crate::data_io::{CellGeneSparseWriter, write_cell_chunks_parallel};
 use crate::prelude::*;
+use crate::store::writer::{CellGeneSparseWriter, write_cell_chunks_parallel};
 use bixverse_sparse::sparse::transpose_sparse;
 
 //////////

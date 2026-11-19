@@ -20,7 +20,7 @@ use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::metacells2::{
     DacMetacellsResult, DacParams, MC2KnnParams, MetacellsParams, RareParams, compute_dac_metacells,
 };
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use meta_cells2_dac_fixtures as fx;
 use meta_cells2_rare_dac_fixtures as rfx;
 

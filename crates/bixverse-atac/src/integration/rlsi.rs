@@ -22,7 +22,7 @@ use bixverse_sc::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_
 use bixverse_sc::sc_batch_correction::seurat_anchors::{
     AnchorSet, build_sample_tree, find_anchor_pairs, score_anchors, tree_merge_embeddings,
 };
-use bixverse_sc_data::v5_io::tf_idf_weights;
+use bixverse_sc_data::store::v5::tf_idf_weights;
 
 use crate::prelude::*;
 use crate::processing::lsi::{LsiParams, library_sizes, lsi_on_matrix, project_lsi, read_tf_idf};

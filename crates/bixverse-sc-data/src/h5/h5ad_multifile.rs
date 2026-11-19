@@ -1,7 +1,7 @@
 //! Multi-h5ad loading: scan multiple h5ad files, apply global gene QC,
 //! and write all cells into a single binary file.
 
-use crate::ann_store::AnnFile;
+use crate::h5::ann_store::AnnFile;
 use ndarray::Array2;
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -9,10 +9,10 @@ use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
 
-use super::data_io::*;
-use super::h5_filters::check_h5ad_filters;
-use super::h5ad_io::*;
+use crate::h5::filters::check_h5ad_filters;
+use crate::h5::h5ad::*;
 use crate::prelude::*;
+use crate::store::{quality::*, writer::*};
 
 //////////////////
 // H5File tasks //

@@ -4,9 +4,9 @@
 use bixverse_sc::sc_processing::hvg::get_hvg_vst;
 use bixverse_sc::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_sc::sc_processing::sctransform::stream::{SctStreamOpts, fit_sctransform};
-use bixverse_sc_data::data_io::CellGeneSparseWriter;
-use bixverse_sc_data::in_memory_io::*;
 use bixverse_sc_data::prelude::*;
+use bixverse_sc_data::store::in_memory::*;
+use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
 const N_CELLS: usize = 300;
 const N_GENES: usize = 60;

@@ -37,8 +37,8 @@ use bixverse_rs::single_cell::atac::processing::lsi::{
     LsiParams, TF_IDF_SCALE, lsi_on_store, set_tf_idf_on_store,
 };
 use bixverse_rs::single_cell::atac::processing::qc::{FragmentQcParams, fragment_qc};
-use bixverse_rs::single_cell::sc_data::data_io::ParallelSparseReader;
-use bixverse_rs::single_cell::sc_data::v5_io::FeatureKind;
+use bixverse_rs::single_cell::sc_data::store::reader::ParallelSparseReader;
+use bixverse_rs::single_cell::sc_data::store::v5::FeatureKind;
 
 /// A required environment variable as a path.
 ///

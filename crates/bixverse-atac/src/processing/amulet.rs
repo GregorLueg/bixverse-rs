@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use bixverse_core::core::math::stats::p_adjust_fdr;
-use bixverse_sc_data::interval_index::FeatureInterval;
+use bixverse_sc_data::store::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use statrs::distribution::{DiscreteCDF, Poisson};
 

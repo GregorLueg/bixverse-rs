@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_export::ad_export::{
     AdFormat, AdParts, Column, ColumnData, CsMatI, DenseMatrix, Embeddings, LevelType, ObsTable,
     UnsTable, VarTable, Varm, save_store, write_csr,

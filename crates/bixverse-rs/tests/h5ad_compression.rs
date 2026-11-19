@@ -12,8 +12,8 @@ use hdf5::File;
 use hdf5::filters::Filter;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::h5_filters::unsupported_filters;
-use bixverse_rs::single_cell::sc_data::h5ad_io::{RawDataSlot, stream_h5_counts, write_h5_counts};
+use bixverse_rs::single_cell::sc_data::h5::filters::unsupported_filters;
+use bixverse_rs::single_cell::sc_data::h5::h5ad::{RawDataSlot, stream_h5_counts, write_h5_counts};
 
 ///////////////
 // Constants //

@@ -24,7 +24,7 @@ use crate::sc_processing::sctransform::residuals::SctResiduals;
 use crate::sc_processing::sctransform::stream::{
     SctGroupedFit, SctStreamOpts, fit_sctransform, fit_sctransform_grouped, sct_corrected_counts,
 };
-use bixverse_sc_data::in_memory_io::{CellSubset, InMemorySparseReader};
+use bixverse_sc_data::store::in_memory::{CellSubset, InMemorySparseReader};
 
 ///////////
 // Types //

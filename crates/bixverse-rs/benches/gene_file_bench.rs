@@ -72,11 +72,12 @@ use rand_distr::{Distribution, LogNormal, Uniform};
 use rayon::prelude::*;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CellPayload, CscGeneChunk, CsrCellChunk, DataLayerReturn,
-    ParallelSparseReader, RawCounts, SingleCellReading,
+use bixverse_rs::single_cell::sc_data::store::gene_file::write_gene_file;
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CscGeneChunk, CsrCellChunk, DataLayerReturn, RawCounts},
+    reader::{ParallelSparseReader, SingleCellReading},
+    writer::{CellGeneSparseWriter, CellPayload},
 };
-use bixverse_rs::single_cell::sc_data::gene_file_io::write_gene_file;
 use bixverse_rs::single_cell::sc_processing::hvg::{
     CellBatchIndex, GeneStats, HistogramScratch, gene_stats,
 };
@@ -115,10 +116,10 @@ const TARGET_SIZE: f32 = 1e4;
 /// Cells generated and encoded per write batch.
 const GEN_BATCH: usize = 8_192;
 
-/// Mirrors `GENE_FILE_READ_BATCH` in `gene_file_io.rs`.
+/// Mirrors `GENE_FILE_READ_BATCH` in `store/gene_file.rs`.
 const READ_BATCH: usize = 2_048;
 
-/// Mirrors `GENE_FILE_WRITE_BATCH` in `gene_file_io.rs`.
+/// Mirrors `GENE_FILE_WRITE_BATCH` in `store/gene_file.rs`.
 const WRITE_BATCH: usize = 1_024;
 
 /// Mirrors `GENE_BATCH_SIZE` in `hvg.rs`.
@@ -284,8 +285,8 @@ fn ensure_cell_store(path: &Path, n_cells: usize, n_genes: usize, library: f64) 
 /// * `slot` - Raw count slot, as the R `slot` argument
 #[cfg(feature = "h5")]
 fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
-    use bixverse_rs::single_cell::sc_data::data_io::MinCellQuality;
-    use bixverse_rs::single_cell::sc_data::h5ad_io::{parse_raw_slot, stream_h5_counts};
+    use bixverse_rs::single_cell::sc_data::h5::h5ad::{parse_raw_slot, stream_h5_counts};
+    use bixverse_rs::single_cell::sc_data::store::quality::MinCellQuality;
 
     if cell_path.exists() && std::env::var("GENE_FILE_BENCH_REGEN").is_err() {
         return;
@@ -294,8 +295,8 @@ fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
         parse_raw_slot(slot).expect("GENE_FILE_BENCH_H5AD_SLOT: X, raw.X or layers.counts");
     // through AnnFile, so an anndata Zarr store works too (feature `zarr`)
     let (no_cells, no_genes, indptr_len) = {
-        use bixverse_rs::single_cell::sc_data::ann_store::AnnFile;
-        use bixverse_rs::single_cell::sc_data::h5_scan::get_h5ad_dimensions;
+        use bixverse_rs::single_cell::sc_data::h5::ann_store::AnnFile;
+        use bixverse_rs::single_cell::sc_data::h5::scan::get_h5ad_dimensions;
         let dims = get_h5ad_dimensions(h5ad).expect("h5ad or Zarr dimensions");
         let indptr_len = AnnFile::open(h5ad)
             .and_then(|f| f.shape(raw_slot.get_indptr()))
@@ -523,7 +524,7 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, Duration) {
     (r, t.elapsed())
 }
 
-/// Phase ranges, the same cut as `plan_phases` in `gene_file_io.rs`.
+/// Phase ranges, the same cut as `plan_phases` in `store/gene_file.rs`.
 ///
 /// ### Params
 ///

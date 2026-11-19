@@ -41,9 +41,9 @@ use rayon::prelude::*;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::*;
 use crate::prelude::*;
-use crate::v5_io::{MAX_LAYERS, NormKind};
+use crate::store::v5::{MAX_LAYERS, NormKind};
+use crate::store::{chunk::*, writer::*};
 
 ////////////
 // Consts //
@@ -1688,6 +1688,7 @@ pub fn upgrade_store_to_v5(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::reader::peek_file_version;
     use indexmap::IndexSet;
 
     #[test]
@@ -1831,10 +1832,11 @@ mod tests {
         }
         writer.finalise().unwrap();
         if version == SC_FILE_VERSION_V3 {
-            crate::gene_file_io::write_gene_file_v3(cell_path, gene_path, Some(500), false)
+            crate::store::gene_file::write_gene_file_v3(cell_path, gene_path, Some(500), false)
                 .unwrap();
         } else {
-            crate::gene_file_io::write_gene_file(cell_path, gene_path, Some(500), false).unwrap();
+            crate::store::gene_file::write_gene_file(cell_path, gene_path, Some(500), false)
+                .unwrap();
         }
     }
 
@@ -2140,11 +2142,11 @@ mod tests {
         assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION_V4);
         assert_eq!(peek_file_version(s.path(2)).unwrap(), SC_FILE_VERSION);
         assert_eq!(
-            crate::data_io::peek_target_size(s.path(1)).unwrap(),
+            crate::store::reader::peek_target_size(s.path(1)).unwrap(),
             Some(TARGET)
         );
         assert_eq!(
-            crate::data_io::peek_target_size(s.path(2)).unwrap(),
+            crate::store::reader::peek_target_size(s.path(2)).unwrap(),
             Some(TARGET)
         );
     }
@@ -2166,7 +2168,7 @@ mod tests {
         let s = Scratch::new("genefile", 4);
         write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
         convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
-        crate::gene_file_io::write_gene_file(s.path(2), s.path(3), Some(500), false).unwrap();
+        crate::store::gene_file::write_gene_file(s.path(2), s.path(3), Some(500), false).unwrap();
         assert_eq!(peek_file_version(s.path(3)).unwrap(), SC_FILE_VERSION);
 
         let (v3, v5) = (
@@ -2218,8 +2220,8 @@ mod tests {
         let s = Scratch::new("archive", 6);
         write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
         convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
-        crate::archive_io::archive_cell_file(s.path(2), s.path(3), 3, false).unwrap();
-        crate::archive_io::restore_archive(s.path(3), s.path(4), s.path(5), Some(500), false)
+        crate::store::archive::archive_cell_file(s.path(2), s.path(3), 3, false).unwrap();
+        crate::store::archive::restore_archive(s.path(3), s.path(4), s.path(5), Some(500), false)
             .unwrap();
 
         let original = ParallelSparseReader::new(s.path(2)).unwrap();
@@ -2270,7 +2272,7 @@ mod tests {
         let (n_cells, n_genes) = (layers[0].len(), layers[0][0].len());
         let mut w = CellGeneSparseWriter::new(cell_path, true, n_cells, n_genes, 0.0)
             .unwrap()
-            .with_kinds(crate::v5_io::FeatureKind::Snp, NormKind::None)
+            .with_kinds(crate::store::v5::FeatureKind::Snp, NormKind::None)
             .unwrap()
             .with_layers(layers.len())
             .unwrap();
@@ -2286,7 +2288,7 @@ mod tests {
             w.write_cell_layers(c, &idx, &refs, true).unwrap();
         }
         w.finalise().unwrap();
-        crate::gene_file_io::write_gene_file(cell_path, gene_path, Some(37), false).unwrap();
+        crate::store::gene_file::write_gene_file(cell_path, gene_path, Some(37), false).unwrap();
     }
 
     /// Every layer reads back from both orientations, the norm is refused and
@@ -2311,7 +2313,7 @@ mod tests {
                 .unwrap();
             assert_eq!(genes.n_layers(), 3);
             assert_eq!(genes.norm_kind(), NormKind::None);
-            assert_eq!(genes.feature_kind(), crate::v5_io::FeatureKind::Snp);
+            assert_eq!(genes.feature_kind(), crate::store::v5::FeatureKind::Snp);
 
             let csr = cells
                 .read_cells_sparse::<u32>(&all_cells, &DataLayerReturn::Raw)
@@ -2440,7 +2442,7 @@ mod tests {
         // the first directory entry is the offsets: make it an unknown kind
         let dir = |p: &str| {
             let b = std::fs::read(p).unwrap();
-            crate::v5_io::le_u64(&b, 48)
+            crate::store::v5::le_u64(&b, 48)
         };
         small_v5(s.path(0));
         patch_bytes(s.path(0), dir(s.path(0)), &99u32.to_le_bytes());
@@ -2476,15 +2478,15 @@ mod tests {
             ParallelSparseReader::new(s.path(0)).unwrap(),
             ParallelSparseReader::new(s.path(1)).unwrap(),
         );
-        assert_eq!(a.cell_id_hash(), Some(crate::v5_io::cell_id_hash(&ids)));
+        assert_eq!(a.cell_id_hash(), Some(crate::store::v5::cell_id_hash(&ids)));
         assert_eq!(b.cell_id_hash(), None);
-        assert!(crate::v5_io::check_same_cells(&[&a, &b]).is_err());
+        assert!(crate::store::v5::check_same_cells(&[&a, &b]).is_err());
 
-        crate::v5_io::set_cell_ids(&[s.path(1)], &ids).unwrap();
+        crate::store::v5::set_cell_ids(&[s.path(1)], &ids).unwrap();
         let b = ParallelSparseReader::new(s.path(1)).unwrap();
-        crate::v5_io::check_same_cells(&[&a, &b]).unwrap();
+        crate::store::v5::check_same_cells(&[&a, &b]).unwrap();
         assert_eq!(b.read_cells_parallel(&[0, 1]).unwrap().len(), 2);
-        assert!(crate::v5_io::set_cell_ids(&[s.path(1)], &ids[..1]).is_err());
+        assert!(crate::store::v5::set_cell_ids(&[s.path(1)], &ids[..1]).is_err());
     }
 
     /// TF-IDF reads `ln1p(x / lib * scale * n / total_f)` in both orientations.
@@ -2495,7 +2497,7 @@ mod tests {
         let [dp, _, _] = allele_layers(n_cells, n_genes);
         let mut w = CellGeneSparseWriter::new(s.path(0), true, n_cells, n_genes, 0.0)
             .unwrap()
-            .with_kinds(crate::v5_io::FeatureKind::Peak, NormKind::LogCpm)
+            .with_kinds(crate::store::v5::FeatureKind::Peak, NormKind::LogCpm)
             .unwrap();
         for (c, row) in dp.iter().enumerate() {
             let idx: Vec<u32> = (0..n_genes as u32)
@@ -2505,11 +2507,11 @@ mod tests {
             w.write_cell_layers(c, &idx, &[&vals], true).unwrap();
         }
         w.finalise().unwrap();
-        crate::gene_file_io::write_gene_file(s.path(0), s.path(1), None, false).unwrap();
+        crate::store::gene_file::write_gene_file(s.path(0), s.path(1), None, false).unwrap();
 
         let genes = ParallelSparseReader::new(s.path(1)).unwrap();
-        let idf = crate::v5_io::tf_idf_weights(&genes, None).unwrap();
-        crate::v5_io::set_tf_idf(&[s.path(0), s.path(1)], &idf, 1e4).unwrap();
+        let idf = crate::store::v5::tf_idf_weights(&genes, None).unwrap();
+        crate::store::v5::set_tf_idf(&[s.path(0), s.path(1)], &idf, 1e4).unwrap();
 
         let lib: Vec<f32> = dp.iter().map(|r| r.iter().sum::<u32>() as f32).collect();
         let total: Vec<f64> = (0..n_genes)

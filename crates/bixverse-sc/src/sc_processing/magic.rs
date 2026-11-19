@@ -52,7 +52,7 @@ use std::time::Instant;
 use crate::mc_generation::seacells::compute_diffusion_kernel;
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::{csr_matmul_dense_block, normalise_csr_rows_l1};
-use bixverse_sc_data::data_io::SingleCellReading;
+use bixverse_sc_data::store::reader::SingleCellReading;
 
 ////////////
 // Consts //
@@ -874,8 +874,10 @@ mod tests {
     // Streaming path //
     ////////////////////
 
-    use bixverse_sc_data::data_io::{
-        CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+    use bixverse_sc_data::store::{
+        chunk::{CscGeneChunk, RawCounts},
+        reader::ParallelSparseReader,
+        writer::CellGeneSparseWriter,
     };
 
     /// Scratch store that removes itself on drop.
@@ -1168,7 +1170,7 @@ mod tests {
     /// A cell-based store must be rejected rather than silently misread.
     #[test]
     fn test_streaming_rejects_cell_based_store() {
-        use bixverse_sc_data::data_io::CsrCellChunk;
+        use bixverse_sc_data::store::chunk::CsrCellChunk;
 
         let store = TempStore::new("cellbased");
         let mut writer =

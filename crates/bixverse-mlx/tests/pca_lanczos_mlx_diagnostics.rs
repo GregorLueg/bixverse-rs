@@ -32,7 +32,7 @@ use bixverse_mlx::linalg::lanczos::sparse_svd_lanczos_mlx;
 use bixverse_mlx::linalg::rand_svd::{RandSvdMlxParams, randomised_sparse_svd_mlx};
 use bixverse_sc::sc_processing::knn::generate_knn_kmknn;
 use bixverse_sc::sc_processing::pca::{SingleCellPcaParams, sparse_pca_accelerator_input};
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 
 /// Principal components, as in the R bench.
 const N_PCS: usize = 30;

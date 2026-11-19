@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use crate::ann_store::{AnnFile, NodeKind};
-use crate::h5ad_io::{H5ADFormat, RawDataSlot};
+use crate::h5::ann_store::{AnnFile, NodeKind};
+use crate::h5::h5ad::{H5ADFormat, RawDataSlot};
 use crate::prelude::*;
 
 ////////////

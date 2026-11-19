@@ -2,7 +2,7 @@
 //! `r_synthetic.rs`. The generators live in `bixverse-sc-data`; this only
 //! hands their buffers to numpy. Every index comes back 0-based.
 
-use bixverse_sc_data::sc_synthetic_data::{
+use bixverse_sc_data::synthetic::{
     CellSweepSyntheticParams, CellTypeConfig, DialogueSyntheticParams, create_adt_synthetic_data,
     create_cellsweep_synthetic_data, create_celltype_sparse_csr_data,
     create_dialogue_synthetic_data, generate_sample_labels, parse_sample_bias,

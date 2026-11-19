@@ -58,7 +58,7 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::cellsweep::{
     CellSweepParams, CellSweepSample, run_cellsweep,
 };

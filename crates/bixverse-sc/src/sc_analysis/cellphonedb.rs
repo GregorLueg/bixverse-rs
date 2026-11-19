@@ -764,7 +764,7 @@ where
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use rand::prelude::*;
 
     /// CSC (cells, genes) from dense columns, norm values in `data_2`.

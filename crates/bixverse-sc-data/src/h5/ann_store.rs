@@ -3,7 +3,7 @@
 //! The ingest loops only ever open a file, take 1-D arrays (`indptr`,
 //! `indices`, `data`) and read ranges of them, read rows of a dense `X`, and
 //! look at attributes and group members. [`AnnFile`] offers exactly that over
-//! both backends, so the loops in `h5ad_io` serve both. HDF5 reads keep going
+//! both backends, so the loops in `h5::h5ad` serve both. HDF5 reads keep going
 //! through [`H5ChunkedReader`], Zarr reads through `zarrs`, which decodes
 //! chunks in parallel itself. Values convert through [`H5Elem`] whatever the
 //! stored type.
@@ -22,10 +22,10 @@ use zarrs::filesystem::FilesystemStore;
 #[cfg(feature = "zarr")]
 use zarrs::group::Group as ZGroup;
 
-use crate::h5_10x_io::read_string_dataset;
-use crate::h5_chunked::{H5ChunkedReader, H5Elem};
+use crate::h5::chunked::{H5ChunkedReader, H5Elem};
 #[cfg(feature = "zarr")]
-use crate::h5ad_frame_io::{ColumnData, to_r_int};
+use crate::h5::h5ad_frame::{ColumnData, to_r_int};
+use crate::h5::tenx::read_string_dataset;
 use crate::prelude::*;
 
 /// A Zarr array on the local filesystem.
@@ -582,9 +582,9 @@ fn zread<T: H5Elem>(arr: &ZArray, subset: Vec<Range<u64>>) -> Result<Vec<T>, ScD
 #[cfg(all(test, feature = "zarr"))]
 mod tests {
     use super::*;
-    use crate::h5_scan::{detect_raw_count_slot, get_h5ad_dimensions};
-    use crate::h5ad_frame_io::read_h5ad_frame;
-    use crate::h5ad_io::{RawDataSlot, write_h5_counts};
+    use crate::h5::h5ad::{RawDataSlot, write_h5_counts};
+    use crate::h5::h5ad_frame::read_h5ad_frame;
+    use crate::h5::scan::{detect_raw_count_slot, get_h5ad_dimensions};
     use std::path::PathBuf;
 
     /// anndata-written fixtures, `python/dev/gen_anndata_fixture.py`.

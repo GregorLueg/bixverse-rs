@@ -5,7 +5,7 @@
 //! Gradient boosting has no GPU path and errors.
 
 use bixverse_sc::sc_analysis::scenic::ScenicParams;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_gpu::scenic_gpu::{
     ScenicGpuParams, run_scenic_grn_gpu, run_scenic_grn_in_memory_gpu, run_scenic_grn_streaming_gpu,
 };

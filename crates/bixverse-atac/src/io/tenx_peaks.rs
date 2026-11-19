@@ -11,16 +11,16 @@ use std::path::Path;
 
 use rustc_hash::FxHashMap;
 
-use bixverse_sc_data::ann_store::AnnFile;
-use bixverse_sc_data::data_io::{CellOnFileQuality, MinCellQuality};
-use bixverse_sc_data::gene_file_io::write_gene_file;
-use bixverse_sc_data::h5_10x_io::{
+use bixverse_sc_data::h5::ann_store::AnnFile;
+use bixverse_sc_data::h5::tenx::{
     TenxVersion, resolve_tenx_version, validate_feature_types_tenx, write_h5_tenx_streaming,
 };
-use bixverse_sc_data::interval_index::{
+use bixverse_sc_data::store::gene_file::write_gene_file;
+use bixverse_sc_data::store::interval_index::{
     Arm, FeatureInterval, GenomeIntervals, attach_interval_index,
 };
-use bixverse_sc_data::v5_io::{FeatureKind, set_cell_ids, set_feature_kind};
+use bixverse_sc_data::store::quality::{CellOnFileQuality, MinCellQuality};
+use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
 
 use crate::prelude::*;
 use crate::processing::lsi::TF_IDF_SCALE;

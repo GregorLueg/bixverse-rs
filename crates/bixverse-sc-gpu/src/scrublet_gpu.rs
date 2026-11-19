@@ -781,7 +781,7 @@ mod tests {
     use bixverse_sc::sc_processing::knn::KnnParams;
     use bixverse_sc::sc_processing::pca::PcaSolver;
     use bixverse_sc::sc_processing::scrublet::{Scrublet, ScrubletParams};
-    use bixverse_sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+    use bixverse_sc_data::store::{reader::ParallelSparseReader, writer::CellGeneSparseWriter};
     use cubecl::wgpu::WgpuDevice;
 
     const TEST_CELLS: usize = 600;

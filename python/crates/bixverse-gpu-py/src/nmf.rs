@@ -10,7 +10,10 @@ use bixverse_gpu::methods_gpu::nmf_consensus_gpu::{
     nmf_single_run_sparse_gpu,
 };
 use bixverse_sc::prelude::CompressedSparseData2;
-use bixverse_sc_data::data_io::{DataLayerReturn, ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::{
+    chunk::DataLayerReturn,
+    reader::{ParallelSparseReader, SingleCellReading},
+};
 use indexmap::IndexSet;
 use numpy::PyReadonlyArray1;
 use py_common::convert::{csr_from_parts, index_vec};

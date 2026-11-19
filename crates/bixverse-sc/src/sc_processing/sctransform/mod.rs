@@ -24,7 +24,7 @@
 //! this method. PCA on the residuals is a PCA entry point and sits in
 //! [`crate::sc_processing::pca`]; regenerating a cell-major store
 //! from a gene-major one is a store-format operation, useful beyond this
-//! method, and sits in [`bixverse_sc_data::bin_merge_io`].
+//! method, and sits in [`bixverse_sc_data::store::merge`].
 //!
 //! Every stage bar the subsample fit is a per-gene reduction, so memory is flat
 //! in the cell count. That is the difference from the R implementation, which

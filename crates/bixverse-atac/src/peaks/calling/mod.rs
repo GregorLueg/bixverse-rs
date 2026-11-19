@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::{Mmap, MmapOptions};
 
-use bixverse_sc_data::interval_index::FeatureInterval;
+use bixverse_sc_data::store::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 

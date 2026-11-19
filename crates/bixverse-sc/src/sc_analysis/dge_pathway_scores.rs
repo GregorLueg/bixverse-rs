@@ -1721,8 +1721,8 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
-    use bixverse_sc_data::gene_file_io::write_gene_file;
+    use bixverse_sc_data::store::gene_file::write_gene_file;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
     /// Scratch store that removes itself on drop.
     struct TempStore(std::path::PathBuf);

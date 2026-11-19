@@ -25,10 +25,10 @@ use bixverse_atac::processing::lsi::{
 use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::parse_pca_solver;
-use bixverse_sc_data::data_io::ParallelSparseReader;
-use bixverse_sc_data::gene_file_io::GENE_FILE_BYTES_PER_NNZ;
-use bixverse_sc_data::interval_index::FeatureInterval;
-use bixverse_sc_data::v5_io::parse_feature_kind;
+use bixverse_sc_data::store::gene_file::GENE_FILE_BYTES_PER_NNZ;
+use bixverse_sc_data::store::interval_index::FeatureInterval;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
+use bixverse_sc_data::store::v5::parse_feature_kind;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
 use py_common::convert::{f64_array, from_py, index_vec, mat_array, mat_view, u32_array};
 use py_common::error::BvErr;

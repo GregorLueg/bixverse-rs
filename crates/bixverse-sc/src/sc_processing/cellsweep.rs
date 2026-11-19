@@ -41,7 +41,7 @@ use crate::prelude::*;
 use crate::sc_utils::simd::ln_dot_simd;
 use bixverse_core::core::math::vector_helpers::quantile_sorted;
 use bixverse_core::utils::simd::sum_simd_f64;
-use bixverse_sc_data::data_io::CellGeneSparseWriter;
+use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
 ////////////
 // Consts //
@@ -62,7 +62,7 @@ const ALPHA_CAP_SLACK: f64 = 1e-6;
 /// Quantile of the per-cell `|delta f|` used for the convergence check.
 const F_CONVERGENCE_QUANTILE: f64 = 0.9;
 
-pub use bixverse_sc_data::sc_synthetic_data::MIN_EMPTY_DROPLETS;
+pub use bixverse_sc_data::synthetic::MIN_EMPTY_DROPLETS;
 
 /// Empty droplets below which a frozen ambient profile is worth a warning.
 pub const RECOMMENDED_MIN_EMPTY_DROPLETS: usize = 10_000;

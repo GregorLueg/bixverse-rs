@@ -40,7 +40,7 @@ use bixverse_rs::core::math::pca_svd::compute_pc_scores;
 use bixverse_rs::core::math::sparse::{BlockLanczosParams, sparse_svd_lanczos};
 use bixverse_rs::gpu::linalg::sparse_lanczos_gpu::sparse_svd_lanczos_gpu;
 use bixverse_rs::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
-use bixverse_rs::single_cell::sc_data::data_io::ParallelSparseReader;
+use bixverse_rs::single_cell::sc_data::store::reader::ParallelSparseReader;
 use bixverse_rs::single_cell::sc_processing::knn::generate_knn_kmknn;
 use bixverse_rs::single_cell::sc_processing::pca::{
     SingleCellPcaParams, sparse_pca_accelerator_input,

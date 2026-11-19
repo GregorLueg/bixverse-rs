@@ -17,7 +17,7 @@
 use crate::mc_analysis::as_csc;
 use crate::prelude::*;
 use crate::sc_analysis::hotspot::{HotSpotGeneRes, HotSpotPairRes, HotSpotParams, Hotspot};
-use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
 /////////////
 // Helpers //
@@ -141,8 +141,10 @@ mod tests {
     use faer::Mat;
 
     use crate::sc_analysis::hotspot::{HotSpotGraphParams, hotspot_gene_clusters};
-    use bixverse_sc_data::data_io::{
-        CellGeneSparseWriter, CscGeneChunk, CsrCellChunk, ParallelSparseReader, RawCounts,
+    use bixverse_sc_data::store::{
+        chunk::{CscGeneChunk, CsrCellChunk, RawCounts},
+        reader::ParallelSparseReader,
+        writer::CellGeneSparseWriter,
     };
 
     const N_CELLS: usize = 24;

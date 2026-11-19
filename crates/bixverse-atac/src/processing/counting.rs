@@ -11,10 +11,12 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use bixverse_sc_data::data_io::CellGeneSparseWriter;
-use bixverse_sc_data::gene_file_io::write_gene_file;
-use bixverse_sc_data::interval_index::{FeatureInterval, GenomeIntervals, attach_interval_index};
-use bixverse_sc_data::v5_io::{FeatureKind, set_cell_ids, set_feature_kind};
+use bixverse_sc_data::store::gene_file::write_gene_file;
+use bixverse_sc_data::store::interval_index::{
+    FeatureInterval, GenomeIntervals, attach_interval_index,
+};
+use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
+use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
 use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
 use crate::peaks::regions::{ChromRegions, RegionIndex};

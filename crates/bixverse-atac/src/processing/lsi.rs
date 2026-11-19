@@ -1,6 +1,6 @@
 //! TF-IDF and latent semantic indexing (LSI) on an ATAC store.
 //!
-//! The TF-IDF is store metadata (`v5_io::set_tf_idf`): the norm layer of a
+//! The TF-IDF is store metadata (`store::v5::set_tf_idf`): the norm layer of a
 //! TF-IDF store reads as `ln1p(x / lib * scale * idf)`, Signac `RunTFIDF`
 //! method 1. LSI is then an uncentred, unscaled truncated SVD of that layer
 //! over the top features, with the left singular vectors z-scored per
@@ -20,8 +20,8 @@ use rayon::prelude::*;
 
 use bixverse_core::core::math::vector_helpers::pearson_correlation;
 use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
-use bixverse_sc_data::data_io::{norm_value, peek_target_size};
-use bixverse_sc_data::v5_io::{NormKind, set_tf_idf, tf_idf_weights};
+use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
+use bixverse_sc_data::store::{chunk::norm_value, reader::peek_target_size};
 
 use crate::prelude::*;
 
@@ -409,8 +409,8 @@ pub fn lsi_on_matrix(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
-    use bixverse_sc_data::gene_file_io::write_gene_file;
+    use bixverse_sc_data::store::gene_file::write_gene_file;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
     use crate::processing::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
 

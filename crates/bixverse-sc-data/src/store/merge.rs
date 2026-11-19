@@ -8,11 +8,12 @@ use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::{
-    CellGeneSparseWriter, CsrCellChunk, ParallelSparseReader, RawCounts, SingleCellReading,
-    peek_target_size, write_cell_chunks_parallel,
-};
 use crate::prelude::*;
+use crate::store::{
+    chunk::{CsrCellChunk, RawCounts},
+    reader::{ParallelSparseReader, SingleCellReading, peek_target_size},
+    writer::{CellGeneSparseWriter, write_cell_chunks_parallel},
+};
 
 ////////////
 // Consts //

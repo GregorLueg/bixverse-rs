@@ -3,7 +3,7 @@
 //!
 //! Twin of [`crate::sc_analysis::lm_activity`] that walks the CSR rows of an
 //! in-memory metacell matrix directly, since
-//! [`InMemorySparseReader`](bixverse_sc_data::in_memory_io::InMemorySparseReader)
+//! [`InMemorySparseReader`](bixverse_sc_data::store::in_memory::InMemorySparseReader)
 //! only serves the gene-major view. This also keeps the normalised layer at
 //! f32 instead of the f16 the disk chunks carry.
 

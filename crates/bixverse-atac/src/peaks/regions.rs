@@ -11,7 +11,7 @@ use std::path::Path;
 use flate2::read::MultiGzDecoder;
 use rustc_hash::FxHashMap;
 
-use bixverse_sc_data::interval_index::{Arm, FeatureInterval};
+use bixverse_sc_data::store::interval_index::{Arm, FeatureInterval};
 
 use crate::prelude::*;
 

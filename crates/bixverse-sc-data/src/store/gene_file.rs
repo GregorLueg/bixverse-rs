@@ -18,9 +18,9 @@ use rayon::prelude::*;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::*;
 use crate::prelude::*;
-use crate::v4_io::{GENE_NORM_LUT_COUNTS, gene_norm_table};
+use crate::store::v4::{GENE_NORM_LUT_COUNTS, gene_norm_table};
+use crate::store::{chunk::*, writer::*};
 use bixverse_sparse::sparse::ScatterPtr;
 
 /// Cells decoded per read inside one worker's chunk.

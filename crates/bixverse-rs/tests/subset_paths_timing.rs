@@ -13,8 +13,10 @@ use std::time::Instant;
 use indexmap::IndexSet;
 use rand::prelude::*;
 
-use bixverse_rs::single_cell::sc_data::data_io::{ParallelSparseReader, SingleCellReading};
-use bixverse_rs::single_cell::sc_data::in_memory_io::{InMemorySparseReader, read_cell_subset_csc};
+use bixverse_rs::single_cell::sc_data::store::in_memory::{
+    InMemorySparseReader, read_cell_subset_csc,
+};
+use bixverse_rs::single_cell::sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use bixverse_rs::single_cell::sc_processing::hvg::get_hvg_vst;
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{

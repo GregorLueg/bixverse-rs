@@ -1,6 +1,6 @@
 //! Multi-10x loading: scan multiple 10x CellRanger h5 files, apply global gene
 //! QC, and write all cells into a single binary file. Mirrors the h5ad and mtx
-//! multi-loader designs and reuses the 10x layout helpers from `h5_10x_io`.
+//! multi-loader designs and reuses the 10x layout helpers from `h5::tenx`.
 //!
 //! 10x stores the matrix as `genes x cells` in CSC, with `indptr` over cells
 //! and `indices` holding gene rows, so each cell's entries are contiguous and
@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::*;
-use crate::h5_10x_io::{TenxVersion, de_tenx_version, validate_feature_types_tenx};
-use crate::h5_chunked::H5ChunkedReader;
-use crate::h5_filters::check_tenx_filters;
-use crate::h5ad_io::write_h5_cell_major_cells;
+use crate::h5::chunked::H5ChunkedReader;
+use crate::h5::filters::check_tenx_filters;
+use crate::h5::h5ad::write_h5_cell_major_cells;
+use crate::h5::tenx::{TenxVersion, de_tenx_version, validate_feature_types_tenx};
 use crate::prelude::*;
+use crate::store::{quality::*, writer::*};
 
 ////////////////
 // File tasks //
@@ -35,7 +35,7 @@ use crate::prelude::*;
 /// Per-file task descriptor for multi-10x loading
 ///
 /// Deserialises from the keys of one R `prescan_tenx_h5_files()` file task.
-/// `version` goes through [parse_tenx_version](crate::h5_10x_io::parse_tenx_version).
+/// `version` goes through [parse_tenx_version](crate::h5::tenx::parse_tenx_version).
 #[derive(Deserialize)]
 pub struct TenxFileTask {
     /// Experimental identifier

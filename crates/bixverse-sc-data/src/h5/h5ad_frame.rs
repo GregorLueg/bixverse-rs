@@ -1,5 +1,5 @@
 //! Decoding of h5ad dataframes and plain HDF5 datasets into memory, plus a
-//! minimal h5ad writer. `obs_var_io` builds its Parquet export on top of the
+//! minimal h5ad writer. `obs_var` builds its Parquet export on top of the
 //! decoders.
 
 use hdf5::types::{TypeDescriptor, VarLenUnicode};
@@ -9,8 +9,8 @@ use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::ann_store::{AnnFile, NodeKind};
-use crate::h5_10x_io::read_string_dataset;
+use crate::h5::ann_store::{AnnFile, NodeKind};
+use crate::h5::tenx::read_string_dataset;
 use crate::prelude::*;
 
 ///////////

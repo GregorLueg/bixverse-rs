@@ -58,16 +58,16 @@ use bixverse_rs::single_cell::sc_batch_correction::{
     harmony_core::HARMONY_KMEANS_ITERS, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
     seurat_rpca::SeuratRpcaParams,
 };
-use bixverse_rs::single_cell::sc_data::{
-    bin_merge_io::BinMergeTask, data_io::MinCellQuality, mtx_multifile_io::MtxFileTask,
-    sc_synthetic_data::CellTypeConfig,
-};
 #[cfg(feature = "h5")]
 use bixverse_rs::single_cell::sc_data::{
-    h5_10x_io::parse_tenx_version,
-    h5_10x_multifile_io::TenxFileTask,
-    h5ad_io::{RawDataSlot, parse_h5ad_format, parse_raw_slot},
-    h5ad_multifile_io::H5adFileTask,
+    h5::h5ad::{RawDataSlot, parse_h5ad_format, parse_raw_slot},
+    h5::h5ad_multifile::H5adFileTask,
+    h5::tenx::parse_tenx_version,
+    h5::tenx_multifile::TenxFileTask,
+};
+use bixverse_rs::single_cell::sc_data::{
+    mtx::multifile::MtxFileTask, store::merge::BinMergeTask, store::quality::MinCellQuality,
+    synthetic::CellTypeConfig,
 };
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{AprModel, AprParams};
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::stream::AprGroupedFit;

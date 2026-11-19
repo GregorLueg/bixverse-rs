@@ -29,10 +29,10 @@ use std::{
 };
 use thousands::Separable;
 
-use crate::data_io::*;
-use crate::gene_file_io::write_gene_file;
 use crate::prelude::*;
-use crate::v5_io::NormKind;
+use crate::store::gene_file::write_gene_file;
+use crate::store::v5::NormKind;
+use crate::store::{chunk::*, writer::*};
 
 ////////////
 // Consts //

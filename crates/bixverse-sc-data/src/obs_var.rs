@@ -20,9 +20,9 @@ use rustc_hash::FxHashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ann_store::AnnFile;
-use crate::h5_10x_io::{TenxVersion, read_string_dataset};
-use crate::h5ad_frame_io::{ColumnData, H5adFrame, read_frame};
+use crate::h5::ann_store::AnnFile;
+use crate::h5::h5ad_frame::{ColumnData, H5adFrame, read_frame};
+use crate::h5::tenx::{TenxVersion, read_string_dataset};
 use crate::prelude::*;
 
 /// Rows per Parquet row group. DuckDB parallelises a scan over row groups, so

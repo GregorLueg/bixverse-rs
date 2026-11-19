@@ -390,7 +390,7 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
 ///
 /// The twin of [get_pseudo_bulked_counts_dense], which reads cell chunks and
 /// therefore needs a cell-major store and always sweeps every gene. This one
-/// reads gene chunks, so it runs on an [bixverse_sc_data::in_memory_io::InMemorySparseReader]
+/// reads gene chunks, so it runs on an [bixverse_sc_data::store::in_memory::InMemorySparseReader]
 /// as happily as on a file, and it only touches the genes asked for. Both
 /// matter to anything that has already narrowed down to a signature.
 ///
@@ -528,7 +528,7 @@ pub fn pseudo_bulk_genes_dense<S: SingleCellReading>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
     //////////////////////
     // Index remapping //

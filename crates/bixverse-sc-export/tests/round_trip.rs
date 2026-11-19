@@ -2,9 +2,9 @@
 //! through the ingest reader: `X`, obs and var must come back as anndata wrote
 //! them.
 
-use bixverse_sc_data::ann_store::AnnFile;
-use bixverse_sc_data::data_io::{MinCellQuality, ParallelSparseReader};
-use bixverse_sc_data::h5ad_io::{RawDataSlot, write_h5_counts};
+use bixverse_sc_data::h5::ann_store::AnnFile;
+use bixverse_sc_data::h5::h5ad::{RawDataSlot, write_h5_counts};
+use bixverse_sc_data::store::{quality::MinCellQuality, reader::ParallelSparseReader};
 use bixverse_sc_export::ad_export::{Column, ColumnData, ObsTable, VarTable};
 use bixverse_sc_export::prelude::*;
 use std::path::{Path, PathBuf};

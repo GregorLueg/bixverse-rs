@@ -36,7 +36,7 @@ pub(crate) mod twins {
     use bixverse_sc::sc_batch_correction::harmony_v2::HarmonyParamsV2;
     use bixverse_sc::sc_processing::knn::pad_knn_rows;
     use bixverse_sc::sc_processing::pca::SingleCellPcaParams;
-    use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+    use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
     use bixverse_sc_gpu::fast_clusters_gpu::KMeansGpuSpec;
     use bixverse_sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
     use bixverse_sc_gpu::knn_gpu::KnnParamsGpu;

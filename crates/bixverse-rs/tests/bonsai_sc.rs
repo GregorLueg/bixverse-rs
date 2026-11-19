@@ -19,9 +19,11 @@ use bixverse_rs::single_cell::sc_analysis::bonsai::{
     BonsaiLayout, BonsaiScParams, SANITY_GENE_CHUNK, bonsai_layout, keep_for_bonsai,
     read_count_chunk, sanity_bonsai_sc, stream_sanity,
 };
-use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+use bixverse_rs::single_cell::sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CscGeneChunk, RawCounts},
+    reader::ParallelSparseReader,
+    writer::CellGeneSparseWriter,
 };
 
 ///////////////

@@ -20,8 +20,8 @@ use bixverse_sc::sc_processing::residual_fit::{
 };
 use bixverse_sc::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_sc::sc_processing::sctransform::stream::SctStreamOpts;
-use bixverse_sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use numpy::{
     IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };

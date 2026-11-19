@@ -12,16 +12,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::H5_CELL_SLICE_SIZE;
-use crate::ann_store::{AnnFile, NodeKind};
-use crate::data_io::{CellGeneSparseWriter, CellOnFileQuality};
-use crate::data_io::{
+use crate::h5::H5_CELL_SLICE_SIZE;
+use crate::h5::ann_store::{AnnFile, NodeKind};
+use crate::h5::filters::{check_h5_filters, check_h5ad_filters};
+use crate::prelude::*;
+use crate::store::gene_file::plan_phases;
+use crate::store::writer::{
     INDEX_DROPPED, compress_cell_row, dense_index_map, write_cell_chunks_built, write_cell_rows,
     write_cell_rows_flat,
 };
-use crate::gene_file_io::plan_phases;
-use crate::h5_filters::{check_h5_filters, check_h5ad_filters};
-use crate::prelude::*;
+use crate::store::{quality::CellOnFileQuality, writer::CellGeneSparseWriter};
 
 ////////////
 // Consts //
@@ -509,7 +509,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 /// * `raw_slot` - Where to find the raw counts in the h5ad object, see
 ///   [RawDataSlot]
 /// * `max_nnz_in_memory` - Entries held at once by the CSC transpose, the
-///   same unit as [crate::gene_file_io::write_gene_file]'s budget. `None`
+///   same unit as [crate::store::gene_file::write_gene_file]'s budget. `None`
 ///   transposes in one phase. Ignored for the other layouts.
 /// * `verbose` - Controls verbosity of the function.
 ///

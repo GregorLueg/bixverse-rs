@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::*;
-use crate::mtx_io::{MtxSource, parse_block};
+use crate::mtx::{MtxSource, parse_block};
 use crate::prelude::*;
+use crate::store::{quality::*, writer::*};
 
 ////////////////
 // File tasks //

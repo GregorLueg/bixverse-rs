@@ -409,7 +409,7 @@ mod tests {
     /// x86 runner does not agree.
     ///
     /// So nothing that is stored or compared across machines may use this.
-    /// `data_io` and `in_memory_io` accumulate `avg_exp` in f32 and narrow once,
+    /// `store::chunk` and `store::in_memory` accumulate `avg_exp` in f32 and narrow once,
     /// which is what `pca.rs` already did and what makes the two platforms
     /// agree.
     #[test]

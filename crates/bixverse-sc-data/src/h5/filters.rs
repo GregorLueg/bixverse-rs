@@ -16,8 +16,8 @@ use hdf5::File;
 use hdf5::filters::Filter;
 
 use crate::errors::ScDataErrors;
-use crate::h5_10x_io::TenxVersion;
-use crate::h5ad_io::{H5ADFormat, RawDataSlot};
+use crate::h5::h5ad::{H5ADFormat, RawDataSlot};
+use crate::h5::tenx::TenxVersion;
 
 /// Name of an HDF5 filter id
 ///

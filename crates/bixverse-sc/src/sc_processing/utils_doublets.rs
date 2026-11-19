@@ -2850,7 +2850,7 @@ mod tests {
     /// sign, on a three-cell-type store.
     #[test]
     fn test_pca_observed_covariance_matches_lanczos() {
-        use bixverse_sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+        use bixverse_sc_data::store::{reader::ParallelSparseReader, writer::CellGeneSparseWriter};
 
         let (n_cells, n_genes, no_pcs) = (300, 30, 3);
         let hash = |a: usize, b: usize| ((a * 2654435761 + b * 40503) % 1000) as f32 / 1000.0;

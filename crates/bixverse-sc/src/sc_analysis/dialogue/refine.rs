@@ -724,7 +724,7 @@ pub(crate) fn run_step3<S: SingleCellReading>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
     /// A small gene-major store: 12 cells, 5 genes, mixed sparsity.
     fn tiny_store() -> CompressedSparseData2<u32, f32> {

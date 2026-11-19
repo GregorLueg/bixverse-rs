@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
 use bixverse_sc_data::errors::ScDataErrors;
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

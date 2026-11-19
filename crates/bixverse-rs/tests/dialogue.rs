@@ -21,8 +21,8 @@ use bixverse_rs::single_cell::mc_analysis::dialogue_mc::dialogue_metacells;
 use bixverse_rs::single_cell::sc_analysis::dialogue::{
     DialogueParams, DialogueResult, PmdParams, dialogue_run,
 };
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
-use bixverse_rs::single_cell::sc_data::sc_synthetic_data::{
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::synthetic::{
     DialogueSyntheticData, DialogueSyntheticParams, create_dialogue_synthetic_data,
 };
 

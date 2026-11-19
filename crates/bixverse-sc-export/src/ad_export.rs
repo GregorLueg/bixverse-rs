@@ -5,7 +5,10 @@
 //! against the matrix shape before the output is created, so bad input fails
 //! before the counts are streamed, not after.
 
-use bixverse_sc_data::data_io::{DataLayerReturn, ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::{
+    chunk::DataLayerReturn,
+    reader::{ParallelSparseReader, SingleCellReading},
+};
 #[cfg(feature = "zarr")]
 use scx_core::api::write::ZarrAdBuilder;
 use scx_core::api::write::{H5AdBuilder, H5AdOptions};

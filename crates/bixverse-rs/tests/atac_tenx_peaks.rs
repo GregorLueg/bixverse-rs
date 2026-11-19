@@ -4,10 +4,10 @@
 
 use bixverse_rs::single_cell::atac::io::tenx_peaks::tenx_peaks_to_store;
 use bixverse_rs::single_cell::atac::processing::lsi::{TF_IDF_SCALE, set_tf_idf_on_store};
-use bixverse_rs::single_cell::sc_data::data_io::ParallelSparseReader;
-use bixverse_rs::single_cell::sc_data::h5_10x_io::{TenxFeatures, TenxVersion, write_tenx_h5};
+use bixverse_rs::single_cell::sc_data::h5::tenx::{TenxFeatures, TenxVersion, write_tenx_h5};
 use bixverse_rs::single_cell::sc_data::prelude::*;
-use bixverse_rs::single_cell::sc_data::v5_io::{FeatureKind, NormKind, cell_id_hash};
+use bixverse_rs::single_cell::sc_data::store::reader::ParallelSparseReader;
+use bixverse_rs::single_cell::sc_data::store::v5::{FeatureKind, NormKind, cell_id_hash};
 use hdf5::types::VarLenUnicode;
 
 /// Scratch directory removed on drop.

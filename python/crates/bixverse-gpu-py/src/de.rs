@@ -1,7 +1,7 @@
 //! NEBULA with the per-gene fits on the GPU, the twin of `rs_nebula_sc_gpu`.
 
 use bixverse_sc::sc_analysis::nebula::NebulaScParams;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_gpu::nebula_gpu::run_nebula_gpu;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::{from_py, index_vec};

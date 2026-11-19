@@ -24,7 +24,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use bixverse_core::core::base::info::{BinningStrategy, parse_bin_strategy_type};
 use bixverse_core::core::base::loess::*;
-use bixverse_sc_data::in_memory_io::CellSubset;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ////////////
 // Consts //
@@ -2591,7 +2591,7 @@ pub fn select_residual_hvg(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
     /// RAII guard that removes a test's temp store even if an assert fails.
     struct TempStore(std::path::PathBuf);

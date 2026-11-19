@@ -8,32 +8,33 @@
 
 use std::path::{Path, PathBuf};
 
-use bixverse_sc_data::archive_io::{archive_cell_file, restore_archive};
-use bixverse_sc_data::bin_merge_io::{BinMergeTask, merge_sc_bin_files};
-use bixverse_sc_data::data_io::{
-    CellQuality, MinCellQuality, ParallelSparseReader, SingleCellReading, peek_file_version,
+use bixverse_sc_data::h5::h5ad::{
+    RawDataSlot, parse_raw_slot, stream_h5_counts, write_h5_counts, write_h5_normalised_counts,
 };
-use bixverse_sc_data::gene_file_io::{GENE_FILE_BYTES_PER_NNZ, write_gene_file};
-use bixverse_sc_data::h5_10x_io::{
+use bixverse_sc_data::h5::h5ad_multifile::{self, H5adFileTask};
+use bixverse_sc_data::h5::scan::{detect_raw_count_slot, get_h5ad_dimensions, read_h5_strings};
+use bixverse_sc_data::h5::tenx::{
     TenxFeatures, TenxVersion, detect_tenx_version, get_tenx_dimensions, parse_tenx_version,
     stream_h5_tenx_counts, write_tenx_h5,
 };
-use bixverse_sc_data::h5_10x_multifile_io::{TenxFileTask, multi_10x_h5_to_file};
-use bixverse_sc_data::h5_scan::{detect_raw_count_slot, get_h5ad_dimensions, read_h5_strings};
-use bixverse_sc_data::h5ad_io::{
-    RawDataSlot, parse_raw_slot, stream_h5_counts, write_h5_counts, write_h5_normalised_counts,
-};
-use bixverse_sc_data::h5ad_multifile_io::{self, H5adFileTask};
-use bixverse_sc_data::mtx_io::MtxReader;
-use bixverse_sc_data::mtx_multifile_io::{self, MtxFileTask};
-use bixverse_sc_data::obs_var_io::{
+use bixverse_sc_data::h5::tenx_multifile::{TenxFileTask, multi_10x_h5_to_file};
+use bixverse_sc_data::mtx::MtxReader;
+use bixverse_sc_data::mtx::multifile::{self, MtxFileTask};
+use bixverse_sc_data::obs_var::{
     FrameKind, ParquetColumnType, ParquetFrameInfo, h5ad_frame_to_parquet, parse_frame_kind,
     tenx_frame_to_parquet, to_snake_case,
 };
 use bixverse_sc_data::prelude::CompressedSparseData2;
-use bixverse_sc_data::r_obj_io::write_r_counts;
-use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v5};
-use bixverse_sc_data::v5_io::set_cell_ids as v5_set_cell_ids;
+use bixverse_sc_data::r_obj::write_r_counts;
+use bixverse_sc_data::store::archive::{archive_cell_file, restore_archive};
+use bixverse_sc_data::store::gene_file::{GENE_FILE_BYTES_PER_NNZ, write_gene_file};
+use bixverse_sc_data::store::merge::{BinMergeTask, merge_sc_bin_files};
+use bixverse_sc_data::store::v4::{parse_chunk_codec, upgrade_store_to_v5};
+use bixverse_sc_data::store::v5::set_cell_ids as v5_set_cell_ids;
+use bixverse_sc_data::store::{
+    quality::{CellQuality, MinCellQuality},
+    reader::{ParallelSparseReader, SingleCellReading, peek_file_version},
+};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
 use py_common::convert::{from_py, u32_array};
@@ -652,7 +653,7 @@ pub fn multi_h5ad_to_file<'py>(
     let tasks: Vec<H5adFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
         .detach(|| {
-            h5ad_multifile_io::multi_h5ad_to_file(
+            h5ad_multifile::multi_h5ad_to_file(
                 &tasks,
                 &f_path_cells,
                 universe_size,
@@ -705,13 +706,7 @@ pub fn multi_mtx_to_file<'py>(
     let tasks: Vec<MtxFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
         .detach(|| {
-            mtx_multifile_io::multi_mtx_to_file(
-                &tasks,
-                &f_path_cells,
-                universe_size,
-                &qc,
-                verbose > 0,
-            )
+            multifile::multi_mtx_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose > 0)
         })
         .map_err(BvErr::from)?;
     let per_file = res

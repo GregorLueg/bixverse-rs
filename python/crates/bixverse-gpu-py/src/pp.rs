@@ -1,7 +1,7 @@
 //! Sparse PCA on the GPU, the twin of `rs_sc_pca_sparse_gpu`.
 
 use bixverse_sc::sc_processing::pca::SingleCellPcaParams;
-use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use bixverse_sc_gpu::pca_gpu::pca_on_sc_sparse_gpu;
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use py_common::convert::{from_py, index_vec, mat_array};

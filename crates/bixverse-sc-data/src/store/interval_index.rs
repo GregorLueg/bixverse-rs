@@ -25,9 +25,9 @@
 use rustc_hash::FxHashMap;
 use std::ops::Range;
 
-use crate::data_io::ParallelSparseReader;
 use crate::prelude::*;
-use crate::v5_io::{SectionKind, SectionWriter, rewrite_sections};
+use crate::store::reader::ParallelSparseReader;
+use crate::store::v5::{SectionKind, SectionWriter, rewrite_sections};
 
 /// Bytes per feature record in the section.
 const FEATURE_RECORD_LEN: usize = 12;
@@ -664,7 +664,9 @@ mod tests {
     /// and the chunks still read as before.
     #[test]
     fn test_attach_to_a_store_and_read_back() {
-        use crate::data_io::{CellGeneSparseWriter, CsrCellChunk, SingleCellReading};
+        use crate::store::{
+            chunk::CsrCellChunk, reader::SingleCellReading, writer::CellGeneSparseWriter,
+        };
 
         let f = features();
         let path = std::env::temp_dir().join(format!("bx_intervals_{}.bin", std::process::id()));

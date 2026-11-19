@@ -5,9 +5,9 @@
 use hdf5::File;
 use std::path::Path;
 
-use crate::h5_10x_io::*;
-use crate::h5_chunked::H5ChunkedReader;
-use crate::h5_filters::check_tenx_filters;
+use crate::h5::chunked::H5ChunkedReader;
+use crate::h5::filters::check_tenx_filters;
+use crate::h5::tenx::*;
 use crate::prelude::*;
 
 /////////////

@@ -12,7 +12,9 @@
 //! Values are raw counts. `integer` and `real` fields must hold non-negative
 //! integral values (a real `1.5` is an error, not a silent `1`); `pattern`
 //! entries count 1. `complex` fields and any symmetry other than `general`
-//! are rejected.
+//! are rejected. Multi-file loading sits in [`multifile`].
+
+pub mod multifile;
 
 use flate2::{Decompress, FlushDecompress, Status};
 use rayon::prelude::*;
@@ -27,10 +29,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::{
-    CellGeneSparseWriter, CellOnFileQuality, INDEX_DROPPED, compress_cell_row, dense_index_map,
-};
 use crate::prelude::*;
+use crate::store::{
+    quality::CellOnFileQuality,
+    writer::{CellGeneSparseWriter, INDEX_DROPPED, compress_cell_row, dense_index_map},
+};
 
 ///////////////
 // Constants //
@@ -1633,7 +1636,7 @@ impl MtxReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_io::write_cell_rows;
+    use crate::store::writer::write_cell_rows;
 
     ///////////////
     // Fixtures //

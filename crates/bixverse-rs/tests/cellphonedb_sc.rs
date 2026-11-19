@@ -14,7 +14,7 @@ use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::cellphonedb::{
     CellPhoneDbParams, LrInteraction, cellphonedb_statistical,
 };
-use bixverse_rs::single_cell::sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_rs::single_cell::sc_data::store::in_memory::InMemorySparseReader;
 
 mod cpdb_fixtures;
 use cpdb_fixtures::*;

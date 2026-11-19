@@ -136,7 +136,7 @@ mod pairwise_cor_tests {
     use super::*;
     use approx::assert_relative_eq;
     use bixverse_core::core::math::vector_helpers::{pearson_correlation, rank_vector};
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use rand::prelude::*;
 
     /// Build a CSC `cells x genes` matrix from dense gene columns.

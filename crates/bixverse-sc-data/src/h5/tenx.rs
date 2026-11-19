@@ -13,12 +13,12 @@ use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::data_io::CellOnFileQuality;
-use crate::data_io::*;
-use crate::h5_chunked::H5ChunkedReader;
-use crate::h5_filters::check_tenx_filters;
-use crate::h5ad_io::{CsrQualityStats, csr_quality_stats, write_h5_cell_major_cells};
+use crate::h5::chunked::H5ChunkedReader;
+use crate::h5::filters::check_tenx_filters;
+use crate::h5::h5ad::{CsrQualityStats, csr_quality_stats, write_h5_cell_major_cells};
 use crate::prelude::*;
+use crate::store::quality::CellOnFileQuality;
+use crate::store::{quality::*, writer::*};
 
 /////////////////
 // 10x version //

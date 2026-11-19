@@ -4,8 +4,8 @@
 //! The numerics live in `bixverse-sc-data::plotting`; this only moves
 //! buffers. Every index is 0-based.
 
-use bixverse_sc_data::data_io::ParallelSparseReader;
 use bixverse_sc_data::plotting::{extract_grouped_gene_stats, extract_norm_counts_multi};
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1};
 use py_common::convert::index_vec;
 use py_common::error::BvErr;

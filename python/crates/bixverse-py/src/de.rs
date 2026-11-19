@@ -20,7 +20,7 @@ use bixverse_sc::sc_analysis::dge_pathway_scores::{
 use bixverse_sc::sc_analysis::meld::{MeldParams, meld as meld_rs};
 use bixverse_sc::sc_analysis::milo_r::{MiloRParams, make_milor_nhoods, spatial_fdr as sfdr};
 use bixverse_sc::sc_analysis::nebula::{NebulaScParams, run_nebula};
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use edge_rs::glm::test::Tested;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;

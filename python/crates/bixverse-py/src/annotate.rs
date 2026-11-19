@@ -26,7 +26,7 @@ use bixverse_sc::sc_batch_correction::harmony::HarmonyParams;
 use bixverse_sc::sc_batch_correction::harmony_v2::HarmonyParamsV2;
 use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::SingleCellPcaParams;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
 use py_common::convert::f64_array;

@@ -57,7 +57,7 @@ pub mod single_cell {
     pub use bixverse_atac as atac;
     pub use bixverse_sc::*;
     pub use bixverse_sc_data as sc_data;
-    pub use bixverse_sc_data::{CELL_BATCH_SIZE, sc_traits};
+    pub use bixverse_sc_data::{sc_traits, store::CELL_BATCH_SIZE};
     #[cfg(feature = "export")]
     pub use bixverse_sc_export as sc_export;
 }

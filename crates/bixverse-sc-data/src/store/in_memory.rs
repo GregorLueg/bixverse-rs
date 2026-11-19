@@ -24,12 +24,14 @@ use indexmap::IndexSet;
 use num_traits::FromPrimitive;
 use rayon::prelude::*;
 
-use crate::data_io::{
-    CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts, RunSource,
-    SingleCellReading, StoreDims, cell_row_map, extend_raw_checked, read_fused,
-};
 use crate::prelude::*;
 use crate::sc_traits::F16;
+use crate::store::{
+    chunk::{
+        CscGeneChunk, CsrCellChunk, DataLayerReturn, RawCounts, RunSource, extend_raw_checked,
+    },
+    reader::{ParallelSparseReader, SingleCellReading, StoreDims, cell_row_map, read_fused},
+};
 use bixverse_sparse::sparse::transpose_sparse;
 
 //////////////////////////

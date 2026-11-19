@@ -52,8 +52,8 @@ use std::path::Path;
 
 use indexmap::IndexSet;
 
-use crate::data_io::{DataLayerReturn, ParallelSparseReader};
 use crate::prelude::*;
+use crate::store::{chunk::DataLayerReturn, reader::ParallelSparseReader};
 
 ////////////
 // Consts //

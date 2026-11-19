@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use bixverse_methods::enrichment::lm_activity::{LmMethod, LmStat, lm_activity};
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
     /// Scratch store that removes itself on drop.
     struct TempStore(std::path::PathBuf);

@@ -29,10 +29,12 @@ use bixverse_sc::sc_annotation::seurat_transfer::{
 };
 use bixverse_sc::sc_batch_correction::seurat_anchors::AnchorSet;
 use bixverse_sc::sc_processing::pca::PcaSolver;
-use bixverse_sc_data::data_io::{CellGeneSparseWriter, CsrCellChunk, ParallelSparseReader};
-use bixverse_sc_data::gene_file_io::write_gene_file;
-use bixverse_sc_data::interval_index::FeatureInterval;
-use bixverse_sc_data::v5_io::{FeatureKind, tf_idf_weights};
+use bixverse_sc_data::store::gene_file::write_gene_file;
+use bixverse_sc_data::store::interval_index::FeatureInterval;
+use bixverse_sc_data::store::v5::{FeatureKind, tf_idf_weights};
+use bixverse_sc_data::store::{
+    chunk::CsrCellChunk, reader::ParallelSparseReader, writer::CellGeneSparseWriter,
+};
 use faer::Mat;
 use rustc_hash::{FxHashMap, FxHashSet};
 

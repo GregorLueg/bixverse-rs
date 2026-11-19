@@ -14,7 +14,10 @@
 //! decompression across rayon workers; wrapping this pass in another rayon
 //! call would oversubscribe the pool with no throughput win.
 
-use bixverse_sc_data::data_io::{CsrBatch, CsrCellChunk, DataLayerReturn};
+use bixverse_sc_data::store::{
+    chunk::{CsrCellChunk, DataLayerReturn},
+    reader::CsrBatch,
+};
 
 //////////////////
 // Layer select //
