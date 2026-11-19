@@ -194,7 +194,9 @@ def test_gene_activity_matches_signac(exp):
         (names[f], c): v
         for f, c, v in ref.select("feature_idx", "cell_idx", "value").iter_rows()
     }
-    gene_ids = ga.var()["gene_id"].to_list()
+    var = ga.var()
+    assert var["gene_id"][0].startswith("ENSG") and "." not in var["gene_id"][0]
+    gene_ids = var["gene_name"].to_list()
     assert sorted(gene_ids) == sorted(names)
     m = bv.get_counts(ga, layer="raw").scipy_csr().tocoo()
     got = {

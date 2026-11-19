@@ -18,7 +18,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
-from bixverse._core.multimodal import AtacInfo, SingleCellsMultiModal
+from bixverse._core.multimodal import AtacInfo, CountMode, SingleCellsMultiModal
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import ScCache
@@ -36,7 +36,6 @@ TF_IDF_SCALE: float = 1e4
 
 MITO_CHROMS: tuple[str, ...] = ("chrM", "MT", "chrMT", "M")
 
-CountMode = Literal["insertion", "paired-insertion", "fragment"]
 
 TagSource = Literal["insertion", "fragment_start"]
 
@@ -82,6 +81,7 @@ def _write_atac_tables(
     lib_size: np.ndarray,
     nnz: np.ndarray,
     kind: Literal["peak", "tile"],
+    count_mode: CountMode,
 ) -> None:
     """Write `var_atac`, the per-cell totals to obs, and reset the ATAC state."""
     var = pl.DataFrame(
@@ -103,7 +103,7 @@ def _write_atac_tables(
             }
         )
     )
-    mm.atac = AtacInfo(kind=kind)
+    mm.atac = AtacInfo(kind=kind, count_mode=count_mode)
     mm.atac_cache = ScCache()
 
 
@@ -151,6 +151,7 @@ def add_atac_tenx(
         res["lib_size"],
         res["nnz"],
         "peak",
+        "insertion",
     )
 
 
@@ -245,6 +246,7 @@ def add_atac_fragments(
         res["lib_size"],
         res["nnz"],
         kind,
+        mode,
     )
 
 
@@ -290,14 +292,16 @@ def gene_activity(
         verbose: `0` silent, `1` normal.
 
     Returns:
-        The gene activity experiment. var holds `gene_id` (the gene name, made
-        unique), `gtf_gene_id`, `chrom`, `start`, `end`; obs's `lib_size` and
-        `nnz` are the gene activity's.
+        The gene activity experiment. var holds `gene_id` (the GTF gene ID
+        without its version, as Cell Ranger keys the RNA), `gene_name` (made
+        unique), `chrom`, `start`, `end`; obs's `lib_size` and `nnz` are
+        the gene activity's.
 
     Raises:
         FileExistsError: If a store exists at `dir_out` and `overwrite` is
             false.
-        ValueError: If `target_size` is `None` and obs has no `lib_size`.
+        ValueError: If `target_size` is `None` and obs has no `lib_size`, or
+            two gene IDs collide once their versions are stripped.
     """
     out = sc.dir / "gene_activity" if dir_out is None else Path(dir_out).expanduser()
     cells, genes = out / CELLS_BIN, out / GENES_BIN
@@ -330,10 +334,15 @@ def gene_activity(
         max_mem_gb,
         verbose,
     )
+    # Unversioned, as Cell Ranger keys the RNA, so RNA and gene activity share
+    # gene_id. `_PAR_Y` survives and keeps the chrY copies apart.
+    gene_id = pl.Series(list(r["gene_id"]), dtype=pl.String).str.replace(r"\.\d+", "")
+    if gene_id.is_duplicated().any():
+        raise ValueError("Gene IDs collide once their versions are stripped.")
     var = pl.DataFrame(
         {
-            "gene_id": pl.Series(list(r["name"]), dtype=pl.String),
-            "gtf_gene_id": pl.Series(list(r["gene_id"]), dtype=pl.String),
+            "gene_id": gene_id,
+            "gene_name": pl.Series(list(r["name"]), dtype=pl.String),
             "chrom": pl.Series(list(r["chrom"]), dtype=pl.String),
             "start": pl.Series(np.asarray(r["start"], dtype=np.int64)),
             "end": pl.Series(np.asarray(r["end"], dtype=np.int64)),
@@ -369,8 +378,10 @@ def atac_fragment_qc(
 
     Adds `atac_n_fragments`, `atac_nucleosome_signal`, `atac_tss_enrichment`
     (Signac's fast definition) and `atac_mito_fraction` for every cell of the
-    store, plus `atac_frip` when an ATAC store exists (its library size over
-    the fragments; insertion counts give two per fragment).
+    store, plus `atac_frip` when an ATAC store exists: its library size over
+    the fragments, in the store's count unit, so with insertion counts the
+    share of insertions in peaks (two per fragment) and otherwise Signac's
+    fragments in peaks over fragments.
 
     Args:
         mm: The experiment.
@@ -401,10 +412,10 @@ def atac_fragment_qc(
     )
     if mm.atac is not None and "atac_lib_size" in mm.obs_columns():
         lib = mm.obs(cols=["atac_lib_size"])["atac_lib_size"].to_numpy()
+        per_fragment = 2.0 if mm.atac.count_mode == "insertion" else 1.0
+        total = per_fragment * qc["n_fragments"].astype(np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
-            frame = frame.with_columns(
-                pl.Series("atac_frip", lib / qc["n_fragments"].astype(np.float64))
-            )
+            frame = frame.with_columns(pl.Series("atac_frip", lib / total))
     mm.add_obs(frame)
     return frame
 

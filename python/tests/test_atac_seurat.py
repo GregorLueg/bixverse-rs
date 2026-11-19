@@ -127,7 +127,11 @@ def test_rlsi_matches_seurat(tmp_path, barcodes, batch, lsi_features):
 
 
 def test_transfer_labels_seurat_matches_seurat(tmp_path, barcodes, batch):
-    genes = _tsv("signac/gene_activity/genes.tsv")["gene_name"].to_list()
+    # Ensembl IDs without version, as Cell Ranger keys the RNA
+    genes = [
+        g.split(".")[0]
+        for g in _tsv("signac/gene_activity/genes.tsv")["gene_id"].to_list()
+    ]
     rna = _tsv("seurat/rna/matrix.tsv.gz")
     counts = csr_matrix(
         (

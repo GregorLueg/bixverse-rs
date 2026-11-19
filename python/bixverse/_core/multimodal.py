@@ -58,6 +58,7 @@ from bixverse.params import DsbParams
 
 Modality = Literal["rna", "adt", "atac", "wnn"]
 CacheModality = Literal["rna", "adt", "atac"]
+CountMode = Literal["insertion", "paired-insertion", "fragment"]
 
 MODALITY_ONLY_MM = "modality = '{}' is only supported for SingleCellsMultiModal."
 
@@ -150,6 +151,9 @@ class AtacInfo:
 
     Attributes:
         kind: `"peak"` or `"tile"`.
+        count_mode: What one count is: `"insertion"` (up to two per
+            fragment), `"paired-insertion"` or `"fragment"` (one per fragment
+            and feature). The 10x `Peaks` matrix counts insertions.
         tf_idf: Whether the store is TF-IDF normalised.
         depth_cor: Correlation of each LSI component with the library size,
             all components including any dropped one.
@@ -161,6 +165,7 @@ class AtacInfo:
     """
 
     kind: Literal["peak", "tile"]
+    count_mode: CountMode
     tf_idf: bool = False
     depth_cor: np.ndarray | None = None
     lsi_dropped: tuple[int, ...] = ()
@@ -172,6 +177,7 @@ class AtacInfo:
         return compact_repr(
             "AtacInfo",
             kind=self.kind,
+            count_mode=self.count_mode,
             tf_idf=self.tf_idf,
             lsi=self.depth_cor is not None,
             lsi_dropped=list(self.lsi_dropped),
@@ -639,6 +645,7 @@ def mm_payload(mm: SingleCellsMultiModal) -> tuple[dict[str, np.ndarray], dict]:
                 arrays[f"atac/{k}"] = v
         meta["atac"] = {
             "kind": a.kind,
+            "count_mode": a.count_mode,
             "tf_idf": a.tf_idf,
             "lsi_dropped": list(a.lsi_dropped),
         }
@@ -688,6 +695,7 @@ def mm_from_payload(
         a = meta["atac"]
         mm.atac = AtacInfo(
             kind=a["kind"],
+            count_mode=a["count_mode"],
             tf_idf=a["tf_idf"],
             depth_cor=arrays.get("atac/depth_cor"),
             lsi_dropped=tuple(a["lsi_dropped"]),
