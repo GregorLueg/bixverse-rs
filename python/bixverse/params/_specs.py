@@ -1583,7 +1583,11 @@ class FastClusterParams:
             no more than this in modularity.
         local_moving: `"queue"` is Traag's sequential queue. `"coloured"` moves the
             nodes of one colour class in parallel, which only kicks in on larger
-            levels of the graph.
+            levels of the graph. `None` is `"queue"` for Leiden and `"coloured"`
+            for Louvain.
+        node_order: Visit order of the queue, `"bfs"` (sweep in BFS order from a
+            random start) or `"shuffle"` (as igraph). `None` is `"bfs"` for Leiden
+            and `"shuffle"` for Louvain.
         multi_level: Shall the communities be aggregated and refined in levels.
         max_evals: Cap on the node evaluations per local moving phase, in units of
             the number of nodes.
@@ -1611,7 +1615,8 @@ class FastClusterParams:
     n_iterations: int | None = None
     beta: float = 0.01
     min_gain: float = 0.0
-    local_moving: Literal["queue", "coloured"] = "queue"
+    local_moving: Literal["queue", "coloured"] | None = None
+    node_order: Literal["bfs", "shuffle"] | None = None
     multi_level: bool = True
     max_evals: int = 10
 
