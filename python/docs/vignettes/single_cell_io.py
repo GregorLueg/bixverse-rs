@@ -368,9 +368,10 @@ assert np.array_equal(raw_archived.data, raw_h5.data)
 #
 # Checkpoint with `bv.io.save()` and `bv.io.load_existing()`; archive with
 # `bv.io.archive_sc_exp()`. Already loaded experiments can be stacked into a new
-# one with `bv.io.merge_sc_experiments()`, and stores in the old v3 binary
-# format are converted in place with `bv.io.upgrade_sc_store()`. There is no
-# Seurat reader on the Python side.
+# one with `bv.io.merge_sc_experiments()`, and stores in the older v3 and v4
+# binary formats are converted in place with `bv.io.upgrade_sc_store()` (pass
+# the directory for a v3 store, which no longer opens). There is no Seurat
+# reader on the Python side.
 #
 # All readers share the same `MinQualityParams` QC interface and write into the
 # same on-disk `SingleCells` layout, so everything downstream (normalisation,

@@ -179,10 +179,9 @@
 # them are tiny, so on disk they get bit-packed to whatever width the block
 # actually needs. A block of ones and twos costs a single bit per value, the rare
 # gene with a count in the thousands only widens its own block, and nothing gets
-# clipped. Normalised counts live at `f16` precision: the ML field has shown you
-# can get away with it, and they are pushing quantisation even further than
-# that. We accept the precision loss and upcast to `f64` where it matters, to
-# avoid catastrophic cancellation issues at large N.
+# clipped. Normalised counts are not stored at all: they are a pure function of
+# the raw counts and get recomputed at `f32` on read. Where it matters we upcast
+# to `f64`, to avoid catastrophic cancellation issues at large N.
 #
 # 4. **_We are not doing any heavy calculations in Python._** Rust is superior
 # for speed and optimisation: aggressive multi-threading, no interpreter in the
@@ -202,7 +201,7 @@
 # #[derive(Debug)]
 # pub struct CsrCellChunk {
 #     pub data_raw: RawCounts,
-#     pub data_norm: Vec<F16>,
+#     pub data_norm: Vec<f32>,
 #     pub library_size: usize,
 #     pub indices: Vec<u32>,
 #     pub original_index: usize,
@@ -222,8 +221,7 @@
 # #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 # pub struct CscGeneChunk {
 #     pub data_raw: RawCounts,
-#     pub data_norm: Vec<F16>,
-#     pub avg_exp: F16,
+#     pub data_norm: Vec<f32>,
 #     pub nnz: usize,
 #     pub indices: Vec<u32>,
 #     pub original_index: usize,
@@ -323,14 +321,15 @@ print(type(sc.obs()))
 sc.obs(cols=["cell_id", "lib_size", "nnz"]).head(3)
 
 # %% [markdown]
-# #### The v4 file format
+# #### The v5 file format
 #
 # Cheap disk space is no excuse to waste it though. The first versions of the
 # format were lazy: absolute `u32` indices, `u16` raw counts, the full `f16`
 # normalised layer, all thrown at [lz4](https://en.wikipedia.org/wiki/LZ4_(compression_algorithm)).
 # lz4 is fast, but it cannot do much with a sorted list of absolute indices.
-# Version 4 (the default for everything the package writes now) looks at what
-# a chunk actually holds:
+# Version 4 rewrote the chunks to look at what they actually hold, and version 5
+# (the default for everything the package writes now) keeps that chunk codec and
+# rebuilds the file around it:
 #
 # - **Indices are delta bit-packed** in blocks of 128. Sorted gene (or cell)
 # indices turn into small gaps, and each block is packed to the width of its
@@ -347,11 +346,17 @@ sc.obs(cols=["cell_id", "lib_size", "nnz"]).head(3)
 # in its tail, plus a small lookup table for counts 1 to 4, which covers the
 # common low counts without a single `ln_1p` call.
 # - **A fixed 32 byte header sits uncompressed** in front of every chunk: nnz,
-# library size (or average expression for genes), original index, flags and the
+# library size (or the raw count total for genes), original index, flags and the
 # codec. Things like library sizes can be read without decompressing anything.
 # - **The codec is per chunk:** lz4 by default, zstd if you want smaller files
 # and can live with slower decoding, or none. A chunk that does not shrink is
 # stored raw whatever you asked for.
+# - **The file itself has a 128 byte header and tail sections.** The header says
+# what the store holds (genes, peaks, tiles, gene activity), how the norm is
+# derived (log-CPM or TF-IDF), how many raw layers a chunk carries and a hash of
+# the cell IDs. Chunk offsets, the library sizes and the TF-IDF weights sit in
+# sections after the chunks, so switching the norm of an ATAC store to TF-IDF
+# appends a section and patches the header without touching a single chunk.
 #
 # So in practice we store raw counts and only raw counts, wherever possible, and
 # the normalised layer is computed on the fly. Reads also prefetch their byte
@@ -359,26 +364,33 @@ sc.obs(cols=["cell_id", "lib_size", "nnz"]).head(3)
 # a time.
 #
 # You can check the recompute yourself: `log1p(count / library size x target
-# size)`, rounded to `f16`, is exactly the norm layer the reader hands back.
+# size)` in `f32` is the norm layer the reader hands back.
 
 # %%
 lib_size = sc.obs(cols=["lib_size"])["lib_size"].to_numpy()[cells]
 row = np.repeat(np.arange(len(cells)), np.diff(indptr.astype(np.int64)))
 
-recomputed = np.log1p(raw / lib_size[row] * reader.target_size).astype(np.float16)
+recomputed = np.log1p(
+    raw.astype(np.float32)
+    / lib_size[row].astype(np.float32)
+    * np.float32(reader.target_size)
+)
 
-assert np.array_equal(recomputed.astype(np.float32), norm)
+assert np.array_equal(recomputed, norm)
 
 # %% [markdown]
-# Got stores from an older version of the package? They still open and work, you
-# just get a warning from `bv.io.load_existing()` nudging you to convert them.
-# `bv.io.upgrade_sc_store()` does that in place: it writes the v4 files next to
-# the old ones, checks them, and only then swaps them in, keeping `.v3.bak`
-# copies unless you tell it otherwise.
+# Got stores from an older version of the package? v4 stores still open and
+# work, you just get a warning from `bv.io.load_existing()` nudging you to
+# convert them. v3 stores no longer open at all. `bv.io.upgrade_sc_store()`
+# converts either in place: it writes the v5 files next to the old ones, checks
+# them, and only then swaps them in, keeping `.v4.bak` (or `.v3.bak`) copies
+# unless you tell it otherwise. Since a v3 store cannot be opened, pass its
+# directory instead of the experiment.
 #
 # ```python
-# sc = bv.io.load_existing("path/to/old_store")
+# sc = bv.io.load_existing("path/to/v4_store")
 # sc = bv.io.upgrade_sc_store(sc, codec="zstd", keep_backup=False)
+# bv.io.upgrade_sc_store("path/to/v3_store")
 # ```
 #
 # Once you are done with the analysis, `bv.io.archive_sc_exp()` archives the

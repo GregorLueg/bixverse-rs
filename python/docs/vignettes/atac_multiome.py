@@ -15,8 +15,9 @@
 # transfer from RNA to ATAC.
 #
 # ATAC lives next to the RNA in a `SingleCellsMultiModal`: a second v5 store
-# under `atac/` with peaks as features, TF-IDF as the norm and the genomic
-# coordinates in an interval index. Its cells are the RNA cells, in the same
+# under `atac/` with peaks as features, log-CPM as the norm until `run_tfidf`
+# switches it to TF-IDF, and the genomic coordinates in an interval index. Its
+# cells are the RNA cells, in the same
 # order, so the RNA cell filter applies to both. Read the
 # [multi-modal vignette](multi_modal_single_cells.ipynb) first if you have not.
 
