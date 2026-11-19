@@ -6,7 +6,7 @@ Every public entry point, grouped by module. Generated from each module's
 Grep this file to check whether a function exists before calling it, then
 `help(bv.<module>.<name>)` or `inspect.signature()` for how to call it.
 
-Version: 0.3.3.
+Version: 0.4.0.
 
 ## bv
 
