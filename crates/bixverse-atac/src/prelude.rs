@@ -13,6 +13,7 @@ pub use crate::io::annotation::{
 pub use crate::io::fragments::{
     BarcodeIndex, Coverage, Fragment, barcode_fragment_counts, fold_fragments,
 };
+pub use crate::io::merge::{FragmentInput, MergeSummary, merge_fragment_files};
 #[cfg(feature = "h5")]
 pub use crate::io::tenx_peaks::{TenxPeakIngest, tenx_peaks_to_store};
 pub use crate::peaks::calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};

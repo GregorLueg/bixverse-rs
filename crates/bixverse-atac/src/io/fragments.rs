@@ -286,7 +286,7 @@ fn chrom_str<'a>(chrom: &'a [u8], line: &[u8]) -> Result<&'a str, AtacErrors> {
 ///
 /// The total block length, or `None` when the bytes do not start a BGZF
 /// block (plain gzip has no `BC` extra subfield).
-fn bgzf_block_len(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn bgzf_block_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < GZIP_FIXED_HEADER || bytes[0] != 31 || bytes[1] != 139 || bytes[2] != 8 {
         return None;
     }
@@ -480,7 +480,12 @@ where
 /// ### Returns
 ///
 /// The combined accumulator, or an I/O or parse error.
-fn drive<A, I, P, R>(path: &Path, init: &I, parse: &P, reduce: &R) -> Result<A, AtacErrors>
+pub(crate) fn drive<A, I, P, R>(
+    path: &Path,
+    init: &I,
+    parse: &P,
+    reduce: &R,
+) -> Result<A, AtacErrors>
 where
     A: Send,
     I: Fn() -> A + Sync + Send,
@@ -942,6 +947,68 @@ where
     F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
     R: Fn(A, A) -> A + Sync + Send,
 {
+    // an index that does not belong to the file can still land on block
+    // boundaries; the chromosome of every line it leads to must be its own
+    let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+    let foreign: Mutex<Option<String>> = Mutex::new(None);
+    let checked = |acc: &mut A, chrom: &str, frags: &[Fragment]| {
+        if names.contains(&chrom) {
+            fold(acc, chrom, frags);
+        } else {
+            foreign
+                .lock()
+                .expect("not poisoned")
+                .get_or_insert_with(|| chrom.to_string());
+        }
+    };
+    let parser = FragmentParser {
+        barcodes,
+        fold: &checked,
+    };
+    let (acc, _) = parse_spans(
+        path,
+        spans,
+        &|| (init(), Vec::new()),
+        &parser,
+        &|(a, _), (b, _)| (reduce(a, b), Vec::new()),
+    )?;
+    if let Some(chrom) = foreign.into_inner().expect("not poisoned") {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "the tabix index does not match the file: it leads to '{chrom}' fragments where it \
+             promises others; regenerate the .tbi"
+        )));
+    }
+    Ok(acc)
+}
+
+/// Run a parser over the lines of some chromosomes of a BGZF file, read
+/// through their tabix spans.
+///
+/// ### Params
+///
+/// * `path` - The BGZF file the spans come from
+/// * `spans` - Chromosomes to read, from [`chrom_spans`]
+/// * `init` - New accumulator
+/// * `parse` - The line parser
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error, or an error for an
+/// index that does not match the file.
+pub(crate) fn parse_spans<A, I, P, R>(
+    path: &Path,
+    spans: &[ChromSpan],
+    init: &I,
+    parse: &P,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    P: Parse<A>,
+    R: Fn(A, A) -> A + Sync + Send,
+{
     let file = File::open(path)?;
     // SAFETY: the file is opened read-only and not modified while mapped.
     let mmap = unsafe { Mmap::map(&file)? };
@@ -982,39 +1049,7 @@ where
             end: (end_in > 0).then_some(end_in),
         });
     }
-    // an index that does not belong to the file can still land on block
-    // boundaries; the chromosome of every line it leads to must be its own
-    let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
-    let foreign: Mutex<Option<String>> = Mutex::new(None);
-    let checked = |acc: &mut A, chrom: &str, frags: &[Fragment]| {
-        if names.contains(&chrom) {
-            fold(acc, chrom, frags);
-        } else {
-            foreign
-                .lock()
-                .expect("not poisoned")
-                .get_or_insert_with(|| chrom.to_string());
-        }
-    };
-    let parser = FragmentParser {
-        barcodes,
-        fold: &checked,
-    };
-    let (acc, _) = fold_bgzf_segments(
-        bytes,
-        &blocks,
-        &segments,
-        &|| (init(), Vec::new()),
-        &parser,
-        &|(a, _), (b, _)| (reduce(a, b), Vec::new()),
-    )?;
-    if let Some(chrom) = foreign.into_inner().expect("not poisoned") {
-        return Err(AtacErrors::InvalidArgument(format!(
-            "the tabix index does not match the file: it leads to '{chrom}' fragments where it \
-             promises others; regenerate the .tbi"
-        )));
-    }
-    Ok(acc)
+    fold_bgzf_segments(bytes, &blocks, &segments, init, parse, reduce)
 }
 
 /// Append `b` to `a`, keeping the larger of the two allocations: the merge
