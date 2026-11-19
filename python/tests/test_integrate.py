@@ -83,7 +83,7 @@ def test_harmony_refuses_stale_pca(sc):
 
 def test_harmony_without_pca_warns(sc):
     sc.cache.pca_factors = None
-    with pytest.warns(UserWarning, match="No PCA"):
+    with pytest.warns(UserWarning, match="No 'pca' embedding"):
         integrate.harmony(sc, BATCH)
     assert "harmony" not in sc.cache.embeddings
 

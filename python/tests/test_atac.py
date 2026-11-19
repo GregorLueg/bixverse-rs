@@ -263,3 +263,31 @@ def test_differential_accessibility_reads_the_peaks(exp):
     assert arms["gene_id"][0].startswith("chr22:")
     spec = bv.de.find_specific_markers(exp, "cell_grp", modality="atac", verbose=0)
     assert spec is not None and spec.params["method"] == "lr"
+
+
+def test_harmony_corrects_the_lsi(with_peaks):
+    exp = with_peaks
+    atac.run_tfidf(exp)
+    atac.find_top_features(exp, min_cutoff="q5")
+    atac.calculate_lsi(exp, n_comp=10)
+    batch = np.where(np.arange(exp.n_cells) % 2 == 0, "a", "b")
+    exp.add_obs(pl.DataFrame({"cell_idx": exp._all_cells(), "atac_batch": batch}))
+
+    # no ATAC PCA: the default embedding is absent
+    with pytest.warns(UserWarning, match="'pca'"):
+        bv.integrate.harmony(exp, "atac_batch", modality="atac", verbose=0)
+    assert "harmony" not in exp.atac_cache.embeddings
+
+    bv.integrate.harmony(
+        exp, "atac_batch", embd_to_use="lsi", modality="atac", verbose=0
+    )
+    lsi = exp.atac_cache.embeddings["lsi"]
+    corrected = exp.atac_cache.embeddings["harmony"]
+    assert corrected.shape == lsi.shape
+    assert not np.allclose(corrected, lsi)
+    assert "harmony" not in exp.cache.embeddings
+    assert exp.check_state(["harmony"], modality="atac") is True
+
+    bv.graph.find_neighbours(exp, embd_to_use="harmony", modality="atac", verbose=0)
+    assert exp.atac_cache.knn is not None
+    assert exp.atac_cache.knn.indices.shape[0] == exp.n_cells

@@ -343,6 +343,7 @@ def _harmony(
     params: object,
     name: str,
     run: Callable[..., np.ndarray],
+    embd_to_use: str,
     modality: CacheModality,
     seed: int,
     verbose: Verbose,
@@ -350,30 +351,30 @@ def _harmony(
     """Shared body of Harmony v1, v2 and the GPU twin. `params` is any Harmony
     bundle; `run` the extension call."""
     cache = modality_cache(sc, modality)
-    require_fresh(sc, ["pca"], modality)
-    pca = cache.pca_factors
-    if pca is None:
+    embd = _embedding(sc, embd_to_use, modality)
+    if embd is None:
         warnings.warn(
-            "No PCA embeddings found in the object. Returning class as is",
+            f"No '{embd_to_use}' embedding found in the object. Returning class as is",
             stacklevel=3,
         )
         return
+    require_fresh(sc, [embd_to_use], modality)
     columns = [batch_column, *(additional_batch_columns or [])]
     labels = [_labels(sc, c)[0] for c in columns]
-    if any(len(lab) != pca.shape[0] for lab in labels):
-        raise ValueError("The batch columns do not cover the rows of the PCA.")
+    if any(len(lab) != embd.shape[0] for lab in labels):
+        raise ValueError(f"The batch columns do not cover the rows of '{embd_to_use}'.")
 
     d = to_rust(params)
     if d["k"] is None:
         d["k"] = min(
-            round(pca.shape[0] / HARMONY_CELLS_PER_CLUSTER), HARMONY_MAX_CLUSTERS
+            round(embd.shape[0] / HARMONY_CELLS_PER_CLUSTER), HARMONY_MAX_CLUSTERS
         )
         if verbose:
             logger.info("Auto-determined number of Harmony clusters: %i", d["k"])
     cache.embeddings[name] = run(
-        np.ascontiguousarray(pca, dtype=np.float32), d, labels, seed, verbose
+        np.ascontiguousarray(embd, dtype=np.float32), d, labels, seed, verbose
     )
-    stamp(sc, name, parents=("pca",), modality=modality)
+    stamp(sc, name, parents=(embd_to_use,), modality=modality)
 
 
 @beartype
@@ -382,22 +383,28 @@ def harmony(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
     verbose: Verbose = True,
 ) -> None:
-    """Harmony (v2) on the PCA.
+    """Harmony (v2) on the PCA or another embedding.
 
     The corrected embedding goes to the modality's `embeddings["harmony"]`,
-    stamped as derived from `"pca"`. The original algorithm is `harmony_v1`.
+    stamped as derived from `embd_to_use`. The original algorithm is
+    `harmony_v1`. On ATAC, correct the LSI with `embd_to_use="lsi"`,
+    `modality="atac"`, then build the neighbours on `"harmony"` with the same
+    modality.
 
     Args:
-        sc: The experiment, with a PCA.
+        sc: The experiment, with the embedding.
         batch_column: obs column with the primary batch.
         additional_batch_columns: Further obs columns to regress out.
-        modality: The PCA to correct and the cache to write: `"rna"`, or
-            `"adt"` on a `SingleCellsMultiModal`.
+        embd_to_use: The embedding to correct, `"pca"` or a name in the
+            modality's `embeddings` (`"lsi"` for ATAC).
+        modality: The cache to read and write: `"rna"`, or `"adt"` / `"atac"`
+            on a `SingleCellsMultiModal`.
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
@@ -405,8 +412,8 @@ def harmony(
             method has it.
 
     Raises:
-        ValueError: If the PCA is stale, or a batch column is missing or
-            incomplete.
+        ValueError: If the embedding is stale, or a batch column is missing
+            or incomplete.
 
     References:
         Patikas, et al., bioRxiv, 2026.
@@ -426,6 +433,7 @@ def harmony(
         harmony_params or HarmonyV2Params(),
         "harmony",
         _bixverse.harmony_v2,
+        embd_to_use,
         modality,
         seed,
         verbose,
@@ -438,22 +446,25 @@ def harmony_v1(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
     verbose: Verbose = True,
 ) -> None:
-    """The original Harmony (v1) on the PCA.
+    """The original Harmony (v1) on the PCA or another embedding.
 
     The corrected embedding goes to the modality's `embeddings["harmony_v1"]`,
-    stamped as derived from `"pca"`.
+    stamped as derived from `embd_to_use`.
 
     Args:
-        sc: The experiment, with a PCA.
+        sc: The experiment, with the embedding.
         batch_column: obs column with the primary batch.
         additional_batch_columns: Further obs columns to regress out.
-        modality: The PCA to correct and the cache to write: `"rna"`, or
-            `"adt"` on a `SingleCellsMultiModal`.
+        embd_to_use: The embedding to correct, `"pca"` or a name in the
+            modality's `embeddings` (`"lsi"` for ATAC).
+        modality: The cache to read and write: `"rna"`, or `"adt"` / `"atac"`
+            on a `SingleCellsMultiModal`.
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
@@ -461,8 +472,8 @@ def harmony_v1(
             method has it.
 
     Raises:
-        ValueError: If the PCA is stale, or a batch column is missing or
-            incomplete.
+        ValueError: If the embedding is stale, or a batch column is missing
+            or incomplete.
 
     References:
         Korsunsky, et al., Nat Methods, 2019.
@@ -474,6 +485,7 @@ def harmony_v1(
         harmony_params or HarmonyParams(),
         "harmony_v1",
         _bixverse.harmony,
+        embd_to_use,
         modality,
         seed,
         verbose,
