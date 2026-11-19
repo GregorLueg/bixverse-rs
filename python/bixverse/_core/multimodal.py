@@ -2,7 +2,7 @@
 store, a WNN slot.
 
 The RNA side is a `SingleCells` in every respect, so every RNA method takes
-one unchanged. On top of it sit three things:
+one unchanged. On top of it sit four things:
 
 - `adt`: the ADT counts of the cells kept when they were added, raw and
   normalised (CLR or DSB), keyed by barcode. They are not in the store and
@@ -626,7 +626,8 @@ _DSB_ARRAYS: tuple[str, ...] = (
 
 @beartype
 def mm_payload(mm: SingleCellsMultiModal) -> tuple[dict[str, np.ndarray], dict]:
-    """The ADT counts, the ADT cache and the WNN slot as npz arrays and JSON."""
+    """The ADT counts and cache, the ATAC state and cache and the WNN slot as
+    npz arrays and JSON."""
     arrays, adt_meta = cache_payload(mm.adt_cache, "adt_cache")
     atac_arrays, atac_meta = cache_payload(mm.atac_cache, "atac_cache")
     arrays |= atac_arrays

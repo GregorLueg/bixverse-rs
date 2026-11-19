@@ -1214,7 +1214,7 @@ def run_magic(
     Args:
         sc: The experiment, with a kNN graph over the kept cells.
         features: Gene ids to impute. Unknown ids warn and drop.
-        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         magic_params: The MAGIC parameters. `None` uses the defaults.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the

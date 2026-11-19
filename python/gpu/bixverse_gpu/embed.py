@@ -150,7 +150,7 @@ def umap(
             `sc.cache.embeddings`.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         params: The estimator. `None` is `umap_defaults()`.
 
@@ -192,7 +192,7 @@ def tsne(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         params: The estimator. `None` is `tsne_defaults()`.
 
@@ -232,7 +232,7 @@ def densmap(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         params: The estimator. `None` is `densmap_defaults()`.
 
@@ -277,7 +277,7 @@ def phate(
         embd_to_use: The input embedding.
         slot_name: The name in `sc.cache.embeddings` to write.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN and the slot: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         params: The estimator. `None` is `phate_defaults()`.
 

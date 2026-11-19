@@ -248,4 +248,5 @@ checkout.
 | source build fails in `hdf5-metno-src` | install CMake and a C compiler (unverified error text) |
 | source build fails on edition 2024 | `rustup update`; rustc 1.85 or newer |
 | h5ad does not load, file uses LZF or Blosc | rewrite it with gzip compression, or export the counts as MTX |
-| warning that the store uses the v3 format | `bv.io.upgrade_sc_store(sc)`; v3 still works, v4 is smaller and faster |
+| warning that the store uses the v4 format | `bv.io.upgrade_sc_store(sc)`; v4 still works, v5 is the current format |
+| `RuntimeError` that the store uses the v3 format | `bv.io.upgrade_sc_store("dir")`; v3 no longer opens |

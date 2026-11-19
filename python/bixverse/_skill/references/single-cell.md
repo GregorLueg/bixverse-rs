@@ -154,8 +154,10 @@ batches above `bv.qc.N_CELLS_STREAMING_THRESHOLD` (100,000 kept cells);
 
 - Loading into a directory that already holds an experiment overwrites its
   stores and deletes `memory_py.*`.
-- `load_existing()` warns on a v3 store; `bv.io.upgrade_sc_store(sc)`
-  converts it in place (`keep_backup=True` leaves `<file>.v3.bak`).
+- `load_existing()` warns on a v4 store and refuses a v3 one.
+  `bv.io.upgrade_sc_store(sc)` converts a v4 store in place, and
+  `bv.io.upgrade_sc_store("dir")` a v3 one (`keep_backup=True` leaves
+  `<file>.v<n>.bak`).
 - The DuckDB `obs.to_keep` column is the source of truth for the cell filter.
   If it disagrees with `memory_py.npz`, `load_existing()` warns, uses
   `to_keep`, and the cached artefacts load as stale.
@@ -473,7 +475,9 @@ bv.pp.calculate_pca(
 ## Batch correction
 
 All run after `calculate_pca()` and write a new named embedding for
-`find_neighbours(embd_to_use=...)`.
+`find_neighbours(embd_to_use=...)`. Harmony also corrects another embedding:
+`harmony(mm, "batch", embd_to_use="lsi", modality="atac")` writes `"harmony"`
+to the ATAC cache.
 
 | Function | Embedding | Params |
 |---|---|---|
@@ -538,8 +542,9 @@ bv.graph.find_clusters(sc, res=1.0, name="leiden_clusters")
 - `get_connectivities(sc).scipy_csr()` gives scipy; hand the three vectors to
   igraph or networkx.
 - `fast_cluster(sc, resolutions=(2.0, 1.0, 0.5), n_seeds=1)` coarsens with
-  k-means and clusters the centroids. Its `memberships` (`cell_idx`,
-  `res_<value>`) go straight into `sc.add_obs()`.
+  k-means (e-means by default; `FastClusterParams(km_type="standard")` for
+  Lloyd's, `"minibatch"` for mini-batch) and clusters the centroids. Its
+  `memberships` (`cell_idx`, `res_<value>`) go straight into `sc.add_obs()`.
 
 ### Traps
 

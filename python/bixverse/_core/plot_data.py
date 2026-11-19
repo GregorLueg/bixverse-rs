@@ -310,8 +310,8 @@ def extract_embedding_data(
         sc: The experiment, a subset or meta cells.
         embedding: The embedding name, `"pca"` for the PCA scores.
         obs_cols: obs columns to attach.
-        modality: Where the embedding lives: `"rna"`, or `"adt"` / `"wnn"`
-            on a `SingleCellsMultiModal`.
+        modality: Where the embedding lives: `"rna"`, or `"adt"` / `"atac"` /
+            `"wnn"` on a `SingleCellsMultiModal`.
 
     Returns:
         `cell_id`, `dim_1` ... `dim_k` (`float64`) and the obs columns, one
@@ -549,7 +549,7 @@ def extract_feature_plot_data(
         clip: Clip the z-scores, with `scale`.
         obs_cols: obs columns to attach.
         expr_modality: `"rna"` or `"adt"`.
-        embd_modality: `"rna"`, `"adt"` or `"wnn"`.
+        embd_modality: `"rna"`, `"adt"`, `"atac"` or `"wnn"`.
         layer: `"norm"` or `"magic"`.
 
     Returns:

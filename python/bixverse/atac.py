@@ -42,7 +42,9 @@ those biased by gene length or by fragments shared between neighbouring genes
 
 **Mapping and integration.** `project_lsi` puts a query onto a reference
 LSI (Seurat's `lsiproject`); `run_rlsi` integrates batches through
-reciprocal LSI anchors.
+reciprocal LSI anchors. `bv.integrate.harmony(mm, "batch", embd_to_use="lsi",
+modality="atac")` corrects the LSI instead and writes `"harmony"` to the ATAC
+cache.
 
 **Gotchas.** `run_tfidf` computes the IDF over the kept cells: run it again,
 then the LSI, after changing them. `calculate_lsi` drops component 1 by

@@ -341,15 +341,15 @@ def find_neighbours(
         embd_to_use: The embedding, `"pca"` or a name in the cache's
             `embeddings`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, or `"adt"` / `"atac"` on a `SingleCellsMultiModal`.
         neighbours_params: kNN and graph parameters. `None` uses the defaults.
         seed: Seed for the index build.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
     Raises:
-        ValueError: If the embedding is stale, or on `"adt"` without a
-            multi-modal object.
+        ValueError: If the embedding is stale, or on `"adt"` / `"atac"`
+            without a multi-modal object.
 
     Examples:
         >>> bv.graph.find_neighbours(sc, no_embd_to_use=20)
@@ -397,7 +397,7 @@ def get_connectivities(sc: ScOrMc, *, modality: Modality = "rna") -> CsrMatrix |
 
     Args:
         sc: The experiment.
-        modality: `"rna"`, or `"adt"` / `"wnn"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a `SingleCellsMultiModal`.
 
     Returns:
         The graph, or `None` (with a warning) if none was built.
@@ -440,7 +440,7 @@ def find_clusters(
         cluster_algorithm: `"leiden"` or `"louvain"`.
         res: Modularity resolution; higher gives more communities.
         name: The obs column to write.
-        modality: The graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.

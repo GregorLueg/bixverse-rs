@@ -1,7 +1,7 @@
 """Differential expression, markers and differential abundance.
 
-Wilcoxon markers, pseudobulk edgeR, NEBULA, Milo neighbourhoods and MELD.
-The work runs in Rust.
+Wilcoxon and logistic regression markers (also on ATAC peaks), pseudobulk
+edgeR, NEBULA, Milo neighbourhoods and MELD. The work runs in Rust.
 
 Marker tests return polars frames; the specific markers, NEBULA, Milo and
 MELD return frozen records. Nothing is written to obs.

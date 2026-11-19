@@ -511,7 +511,7 @@ def step_neighbours(
     Args:
         embd_to_use: The embedding, forwarded.
         no_embd_to_use: Number of leading dimensions, forwarded.
-        modality: `"rna"` or `"adt"`, forwarded.
+        modality: `"rna"`, `"adt"` or `"atac"`, forwarded.
         neighbours_params: kNN and graph parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the

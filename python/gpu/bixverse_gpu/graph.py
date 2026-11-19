@@ -155,7 +155,7 @@ def find_neighbours(
         embd_to_use: The embedding, `"pca"` or a name in the cache's
             `embeddings`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, or `"adt"` / `"atac"` on a `SingleCellsMultiModal`.
         knn_params: The GPU kNN parameters. `None` runs `"nndescent"` with the
             defaults.
         graph_params: How the kNN becomes a graph. `None` uses the defaults.
@@ -236,7 +236,7 @@ def find_clusters(
         cluster_algorithm: `"leiden"` or `"louvain"`.
         res: Modularity resolution; higher gives more communities.
         name: The obs column to write.
-        modality: The graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.

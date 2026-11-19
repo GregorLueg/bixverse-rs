@@ -76,6 +76,7 @@ nav:
           - Batch correction: api/integrate.md
           - Annotation: api/annotate.md
           - Multi-modal: api/mm.md
+          - ATAC: api/atac.md
       - Differential testing:
           - Differential expression and abundance: api/de.md
       - Methods:

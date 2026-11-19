@@ -36,7 +36,7 @@ A condition effect is an inference about donors. Cells within a donor are not
 independent, so use pseudobulk edgeR or NEBULA for it. `bv.de` takes
 `SingleCells` or `SingleCellsSubset` and writes nothing to the object.
 
-**Markers (Wilcoxon / Mann-Whitney).**
+**Markers (Wilcoxon or logistic regression).**
 
 ```python
 markers = bv.de.find_all_markers(sc, "leiden_clustering")  # one-vs-rest
@@ -53,6 +53,10 @@ bv.de.get_marker_summary(spec).sort("min_auroc", descending=True)
 - `alternative` defaults to `"greater"` for `find_all_markers` and
   `find_specific_markers`, `"twosided"` for `find_markers`.
 - `min_prop=0.05`: share of either group that must express a gene to test it.
+- `method="lr"` runs Seurat's logistic regression test with the library size
+  as covariate; `z_scores` are then signed roots of the likelihood ratio.
+  `modality="atac"` tests the peaks of a `SingleCellsMultiModal` and defaults
+  to `"lr"`; RNA defaults to `"wilcox"`.
 - `find_specific_markers` tests each group against every rival separately.
   Its summary has `min_auroc`, `worst_rival`, `simes_fdr`, `max_p_fdr`; the
   per-rival table comes from `get_marker_comparisons()`. It returns `None` if
@@ -539,8 +543,9 @@ bv.graph.find_clusters(mm, modality="wnn")
   added: dropping cells later works, restoring dropped cells does not.
 - CLR (default) or DSB normalisation runs inside `add_adt_counts`. DSB defaults
   to `use_isotype_controls=True`, so pass `isotype_names`.
-- `generate_wnn_graph` needs both PCAs, rebuilds per-modality kNNs at
-  `knn_range=200` and replaces any earlier WNN result.
+- `generate_wnn_graph` needs an embedding of both modalities (the PCAs;
+  for ATAC `modality_2="atac"`, `embd_to_use_2="lsi"`), rebuilds
+  per-modality kNNs at `knn_range=200` and replaces any earlier WNN result.
 - Getters: `get_adt_counts(mm, layer=...)`, `get_adt_names`, `get_wnn_weights`.
 
 ## Pipelines

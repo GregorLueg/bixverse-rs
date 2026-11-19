@@ -9,7 +9,9 @@ Start with `add_adt_counts`, then `calculate_pca_adt`. Run the RNA PCA the
 usual way (`bv.pp.find_hvg`, `bv.pp.calculate_pca`) and call
 `generate_wnn_graph`. From there `bv.graph.find_clusters` and `bv.embed`
 take `modality="wnn"`; `modality="adt"` does the same for the protein side
-alone.
+alone. The WNN fuses RNA with ATAC the same way: `modality_2="atac"`,
+`embd_to_use_2="lsi"` (or `"harmony"` after correcting the LSI), see
+`bv.atac`.
 
 **What lands where.** `add_adt_counts` cuts the counts to the kept cells,
 normalises them and stores them in `mm.adt`; it also writes the `var_adt` table
@@ -38,10 +40,10 @@ dropping cells afterwards is fine, putting dropped cells back is not
 (`calculate_pca_adt` then raises). DSB
 wants the isotype controls by default (`DsbParams.use_isotype_controls`), so
 pass `isotype_names`, or switch the option off. Leave the isotypes out of the
-ADT PCA with `features=`. `generate_wnn_graph` needs the PCA of both
-modalities, rebuilds the per-modality kNN graphs itself at `knn_range`
-neighbours rather than reusing the cached ones, and replaces any earlier WNN
-result with its embeddings.
+ADT PCA with `features=`. `generate_wnn_graph` needs an embedding of both
+modalities (the PCA, or the LSI for ATAC), rebuilds the per-modality kNN
+graphs itself at `knn_range` neighbours rather than reusing the cached ones,
+and replaces any earlier WNN result with its embeddings.
 """
 
 from bixverse._core.mm import (
