@@ -465,7 +465,6 @@ Parameter bundles for the single cell suite.
 - `DsbParams`: Default parameters for DSB ADT normalisation
 - `EdgerQlParams`: Wrapper function for parameters for the edgeR quasi-likelihood workflow
 - `EmptyDropletsParams`: Parameters for identifying empty droplets
-- `FastClusterDefault`: Helper function to generate default parameters for the fast clustering for the doublet detection methods
 - `FastClusterParams`: Fast single cell clustering parameters
 - `FastmnnParams`: Wrapper function for the fastMNN parameters
 - `GeneTrendsParams`: Wrapper function for gene trend parameters
@@ -475,7 +474,6 @@ Parameter bundles for the single cell suite.
 - `HvgDefaults`: Helper function to generate HVG defaults
 - `HvgParams`: Wrapper function for HVG detection parameters.
 - `HvgScranDefaults`: Helper function to generate the scran HVG trend defaults
-- `KmeansDefaults`: K-mean parameter defaults.
 - `KnnDefaults`: Helper function to generate kNN defaults
 - `KnnGraphDefaults`: Helper function to generate the kNN graph defaults
 - `KnnParams`: Parameters for single cell kNN searches

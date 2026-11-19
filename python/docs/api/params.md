@@ -16,7 +16,6 @@ module that takes them; `Shared` goes to more than one.
         - HarmonyParams
         - HarmonyV2Params
         - HvgParams
-        - KmeansDefaults
         - KnnParams
         - NeighboursParams
         - PcaParams
@@ -59,7 +58,6 @@ module that takes them; `Shared` goes to more than one.
       show_root_heading: false
       heading_level: 3
       members:
-        - FastClusterDefault
         - FastClusterParams
 
 ## Batch correction

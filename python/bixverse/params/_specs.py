@@ -16,34 +16,6 @@ _CONF = BeartypeConf(is_pep484_tower=True)
 
 @beartype(conf=_CONF)
 @dataclass(frozen=True, kw_only=True, slots=True)
-class FastClusterDefault:
-    """Helper function to generate default parameters for the fast clustering for the doublet detection methods
-
-    Attributes:
-        km_type: The k-means of the fast clustering: `"emeans"`, `"standard"`
-            (Lloyd's) or `"minibatch"`.
-        e_means_epochs: `km_type = "emeans"` only. Passes over the data; `None`
-            for the default.
-        n_centroids: The number of centroids to use. `None` uses `sqrt(N_cells) * 4`
-            centroids.
-        k_means_iter: Number of maximum k-means iterations. Ignored by e-means.
-        batch_size: Max batch size, capped at `N_cells / 2` depending on the data
-            set.
-    """
-
-    km_type: Literal["emeans", "standard", "minibatch"] = "emeans"
-    e_means_epochs: float | None = None
-    n_centroids: int | None = None
-    k_means_iter: int = 100
-    batch_size: int = 4098
-
-    def __post_init__(self) -> None:
-        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
-        _extras.run(self)
-
-
-@beartype(conf=_CONF)
-@dataclass(frozen=True, kw_only=True, slots=True)
 class HvgDefaults:
     """Helper function to generate HVG defaults
 
@@ -106,39 +78,6 @@ class HvgScranDefaults:
         check_range("min_mean", self.min_mean, 0, None, False, True)
         check_range("min_width", self.min_width, 0, None, True, True)
         check_range("min_window_count", self.min_window_count, 1, None, False, True)
-        _extras.run(self)
-
-
-@beartype(conf=_CONF)
-@dataclass(frozen=True, kw_only=True, slots=True)
-class KmeansDefaults:
-    """K-mean parameter defaults.
-
-    Helper function to generate defaults for the k-mean clustering were more control
-    is needed.
-
-    Attributes:
-        k_means_algorithm: `"emeans"` or `"lloyd"`.
-        e_means_epochs: e-means only. Passes over the data; `None` for the
-            default.
-        k_means_iter: Lloyd's only. The number of iterations to use for the
-            clustering.
-        k_means_init: Lloyd's only. The initialisation.
-        gemm: Controls which CPU implementation is used by the method. GEMM is
-            faster with large dimensionality.
-        hamerly: Shall a faster exact method be used leveraging the triangle
-            inequality. Faster on large data sets with large numbers of centroids.
-    """
-
-    k_means_iter: int = 30
-    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
-    e_means_epochs: float | None = None
-    k_means_init: Literal["parallel", "random"] = "parallel"
-    gemm: bool | None = False
-    hamerly: bool | None = True
-
-    def __post_init__(self) -> None:
-        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         _extras.run(self)
 
 
@@ -3896,7 +3835,6 @@ __all__ = [
     "DsbParams",
     "EdgerQlParams",
     "EmptyDropletsParams",
-    "FastClusterDefault",
     "FastClusterParams",
     "FastmnnParams",
     "GeneTrendsParams",
@@ -3906,7 +3844,6 @@ __all__ = [
     "HvgDefaults",
     "HvgParams",
     "HvgScranDefaults",
-    "KmeansDefaults",
     "KnnDefaults",
     "KnnGraphDefaults",
     "KnnParams",
