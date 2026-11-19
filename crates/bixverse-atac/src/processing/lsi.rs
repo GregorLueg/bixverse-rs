@@ -21,7 +21,6 @@ use rayon::prelude::*;
 use bixverse_core::core::math::vector_helpers::pearson_correlation;
 use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
 use bixverse_sc_data::data_io::{norm_value, peek_target_size};
-use bixverse_sc_data::prelude::*;
 use bixverse_sc_data::v5_io::{NormKind, set_tf_idf, tf_idf_weights};
 
 use crate::prelude::*;
@@ -283,7 +282,7 @@ pub fn project_lsi(
 /// * `gene_path` - Gene-based (feature-major) file of the store
 /// * `cells` - Cells to embed, in output row order
 /// * `features` - Features to use, typically from
-///   [`crate::features::select_top_features`]
+///   [`crate::processing::features::select_top_features`]
 /// * `params` - See [`LsiParams`]
 /// * `seed` - Seed of the solver
 /// * `verbose` - `0` silent, `1` normal, `2` detailed
@@ -413,7 +412,7 @@ mod tests {
     use bixverse_sc_data::data_io::CellGeneSparseWriter;
     use bixverse_sc_data::gene_file_io::write_gene_file;
 
-    use crate::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
+    use crate::processing::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
 
     /// Scratch files that remove themselves on drop.
     struct TempFiles(Vec<std::path::PathBuf>);

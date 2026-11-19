@@ -10,17 +10,9 @@
 //! ## Features
 #![doc = document_features::document_features!()]
 
-pub mod amulet;
-pub mod annotation;
-pub mod counting;
 pub mod errors;
-pub mod features;
-pub mod fragments;
-pub mod lsi;
-pub mod peak_calling;
+pub mod integration;
+pub mod io;
+pub mod peaks;
 pub mod prelude;
-pub mod qc;
-pub mod regions;
-pub mod rlsi;
-#[cfg(feature = "h5")]
-pub mod tenx_peaks;
+pub mod processing;

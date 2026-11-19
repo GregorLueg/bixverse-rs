@@ -7,17 +7,23 @@ use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
 
-use bixverse_atac::amulet::{AmuletParams, amulet};
-use bixverse_atac::annotation::{GeneActivityParams, gene_activity_regions, read_gtf_genes};
-use bixverse_atac::counting::{CountMode, FeatureCounts, count_fragments, write_counts_store};
-use bixverse_atac::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
-use bixverse_atac::lsi::{
+use bixverse_atac::integration::rlsi::{
+    BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store,
+};
+use bixverse_atac::io::annotation::{GeneActivityParams, gene_activity_regions, read_gtf_genes};
+use bixverse_atac::peaks::calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};
+use bixverse_atac::peaks::regions::{genome_tiles, read_bed, region};
+use bixverse_atac::processing::amulet::{AmuletParams, amulet};
+use bixverse_atac::processing::counting::{
+    CountMode, FeatureCounts, count_fragments, write_counts_store,
+};
+use bixverse_atac::processing::features::{
+    TopFeatureCutoff, feature_total_stats, select_top_features,
+};
+use bixverse_atac::processing::lsi::{
     LsiParams, TF_IDF_SCALE, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
 };
-use bixverse_atac::peak_calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};
-use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
-use bixverse_atac::regions::{genome_tiles, read_bed, region};
-use bixverse_atac::rlsi::{BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store};
+use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_annotation::seurat_transfer::{
     TransferAnchorParams, TransferDataParams, find_transfer_anchors, transfer_labels,
 };

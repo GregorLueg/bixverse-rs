@@ -21,7 +21,7 @@ use std::path::Path;
 
 use rustc_hash::FxHashMap;
 
-use crate::fragments::{BarcodeIndex, Fragment, fold_fragments};
+use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
 use crate::prelude::*;
 
 /// Chromosome names treated as the mitochondrial genome by default.

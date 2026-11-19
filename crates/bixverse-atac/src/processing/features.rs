@@ -7,8 +7,6 @@
 
 use indexmap::IndexSet;
 
-use bixverse_sc_data::prelude::*;
-
 use crate::prelude::*;
 
 /// Features read per batch when summing totals.

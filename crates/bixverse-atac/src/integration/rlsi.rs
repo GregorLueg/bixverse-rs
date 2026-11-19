@@ -24,8 +24,8 @@ use bixverse_sc::sc_batch_correction::seurat_anchors::{
 };
 use bixverse_sc_data::v5_io::tf_idf_weights;
 
-use crate::lsi::{LsiParams, library_sizes, lsi_on_matrix, project_lsi, read_tf_idf};
 use crate::prelude::*;
+use crate::processing::lsi::{LsiParams, library_sizes, lsi_on_matrix, project_lsi, read_tf_idf};
 
 ///////////
 // Types //
@@ -77,7 +77,7 @@ pub type ScoredAnchors = (Vec<(u32, u32)>, Vec<f32>);
 /// One batch's LSI and TF-IDF, the input of the anchor search.
 #[derive(Clone, Debug)]
 pub struct BatchLsi {
-    /// Cells x components, z-scored ([`crate::lsi::LsiResult::embedding`])
+    /// Cells x components, z-scored ([`crate::processing::lsi::LsiResult::embedding`])
     pub embedding: Mat<f32>,
     /// Features x components
     pub loadings: Mat<f32>,

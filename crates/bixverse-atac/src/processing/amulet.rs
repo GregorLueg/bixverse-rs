@@ -11,7 +11,7 @@
 //! (Poisson, Benjamini-Hochberg); cells above the cutoff are multiplets.
 //!
 //! The fragment file is read once, in chromosome batches (see
-//! [`crate::fragments::plan_batches`]); only the sites and one count per
+//! [`crate::io::fragments::plan_batches`]); only the sites and one count per
 //! cell outlive a batch.
 
 use std::path::Path;
@@ -21,9 +21,9 @@ use bixverse_sc_data::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use statrs::distribution::{DiscreteCDF, Poisson};
 
-use crate::fragments::{fold_batch, plan_batches};
+use crate::io::fragments::{fold_batch, plan_batches};
+use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
-use crate::regions::{ChromRegions, RegionIndex};
 
 /// Memory per compressed fragment file byte in flight: 12 bytes per fragment
 /// kept and roughly 10 compressed bytes per fragment line, plus vector

@@ -14,12 +14,11 @@ use rayon::prelude::*;
 use bixverse_sc_data::data_io::CellGeneSparseWriter;
 use bixverse_sc_data::gene_file_io::write_gene_file;
 use bixverse_sc_data::interval_index::{FeatureInterval, GenomeIntervals, attach_interval_index};
-use bixverse_sc_data::prelude::*;
 use bixverse_sc_data::v5_io::{FeatureKind, set_cell_ids, set_feature_kind};
 
-use crate::fragments::{BarcodeIndex, Fragment, fold_fragments};
+use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
+use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
-use crate::regions::{ChromRegions, RegionIndex};
 
 ///////////
 // Types //
@@ -179,7 +178,7 @@ pub fn count_fragments(
 
 /// Write counts as a v5 store with feature kind, interval index and cell IDs.
 ///
-/// The norm stays log-CPM until [`crate::lsi::set_tf_idf_on_store`] switches
+/// The norm stays log-CPM until [`crate::processing::lsi::set_tf_idf_on_store`] switches
 /// it.
 ///
 /// ### Params
@@ -244,7 +243,7 @@ pub fn write_counts_store(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regions::region;
+    use crate::peaks::regions::region;
 
     /// Hits of one fragment against `[100, 200)`, `[150, 300)`, `[400, 500)`.
     ///

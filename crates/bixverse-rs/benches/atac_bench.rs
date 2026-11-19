@@ -24,17 +24,19 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use bixverse_rs::single_cell::atac::annotation::{read_gtf_genes, tss_positions};
-use bixverse_rs::single_cell::atac::counting::{CountMode, count_fragments, write_counts_store};
-use bixverse_rs::single_cell::atac::features::{
+use bixverse_rs::single_cell::atac::io::annotation::{read_gtf_genes, tss_positions};
+use bixverse_rs::single_cell::atac::io::fragments::{BarcodeIndex, fold_fragments};
+use bixverse_rs::single_cell::atac::peaks::regions::read_bed;
+use bixverse_rs::single_cell::atac::processing::counting::{
+    CountMode, count_fragments, write_counts_store,
+};
+use bixverse_rs::single_cell::atac::processing::features::{
     TopFeatureCutoff, feature_total_stats, select_top_features,
 };
-use bixverse_rs::single_cell::atac::fragments::{BarcodeIndex, fold_fragments};
-use bixverse_rs::single_cell::atac::lsi::{
+use bixverse_rs::single_cell::atac::processing::lsi::{
     LsiParams, TF_IDF_SCALE, lsi_on_store, set_tf_idf_on_store,
 };
-use bixverse_rs::single_cell::atac::qc::{FragmentQcParams, fragment_qc};
-use bixverse_rs::single_cell::atac::regions::read_bed;
+use bixverse_rs::single_cell::atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_rs::single_cell::sc_data::data_io::ParallelSparseReader;
 use bixverse_rs::single_cell::sc_data::v5_io::FeatureKind;
 

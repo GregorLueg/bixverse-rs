@@ -22,8 +22,8 @@ use bixverse_sc_data::interval_index::{
 };
 use bixverse_sc_data::v5_io::{FeatureKind, set_cell_ids, set_feature_kind};
 
-use crate::lsi::TF_IDF_SCALE;
 use crate::prelude::*;
+use crate::processing::lsi::TF_IDF_SCALE;
 
 /// Feature type of the ATAC modality in a Cell Ranger ARC h5.
 pub const TENX_PEAKS_FEATURE_TYPE: &str = "Peaks";
@@ -110,7 +110,7 @@ fn barcode_columns(h5_barcodes: &[String], barcodes: &[String]) -> Result<Vec<us
 /// Both files are written: the cell file streamed from the h5, the gene file
 /// converted from it. Then the feature kind (`Peak`), the interval index and
 /// the cell IDs go into the headers. The norm stays log-CPM until
-/// [`crate::lsi::set_tf_idf_on_store`] switches it, since the IDF depends on
+/// [`crate::processing::lsi::set_tf_idf_on_store`] switches it, since the IDF depends on
 /// the final cell set.
 ///
 /// ### Params

@@ -6,21 +6,23 @@
 
 use std::path::PathBuf;
 
-use bixverse_atac::amulet::{AmuletParams, amulet};
-use bixverse_atac::annotation::{
+use bixverse_atac::errors::AtacErrors;
+use bixverse_atac::integration::rlsi::{RlsiParams, rlsi_on_store};
+use bixverse_atac::io::annotation::{
     GeneActivityParams, gene_activity_regions, read_gtf_genes, tss_positions,
 };
-use bixverse_atac::counting::{count_fragments, parse_count_mode, write_counts_store};
-use bixverse_atac::errors::AtacErrors;
-use bixverse_atac::features::feature_total_stats;
-use bixverse_atac::lsi::{LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store};
-use bixverse_atac::peak_calling::{
+use bixverse_atac::io::tenx_peaks::tenx_peaks_to_store;
+use bixverse_atac::peaks::calling::{
     KeepDup, NarrowPeak, PeakCallParams, call_peaks, parse_tag_source,
 };
-use bixverse_atac::qc::{FragmentQcParams, fragment_qc};
-use bixverse_atac::regions::{genome_tiles, read_bed, reduce_regions, region};
-use bixverse_atac::rlsi::{RlsiParams, rlsi_on_store};
-use bixverse_atac::tenx_peaks::tenx_peaks_to_store;
+use bixverse_atac::peaks::regions::{genome_tiles, read_bed, reduce_regions, region};
+use bixverse_atac::processing::amulet::{AmuletParams, amulet};
+use bixverse_atac::processing::counting::{count_fragments, parse_count_mode, write_counts_store};
+use bixverse_atac::processing::features::feature_total_stats;
+use bixverse_atac::processing::lsi::{
+    LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
+};
+use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::parse_pca_solver;
 use bixverse_sc_data::data_io::ParallelSparseReader;

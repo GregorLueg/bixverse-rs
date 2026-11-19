@@ -24,8 +24,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use bixverse_rs::single_cell::atac::fragments::{BarcodeIndex, fold_fragments};
-use bixverse_rs::single_cell::atac::peak_calling::{
+use bixverse_rs::single_cell::atac::io::fragments::{BarcodeIndex, fold_fragments};
+use bixverse_rs::single_cell::atac::peaks::calling::{
     KeepDup, PeakCallParams, call_peaks, parse_tag_source,
 };
 
