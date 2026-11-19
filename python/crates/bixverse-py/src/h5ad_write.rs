@@ -17,7 +17,7 @@ use bixverse_sc_export::ad_export::{
 };
 use bixverse_sc_export::errors::ExportErrors;
 use numpy::{PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
-use py_common::convert::CSlice;
+use py_common::convert::{CSlice, index_vec, path_str};
 use py_common::error::{BixverseError, BvErr};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -279,14 +279,8 @@ pub fn save_h5ad(
     chunk_size: usize,
     zarr: bool,
 ) -> PyResult<()> {
-    let cells: Vec<usize> = cell_indices
-        .c_slice()?
-        .iter()
-        .map(|&c| c as usize)
-        .collect();
-    let path = f_path_cells
-        .to_str()
-        .ok_or_else(|| PyValueError::new_err("f_path_cells is not valid UTF-8"))?;
+    let cells = index_vec(&cell_indices)?;
+    let path = path_str(&f_path_cells)?;
     let parts = build_parts(obs_index, obs, var_index, var, obsm, varm, obsp, uns_json)?;
     let format = ad_format(zarr);
     py.detach(|| {

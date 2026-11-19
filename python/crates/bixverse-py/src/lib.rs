@@ -212,7 +212,6 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(atac::atac_read_bed, m)?,
         wrap_pyfunction!(atac::atac_genome_tiles, m)?,
         wrap_pyfunction!(atac::atac_reduce_regions, m)?,
-        wrap_pyfunction!(atac::atac_gtf_genes, m)?,
         wrap_pyfunction!(atac::atac_tss_positions, m)?,
         wrap_pyfunction!(atac::atac_gene_activity_regions, m)?,
         wrap_pyfunction!(atac::atac_tenx_peaks_to_store, m)?,

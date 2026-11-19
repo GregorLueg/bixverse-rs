@@ -26,13 +26,14 @@ use bixverse_atac::processing::lsi::{
 };
 use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_processing::knn::KnnParams;
-use bixverse_sc::sc_processing::pca::parse_pca_solver;
-use bixverse_sc_data::store::gene_file::GENE_FILE_BYTES_PER_NNZ;
+use bixverse_sc::sc_processing::pca::{PcaSolver, parse_pca_solver};
 use bixverse_sc_data::store::interval_index::FeatureInterval;
 use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_data::store::v5::parse_feature_kind;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
-use py_common::convert::{f64_array, from_py, index_vec, mat_array, mat_view, u32_array};
+use py_common::convert::{
+    CSlice, f64_array, from_py, index_vec, mat_array, mat_view, max_nnz, path_str, u32_array,
+};
 use py_common::error::BvErr;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -61,18 +62,21 @@ fn atac_err(e: AtacErrors) -> PyErr {
     }
 }
 
-/// A path as `&str`.
+/// The SVD solver of the LSIs by name.
 ///
 /// ### Params
 ///
-/// * `p` - The path
+/// * `solver` - `"auto"`, `"exact"`, `"randomised"` or `"covariance"`
 ///
 /// ### Returns
 ///
-/// The string, or `ValueError` for invalid UTF-8.
-fn path_str(p: &std::path::Path) -> PyResult<&str> {
-    p.to_str()
-        .ok_or_else(|| PyValueError::new_err(format!("{} is not valid UTF-8", p.display())))
+/// The [PcaSolver], or `ValueError` for an unknown name.
+fn lsi_solver(solver: &str) -> PyResult<PcaSolver> {
+    parse_pca_solver(solver).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "solver must be 'auto', 'exact', 'randomised' or 'covariance', got '{solver}'"
+        ))
+    })
 }
 
 /// Regions from parallel lists.
@@ -140,19 +144,6 @@ fn regions_dict<'py>(py: Python<'py>, regions: &[FeatureInterval]) -> PyResult<B
             .into_pyarray(py),
     )?;
     Ok(out)
-}
-
-/// Memory budget of the CSR to CSC conversion as a non-zero count.
-///
-/// ### Params
-///
-/// * `max_mem_gb` - Budget in GB, `None` for one phase
-///
-/// ### Returns
-///
-/// Non-zeros per phase.
-fn max_nnz(max_mem_gb: Option<f64>) -> Option<usize> {
-    max_mem_gb.map(|gb| ((gb * 1e9) as usize / GENE_FILE_BYTES_PER_NNZ).max(1))
 }
 
 /////////////
@@ -228,66 +219,6 @@ pub fn atac_reduce_regions<'py>(
 ////////////////
 // Annotation //
 ////////////////
-
-/// The genes of a GTF.
-///
-/// ### Params
-///
-/// * `path` - The GTF, plain or gzip
-///
-/// ### Returns
-///
-/// Dict of `gene_id`, `gene_name`, `biotype`, `chrom`, `start`, `end`
-/// (0-based, half-open) and `strand` (`1`, `-1`, `0`).
-#[pyfunction]
-pub fn atac_gtf_genes<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
-    let genes = py.detach(|| read_gtf_genes(&path)).map_err(atac_err)?;
-    let out = PyDict::new(py);
-    out.set_item(
-        "gene_id",
-        genes.iter().map(|g| g.gene_id.clone()).collect::<Vec<_>>(),
-    )?;
-    out.set_item(
-        "gene_name",
-        genes
-            .iter()
-            .map(|g| g.gene_name.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    out.set_item(
-        "biotype",
-        genes.iter().map(|g| g.biotype.clone()).collect::<Vec<_>>(),
-    )?;
-    out.set_item(
-        "chrom",
-        genes.iter().map(|g| g.chrom.clone()).collect::<Vec<_>>(),
-    )?;
-    out.set_item(
-        "start",
-        genes
-            .iter()
-            .map(|g| g.start)
-            .collect::<Vec<u32>>()
-            .into_pyarray(py),
-    )?;
-    out.set_item(
-        "end",
-        genes
-            .iter()
-            .map(|g| g.end)
-            .collect::<Vec<u32>>()
-            .into_pyarray(py),
-    )?;
-    out.set_item(
-        "strand",
-        genes
-            .iter()
-            .map(|g| g.strand)
-            .collect::<Vec<i8>>()
-            .into_pyarray(py),
-    )?;
-    Ok(out)
-}
 
 /// TSS positions from a GTF.
 ///
@@ -495,8 +426,7 @@ pub fn atac_fragments_to_store<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of per-cell `n_fragments`, `n_reads`, `nucleosome_free`,
-/// `mononucleosomal`, `n_mito` (`uint64`) and `nucleosome_signal`,
+/// Dict of per-cell `n_fragments` (`uint64`) and `nucleosome_signal`,
 /// `tss_enrichment`, `mito_fraction` (`float64`).
 #[pyfunction]
 pub fn atac_fragment_qc<'py>(
@@ -525,10 +455,6 @@ pub fn atac_fragment_qc<'py>(
     out.set_item("tss_enrichment", qc.tss_enrichment().into_pyarray(py))?;
     out.set_item("mito_fraction", qc.mito_fraction().into_pyarray(py))?;
     out.set_item("n_fragments", qc.n_fragments.into_pyarray(py))?;
-    out.set_item("n_reads", qc.n_reads.into_pyarray(py))?;
-    out.set_item("nucleosome_free", qc.nucleosome_free.into_pyarray(py))?;
-    out.set_item("mononucleosomal", qc.mononucleosomal.into_pyarray(py))?;
-    out.set_item("n_mito", qc.n_mito.into_pyarray(py))?;
     Ok(out)
 }
 
@@ -655,9 +581,8 @@ pub fn atac_call_peaks<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of per-cell `n_fragments`, `n_overlaps`, `n_sites` (`uint32`),
-/// `p_value`, `q_value` (`float64`), `multiplet` (`bool`), and the totals
-/// `n_merged_sites`, `n_repeat_sites`.
+/// Dict of per-cell `n_overlaps`, `n_sites` (`uint32`), `p_value`, `q_value`
+/// (`float64`) and `multiplet` (`bool`).
 #[pyfunction]
 #[pyo3(signature = (
     fragments, barcodes, restrict_beds, max_overlap, max_fragment_len, repeat_q,
@@ -696,14 +621,11 @@ pub fn atac_amulet<'py>(
         })
         .map_err(atac_err)?;
     let out = PyDict::new(py);
-    out.set_item("n_fragments", res.n_fragments.into_pyarray(py))?;
     out.set_item("n_overlaps", res.n_overlaps.into_pyarray(py))?;
     out.set_item("n_sites", res.n_sites.into_pyarray(py))?;
     out.set_item("p_value", res.p_value.into_pyarray(py))?;
     out.set_item("q_value", res.q_value.into_pyarray(py))?;
     out.set_item("multiplet", res.multiplet.into_pyarray(py))?;
-    out.set_item("n_merged_sites", res.n_merged_sites)?;
-    out.set_item("n_repeat_sites", res.n_repeat_sites)?;
     Ok(out)
 }
 
@@ -827,11 +749,7 @@ pub fn atac_lsi<'py>(
     seed: usize,
     verbose: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let solver = parse_pca_solver(solver).ok_or_else(|| {
-        PyValueError::new_err(format!(
-            "solver must be 'auto', 'exact', 'randomised' or 'covariance', got '{solver}'"
-        ))
-    })?;
+    let solver = lsi_solver(solver)?;
     let cells = index_vec(&cells)?;
     let features = index_vec(&features)?;
     let (cf, gf) = (path_str(&f_path_cells)?, path_str(&f_path_genes)?);
@@ -875,7 +793,7 @@ pub fn atac_project_lsi<'py>(
     let cells = index_vec(&cells)?;
     let features = index_vec(&features)?;
     let loadings = mat_view(&loadings)?;
-    let sv = singular_values.as_slice()?;
+    let sv = singular_values.c_slice()?;
     let (cf, gf) = (path_str(&f_path_cells)?, path_str(&f_path_genes)?);
     let res = py
         .detach(|| {
@@ -937,11 +855,7 @@ pub fn atac_rlsi<'py>(
     seed: usize,
     verbose: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let solver = parse_pca_solver(solver).ok_or_else(|| {
-        PyValueError::new_err(format!(
-            "solver must be 'auto', 'exact', 'randomised' or 'covariance', got '{solver}'"
-        ))
-    })?;
+    let solver = lsi_solver(solver)?;
     let params = RlsiParams {
         dims: index_vec(&dims)?,
         k_anchor,

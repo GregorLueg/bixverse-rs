@@ -54,6 +54,7 @@ def _check_output(path: Path, *, overwrite: bool) -> None:
         _remove(path)
 
 
+@beartype
 def _remove(path: Path) -> None:
     """Remove a file, or a directory such as a Zarr store."""
     if path.is_dir():

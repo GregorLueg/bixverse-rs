@@ -1132,7 +1132,7 @@ def transfer_labels_seurat(
     if label_column not in obs.columns:
         raise ValueError(f"Reference obs has no column '{label_column}'.")
     codes, levels = _label_codes(obs[label_column], label_column)
-    res = _bixverse.transfer_labels_seurat(
+    scores = _bixverse.transfer_labels_seurat(
         str(reference.genes_path),
         np.asarray(reference.cells_to_keep, dtype=np.uint32),
         np.asarray([ref_lookup[g] for g in shared], dtype=np.uint32),
@@ -1153,7 +1153,6 @@ def transfer_labels_seurat(
         seed,
         verbose,
     )
-    scores = res["scores"]
     top = scores.argmax(axis=1)
     out = pl.DataFrame(
         {

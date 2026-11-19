@@ -28,7 +28,7 @@ use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj::write_r_counts;
 use bixverse_sc_data::store::archive::{archive_cell_file, restore_archive};
 use bixverse_sc_data::store::convert::upgrade_store_to_v5;
-use bixverse_sc_data::store::gene_file::{GENE_FILE_BYTES_PER_NNZ, write_gene_file};
+use bixverse_sc_data::store::gene_file::write_gene_file;
 use bixverse_sc_data::store::merge::{BinMergeTask, merge_sc_bin_files};
 use bixverse_sc_data::store::v4::parse_chunk_codec;
 use bixverse_sc_data::store::v5::set_cell_ids as v5_set_cell_ids;
@@ -38,7 +38,7 @@ use bixverse_sc_data::store::{
 };
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
-use py_common::convert::{from_py, u32_array};
+use py_common::convert::{from_py, max_nnz, path_str, u32_array};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -47,33 +47,6 @@ use pyo3::types::{PyDict, PyList};
 /////////////
 // Helpers //
 /////////////
-
-/// A path as UTF-8, which the crate's string-typed signatures need
-///
-/// ### Params
-///
-/// * `p` - The path
-///
-/// ### Returns
-///
-/// The path as `&str`, or a `ValueError` for a non UTF-8 path.
-fn path_str(p: &Path) -> PyResult<&str> {
-    p.to_str()
-        .ok_or_else(|| PyValueError::new_err(format!("{} is not valid UTF-8", p.display())))
-}
-
-/// Memory budget of the CSR to CSC conversion as a non-zero count
-///
-/// ### Params
-///
-/// * `max_mem_gb` - Budget in GB, `None` for a single phase
-///
-/// ### Returns
-///
-/// The maximum non-zeros held at once, at least one.
-fn max_nnz(max_mem_gb: Option<f64>) -> Option<usize> {
-    max_mem_gb.map(|gb| ((gb * 1e9) as usize / GENE_FILE_BYTES_PER_NNZ).max(1))
-}
 
 /// Directory for the mtx loader's spill files
 ///

@@ -649,7 +649,7 @@ pub fn transfer_labels_symphony<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of `scores` (`(query cells, n_labels)` `float32`) and `n_anchors`.
+/// The `(query cells, n_labels)` `float32` label scores.
 #[pyfunction]
 #[pyo3(signature = (
     ref_genes, ref_cells, ref_features, query_genes, query_cells, query_features,
@@ -678,7 +678,7 @@ pub fn transfer_labels_seurat<'py>(
     knn_params: &Bound<'py, PyAny>,
     seed: usize,
     verbose: usize,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Bound<'py, PyAny>> {
     let knn_params: KnnParams = from_py(knn_params, "knn params")?;
     let ref_cells = index_vec(&ref_cells)?;
     let query_cells = index_vec(&query_cells)?;
@@ -713,7 +713,7 @@ pub fn transfer_labels_seurat<'py>(
     };
     let ref_reader = ParallelSparseReader::new(ref_genes).map_err(BvErr::from)?;
     let query_reader = ParallelSparseReader::new(query_genes).map_err(BvErr::from)?;
-    let (scores, n_anchors) = py
+    let scores = py
         .detach(|| {
             let anchors = find_transfer_anchors(
                 &ref_reader,
@@ -734,11 +734,8 @@ pub fn transfer_labels_seurat<'py>(
                 &data_params,
                 seed,
             )?;
-            Ok::<_, bixverse_sc::prelude::ScErrors>((scores, anchors.pairs.len()))
+            Ok::<_, bixverse_sc::prelude::ScErrors>(scores)
         })
         .map_err(BvErr::from)?;
-    let out = PyDict::new(py);
-    out.set_item("scores", mat_array(py, &scores)?)?;
-    out.set_item("n_anchors", n_anchors)?;
-    Ok(out)
+    mat_array(py, &scores)
 }

@@ -685,6 +685,27 @@ def transfer_labels_symphony(
     seed: int = 42,
     verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+def transfer_labels_seurat(
+    ref_genes: str,
+    ref_cells: np.ndarray,
+    ref_features: np.ndarray,
+    query_genes: str,
+    query_cells: np.ndarray,
+    query_features: np.ndarray,
+    ref_labels: np.ndarray,
+    n_labels: int,
+    weight_embedding: np.ndarray,
+    n_cc: int,
+    k_anchor: int,
+    k_score: int,
+    scale_max: float,
+    l2_norm: bool,
+    k_weight: int,
+    sd: float,
+    knn_params: dict[str, Any],
+    seed: int = ...,
+    verbose: int = ...,
+) -> np.ndarray: ...
 def bootstrapped_metacells(
     f_path_cell: str,
     knn: np.ndarray | None,
@@ -1240,6 +1261,9 @@ def grouped_gene_stats(
     group_ids: np.ndarray,
     n_groups: int,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+
+# ATAC
+
 def atac_read_bed(path: Path) -> dict[str, Any]: ...
 def atac_genome_tiles(
     chroms: list[str], sizes: list[int], width: int
@@ -1247,7 +1271,6 @@ def atac_genome_tiles(
 def atac_reduce_regions(
     chrom: list[str], start: list[int], end: list[int]
 ) -> dict[str, Any]: ...
-def atac_gtf_genes(path: Path) -> dict[str, Any]: ...
 def atac_tss_positions(path: Path, biotypes: list[str]) -> dict[str, Any]: ...
 def atac_project_lsi(
     f_path_cells: Path,
@@ -1276,27 +1299,6 @@ def atac_rlsi(
     seed: int = ...,
     verbose: int = ...,
 ) -> np.ndarray: ...
-def transfer_labels_seurat(
-    ref_genes: str,
-    ref_cells: np.ndarray,
-    ref_features: np.ndarray,
-    query_genes: str,
-    query_cells: np.ndarray,
-    query_features: np.ndarray,
-    ref_labels: np.ndarray,
-    n_labels: int,
-    weight_embedding: np.ndarray,
-    n_cc: int,
-    k_anchor: int,
-    k_score: int,
-    scale_max: float,
-    l2_norm: bool,
-    k_weight: int,
-    sd: float,
-    knn_params: dict[str, Any],
-    seed: int = ...,
-    verbose: int = ...,
-) -> dict[str, Any]: ...
 def atac_gene_activity_regions(
     path: Path, upstream: int, downstream: int, max_width: int, biotypes: list[str]
 ) -> dict[str, Any]: ...
@@ -1364,7 +1366,7 @@ def atac_set_tf_idf(
     scale: float,
 ) -> np.ndarray: ...
 def atac_feature_totals(
-    f_path_genes: Path, cells: np.ndarray | None
+    f_path_genes: Path, cells: np.ndarray | None, min_cutoff: str | None = ...
 ) -> dict[str, np.ndarray]: ...
 def atac_lsi(
     f_path_cells: Path,

@@ -18,8 +18,8 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.integrate import _labels
 from bixverse._core.multimodal import AtacInfo, CountMode, SingleCellsMultiModal
-from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
 from bixverse._core.state import ScCache
 from bixverse._validate import Verbose
@@ -66,6 +66,7 @@ def require_atac(mm: SingleCellsMultiModal) -> AtacInfo:
     return mm.atac
 
 
+@beartype
 def _region_ids(chrom: Sequence[str], start: np.ndarray, end: np.ndarray) -> list[str]:
     """`chrom:start-end` ids, 0-based half-open."""
     return [f"{c}:{s}-{e}" for c, s, e in zip(chrom, start, end, strict=True)]
@@ -127,7 +128,7 @@ def add_atac_tenx(
             barcodes).
         h5_path: The Cell Ranger ARC `filtered_feature_bc_matrix.h5`.
         max_mem_gb: Memory budget of the peak-major conversion.
-        verbose: `0` silent, `1` normal.
+        verbose: `0` silent, `1` normal, `2` detailed.
 
     Raises:
         ValueError: If a cell of the store is not in the h5.
@@ -218,7 +219,12 @@ def add_atac_fragments(
             `"paired-insertion"` (once per fragment and feature, SnapATAC2) or
             `"fragment"` (each overlapping fragment, Signac).
         max_mem_gb: Memory budget of the peak-major conversion.
-        verbose: `0` silent, `1` normal.
+        verbose: `0` silent, `1` normal, `2` detailed.
+
+    Raises:
+        ValueError: Unless exactly one of `peaks` and `tile_width` is given,
+            if tiles come without `chrom_sizes`, or if a `peaks` frame lacks
+            `chrom`, `start` or `end`.
     """
     chrom, start, end, kind = _features(peaks, tile_width, chrom_sizes)
     cells, genes = atac_paths(mm)
@@ -289,7 +295,7 @@ def gene_activity(
             `lib_size` of the kept cells, as the Signac vignettes do.
         overwrite: Replace an existing store at `dir_out`.
         max_mem_gb: Memory budget of the gene-major conversion.
-        verbose: `0` silent, `1` normal.
+        verbose: `0` silent, `1` normal, `2` detailed.
 
     Returns:
         The gene activity experiment. var holds `gene_id` (the GTF gene ID
@@ -487,13 +493,16 @@ def call_peaks(
         `peak_called_in`, the comma-separated groups. Without: one row per
         group and peak, with `group`, `summit` and the summit's `pileup`,
         `pscore` (`-log10 p`), `fold` and `qscore` (`-log10 q`).
+
+    Raises:
+        ValueError: If `group_by` is not an obs column or has missing values.
     """
     kept = sc.cells_to_keep
     if group_by is None:
         codes = np.zeros(len(kept), dtype=np.uint32)
         levels = ["all"]
     else:
-        codes, levels = _factor_codes(_obs_aligned(sc, [group_by])[group_by], group_by)
+        codes, levels = _labels(sc, group_by)
     r = _bixverse.atac_call_peaks(
         Path(fragments),
         [str(b) for b in sc.cell_ids(kept)],
@@ -633,38 +642,24 @@ def run_tfidf(mm: SingleCellsMultiModal, *, scale: float = TF_IDF_SCALE) -> np.n
     Header metadata only; no count is rewritten. Run again after the kept
     cells change.
 
+    Args:
+        mm: The experiment, with ATAC.
+        scale: Scale factor of the term frequencies.
+
     Returns:
         The IDF per feature.
+
+    Raises:
+        ValueError: If no ATAC store was added.
     """
     info = require_atac(mm)
     cells, genes = atac_paths(mm)
     idf = _bixverse.atac_set_tf_idf(
-        cells, genes, np.sort(mm.cells_to_keep).astype(np.uint32), scale
+        cells, genes, np.asarray(mm.cells_to_keep, dtype=np.uint32), scale
     )
     info.tf_idf = True
     mm.atac_cache = ScCache()
     return idf
-
-
-@beartype
-def _parse_cutoff(min_cutoff: str | float | None) -> tuple[str, float]:
-    """`("quantile", q)`, `("count", c)` or `("all", 0)`.
-
-    Raises:
-        ValueError: For a malformed `"qN"`.
-    """
-    if min_cutoff is None:
-        return "all", 0.0
-    if isinstance(min_cutoff, str):
-        if not min_cutoff.startswith("q"):
-            raise ValueError(
-                f"min_cutoff must be 'qN', a number or None, got '{min_cutoff}'"
-            )
-        q = float(min_cutoff[1:])
-        if not 0 <= q <= 100:
-            raise ValueError("the percentile of min_cutoff must be in [0, 100]")
-        return "quantile", q / 100
-    return "count", float(min_cutoff)
 
 
 @beartype
@@ -683,20 +678,19 @@ def find_top_features(
 
     Returns:
         0-based indices of the top features.
+
+    Raises:
+        ValueError: If no ATAC store was added, or for a malformed
+            `min_cutoff`.
     """
     require_atac(mm)
     _, genes = atac_paths(mm)
     t = _bixverse.atac_feature_totals(
-        genes, np.sort(mm.cells_to_keep).astype(np.uint32)
+        genes,
+        np.asarray(mm.cells_to_keep, dtype=np.uint32),
+        None if min_cutoff is None else str(min_cutoff),
     )
-    how, x = _parse_cutoff(min_cutoff)
-    match how:
-        case "quantile":
-            keep = t["percentile"] > x
-        case "count":
-            keep = t["count"] > x
-        case _:
-            keep = np.ones(len(t["count"]), dtype=bool)
+    keep = t["top_feature"]
     with db.connect(mm.db_path) as con:
         var = db.get_table(
             con, "var_atac", cols=["feature_id", "chrom", "start", "end"]
@@ -772,15 +766,14 @@ def calculate_lsi(
         feats.astype(np.uint32),
         n_comp,
         solver,
-        True,
-        scale_max,
-        seed,
-        verbose,
+        scale_max=scale_max,
+        seed=seed,
+        verbose=verbose,
     )
     emb = res["embedding"]
-    dropped: tuple[int, ...] = (0,) if drop_first else ()
+    dropped: tuple[int, ...] = ()
     if drop_first:
-        emb = emb[:, 1:]
+        emb, dropped = emb[:, 1:], (0,)
     mm.atac_cache.embeddings["lsi"] = np.ascontiguousarray(emb)
     mm.stamp("lsi", modality="atac")
     info.depth_cor = np.asarray(res["depth_cor"])
@@ -820,14 +813,18 @@ def project_lsi(
             reference LSI feature is not in the query.
     """
     ref = require_atac(reference)
-    if ref.lsi_loadings is None or ref.lsi_features is None:
-        raise ValueError("Run calculate_lsi() on the reference first.")
-    if ref.lsi_singular_values is None:
+    if (
+        ref.lsi_loadings is None
+        or ref.lsi_features is None
+        or ref.lsi_singular_values is None
+    ):
         raise ValueError("Run calculate_lsi() on the reference first.")
     if not require_atac(query).tf_idf:
         raise ValueError("Run run_tfidf() on the query first.")
 
+    @beartype
     def regions(v: pl.DataFrame) -> list[tuple[str, int, int]]:
+        """The `(chrom, start, end)` of every row of a var table."""
         return list(zip(v["chrom"], v["start"], v["end"], strict=True))
 
     ref_regions = regions(reference.var(modality="atac"))
@@ -912,7 +909,8 @@ def run_rlsi(
         The integrated embedding, kept cells x its dimensions.
 
     Raises:
-        ValueError: Without the embedding, or with fewer than two batches.
+        ValueError: Without the embedding, with fewer than two batches, or if
+            `batch_column` is not an obs column or has missing values.
     """
     info = require_atac(mm)
     emb = mm.atac_cache.embeddings.get(embedding)
@@ -924,9 +922,7 @@ def run_rlsi(
         feats = info.lsi_features
     else:
         feats = np.asarray(features)
-    codes, _ = _factor_codes(
-        _obs_aligned(mm, [batch_column])[batch_column], batch_column
-    )
+    codes, _ = _labels(mm, batch_column)
     cells, genes = atac_paths(mm)
     out = _bixverse.atac_rlsi(
         cells,
@@ -955,6 +951,9 @@ def run_rlsi(
 @beartype
 def get_lsi_depth_cor(mm: SingleCellsMultiModal) -> pl.DataFrame:
     """Correlation of each LSI component with the library size.
+
+    Args:
+        mm: The experiment, after `calculate_lsi`.
 
     Returns:
         `component` (1-based), `depth_cor`, `dropped`.

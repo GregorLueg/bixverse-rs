@@ -99,19 +99,17 @@ fn mann_whitney_dict<'py>(py: Python<'py>, res: DgeMannWhitneyRes) -> PyResult<B
 ///
 /// ### Returns
 ///
-/// Dict with `lfc`, `prop1`, `prop2`, `lr_stat`, `z_scores` (signed root of
-/// `lr_stat`), `p_values`, `fdr` and `converged` over the kept genes and the
-/// full-length `genes_to_keep` mask.
+/// Dict with `lfc`, `prop1`, `prop2`, `z_scores` (signed root of the
+/// likelihood ratio statistic), `p_values` and `fdr` over the kept genes and
+/// the full-length `genes_to_keep` mask.
 fn lr_dict<'py>(py: Python<'py>, res: DgeLrRes) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     out.set_item("lfc", f64_array(py, &res.lfc))?;
     out.set_item("prop1", f64_array(py, &res.prop1))?;
     out.set_item("prop2", f64_array(py, &res.prop2))?;
-    out.set_item("lr_stat", res.lr_stat.into_pyarray(py))?;
     out.set_item("z_scores", res.z_scores.into_pyarray(py))?;
     out.set_item("p_values", res.p_vals.into_pyarray(py))?;
     out.set_item("fdr", res.fdr.into_pyarray(py))?;
-    out.set_item("converged", res.converged.into_pyarray(py))?;
     out.set_item("genes_to_keep", res.genes_to_keep.into_pyarray(py))?;
     Ok(out)
 }
