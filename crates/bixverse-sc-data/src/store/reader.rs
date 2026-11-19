@@ -15,7 +15,7 @@ use std::{fs::File, marker::Sync, path::Path, sync::Arc};
 use crate::prelude::*;
 use crate::store::chunk::{
     FILE_MAGIC, FileHeader, RunSource, SparseDataHeader, csc_payload, csr_payload,
-    extend_raw_checked, keep_set_index_map, le_u64, raw_to, remap,
+    extend_raw_checked, gene_subset_map, keep_set_index_map, le_u64, raw_to, remap,
 };
 use crate::store::interval_index::GenomeIntervals;
 use crate::store::v4::{
@@ -2174,26 +2174,37 @@ pub struct CsrBatch {
 }
 
 impl ParallelSparseReader {
-    /// Read a batch of cells straight into CSR, as `f32`.
+    /// Read a batch of cells straight into CSR, as `f32`, optionally over a
+    /// subset of genes.
     ///
     /// [`SingleCellReading::read_cells_sparse`] with `T = f32`, unpacked into
-    /// the [`CsrBatch`] the Python loader hands to scipy or torch.
+    /// the [`CsrBatch`] the Python loader hands to scipy or torch. A gene
+    /// selection is applied while each cell is decoded, so no batch over every
+    /// gene is built; column indices come out sorted within each row.
     ///
     /// ### Params
     ///
     /// * `indices` - Original cell indices, in the order the batch wants them
+    /// * `genes` - Store genes to keep, in output column order, or `None` for
+    ///   every gene in store order
     /// * `data_layer` - Which layer(s) to materialise
     ///
     /// ### Returns
     ///
-    /// The batch as CSR, or [`ScDataErrors::ReaderModeMismatch`] on a
-    /// gene-major store.
+    /// The batch as CSR, [`ScDataErrors::ReaderModeMismatch`] on a gene-major
+    /// store, or [`ScDataErrors::InvalidArgument`] for an out-of-range or
+    /// repeated gene.
     pub fn read_cells_csr(
         &self,
         indices: &[usize],
+        genes: Option<&[usize]>,
         data_layer: &DataLayerReturn,
     ) -> Result<CsrBatch, ScDataErrors> {
-        let csr = self.read_cells_sparse::<f32>(indices, data_layer)?;
+        let gene_map = genes
+            .map(|g| gene_subset_map(g, self.dims.total_genes))
+            .transpose()?;
+        let n_cols = genes.map_or(self.dims.total_genes, <[usize]>::len);
+        let csr = self.read_cells_fused::<f32>(indices, gene_map.as_deref(), n_cols, data_layer)?;
 
         Ok(CsrBatch {
             data_raw: wanted_layers(data_layer).0.then_some(csr.data),
@@ -2202,6 +2213,55 @@ impl ParallelSparseReader {
             indptr: csr.indptr,
             shape: csr.shape,
         })
+    }
+
+    /// Read cells into CSR, filtering genes through a dense map, see
+    /// [`read_fused`].
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, in output row order
+    /// * `gene_map` - Optional dense `gene -> output column` map
+    /// * `n_cols` - Output columns: the kept genes, or every gene
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSR.
+    fn read_cells_fused<T>(
+        &self,
+        indices: &[usize],
+        gene_map: Option<&[u32]>,
+        n_cols: usize,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, ScDataErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        if !self.is_cell_based() {
+            return Err(ScDataErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
+
+        self.prefetch(indices);
+
+        read_fused(
+            indices,
+            data_layer,
+            CompressedSparseFormat::Csr,
+            (indices.len(), n_cols),
+            |cell, scratch, fragment| {
+                if self.is_v4() {
+                    let (chunk, _) = self.locate_chunk(cell)?;
+                    return fragment.push_v4(chunk, &self.v4_ctx(), scratch, gene_map);
+                }
+                self.decompress_chunk_into(cell, &mut scratch.bytes)?;
+                let p = csr_payload(&scratch.bytes)?;
+                fragment.push_run(&p, gene_map)
+            },
+        )
     }
 }
 
@@ -2271,30 +2331,7 @@ impl SingleCellReading for ParallelSparseReader {
     where
         T: BixverseNumeric + FromPrimitive,
     {
-        if !self.is_cell_based() {
-            return Err(ScDataErrors::ReaderModeMismatch {
-                actual: "gene-based",
-                requested: "cell-based",
-            });
-        }
-
-        self.prefetch(indices);
-
-        read_fused(
-            indices,
-            data_layer,
-            CompressedSparseFormat::Csr,
-            (indices.len(), self.dims.total_genes),
-            |cell, scratch, fragment| {
-                if self.is_v4() {
-                    let (chunk, _) = self.locate_chunk(cell)?;
-                    return fragment.push_v4(chunk, &self.v4_ctx(), scratch, None);
-                }
-                self.decompress_chunk_into(cell, &mut scratch.bytes)?;
-                let p = csr_payload(&scratch.bytes)?;
-                fragment.push_run(&p, None)
-            },
-        )
+        self.read_cells_fused(indices, None, self.dims.total_genes, data_layer)
     }
 
     /// Read a batch of genes straight into CSC, optionally filtering cells
@@ -2702,7 +2739,7 @@ mod tests {
         let order = [2usize, 0, 1];
 
         let batch = reader
-            .read_cells_csr(&order, &DataLayerReturn::BothLayers)
+            .read_cells_csr(&order, None, &DataLayerReturn::BothLayers)
             .expect("csr batch");
         let chunks = reader.read_cells_parallel(&order).expect("chunk batch");
 
@@ -2735,13 +2772,13 @@ mod tests {
         let (_temp, reader) = csr_test_store();
 
         let raw_only = reader
-            .read_cells_csr(&[0, 1, 2], &DataLayerReturn::Raw)
+            .read_cells_csr(&[0, 1, 2], None, &DataLayerReturn::Raw)
             .expect("raw batch");
         assert!(raw_only.data_raw.is_some());
         assert!(raw_only.data_norm.is_none());
 
         let norm_only = reader
-            .read_cells_csr(&[0, 1, 2], &DataLayerReturn::Norm)
+            .read_cells_csr(&[0, 1, 2], None, &DataLayerReturn::Norm)
             .expect("norm batch");
         assert!(norm_only.data_raw.is_none());
         assert!(norm_only.data_norm.is_some());
@@ -2754,7 +2791,7 @@ mod tests {
         // A cell may legitimately appear twice in one batch: sampling with
         // replacement is a normal thing for a training loop to ask for.
         let batch = reader
-            .read_cells_csr(&[1, 1], &DataLayerReturn::Raw)
+            .read_cells_csr(&[1, 1], None, &DataLayerReturn::Raw)
             .expect("csr batch");
 
         assert_eq!(batch.shape.0, 2);
@@ -2763,11 +2800,46 @@ mod tests {
     }
 
     #[test]
+    fn test_read_cells_csr_gene_subset() {
+        // v5 decodes through push_v4, the legacy store through push_run
+        for legacy in [false, true] {
+            let (_temp, reader) = csr_test_store_with(legacy);
+
+            // genes 2 then 0: a reversed selection must come back sorted
+            let batch = reader
+                .read_cells_csr(&[0, 1, 2], Some(&[2, 0]), &DataLayerReturn::BothLayers)
+                .expect("subset batch");
+            assert_eq!(batch.shape, (3, 2));
+            assert_eq!(batch.indptr, vec![0, 2, 4, 4]);
+            assert_eq!(batch.indices, vec![0, 1, 0, 1]);
+            assert_eq!(batch.data_raw.unwrap(), vec![70_000.0, 5.0, 3.0, 1.0]);
+
+            let full = reader
+                .read_cells_csr(&[0, 1, 2], None, &DataLayerReturn::Norm)
+                .unwrap()
+                .data_norm
+                .unwrap();
+            // full rows: cell 0 is genes [0, 2], cell 1 genes [0, 1, 2]
+            assert_eq!(
+                batch.data_norm.unwrap(),
+                vec![full[1], full[0], full[4], full[2]]
+            );
+
+            for bad in [&[0usize, 0][..], &[4][..]] {
+                let err = reader
+                    .read_cells_csr(&[0], Some(bad), &DataLayerReturn::Raw)
+                    .expect_err("invalid gene selection");
+                assert!(matches!(err, ScDataErrors::InvalidArgument(_)));
+            }
+        }
+    }
+
+    #[test]
     fn test_read_cells_csr_rejects_unknown_cell() {
         let (_temp, reader) = csr_test_store();
 
         let err = reader
-            .read_cells_csr(&[99], &DataLayerReturn::Raw)
+            .read_cells_csr(&[99], None, &DataLayerReturn::Raw)
             .expect_err("index is out of range");
         assert!(matches!(err, ScDataErrors::ChunkIndexNotFound(99)));
     }
@@ -2784,7 +2856,7 @@ mod tests {
 
         let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         let err = reader
-            .read_cells_csr(&[0], &DataLayerReturn::Raw)
+            .read_cells_csr(&[0], None, &DataLayerReturn::Raw)
             .expect_err("store is gene-major");
         assert!(matches!(err, ScDataErrors::ReaderModeMismatch { .. }));
     }

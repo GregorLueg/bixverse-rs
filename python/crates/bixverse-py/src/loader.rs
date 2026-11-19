@@ -26,9 +26,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 
-use crate::batch::{
-    GeneRemap, Layer, PreparedBatch, adopt_csr, gene_remap, prepare_dense, subset_csr,
-};
+use crate::batch::{GeneRemap, Layer, PreparedBatch, adopt_csr, gene_remap, prepare_dense};
 use crate::reader::PyCellReader;
 use py_common::convert::CSlice;
 use py_common::error::BvErr;
@@ -274,12 +272,10 @@ impl PyCellLoader {
                 // walks the decompressed bytes once instead of building a
                 // `CsrCellChunk` per cell and copying out of it again.
                 let msg = if sparse {
+                    let genes = remap.as_deref().map(|r| r.genes.as_slice());
                     reader
-                        .read_cells_csr(batch, &layer.as_data_layer())
-                        .map(|b| match remap.as_deref() {
-                            Some(r) => subset_csr(adopt_csr(b), r),
-                            None => adopt_csr(b),
-                        })
+                        .read_cells_csr(batch, genes, &layer.as_data_layer())
+                        .map(adopt_csr)
                 } else {
                     reader
                         .read_cells_parallel(batch)

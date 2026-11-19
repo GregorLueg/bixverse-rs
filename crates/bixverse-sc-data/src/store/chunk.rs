@@ -42,6 +42,36 @@ pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
     map
 }
 
+/// Checked dense map for a gene selection over every gene of a store.
+///
+/// ### Params
+///
+/// * `genes` - Store genes to keep, in output column order
+/// * `n_genes` - Genes in the store
+///
+/// ### Returns
+///
+/// `map[gene] = column`, [`INDEX_DROPPED`] for genes not kept, or
+/// [`ScDataErrors::InvalidArgument`] naming the first out-of-range or
+/// repeated gene.
+pub fn gene_subset_map(genes: &[usize], n_genes: usize) -> Result<Vec<u32>, ScDataErrors> {
+    let mut map = vec![INDEX_DROPPED; n_genes];
+    for (col, &g) in genes.iter().enumerate() {
+        let slot = map.get_mut(g).ok_or_else(|| {
+            ScDataErrors::InvalidArgument(format!(
+                "gene index {g} is out of range for a store of {n_genes} genes"
+            ))
+        })?;
+        if *slot != INDEX_DROPPED {
+            return Err(ScDataErrors::InvalidArgument(format!(
+                "gene index {g} is repeated"
+            )));
+        }
+        *slot = col as u32;
+    }
+    Ok(map)
+}
+
 /// [`dense_index_map`] over a keep set, rows in the set's iteration order.
 ///
 /// ### Params

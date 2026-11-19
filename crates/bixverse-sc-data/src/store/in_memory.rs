@@ -407,7 +407,7 @@ pub fn read_cell_subset_csc(
     cell_reader: &ParallelSparseReader,
     cell_indices: &[usize],
 ) -> Result<CompressedSparseData2<u32, f32>, ScDataErrors> {
-    let batch = cell_reader.read_cells_csr(cell_indices, &DataLayerReturn::BothLayers)?;
+    let batch = cell_reader.read_cells_csr(cell_indices, None, &DataLayerReturn::BothLayers)?;
 
     // Raw counts come back as f32, exact for anything below 2^24.
     let data: Vec<u32> = batch

@@ -6,7 +6,7 @@
 //! before the counts are streamed, not after.
 
 use bixverse_sc_data::store::{
-    chunk::DataLayerReturn,
+    chunk::{DataLayerReturn, gene_subset_map},
     reader::{ParallelSparseReader, SingleCellReading},
 };
 #[cfg(feature = "zarr")]
@@ -43,7 +43,7 @@ pub enum AdFormat {
 pub struct AdParts {
     /// Cell table, one row per written cell.
     pub obs: ObsTable,
-    /// Gene table, one row per gene of the store.
+    /// Gene table, one row per written gene.
     pub var: VarTable,
     /// Cell embeddings, one row per cell.
     pub obsm: Embeddings,
@@ -184,20 +184,24 @@ impl Builder {
 /// * `path` - Output to create
 /// * `format` - h5ad or Zarr
 /// * `cells` - 0-based cells to write, in output order
+/// * `genes` - 0-based genes to write, in output order, or `None` for every
+///   gene in store order
 /// * `norm` - Write the normalised instead of the raw counts
-/// * `parts` - obs (one row per entry of `cells`), var (one row per gene)
-///   and the rest
+/// * `parts` - obs (one row per entry of `cells`), var (one row per written
+///   gene) and the rest
 /// * `chunk_size` - Cells per streamed batch
 ///
 /// ### Returns
 ///
 /// `Ok(())`, or the first error. Nothing is created when the inputs do not
 /// fit together.
+#[allow(clippy::too_many_arguments)]
 pub fn save_store(
     reader: &ParallelSparseReader,
     path: &Path,
     format: AdFormat,
     cells: &[usize],
+    genes: Option<&[usize]>,
     norm: bool,
     parts: AdParts,
     chunk_size: usize,
@@ -214,7 +218,10 @@ pub fn save_store(
             dims.total_cells
         )));
     }
-    let (n_obs, n_vars) = (cells.len(), dims.total_genes);
+    if let Some(g) = genes {
+        gene_subset_map(g, dims.total_genes)?;
+    }
+    let (n_obs, n_vars) = (cells.len(), genes.map_or(dims.total_genes, <[usize]>::len));
     parts.check(n_obs, n_vars)?;
     let chunk_size = chunk_size.max(1);
     let layer = if norm {
@@ -225,7 +232,7 @@ pub fn save_store(
 
     let mut builder = Builder::new(path, format, n_obs, n_vars, chunk_size)?;
     for (i, batch) in cells.chunks(chunk_size).enumerate() {
-        let csr = reader.read_cells_csr(batch, &layer)?;
+        let csr = reader.read_cells_csr(batch, genes, &layer)?;
         let data = if norm { csr.data_norm } else { csr.data_raw }
             .expect("the requested layer is always materialised");
         let indptr: Vec<u64> = csr.indptr.iter().map(|&p| p as u64).collect();

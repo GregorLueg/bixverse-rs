@@ -237,14 +237,16 @@ fn ad_format(zarr: bool) -> AdFormat {
 /// * `norm` - Write the normalised instead of the raw counts
 /// * `obs_index` - One name per written cell
 /// * `obs` - obs columns, see [to_columns]
-/// * `var_index` - One name per gene
+/// * `var_index` - One name per written gene
 /// * `var` - var columns
 /// * `obsm` - Cell embeddings
-/// * `varm` - Gene loadings
+/// * `varm` - Gene loadings, one row per written gene
 /// * `obsp` - Cell graphs as `(data, indices, indptr)`
 /// * `uns_json` - JSON object for `uns`
 /// * `chunk_size` - Cells per streaming batch
 /// * `zarr` - Write an AnnData Zarr store instead of an h5ad file
+/// * `gene_indices` - 0-based genes to write, in output order, or `None`
+///   for every gene
 ///
 /// ### Returns
 ///
@@ -252,7 +254,7 @@ fn ad_format(zarr: bool) -> AdFormat {
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cell_indices, norm, obs_index, obs, var_index, var, obsm, varm,
-    obsp, uns_json, chunk_size = 10_000, zarr = false
+    obsp, uns_json, chunk_size = 10_000, zarr = false, gene_indices = None
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn save_h5ad(
@@ -278,14 +280,25 @@ pub fn save_h5ad(
     uns_json: &str,
     chunk_size: usize,
     zarr: bool,
+    gene_indices: Option<PyReadonlyArray1<'_, u32>>,
 ) -> PyResult<()> {
     let cells = index_vec(&cell_indices)?;
+    let genes = gene_indices.as_ref().map(index_vec).transpose()?;
     let path = path_str(&f_path_cells)?;
     let parts = build_parts(obs_index, obs, var_index, var, obsm, varm, obsp, uns_json)?;
     let format = ad_format(zarr);
     py.detach(|| {
         let reader = ParallelSparseReader::new(path).map_err(ExportErrors::from)?;
-        save_store(&reader, &h5_path, format, &cells, norm, parts, chunk_size)
+        save_store(
+            &reader,
+            &h5_path,
+            format,
+            &cells,
+            genes.as_deref(),
+            norm,
+            parts,
+            chunk_size,
+        )
     })
     .map_err(export_err)
 }

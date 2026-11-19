@@ -424,3 +424,28 @@ def test_varm_pcs_sit_on_the_genes_the_pca_ran_on(data, tmp_path):
     np.testing.assert_allclose(pcs[genes], loadings, rtol=1e-6)
     others = np.setdiff1d(np.arange(sc.n_genes), genes)
     assert np.all(pcs[others] == 0)
+
+
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_save_writes_a_gene_selection(data, fmt, tmp_path):
+    ad = pytest.importorskip("anndata")
+    sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
+    bv.pp.find_hvg(sc, hvg_no=15)
+    bv.pp.calculate_pca(sc, 3)
+    full = bv.io.save_h5ad(sc, tmp_path / "full.h5ad")
+    # out of store order, once as indices and once as ids
+    idx = np.array([30, 2, 17, 5, 11], dtype=np.uint32)
+    ids = sc.var().sort("gene_idx")["gene_id"].to_numpy()[idx].tolist()
+    save = bv.io.save_zarr if fmt == "zarr" else bv.io.save_h5ad
+    read = ad.read_zarr if fmt == "zarr" else ad.read_h5ad
+    ref = ad.read_h5ad(full)
+    for i, genes in enumerate((idx, ids)):
+        got = read(save(sc, tmp_path / f"g{i}.{fmt}", genes=genes))
+        assert got.var_names.tolist() == ids
+        np.testing.assert_array_equal(
+            got.X.toarray(), ref.X.toarray()[:, idx.astype(np.int64)]
+        )
+        np.testing.assert_array_equal(got.varm["PCs"], ref.varm["PCs"][idx])
+        assert got.obs_names.tolist() == ref.obs_names.tolist()
+    with pytest.raises(ValueError, match="repeated"):
+        save(sc, tmp_path / "bad", genes=[1, 1])

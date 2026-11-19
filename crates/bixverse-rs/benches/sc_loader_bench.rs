@@ -440,7 +440,7 @@ fn time_fused(reader: &ParallelSparseReader, order: &[usize], batch_size: usize)
     let start = Instant::now();
     for batch in order.chunks(batch_size) {
         let csr = reader
-            .read_cells_csr(batch, &DataLayerReturn::Norm)
+            .read_cells_csr(batch, None, &DataLayerReturn::Norm)
             .expect("read batch");
         nnz += csr.indices.len();
         black_box(&csr);

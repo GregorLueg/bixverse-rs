@@ -232,6 +232,7 @@ def save_h5ad(
     uns_json: str,
     chunk_size: int = ...,
     zarr: bool = ...,
+    gene_indices: np.ndarray | None = ...,
 ) -> None: ...
 def write_h5ad(
     h5_path: Path,

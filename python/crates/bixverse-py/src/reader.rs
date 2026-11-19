@@ -14,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::batch::{Layer, adopt_csr, gene_remap, subset_csr};
+use crate::batch::{Layer, adopt_csr, gene_remap};
 use py_common::convert::CSlice;
 use py_common::error::BvErr;
 
@@ -143,12 +143,10 @@ impl PyCellReader {
         let reader = Arc::clone(&self.inner);
         let batch = py
             .detach(|| {
+                let genes = remap.as_ref().map(|r| r.genes.as_slice());
                 reader
-                    .read_cells_csr(&cells, &layer.as_data_layer())
-                    .map(|b| match remap.as_ref() {
-                        Some(r) => subset_csr(adopt_csr(b), r),
-                        None => adopt_csr(b),
-                    })
+                    .read_cells_csr(&cells, genes, &layer.as_data_layer())
+                    .map(adopt_csr)
             })
             .map_err(BvErr::from)?;
 
