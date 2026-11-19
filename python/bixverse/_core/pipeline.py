@@ -584,6 +584,7 @@ def step_harmony(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
@@ -595,7 +596,8 @@ def step_harmony(
         batch_column: obs column with the primary batch, forwarded.
         additional_batch_columns: Further obs columns to regress out,
             forwarded.
-        modality: The PCA to correct, forwarded.
+        embd_to_use: The embedding to correct, forwarded.
+        modality: The cache to read and write, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -607,6 +609,7 @@ def step_harmony(
         {
             "batch_column": batch_column,
             "additional_batch_columns": additional_batch_columns,
+            "embd_to_use": embd_to_use,
             "modality": modality,
             "harmony_params": harmony_params,
             "seed": seed,
@@ -620,6 +623,7 @@ def step_harmony_v1(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
@@ -631,7 +635,8 @@ def step_harmony_v1(
         batch_column: obs column with the primary batch, forwarded.
         additional_batch_columns: Further obs columns to regress out,
             forwarded.
-        modality: The PCA to correct, forwarded.
+        embd_to_use: The embedding to correct, forwarded.
+        modality: The cache to read and write, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -643,6 +648,7 @@ def step_harmony_v1(
         {
             "batch_column": batch_column,
             "additional_batch_columns": additional_batch_columns,
+            "embd_to_use": embd_to_use,
             "modality": modality,
             "harmony_params": harmony_params,
             "seed": seed,
