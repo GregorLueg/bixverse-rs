@@ -15,7 +15,10 @@
 //!
 //! Cut sites are the raw start and end of a fragment and count once for
 //! every TSS window they fall in, with Signac's window arithmetic replicated
-//! exactly (see [`SIGNAC_CUT_SHIFT_LO`]).
+//! exactly (see [`SIGNAC_CUT_SHIFT_LO`]). One deliberate difference: Signac
+//! sizes every window of a chunk by the chunk's first window, so a TSS within
+//! 1 kb of a chromosome end, whose windows Signac trims, miscounts its whole
+//! chunk there; the full windows are counted here.
 
 use std::path::Path;
 
