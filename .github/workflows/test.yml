@@ -50,5 +50,8 @@ jobs:
       # The bixverse R package's own R CMD check links libR on macOS.
       r-macos: false
       check-exclude: bixverse-r
+      # scx-core always links HDF5, so bixverse-sc-export needs it even with
+      # no features on.
+      apt-packages: libhdf5-dev
       gpu-malloc-check: true
     secrets: inherit
