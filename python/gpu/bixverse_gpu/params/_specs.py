@@ -229,15 +229,18 @@ class FastClusterGpuParams:
     k-means, builds a graph over the centroids and runs Louvain or Leiden on it. The
     community of each centroid is handed back to its cells. Only the k-means (and
     the cell-mediated top-m search) run on the GPU. The mini-batch k-means knobs are
-    gone: the GPU k-means is full-batch Lloyd's.
+    gone: the GPU runs e-means or full-batch Lloyd's.
 
     Attributes:
         n_centroids: Number of k-means centroids. If `None`, defaults to `floor(4 *
             sqrt(n_cells))`.
-        k_means_iter: Maximum number of k-means iterations.
-        k_means_init: Initialisation method. One of `"random"`, `"parallel"` or
-            `"plusplus"`. If `None`, picked on the Rust side based on the number of
-            centroids.
+        k_means_algorithm: `"emeans"` or `"lloyd"`.
+        e_means_epochs: e-means only. Passes over the data; `None` for the
+            default.
+        k_means_iter: Lloyd's only. Maximum number of k-means iterations.
+        k_means_init: Lloyd's only. Initialisation method. One of `"random"`,
+            `"parallel"` or `"plusplus"`. If `None`, picked on the Rust side based
+            on the number of centroids.
         fixed: Shall k-means run for a fixed number of iterations, without checking
             for convergence. wgpu only; MLX always runs every iteration.
         quantise: Shall the data buffer be held at fp16 on the GPU. Halves the
@@ -294,6 +297,8 @@ class FastClusterGpuParams:
     """
 
     n_centroids: int | None = None
+    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_iter: int = 50
     k_means_init: str | None = None
     fixed: bool = True
@@ -319,6 +324,7 @@ class FastClusterGpuParams:
 
     def __post_init__(self) -> None:
         check_range("n_centroids", self.n_centroids, 2, None, False, True)
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("k_means_iter", self.k_means_iter, 1, None, False, True)
         check_range("n_anchors", self.n_anchors, 1, None, False, True)
         check_range("centroid_k", self.centroid_k, 1, None, False, True)
@@ -427,9 +433,12 @@ class HarmonyV2GpuParams:
             during ridge regression.
         use_dynamic_lambda: If `True`, lambda is estimated dynamically per cluster
             instead of using the fixed `lambda` value.
-        k_means_iter: Maximum number of k-means iterations for the initial centroid
-            computation.
-        k_means_init: Initialisation strategy for k-means.
+        k_means_algorithm: `"emeans"` or `"lloyd"`, for the initial centroids.
+        e_means_epochs: e-means only. Passes over the data; `None` for the
+            default.
+        k_means_iter: Lloyd's only. Maximum number of k-means iterations for the
+            initial centroid computation.
+        k_means_init: Lloyd's only. Initialisation strategy for k-means.
         fixed: If `True`, centroids are fixed after initialisation.
         quantise: If `True`, quantises intermediate values to f16 during k-means.
     """
@@ -447,6 +456,8 @@ class HarmonyV2GpuParams:
     tau: float = 0.0
     batch_proportion_cutoff: float = 1e-05
     use_dynamic_lambda: bool = False
+    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_iter: int = 10
     k_means_init: str | None = None
     fixed: bool = False
@@ -470,6 +481,7 @@ class HarmonyV2GpuParams:
         check_range(
             "batch_proportion_cutoff", self.batch_proportion_cutoff, 0, None, True, True
         )
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("k_means_iter", self.k_means_iter, 1, None, False, True)
         _extras.run(self)
 

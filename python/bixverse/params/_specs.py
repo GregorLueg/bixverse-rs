@@ -20,20 +20,25 @@ class FastClusterDefault:
     """Helper function to generate default parameters for the fast clustering for the doublet detection methods
 
     Attributes:
-        km_type: The type of k-means clustering.
+        km_type: The k-means of the fast clustering: `"emeans"`, `"standard"`
+            (Lloyd's) or `"minibatch"`.
+        e_means_epochs: `km_type = "emeans"` only. Passes over the data; `None`
+            for the default.
         n_centroids: The number of centroids to use. `None` uses `sqrt(N_cells) * 4`
             centroids.
-        k_means_iter: Number of maximum k-means iterations.
+        k_means_iter: Number of maximum k-means iterations. Ignored by e-means.
         batch_size: Max batch size, capped at `N_cells / 2` depending on the data
             set.
     """
 
-    km_type: Literal["minibatch", "standard"] = "minibatch"
+    km_type: Literal["emeans", "standard", "minibatch"] = "emeans"
+    e_means_epochs: float | None = None
     n_centroids: int | None = None
     k_means_iter: int = 100
     batch_size: int = 4098
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         _extras.run(self)
 
 
@@ -113,8 +118,12 @@ class KmeansDefaults:
     is needed.
 
     Attributes:
-        k_means_iter: The number of iterations to use for the clustering.
-        k_means_init: The initialisation.
+        k_means_algorithm: `"emeans"` or `"lloyd"`.
+        e_means_epochs: e-means only. Passes over the data; `None` for the
+            default.
+        k_means_iter: Lloyd's only. The number of iterations to use for the
+            clustering.
+        k_means_init: Lloyd's only. The initialisation.
         gemm: Controls which CPU implementation is used by the method. GEMM is
             faster with large dimensionality.
         hamerly: Shall a faster exact method be used leveraging the triangle
@@ -122,11 +131,14 @@ class KmeansDefaults:
     """
 
     k_means_iter: int = 30
+    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_init: Literal["parallel", "random"] = "parallel"
     gemm: bool | None = False
     hamerly: bool | None = True
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         _extras.run(self)
 
 
@@ -439,10 +451,13 @@ class BoostParams:
             generates `sqrt(n)` lists.
         n_probe: IVF param: number of clusters/centroids to query. `None` queries
             `sqrt(n_lists)` clusters.
-        km_type: The type of k-means clustering.
+        km_type: The k-means of the fast clustering: `"emeans"`, `"standard"`
+            (Lloyd's) or `"minibatch"`.
+        e_means_epochs: `km_type = "emeans"` only. Passes over the data; `None`
+            for the default.
         n_centroids: The number of centroids to use. `None` uses `sqrt(N_cells) * 4`
             centroids.
-        k_means_iter: Number of maximum k-means iterations.
+        k_means_iter: Number of maximum k-means iterations. Ignored by e-means.
         batch_size: Max batch size, capped at `N_cells / 2` depending on the data
             set.
     """
@@ -481,12 +496,14 @@ class BoostParams:
     ef_search: int = 100
     n_list: int | None = None
     n_probe: int | None = None
-    km_type: Literal["minibatch", "standard"] = "minibatch"
+    km_type: Literal["emeans", "standard", "minibatch"] = "emeans"
+    e_means_epochs: float | None = None
     n_centroids: int | None = None
     k_means_iter: int = 100
     batch_size: int = 4098
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("boost_rate", self.boost_rate, 0, 1, False, False)
         check_range("resolution", self.resolution, 0, None, True, True)
         check_range("n_iters", self.n_iters, 1, None, False, True)
@@ -1578,8 +1595,11 @@ class FastClusterParams:
     Attributes:
         n_centroids: Number of k-means centroids. If `None`, defaults to `floor(4 *
             sqrt(n_cells))`.
-        km_type: Which k-means to run for the coarsening.
-        k_means_iter: Number of k-means iterations.
+        km_type: Which k-means to run for the coarsening: `"emeans"`,
+            `"standard"` (Lloyd's) or `"minibatch"`.
+        e_means_epochs: `km_type = "emeans"` only. Passes over the data; `None`
+            for the default.
+        k_means_iter: Number of k-means iterations. Ignored by e-means.
         batch_size: `km_type = "minibatch"` only. Batch size.
         drift_threshold: `km_type = "minibatch"` only. The mini batch k-means stops
             once the centroid drift falls below this.
@@ -1621,8 +1641,7 @@ class FastClusterParams:
             neighbours weigh 2 and one-sided ones 1.
         algorithm: Community detection on the centroid graph.
         n_iterations: Number of iterations of the community detection. A negative
-            value iterates until stable. If `None`, `2` for Louvain and `5` for
-            Leiden, which gave the best modularity across synthetic graphs.
+            value iterates until stable. If `None`, `2`.
         beta: Leiden only. Randomness of the refinement step.
         min_gain: With a negative `n_iterations`, also stop once an iteration gains
             no more than this in modularity.
@@ -1635,7 +1654,8 @@ class FastClusterParams:
     """
 
     n_centroids: int | None = None
-    km_type: Literal["standard", "minibatch"] = "standard"
+    km_type: Literal["emeans", "standard", "minibatch"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_iter: int = 100
     batch_size: int = 4096
     drift_threshold: float = 0.0001
@@ -1660,6 +1680,7 @@ class FastClusterParams:
     max_evals: int = 10
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("n_centroids", self.n_centroids, 2, None, False, True)
         check_range("k_means_iter", self.k_means_iter, 1, None, False, True)
         check_range("batch_size", self.batch_size, 1, None, False, True)
@@ -1842,8 +1863,12 @@ class HarmonyParams:
             change in the objective function falls below this value.
         window_size: Number of previous iterations to consider when checking
             convergence.
-        k_means_iter: The number of iterations to use for the clustering.
-        k_means_init: The initialisation.
+        k_means_algorithm: `"emeans"` or `"lloyd"`.
+        e_means_epochs: e-means only. Passes over the data; `None` for the
+            default.
+        k_means_iter: Lloyd's only. The number of iterations to use for the
+            clustering.
+        k_means_init: Lloyd's only. The initialisation.
         gemm: Controls which CPU implementation is used by the method. GEMM is
             faster with large dimensionality.
         hamerly: Shall a faster exact method be used leveraging the triangle
@@ -1861,11 +1886,14 @@ class HarmonyParams:
     epsilon_harmony: float = 0.01
     window_size: int = 3
     k_means_iter: int = 10
+    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_init: Literal["parallel", "random"] = "parallel"
     gemm: bool | None = False
     hamerly: bool | None = True
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("k", self.k, 1, None, False, True)
         check_len("sigma", self.sigma)
         check_range("sigma", self.sigma, 0, None, True, True)
@@ -1918,8 +1946,12 @@ class HarmonyV2Params:
         use_dynamic_lambda: If `True`, lambda is estimated per cluster as `alpha`
             times the expected counts, as in Harmony v2, instead of using the fixed
             `lambda` value.
-        k_means_iter: The number of iterations to use for the clustering.
-        k_means_init: The initialisation.
+        k_means_algorithm: `"emeans"` or `"lloyd"`.
+        e_means_epochs: e-means only. Passes over the data; `None` for the
+            default.
+        k_means_iter: Lloyd's only. The number of iterations to use for the
+            clustering.
+        k_means_init: Lloyd's only. The initialisation.
         gemm: Controls which CPU implementation is used by the method. GEMM is
             faster with large dimensionality.
         hamerly: Shall a faster exact method be used leveraging the triangle
@@ -1941,11 +1973,14 @@ class HarmonyV2Params:
     batch_proportion_cutoff: float = 1e-05
     use_dynamic_lambda: bool = True
     k_means_iter: int = 10
+    k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
+    e_means_epochs: float | None = None
     k_means_init: Literal["parallel", "random"] = "parallel"
     gemm: bool | None = False
     hamerly: bool | None = True
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("k", self.k, 1, None, False, True)
         check_len("sigma", self.sigma)
         check_range("sigma", self.sigma, 0, None, True, True)
@@ -3527,10 +3562,13 @@ class ScdblfinderParams:
             generates `sqrt(n)` lists.
         n_probe: IVF param: number of clusters/centroids to query. `None` queries
             `sqrt(n_lists)` clusters.
-        km_type: The type of k-means clustering.
+        km_type: The k-means of the fast clustering: `"emeans"`, `"standard"`
+            (Lloyd's) or `"minibatch"`.
+        e_means_epochs: `km_type = "emeans"` only. Passes over the data; `None`
+            for the default.
         n_centroids: The number of centroids to use. `None` uses `sqrt(N_cells) * 4`
             centroids.
-        k_means_iter: Number of maximum k-means iterations.
+        k_means_iter: Number of maximum k-means iterations. Ignored by e-means.
         batch_size: Max batch size, capped at `N_cells / 2` depending on the data
             set.
     """
@@ -3575,12 +3613,14 @@ class ScdblfinderParams:
     ef_search: int = 100
     n_list: int | None = None
     n_probe: int | None = None
-    km_type: Literal["minibatch", "standard"] = "minibatch"
+    km_type: Literal["emeans", "standard", "minibatch"] = "emeans"
+    e_means_epochs: float | None = None
     n_centroids: int | None = None
     k_means_iter: int = 100
     batch_size: int = 4098
 
     def __post_init__(self) -> None:
+        check_range("e_means_epochs", self.e_means_epochs, 0, None, True, True)
         check_range("n_genes", self.n_genes, 1, None, False, True)
         check_range("doublet_ratio", self.doublet_ratio, 0, None, True, True)
         check_range("heterotypic_bias", self.heterotypic_bias, 0, 1, False, False)
