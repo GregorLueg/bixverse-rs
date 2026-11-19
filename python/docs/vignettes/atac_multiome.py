@@ -300,9 +300,17 @@ print(f"transferred label equals the RNA cluster for {agree:.1%} of cells")
 # ## Differential accessibility
 #
 # The marker functions take `modality="atac"` and test peaks instead of
-# genes: here every WNN cluster against the rest, Wilcoxon on the TF-IDF
-# layer. With replicates, `bv.de.pseudobulk_dge(..., modality="atac")` runs
-# edgeR on summed peak counts instead.
+# genes: here every WNN cluster against the rest. On ATAC the default is
+# Signac's recommended test, a logistic regression per peak with the
+# library size as covariate (`group ~ peak + nCount` against
+# `group ~ nCount`), so a cluster with deeper cells does not light up every
+# peak. `method="wilcox"` gets you the Wilcoxon on the TF-IDF layer instead.
+#
+# Don't read these p-values as inference. Every cell counts as a replicate,
+# so with a few hundred cells per cluster they go astronomically small with
+# either test; use them to rank peaks. With replicates,
+# `bv.de.pseudobulk_dge(..., modality="atac")` runs edgeR on summed peak
+# counts per sample, which is the test to trust.
 
 # %%
 da = bv.de.find_all_markers(mm, "wnn_clusters", modality="atac", verbose=0)

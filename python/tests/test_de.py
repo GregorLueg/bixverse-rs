@@ -112,17 +112,17 @@ def test_lr_test_dispatch(sc):
     g1 = obs.filter(pl.col("cell_grp") == "cell_type_1")["cell_idx"].to_numpy()
     g2 = obs.filter(pl.col("cell_grp") == "cell_type_2")["cell_idx"].to_numpy()
     wil = de.find_markers(sc, g1, g2, verbose=False)
-    assert wil.equals(de.find_markers(sc, g1, g2, test="wilcox", verbose=False))
-    lr = de.find_markers(sc, g1, g2, test="lr", verbose=False)
+    assert wil.equals(de.find_markers(sc, g1, g2, method="wilcox", verbose=False))
+    lr = de.find_markers(sc, g1, g2, method="lr", verbose=False)
     assert lr.columns == wil.columns
     assert not np.allclose(lr["p_values"].to_numpy(), wil["p_values"].to_numpy())
 
-    arms = de.find_all_markers(sc, "cell_grp", test="lr", verbose=False)
+    arms = de.find_all_markers(sc, "cell_grp", method="lr", verbose=False)
     assert arms.columns == de.find_all_markers(sc, "cell_grp", verbose=False).columns
-    res = de.find_specific_markers(sc, "cell_grp", test="lr", verbose=False)
-    assert res is not None and res.params["test"] == "lr"
+    res = de.find_specific_markers(sc, "cell_grp", method="lr", verbose=False)
+    assert res is not None and res.params["method"] == "lr"
     ref = de.find_specific_markers(sc, "cell_grp", verbose=False)
-    assert ref is not None and ref.params["test"] == "wilcox"
+    assert ref is not None and ref.params["method"] == "wilcox"
     # the AUROCs are the Wilcoxon ones either way, the p-values are not
     assert res.summary["min_auroc"].equals(ref.summary["min_auroc"])
     assert not res.summary["simes_p"].equals(ref.summary["simes_p"])
@@ -374,7 +374,7 @@ def test_find_markers_lr_matches_scipy_mle(sc):
     g2 = obs.filter(pl.col("cell_grp") == "cell_type_2")
     cells = np.concatenate([g1["cell_idx"].to_numpy(), g2["cell_idx"].to_numpy()])
     res = de.find_markers(
-        sc, cells[: g1.height], cells[g1.height :], test="lr", verbose=False
+        sc, cells[: g1.height], cells[g1.height :], method="lr", verbose=False
     )
 
     genes = res["gene_id"].head(12).to_list()
