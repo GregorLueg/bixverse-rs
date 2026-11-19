@@ -39,7 +39,8 @@ pub struct KMeansGpuSpec {
 }
 
 impl Default for KMeansGpuSpec {
-    /// e-means, with convergence checks, data at full precision.
+    /// e-means, data at full precision. Lloyd's would run a fixed iteration
+    /// count.
     ///
     /// ### Returns
     ///

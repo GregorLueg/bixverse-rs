@@ -439,7 +439,8 @@ class HarmonyV2GpuParams:
         k_means_iter: Lloyd's only. Maximum number of k-means iterations for the
             initial centroid computation.
         k_means_init: Lloyd's only. Initialisation strategy for k-means.
-        fixed: If `True`, centroids are fixed after initialisation.
+        fixed: Lloyd's only. If `True`, run all `k_means_iter` iterations without a
+            convergence check, as harmony2's initial k-means does.
         quantise: If `True`, quantises intermediate values to f16 during k-means.
     """
 
@@ -455,12 +456,12 @@ class HarmonyV2GpuParams:
     alpha: float = 0.2
     tau: float = 0.0
     batch_proportion_cutoff: float = 1e-05
-    use_dynamic_lambda: bool = False
+    use_dynamic_lambda: bool = True
     k_means_algorithm: Literal["emeans", "lloyd"] = "emeans"
     e_means_epochs: float | None = None
     k_means_iter: int = 10
     k_means_init: str | None = None
-    fixed: bool = False
+    fixed: bool = True
     quantise: bool = False
 
     def __post_init__(self) -> None:

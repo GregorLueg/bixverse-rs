@@ -193,7 +193,9 @@ impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
 
 /// The keys a [`HarmonyParamsV2Gpu`] deserialises from, as its R list
 /// conversion reads them: the Harmony fields plus the flat k-means keys, which
-/// default to `HARMONY_KMEANS_ITERS` iterations, not fixed, not quantised.
+/// default to e-means, not quantised. Under Lloyd's they default to
+/// `HARMONY_KMEANS_ITERS` fixed iterations, as harmony2's `kmeans_centers`
+/// runs its initial k-means.
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct HarmonyParamsV2GpuSpec {
@@ -227,7 +229,8 @@ pub struct HarmonyParamsV2GpuSpec {
     /// iterations unless `k_means_iter` says otherwise
     #[serde(flatten)]
     pub kmeans: KMeansSpec,
-    /// Run every k-means iteration without a convergence check
+    /// Run every k-means iteration without a convergence check. Lloyd's only;
+    /// e-means ignores it
     pub fixed: bool,
     /// Hold the k-means data buffer at fp16
     pub quantise: bool,
@@ -256,7 +259,7 @@ impl Default for HarmonyParamsV2GpuSpec {
             batch_proportion_cutoff: d.batch_proportion_cutoff,
             use_dynamic_lambda: d.use_dynamic_lambda,
             kmeans: KMeansSpec::default(),
-            fixed: false,
+            fixed: true,
             quantise: false,
         }
     }

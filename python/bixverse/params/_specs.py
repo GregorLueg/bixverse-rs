@@ -1898,7 +1898,7 @@ class HarmonyV2Params:
     sigma: tuple[float, ...] = (0.1,)
     theta: tuple[float, ...] = (2.0,)
     lambda_: tuple[float, ...] = (1.0,)
-    block_size: float = 0.2
+    block_size: float = 0.05
     max_iter_kmeans: int = 4
     max_iter_harmony: int = 10
     epsilon_kmeans: float = 0.001
