@@ -85,8 +85,8 @@ impl FromRList for HarmonyParamsV2Gpu {
     /// Should values not be found within the List, the parameters will default
     /// to the values defined in `HarmonyParamsV2Gpu::default()`. The
     /// `kmeans_params` field is populated from the same list, with the
-    /// [HarmonyParamsV2GpuSpec] defaults (`HARMONY_KMEANS_ITERS` Lloyd's
-    /// iterations, not fixed, not quantised).
+    /// [HarmonyParamsV2GpuSpec] defaults (e-means; under Lloyd's
+    /// `HARMONY_KMEANS_ITERS` fixed iterations; not quantised).
     ///
     /// ### Params
     ///
