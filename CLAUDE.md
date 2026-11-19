@@ -65,6 +65,7 @@ Features live on the crate that owns the dependency; the facade and `bixverse-r`
 cargo test -p bixverse-core
 cargo test -p bixverse-methods --features dge
 cargo test -p bixverse-sc-data --features hdf5-static
+cargo test -p bixverse-sc-export --features zarr,hdf5-static
 cargo test -p bixverse-sc --features multi-modal
 cargo test -p bixverse-rs --features single-cell,multi-modal               # no HDF5
 cargo test -p bixverse-rs --features single-cell,multi-modal,hdf5-static
@@ -73,7 +74,6 @@ cargo test -p bixverse-r --features single-cell,multi-modal
 cargo test -p bixverse-r --features single-cell,multi-modal,hdf5-static
 cargo test -p bixverse-gpu
 cargo test -p bixverse-sc-gpu
-cargo test -p bixverse-sc-export --features zarr,hdf5-static   # not in CI yet
 cargo test -p bixverse-rs --features sc-gpu,hdf5-static
 
 # Every member on its own: catches features that workspace unification hides.
