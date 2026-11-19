@@ -94,6 +94,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
+libm = "0.2"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 # anndata Zarr (v2 and v3); same version and codecs as scx-core, so one copy
 zarrs = { version = "0.23", default-features = false, features = ["filesystem", "sharding", "crc32c", "zstd", "gzip", "zlib"] }

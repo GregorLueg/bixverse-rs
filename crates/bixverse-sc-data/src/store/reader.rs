@@ -23,8 +23,8 @@ use crate::store::v4::{
     v4_gene_chunk,
 };
 use crate::store::v5::{
-    FeatureKind, NormKind, SectionKind, V5_HEADER_LEN, V5FileHeader, expect_len, find_section,
-    parse_sections,
+    FeatureKind, NormKind, Section, SectionKind, V5_HEADER_LEN, V5FileHeader, check_header_hash,
+    expect_len, find_section, parse_key_values, parse_sections,
 };
 
 ///////////////////////
@@ -522,9 +522,11 @@ pub struct ParallelSparseReader {
     file: File,
     /// Start position of the chunks after the header file
     chunks_start: u64,
-    /// Library size the `data_norm` layer was normalised against (the TF-IDF
-    /// scale), as recorded in the file header. `0.0` when unknown.
+    /// Log-CPM target size, as recorded in the file header. `0.0` when
+    /// unknown.
     target_size: f32,
+    /// TF-IDF scale, `0.0` unless the store is TF-IDF.
+    tf_idf_scale: f32,
     /// Byte offset in the mmap of the first library-size index entry, or
     /// `None` for files written without the index.
     library_index: Option<usize>,
@@ -550,6 +552,8 @@ pub struct ParallelSparseReader {
     idf: Option<Arc<Vec<f32>>>,
     /// Byte range of the v5 interval-index section, decoded on request.
     intervals: Option<std::ops::Range<usize>>,
+    /// Known sections of a v5 file; empty for v3 and v4.
+    sections: Vec<Section>,
 }
 
 impl ParallelSparseReader {
@@ -632,6 +636,7 @@ impl ParallelSparseReader {
     fn open_v5(mmap: memmap2::Mmap, file: File) -> Result<Self, ScDataErrors> {
         let h = V5FileHeader::parse(&mmap)?;
         let sections = parse_sections(&mmap, &h)?;
+        check_header_hash(&mmap, &h)?;
         let missing = |what: &str| ScDataErrors::V5HeaderInvalid(format!("no {what} section"));
 
         let offsets = find_section(&sections, SectionKind::ChunkOffsets)
@@ -641,7 +646,10 @@ impl ParallelSparseReader {
         let mut prev = 0u64;
         for c in 0..=h.n_chunks {
             let off = le_u64(&mmap, offsets.offset + 8 * c);
-            if off < prev || off as usize > chunks_len {
+            // every chunk starts at least its 8-byte length prefix before the
+            // next offset, the last offset is the end of the chunks
+            let min_gap = if c == 0 { 0 } else { 8 };
+            if off < prev + min_gap || off as usize > chunks_len {
                 return Err(ScDataErrors::V5HeaderInvalid(format!(
                     "chunk offset {c} out of order or outside the file"
                 )));
@@ -695,6 +703,10 @@ impl ParallelSparseReader {
             None => None,
         };
 
+        if let Some(s) = find_section(&sections, SectionKind::ChunkChecksums) {
+            expect_len(&s, h.n_chunks, 8)?;
+        }
+
         let cell_norm = cell_lib
             .as_ref()
             .filter(|_| h.target_size != 0.0 && h.norm_kind == NormKind::LogCpm)
@@ -713,6 +725,7 @@ impl ParallelSparseReader {
             file,
             chunks_start: V5_HEADER_LEN as u64,
             target_size: h.target_size,
+            tf_idf_scale: h.tf_idf_scale,
             library_index,
             version: SC_FILE_VERSION,
             cell_lib,
@@ -725,6 +738,7 @@ impl ParallelSparseReader {
             idf,
             intervals: find_section(&sections, SectionKind::IntervalIndex)
                 .map(|s| s.offset..s.offset + s.len),
+            sections,
         })
     }
 
@@ -772,6 +786,15 @@ impl ParallelSparseReader {
         if header.chunk_offsets.len() != n_chunks {
             return Err(ScDataErrors::HeaderDecodeFailed);
         }
+        // every chunk needs at least its 8-byte length prefix inside the file
+        let chunks_len = mmap.len() as u64 - 64;
+        if header
+            .chunk_offsets
+            .iter()
+            .any(|&off| off.checked_add(8).is_none_or(|end| end > chunks_len))
+        {
+            return Err(ScDataErrors::HeaderDecodeFailed);
+        }
         let is_v4_gene = file_header.version == SC_FILE_VERSION_V4 && !header.cell_based;
         let library_index = if is_v4_gene {
             None
@@ -811,6 +834,7 @@ impl ParallelSparseReader {
             file,
             chunks_start: 64,
             target_size: file_header.target_size,
+            tf_idf_scale: 0.0,
             library_index,
             version: file_header.version,
             cell_norm: cell_lib
@@ -825,6 +849,7 @@ impl ParallelSparseReader {
             cell_id_hash: [0; 16],
             idf: None,
             intervals: None,
+            sections: Vec::new(),
         })
     }
 
@@ -895,6 +920,108 @@ impl ParallelSparseReader {
     /// The table, `None` without one.
     pub fn idf(&self) -> Option<&[f32]> {
         self.idf.as_deref().map(Vec::as_slice)
+    }
+
+    /// The log-CPM target and the TF-IDF scale exactly as the header holds
+    /// them, for writers that copy a store's identity.
+    ///
+    /// ### Returns
+    ///
+    /// `(target_size, tf_idf_scale)`, `0.0` where unset.
+    pub(crate) fn header_scales(&self) -> (f32, f32) {
+        (self.target_size, self.tf_idf_scale)
+    }
+
+    /// Whether reads can return the normalised layer: a log-CPM store, or a
+    /// TF-IDF store with its IDF.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when the norm can be derived.
+    pub fn norm_available(&self) -> bool {
+        self.v4_ctx().norm_available()
+    }
+
+    /// TF-IDF scale of a TF-IDF store.
+    ///
+    /// ### Returns
+    ///
+    /// The scale, `None` unless the store is TF-IDF with a scale set.
+    pub fn tf_idf_scale(&self) -> Option<f32> {
+        (self.norm_kind == NormKind::TfIdf && self.tf_idf_scale != 0.0).then_some(self.tf_idf_scale)
+    }
+
+    /// The scale the norm is derived with: the TF-IDF scale on a TF-IDF store,
+    /// the log-CPM target otherwise.
+    ///
+    /// ### Returns
+    ///
+    /// The scale, `0.0` when unknown.
+    pub fn norm_scale(&self) -> f32 {
+        match self.norm_kind {
+            NormKind::TfIdf => self.tf_idf_scale,
+            _ => self.target_size,
+        }
+    }
+
+    /// Payload of a v5 section.
+    ///
+    /// ### Params
+    ///
+    /// * `kind` - The section kind
+    ///
+    /// ### Returns
+    ///
+    /// The bytes, `None` when the file has no such section.
+    fn section_bytes(&self, kind: SectionKind) -> Option<&[u8]> {
+        find_section(&self.sections, kind).map(|s| &self.mmap[s.offset..s.offset + s.len])
+    }
+
+    /// Caller-owned metadata, see [`crate::store::v5::set_store_metadata`].
+    ///
+    /// ### Returns
+    ///
+    /// `(key, value)` pairs in file order; empty without any.
+    pub fn store_metadata(&self) -> Vec<(String, String)> {
+        self.section_bytes(SectionKind::Metadata)
+            .map(parse_key_values)
+            .unwrap_or_default()
+    }
+
+    /// Who wrote the file: writer version and codec.
+    ///
+    /// ### Returns
+    ///
+    /// `(key, value)` pairs; empty for v3, v4 and files written without it.
+    pub fn provenance(&self) -> Vec<(String, String)> {
+        self.section_bytes(SectionKind::Provenance)
+            .map(parse_key_values)
+            .unwrap_or_default()
+    }
+
+    /// Check every chunk against the checksum section.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when all match, `false` without a checksum section, or
+    /// [`ScDataErrors::V4ChunkCorrupt`] naming the first bad chunk.
+    pub(crate) fn verify_chunks(&self) -> Result<bool, ScDataErrors> {
+        let Some(sums) = self.section_bytes(SectionKind::ChunkChecksums) else {
+            return Ok(false);
+        };
+        let bad = (0..self.n_chunks).into_par_iter().find_first(|&c| {
+            let (stored, _) = match self.chunk_bytes(c) {
+                Ok(b) => b,
+                Err(_) => return true,
+            };
+            xxhash_rust::xxh3::xxh3_64(stored) != le_u64(sums, 8 * c)
+        });
+        match bad {
+            Some(c) => Err(ScDataErrors::V4ChunkCorrupt(format!(
+                "chunk {c} does not match its checksum"
+            ))),
+            None => Ok(true),
+        }
     }
 
     /// The genome interval index of the store's features.
@@ -1037,7 +1164,7 @@ impl ParallelSparseReader {
     /// The context.
     fn v4_ctx(&self) -> V4Ctx<'_> {
         V4Ctx {
-            target_size: self.target_size,
+            target_size: self.norm_scale(),
             cell_lib: self.cell_lib.as_deref().map(Vec::as_slice),
             cell_norm: self.cell_norm.as_deref().map(Vec::as_slice),
             is_cell: self.dims.cell_based,
@@ -1253,18 +1380,39 @@ impl ParallelSparseReader {
     /// The compressed slice, still carrying lz4's own size prefix, and the
     /// chunk's byte offset for error reporting.
     fn locate_chunk(&self, original_index: usize) -> Result<(&[u8], usize), ScDataErrors> {
-        let chunk_index = self.chunk_index_of(original_index)?;
-        let chunk_offset = (self.chunks_start
-            + self
-                .chunk_offset(chunk_index)
-                .expect("chunk below n_chunks")) as usize;
+        self.chunk_bytes(self.chunk_index_of(original_index)?)
+    }
 
-        let compressed_size = le_u64(&self.mmap, chunk_offset) as usize;
-
-        Ok((
-            &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size],
-            chunk_offset,
-        ))
+    /// The stored bytes of chunk `c`, after its length prefix.
+    ///
+    /// The length prefix is checked against the next chunk's offset (v5) or
+    /// the file (v3, v4), so a corrupt length errors instead of panicking.
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Chunk ordinal, below `n_chunks`
+    ///
+    /// ### Returns
+    ///
+    /// The slice and the chunk's byte offset, or
+    /// [`ScDataErrors::V4ChunkCorrupt`].
+    pub(crate) fn chunk_bytes(&self, c: usize) -> Result<(&[u8], usize), ScDataErrors> {
+        let corrupt = || ScDataErrors::V4ChunkCorrupt(format!("chunk {c} length outside the file"));
+        let start = self.chunks_start + self.chunk_offset(c).ok_or_else(corrupt)?;
+        let limit = match self.chunk_offset(c + 1) {
+            Some(next) if matches!(self.offsets, ChunkOffsets::Mapped(_)) => {
+                self.chunks_start + next
+            }
+            _ => self.mmap.len() as u64,
+        };
+        let at = start as usize;
+        let size = self
+            .mmap
+            .get(at..at + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+            .ok_or_else(corrupt)?;
+        let end = (start + 8).checked_add(size).filter(|&e| e <= limit).ok_or_else(corrupt)?;
+        Ok((&self.mmap[at + 8..end as usize], at))
     }
 
     /// Locate, decompress and return the raw bytes of a single chunk
@@ -2631,14 +2779,16 @@ impl SingleCellReading for ParallelSparseReader {
         self.dims.cell_based
     }
 
-    /// Library size the `data_norm` layer of this file was scaled to.
+    /// Library size the log-CPM `data_norm` layer of this file is scaled to.
     ///
     /// ### Returns
     ///
-    /// `Some(target_size)`, or `None` for raw-only files and for files written
-    /// before the field entered the header.
+    /// `Some(target_size)`, or `None` for raw-only files, files written
+    /// before the field entered the header and stores whose norm is not
+    /// log-CPM (see [`ParallelSparseReader::norm_scale`] for those).
     fn target_size(&self) -> Option<f32> {
-        (self.target_size != 0.0).then_some(self.target_size)
+        (self.target_size != 0.0 && self.norm_kind == NormKind::LogCpm)
+            .then_some(self.target_size)
     }
 }
 

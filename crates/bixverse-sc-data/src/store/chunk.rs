@@ -362,7 +362,10 @@ impl<'a> Iterator for RawCountsIter<'a> {
 ///
 /// The normalised value.
 pub fn norm_value(x: f32, lib_size: f32, target_size: f32) -> f32 {
-    (x / lib_size * target_size).ln_1p()
+    // libm in f64, not the platform `ln_1p`: the layer is derived on read, so
+    // every OS must compute the same bits, and rounding the f64 result gives
+    // the correctly rounded f32 in all but the rarest cases
+    libm::log1p((x / lib_size * target_size) as f64) as f32
 }
 
 //////////////////

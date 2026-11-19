@@ -13,7 +13,9 @@
 //! after ingest. Section layout (little endian):
 //!
 //! ```text
-//! u32 n_chroms, u32 flags (bit 0: identity order), u64 n_features
+//! u32 n_chroms, u32 flags (bit 0: identity order; bits 8..16: coordinate
+//!                         convention, 0 = 0-based half-open), u64 n_features
+//! u16 genome length, genome name bytes (UTF-8, empty when unknown)
 //! per chromosome: u16 name length, name bytes (UTF-8)
 //! padding to 4 bytes
 //! per feature, store order: u16 chrom, i8 strand, u8 arm, u32 start, u32 end
@@ -34,6 +36,11 @@ const FEATURE_RECORD_LEN: usize = 12;
 
 /// Section flag: features are already in `(chromosome, start)` order.
 const FLAG_IDENTITY_ORDER: u32 = 1;
+
+/// Section flag bits this build knows. The coordinate convention lives in
+/// bits 8..16 and only 0 (0-based, half-open) is defined, so any other bit
+/// refuses the section rather than misplacing every feature.
+const KNOWN_FLAGS: u32 = FLAG_IDENTITY_ORDER;
 
 ///////////
 // Types //
@@ -103,6 +110,9 @@ pub struct FeatureInterval {
 /// The genome interval index of a store's features.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenomeIntervals {
+    /// Genome assembly the coordinates refer to (`"GRCh38"`, say); empty
+    /// when unknown.
+    genome: String,
     /// Chromosome names, in first-seen order of the sorted features.
     chroms: Vec<String>,
     /// Chromosome of every feature, an index into `chroms`.
@@ -122,6 +132,8 @@ pub struct GenomeIntervals {
     chrom_offsets: Vec<u32>,
     /// Longest feature per chromosome, which bounds the overlap scan.
     max_len: Vec<u32>,
+    /// No two features of a chromosome overlap. Derived, not stored.
+    disjoint: bool,
 }
 
 impl GenomeIntervals {
@@ -164,6 +176,7 @@ impl GenomeIntervals {
         }
 
         let mut index = Self {
+            genome: String::new(),
             chroms,
             chrom,
             start: features.iter().map(|f| f.start).collect(),
@@ -173,9 +186,46 @@ impl GenomeIntervals {
             order: Vec::new(),
             chrom_offsets: Vec::new(),
             max_len: Vec::new(),
+            disjoint: false,
         };
         index.build_order();
         Ok(index)
+    }
+
+    /// Record the genome assembly the coordinates refer to.
+    ///
+    /// ### Params
+    ///
+    /// * `genome` - Assembly name, e.g. `"GRCh38"`
+    ///
+    /// ### Returns
+    ///
+    /// The index, or [`ScDataErrors::InvalidArgument`] for a name longer
+    /// than `u16::MAX` bytes.
+    pub fn with_genome(mut self, genome: &str) -> Result<Self, ScDataErrors> {
+        if genome.len() > u16::MAX as usize {
+            return Err(ScDataErrors::InvalidArgument("genome name too long".into()));
+        }
+        self.genome = genome.to_string();
+        Ok(self)
+    }
+
+    /// The genome assembly the coordinates refer to.
+    ///
+    /// ### Returns
+    ///
+    /// The name, `None` when not recorded.
+    pub fn genome(&self) -> Option<&str> {
+        (!self.genome.is_empty()).then_some(self.genome.as_str())
+    }
+
+    /// Whether no two features of a chromosome overlap.
+    ///
+    /// ### Returns
+    ///
+    /// `true` for disjoint features (merged peaks, tiles).
+    pub fn is_disjoint(&self) -> bool {
+        self.disjoint
     }
 
     /// Sort the features, then derive the per-chromosome offsets and maxima.
@@ -201,6 +251,20 @@ impl GenomeIntervals {
         self.order = if identity { Vec::new() } else { order };
         self.chrom_offsets = chrom_offsets;
         self.max_len = max_len;
+        self.disjoint = self.check_disjoint();
+    }
+
+    /// Whether, in sorted order, every feature ends before the next one of
+    /// its chromosome starts.
+    ///
+    /// ### Returns
+    ///
+    /// `true` for disjoint features.
+    fn check_disjoint(&self) -> bool {
+        (1..self.len()).all(|k| {
+            let (a, b) = (self.sorted(k - 1), self.sorted(k));
+            self.chrom[a] != self.chrom[b] || self.end[a] <= self.start[b]
+        })
     }
 
     /// Number of features.
@@ -347,7 +411,9 @@ impl GenomeIntervals {
 
     /// The features overlapping `[start, end)` as one index range.
     ///
-    /// Only defined in genomic order, where the overlap set is contiguous.
+    /// Only defined for disjoint features in genomic order, where the overlap
+    /// set is contiguous. Nested or overlapping features would put a
+    /// non-overlapping feature inside the range.
     ///
     /// ### Params
     ///
@@ -357,9 +423,9 @@ impl GenomeIntervals {
     ///
     /// ### Returns
     ///
-    /// The range, `None` unless the index is in genomic order.
+    /// The range, `None` unless the index is disjoint and in genomic order.
     pub fn overlapping_range(&self, chrom: &str, start: u32, end: u32) -> Option<Range<usize>> {
-        if !self.is_genomic_order() {
+        if !self.is_genomic_order() || !self.disjoint {
             return None;
         }
         let hits = self.overlapping(chrom, start, end);
@@ -384,6 +450,8 @@ impl GenomeIntervals {
         };
         b.extend_from_slice(&flags.to_le_bytes());
         b.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        b.extend_from_slice(&(self.genome.len() as u16).to_le_bytes());
+        b.extend_from_slice(self.genome.as_bytes());
         for name in &self.chroms {
             b.extend_from_slice(&(name.len() as u16).to_le_bytes());
             b.extend_from_slice(name.as_bytes());
@@ -427,9 +495,20 @@ impl GenomeIntervals {
         };
 
         let n_chroms = u32_at(0)? as usize;
-        let identity = u32_at(4)? & FLAG_IDENTITY_ORDER != 0;
+        let flags = u32_at(4)?;
+        if flags & !KNOWN_FLAGS != 0 {
+            return Err(ScDataErrors::V5HeaderInvalid(format!(
+                "interval index flags {flags:#x}: unknown coordinate convention or feature, \
+                 written by a newer bixverse"
+            )));
+        }
+        let identity = flags & FLAG_IDENTITY_ORDER != 0;
         let n = u64::from_le_bytes(take(8, 8)?.try_into().expect("8 bytes")) as usize;
-        let mut at = 16;
+        let genome_len = u16::from_le_bytes(take(16, 2)?.try_into().expect("2 bytes")) as usize;
+        let genome = std::str::from_utf8(take(18, genome_len)?)
+            .map_err(|_| bad())?
+            .to_string();
+        let mut at = 18 + genome_len;
         let mut chroms = Vec::with_capacity(n_chroms);
         for _ in 0..n_chroms {
             let len = u16::from_le_bytes(take(at, 2)?.try_into().expect("2 bytes")) as usize;
@@ -441,6 +520,7 @@ impl GenomeIntervals {
 
         let records = take(at, n.checked_mul(FEATURE_RECORD_LEN).ok_or_else(bad)?)?;
         let mut idx = Self {
+            genome,
             chroms,
             chrom: Vec::with_capacity(n),
             start: Vec::with_capacity(n),
@@ -450,6 +530,7 @@ impl GenomeIntervals {
             order: Vec::new(),
             chrom_offsets: Vec::new(),
             max_len: Vec::new(),
+            disjoint: false,
         };
         for r in records.as_chunks::<FEATURE_RECORD_LEN>().0 {
             let c = u16::from_le_bytes([r[0], r[1]]);
@@ -475,12 +556,18 @@ impl GenomeIntervals {
             .collect();
         let (order, rest) = tail.split_at(if identity { 0 } else { n });
         let (offsets, max_len) = rest.split_at(n_chroms + 1);
-        if order.iter().any(|&i| i as usize >= n) || offsets.last().copied() != Some(n as u32) {
+        let monotone = offsets.windows(2).all(|w| w[0] <= w[1]);
+        if order.iter().any(|&i| i as usize >= n)
+            || offsets.first().copied() != Some(0)
+            || offsets.last().copied() != Some(n as u32)
+            || !monotone
+        {
             return Err(bad());
         }
         idx.order = order.to_vec();
         idx.chrom_offsets = offsets.to_vec();
         idx.max_len = max_len.to_vec();
+        idx.disjoint = idx.check_disjoint();
         Ok(idx)
     }
 }
@@ -666,6 +753,59 @@ mod tests {
         let idx = GenomeIntervals::new(&features()).unwrap();
         let bytes = idx.encode();
         assert!(GenomeIntervals::decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn test_nested_features_have_no_contiguous_range() {
+        let f = |chrom: &str, start: u32, end: u32| FeatureInterval {
+            chrom: chrom.into(),
+            start,
+            end,
+            strand: 0,
+            arm: Arm::Unknown,
+        };
+        // sorted by start, but A spans B: the hits of [25, 35) are A and C
+        let idx = GenomeIntervals::new(&[f("chr1", 0, 1000), f("chr1", 10, 20), f("chr1", 30, 40)])
+            .unwrap();
+        assert!(idx.is_genomic_order());
+        assert!(!idx.is_disjoint());
+        assert_eq!(idx.overlapping("chr1", 25, 35), vec![0, 2]);
+        assert_eq!(idx.overlapping_range("chr1", 25, 35), None);
+        // book-ended features are disjoint
+        let idx = GenomeIntervals::new(&[f("chr1", 0, 10), f("chr1", 10, 20)]).unwrap();
+        assert!(idx.is_disjoint());
+        assert_eq!(idx.overlapping_range("chr1", 5, 15), Some(0..2));
+    }
+
+    #[test]
+    fn test_genome_round_trips_and_unknown_flags_refuse() {
+        let idx = GenomeIntervals::new(&features())
+            .unwrap()
+            .with_genome("GRCh38")
+            .unwrap();
+        let back = GenomeIntervals::decode(&idx.encode()).unwrap();
+        assert_eq!(back.genome(), Some("GRCh38"));
+        assert_eq!(back, idx);
+        assert_eq!(GenomeIntervals::new(&features()).unwrap().genome(), None);
+
+        let mut bytes = idx.encode();
+        bytes[5] = 1; // coordinate convention 1, not defined
+        assert!(GenomeIntervals::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_decode_refuses_offsets_out_of_order() {
+        let idx = GenomeIntervals::new(&features()).unwrap();
+        let mut bytes = idx.encode();
+        // chrom_offsets sit after the order, before max_len: swap two of them
+        let n_chroms = idx.chroms().len();
+        let off = bytes.len() - 4 * n_chroms - 4 * (n_chroms + 1);
+        let (a, b) = (off + 4, off + 8);
+        let x = bytes[a..a + 4].to_vec();
+        let y = bytes[b..b + 4].to_vec();
+        bytes[a..a + 4].copy_from_slice(&y);
+        bytes[b..b + 4].copy_from_slice(&x);
+        assert!(GenomeIntervals::decode(&bytes).is_err());
     }
 
     #[test]

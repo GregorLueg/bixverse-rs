@@ -76,21 +76,41 @@ fn count_gene_nnz(
         .par_iter()
         .zip(counts.par_chunks_mut(n_genes.max(1)))
         .try_for_each(|(&(start, end), counts)| {
+            // the scatter finds each phase's genes by binary search, so a cell
+            // with unsorted or repeated indices would scatter wrongly; the
+            // codec stores them losslessly, so check here
+            let mut unsorted: Option<usize> = None;
+            let mut count = |cell: usize, genes: &[u32]| {
+                let mut prev: Option<u32> = None;
+                for &gene in genes {
+                    if prev.is_some_and(|p| p >= gene) {
+                        unsorted.get_or_insert(cell);
+                    }
+                    prev = Some(gene);
+                    counts[gene as usize] += 1;
+                }
+            };
             for batch_start in (start..end).step_by(GENE_FILE_READ_BATCH) {
                 let batch_end = (batch_start + GENE_FILE_READ_BATCH).min(end);
                 if indices_only {
-                    reader.visit_cells_v4(batch_start, batch_end, false, |_, genes, _| {
-                        for &gene in genes {
-                            counts[gene as usize] += 1;
-                        }
+                    reader.visit_cells_v4(batch_start, batch_end, false, |cell, genes, _| {
+                        count(cell, genes)
                     })?;
                 } else {
-                    for cell in reader.read_cells_range(batch_start, batch_end)? {
-                        for &gene in &cell.indices {
-                            counts[gene as usize] += 1;
-                        }
+                    for (k, cell) in reader
+                        .read_cells_range(batch_start, batch_end)?
+                        .iter()
+                        .enumerate()
+                    {
+                        count(batch_start + k, &cell.indices);
                     }
                 }
+            }
+            if let Some(cell) = unsorted {
+                return Err(ScDataErrors::InvalidArgument(format!(
+                    "cell {cell} has unsorted or repeated gene indices; the gene file needs \
+                     them strictly ascending within each cell"
+                )));
             }
             Ok::<(), ScDataErrors>(())
         })?;
@@ -226,6 +246,11 @@ fn write_gene_file_impl(
     // recomputes it, which the reader then does from the library table
     let cells_v4 = reader.file_version() >= SC_FILE_VERSION_V4;
     let skip_norm = !legacy && cells_v4 && reader.count_norm_stored_chunks()? == 0;
+    if !skip_norm && !reader.norm_available() {
+        return Err(ScDataErrors::NormNotAvailable(
+            "the cell file stores some norms verbatim but cannot derive the rest".into(),
+        ));
+    }
 
     // layers past the first come off their own readers into their own
     // buffers, at the same positions as layer 0; v5 only, and never with a
@@ -281,7 +306,7 @@ fn write_gene_file_impl(
         (false, SC_FILE_VERSION_V4) => CellGeneSparseWriter::new_v4,
         _ => CellGeneSparseWriter::new,
     };
-    let target_size = reader.target_size().unwrap_or(0.0);
+    let target_size = reader.header_scales().0;
     let mut writer = ctor(gene_path, false, n_cells, n_genes, target_size)?;
     if writer.format().norm_f32() {
         writer.inherit_from(&reader)?;
@@ -447,7 +472,7 @@ fn write_gene_file_impl(
                         } else {
                             (&cell_idx[s..e], &raw[s..e])
                         };
-                        return Ok((g, format.encode_gene_derivable(cells, counts, g)));
+                        return Ok((g, format.encode_gene_derivable(cells, counts, g)?));
                     }
                     let chunk = CscGeneChunk {
                         data_raw: RawCounts::from_u32_auto(&raw[s..e]),

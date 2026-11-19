@@ -18,6 +18,7 @@
 //! [16..24)  total_cells    u64
 //! [24..32)  total_genes    u64
 //! [32..40)  n_chunks       u64
+//! [40..56)  cell_id_hash   [u8; 16], all zero when unset (version 3 on)
 //! then per block: frame_len u64, zstd frame (content checksum on)
 //! ```
 
@@ -31,7 +32,7 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::store::gene_file::write_gene_file;
-use crate::store::v5::NormKind;
+use crate::store::v5::{FeatureKind, NormKind};
 use crate::store::{chunk::*, writer::*};
 
 ////////////
@@ -41,15 +42,19 @@ use crate::store::{chunk::*, writer::*};
 /// Leading bytes identifying a bixverse count archive.
 const ARCHIVE_MAGIC: &[u8; 8] = b"BXARCHV1";
 
-/// Archive format version. Independent of `SC_FILE_VERSION`. Version 2 keeps
-/// a verbatim norm as f32; version 1 (f16) still restores.
-const ARCHIVE_VERSION: u32 = 2;
+/// Archive format version. Independent of `SC_FILE_VERSION`. Version 3 adds
+/// the cell-ID hash, version 2 keeps a verbatim norm as f32; versions 1 (f16)
+/// and 2 still restore.
+const ARCHIVE_VERSION: u32 = 3;
 
 /// The archive version that stored verbatim norms as f16.
 const ARCHIVE_VERSION_F16_NORM: u32 = 1;
 
 /// Fixed header length, see the module docs.
-const ARCHIVE_HEADER_LEN: usize = 40;
+const ARCHIVE_HEADER_LEN: usize = 56;
+
+/// Header length of versions 1 and 2, before the cell-ID hash.
+const ARCHIVE_HEADER_LEN_V2: usize = 40;
 
 /// Cells per zstd frame.
 ///
@@ -485,9 +490,12 @@ pub fn archive_cell_file(
             requested: "cell-based",
         });
     }
-    if reader.n_layers() != 1 || reader.norm_kind() != NormKind::LogCpm {
+    if reader.n_layers() != 1
+        || reader.norm_kind() != NormKind::LogCpm
+        || reader.feature_kind() != FeatureKind::Gene
+    {
         return Err(ScDataErrors::ArchiveCorrupt(
-            "the archive holds single-layer log-CPM stores only".into(),
+            "the archive holds single-layer log-CPM gene stores only".into(),
         ));
     }
     let dims = reader.dims();
@@ -503,6 +511,7 @@ pub fn archive_cell_file(
     writer.write_all(&(dims.total_cells as u64).to_le_bytes())?;
     writer.write_all(&(dims.total_genes as u64).to_le_bytes())?;
     writer.write_all(&(order.len() as u64).to_le_bytes())?;
+    writer.write_all(&reader.cell_id_hash().unwrap_or([0; 16]))?;
 
     let blocks: Vec<&[usize]> = order.chunks(ARCHIVE_BLOCK_CELLS).collect();
     let (mut nnz, mut n_norm_stored) = (0usize, 0usize);
@@ -585,16 +594,16 @@ pub fn restore_archive(
     let file_len = file.metadata()?.len();
     let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
 
-    if file_len < ARCHIVE_HEADER_LEN as u64 {
+    if file_len < ARCHIVE_HEADER_LEN_V2 as u64 {
         return Err(ScDataErrors::ArchiveMagicMismatch);
     }
     let mut head = [0u8; ARCHIVE_HEADER_LEN];
-    reader.read_exact(&mut head)?;
+    reader.read_exact(&mut head[..ARCHIVE_HEADER_LEN_V2])?;
     if &head[0..8] != ARCHIVE_MAGIC {
         return Err(ScDataErrors::ArchiveMagicMismatch);
     }
     let version = le_u32(&head, 8);
-    if version != ARCHIVE_VERSION && version != ARCHIVE_VERSION_F16_NORM {
+    if !(ARCHIVE_VERSION_F16_NORM..=ARCHIVE_VERSION).contains(&version) {
         return Err(ScDataErrors::ArchiveVersionMismatch {
             expected: ARCHIVE_VERSION,
             found: version,
@@ -604,13 +613,25 @@ pub fn restore_archive(
     let total_cells = le_u64(&head, 16) as usize;
     let total_genes = le_u64(&head, 24) as usize;
     let n_chunks = le_u64(&head, 32) as usize;
+    let header_len = if version >= 3 {
+        if file_len < ARCHIVE_HEADER_LEN as u64 {
+            return Err(ScDataErrors::ArchiveCorrupt("header truncated".into()));
+        }
+        reader.read_exact(&mut head[ARCHIVE_HEADER_LEN_V2..])?;
+        ARCHIVE_HEADER_LEN
+    } else {
+        ARCHIVE_HEADER_LEN_V2
+    };
+    let mut cell_id_hash = [0u8; 16];
+    cell_id_hash.copy_from_slice(&head[40..56]);
 
     let mut writer =
         CellGeneSparseWriter::new(cell_path, true, total_cells, total_genes, target_size)?;
+    writer.set_cell_id_hash(cell_id_hash);
     let format = writer.format();
 
     let batch_size = rayon::current_num_threads().max(1);
-    let mut pos = ARCHIVE_HEADER_LEN as u64;
+    let mut pos = header_len as u64;
     let mut written = 0usize;
 
     while pos < file_len {
