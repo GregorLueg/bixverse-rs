@@ -10,7 +10,7 @@ use bixverse_sc::mc_generation::generate::seacells_on_store_with;
 use bixverse_sc::mc_generation::seacells::SEACellsParams;
 use bixverse_sc::prelude::parse_verbosity_level;
 use bixverse_sc::sc_analysis::bonsai::BonsaiScParams;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_gpu::errors::ScGpuErrors;
 use bixverse_sc_gpu::sanity_bonsai_gpu::{sanity_bonsai_mc_gpu, sanity_bonsai_sc_gpu};
 use bixverse_sc_gpu::seacells_gpu::seacells_fit_gpu;

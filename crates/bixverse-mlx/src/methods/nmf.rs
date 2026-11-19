@@ -1903,7 +1903,7 @@ mod tests {
         let v = rank_k_input(m, n, k);
         let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
         for target in [ConsensusTarget::HRows, ConsensusTarget::WColumns] {
-            let params = ConsensusParams::<f32>::new(target, None, None, 100, 3, 42);
+            let params = ConsensusParams::<f32>::new(target, None, None, 3, 42);
             let res = nmf_consensus_run_mlx(
                 v.as_ref(),
                 k,
@@ -2135,7 +2135,7 @@ mod tests {
         let v = sparse_rank_k(m, n, k);
         let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
         for target in [ConsensusTarget::HRows, ConsensusTarget::WColumns] {
-            let params = ConsensusParams::<f32>::new(target, None, None, 100, 3, 42);
+            let params = ConsensusParams::<f32>::new(target, None, None, 3, 42);
             let res = nmf_consensus_run_sparse_mlx(
                 to_csr(&v),
                 k,
@@ -2198,7 +2198,7 @@ mod tests {
         let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
         let v = sparse_rank_k(m, n, k);
         let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
-        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 3, 42);
         let rows = nmf_k_sweep_run_sparse_mlx(
             to_csr(&v),
             &[3, 2],
@@ -2258,7 +2258,7 @@ mod tests {
         let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
         let v = sparse_rank_k(m, n, 4);
         let opts = HalsOpts::<f32>::new(100, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
-        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 3, 42);
 
         let mlx = nmf_multiple_run_sparse_mlx(
             to_csr(&v),

@@ -104,11 +104,12 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
         the cache is empty.
 
     Restores the stores from `counts.bxa` when only the archive is there,
-    and warns about a store in the v3 format.
+    and warns about a store in the v4 format.
 
     Raises:
         FileNotFoundError: If a store, the DuckDB, or one half of the memory
             file pair is missing.
+        RuntimeError: If the store is in the v3 format, which no longer opens.
         ValueError: If the memory file is of an unknown format or does not
             fit the store.
 

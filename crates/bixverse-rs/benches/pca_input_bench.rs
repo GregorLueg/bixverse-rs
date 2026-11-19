@@ -38,8 +38,9 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    DataLayerReturn, ParallelSparseReader, SingleCellReading,
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::DataLayerReturn,
+    reader::{ParallelSparseReader, SingleCellReading},
 };
 use bixverse_rs::single_cell::sc_processing::hvg::get_hvg_vst;
 

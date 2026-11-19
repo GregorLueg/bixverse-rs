@@ -37,7 +37,12 @@ from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.multimodal import Modality, modality_cache, require_fresh, stamp
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
+from bixverse._core.single_cells import (
+    CELLS_BIN,
+    GENES_BIN,
+    SingleCells,
+    check_rna_counts,
+)
 from bixverse._core.state import MagicLayer
 from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse._validate import Verbose
@@ -1012,6 +1017,7 @@ def fit_residuals(
         >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="residual"))
         >>> bv.pp.fit_residuals(sc, group_column="batch_index")
     """
+    check_rna_counts(sc, "fit_residuals", refuse=True)
     if isinstance(sc, MetaCells):
         if gene_batch_size is not None:
             warnings.warn(
@@ -1137,6 +1143,7 @@ def sct_corrected_counts(
         >>> bv.pp.fit_residuals(sc)
         >>> corrected = bv.pp.sct_corrected_counts(sc, dir_out="corrected")
     """
+    check_rna_counts(sc, "sct_corrected_counts", refuse=True)
     fit = _fit_usable(sc)
     if fit.method != "sctransform":
         raise ValueError(
@@ -1207,7 +1214,7 @@ def run_magic(
     Args:
         sc: The experiment, with a kNN graph over the kept cells.
         features: Gene ids to impute. Unknown ids warn and drop.
-        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         magic_params: The MAGIC parameters. `None` uses the defaults.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the

@@ -58,10 +58,11 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::cellsweep::{
     CellSweepParams, CellSweepSample, run_cellsweep,
 };
+use tempfile::NamedTempFile;
 
 ////////////
 // Shapes //
@@ -126,37 +127,6 @@ const EPS: f64 = 1e-12;
 
 /// One `(gene indices, counts)` pair per barcode.
 type SparseRows = Vec<(Vec<u32>, Vec<u32>)>;
-
-/// RAII guard that removes a scratch file on drop.
-struct TempBin(std::path::PathBuf);
-
-/// Drop implementation for [`TempBin`]. Errors are ignored: the file may
-/// already be gone.
-impl Drop for TempBin {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempBin {
-    /// Reserve a uniquely named scratch file in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Suffix that makes the file name unique
-    ///
-    /// ### Returns
-    ///
-    /// The guard.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_cellsweep_bench_{name}.bin")))
-    }
-
-    /// Path of the guarded file as a `&str`.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// Whether a named cell should run, given `CELLSWEEP_BENCH_ONLY`.
 ///
@@ -350,13 +320,13 @@ fn bench_fit(
     alpha_cap: f64,
     nnz_total: usize,
 ) {
-    let out = TempBin::new(&format!("{label}_out"));
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let run = |max_iter: usize| {
         run_cellsweep(
             reader,
             std::slice::from_ref(sample),
             pinned_params(alpha_cap, max_iter),
-            out.path(),
+            out.to_str().unwrap(),
             TARGET_SIZE,
             0,
         )
@@ -456,17 +426,17 @@ fn main() {
     );
 
     let (rows, labels) = build_counts();
-    let raw = TempBin::new("raw");
+    let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
     if selected("build") {
         best_of("build", "store generation, not part of the fit", || {
-            write_store(&rows, raw.path())
+            write_store(&rows, raw.to_str().unwrap())
         });
     } else {
-        write_store(&rows, raw.path());
+        write_store(&rows, raw.to_str().unwrap());
     }
 
-    let reader = ParallelSparseReader::new(raw.path()).expect("store opens");
+    let reader = ParallelSparseReader::new(raw.to_str().unwrap()).expect("store opens");
     let sample = CellSweepSample {
         sample_id: "bench".to_string(),
         real_cells: (0..N_REAL).collect(),

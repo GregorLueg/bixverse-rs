@@ -319,7 +319,7 @@ def run_palantir(
         terminal_states: Terminal state cell ids, or label to cell id, the
             labels then naming the `branch_probs` columns. `None` detects
             them from the waypoint Markov chain.
-        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         palantir_params: The parameters. `None` uses the defaults.
         seed: Seed for the eigensolver, the waypoints and the multiscale kNN.
@@ -440,7 +440,7 @@ def run_paga(
             clustering.
         cluster_col: obs column with the clusters. Empty levels of an Enum
             are kept; other columns are sorted into levels.
-        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.

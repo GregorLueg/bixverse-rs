@@ -122,7 +122,7 @@ pub fn pca_on_sc_sparse_mlx<S: SingleCellReading>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use faer::Mat;
 
     /// Number of cells in the synthetic store.

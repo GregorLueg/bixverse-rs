@@ -147,6 +147,11 @@ pub struct BlitzGseaParams {
 }
 
 impl Default for BlitzGseaParams {
+    /// The default [`BlitzGseaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new(None, None, None, None, None, None)
     }

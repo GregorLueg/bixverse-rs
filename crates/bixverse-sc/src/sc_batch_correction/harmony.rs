@@ -9,14 +9,14 @@ use thousands::*;
 
 use crate::prelude::parse_verbosity_level;
 use crate::prelude::*;
-use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
+use bixverse_core::ml::clustering::k_means::{KMeansParamsWrappers, KMeansSpec};
 
 use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
-    CellOrder, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
-    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
-    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
-    window_converged,
+    CellOrder, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
+    distances_and_base, harmony_kmeans_params, kmeans_centroids, normalise_rows_into, objective,
+    observed_counts, r_to_mat, ridge_correction, row_major_to_mat, to_row_major,
+    update_assignments, window_converged,
 };
 
 ////////////
@@ -54,8 +54,12 @@ pub struct HarmonyParams {
     pub kmeans_params: KMeansParamsWrappers,
 }
 
-/// Default implementation for HarmonyParams
 impl Default for HarmonyParams {
+    /// The default [`HarmonyParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -68,8 +72,7 @@ impl Default for HarmonyParams {
             epsilon_kmeans: 1e-3,
             epsilon_harmony: 1e-2,
             window_size: 3,
-            kmeans_params: HarmonyKMeansSpec::default()
-                .try_into()
+            kmeans_params: harmony_kmeans_params(KMeansSpec::default())
                 .expect("default k-means keys parse"),
         }
     }
@@ -102,10 +105,15 @@ pub struct HarmonyParamsSpec {
     pub window_size: usize,
     /// The k-means keys
     #[serde(flatten)]
-    pub kmeans: HarmonyKMeansSpec,
+    pub kmeans: KMeansSpec,
 }
 
 impl Default for HarmonyParamsSpec {
+    /// The default [`HarmonyParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParams::default();
         Self {
@@ -119,7 +127,7 @@ impl Default for HarmonyParamsSpec {
             epsilon_kmeans: d.epsilon_kmeans,
             epsilon_harmony: d.epsilon_harmony,
             window_size: d.window_size,
-            kmeans: HarmonyKMeansSpec::default(),
+            kmeans: KMeansSpec::default(),
         }
     }
 }
@@ -148,7 +156,7 @@ impl TryFrom<HarmonyParamsSpec> for HarmonyParams {
             epsilon_kmeans: s.epsilon_kmeans,
             epsilon_harmony: s.epsilon_harmony,
             window_size: s.window_size,
-            kmeans_params: s.kmeans.try_into()?,
+            kmeans_params: harmony_kmeans_params(s.kmeans)?,
         })
     }
 }

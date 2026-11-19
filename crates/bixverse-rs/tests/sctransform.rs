@@ -23,8 +23,8 @@ use approx::assert_relative_eq;
 use faer::Mat;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::pca::{
     PcaSolver, SingleCellPcaParams, pca_on_sc_residuals,
 };
@@ -42,6 +42,7 @@ use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
 
 mod sctransform_fixtures;
 use sctransform_fixtures as fx;
+use tempfile::NamedTempFile;
 
 ///////////////
 // Constants //
@@ -61,36 +62,6 @@ const TRANSPOSE_GENE_BATCH: usize = 32;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Removes the scratch store when the test ends, pass or panic.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Scratch path in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Suffix that keeps concurrent tests apart
-    ///
-    /// ### Returns
-    ///
-    /// The guard. Nothing is created on disk until something writes to it.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_sct_{name}.bin")))
-    }
-
-    /// The path as a string, which is what the store writers take.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// Rebuilds the count matrix `dev/gen_sctransform_fixtures.R` generated.
 ///
@@ -225,11 +196,11 @@ fn test_fixture_counts_round_trip() {
 /// scalars the model needs. These are ports, so the bar is tight.
 #[test]
 fn test_gene_pass_matches_sctransform() {
-    let store = TempStore::new("gene_pass");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, _) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     let pass =
@@ -338,11 +309,11 @@ fn test_regularisation_matches_sctransform_on_real_fits() {
 /// measured band rather than a tolerance.
 #[test]
 fn test_fit_sctransform_end_to_end() {
-    let store = TempStore::new("end_to_end");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     // Store indices of R's step-1 genes.
@@ -425,11 +396,12 @@ fn test_fit_sctransform_end_to_end() {
 /// gene-major.
 #[test]
 fn test_gene_pass_rejects_a_cell_major_store() {
-    let store = TempStore::new("wrong_mode");
-    let writer = CellGeneSparseWriter::new(store.path(), true, 2, 3, 1e4).expect("writer opens");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let writer =
+        CellGeneSparseWriter::new(store.to_str().unwrap(), true, 2, 3, 1e4).expect("writer opens");
     writer.finalise().expect("finalise");
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells = vec![0_usize, 1];
 
     assert!(matches!(
@@ -465,11 +437,11 @@ fn model_from_fixture() -> SctModel {
 /// and lands within 3e-14 of R.
 #[test]
 fn test_residual_variance_matches_sctransform() {
-    let store = TempStore::new("resid_var");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -647,11 +619,11 @@ fn reference_residual_matrix(
 /// an SVD does not fix.
 #[test]
 fn test_residual_pca_matches_a_direct_svd() {
-    let store = TempStore::new("residual_pca");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -741,11 +713,11 @@ fn test_residual_pca_matches_a_direct_svd() {
 /// holds, so asking for both is refused rather than silently doing one.
 #[test]
 fn test_residual_pca_refuses_clr() {
-    let store = TempStore::new("residual_pca_clr");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -773,11 +745,11 @@ fn test_residual_pca_refuses_clr() {
 /// out of bounds.
 #[test]
 fn test_residual_pca_rejects_an_unmodelled_gene() {
-    let store = TempStore::new("residual_pca_unmodelled");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -818,12 +790,12 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
 /// not a tolerance.
 #[test]
 fn test_corrected_counts_match_sctransform() {
-    let store = TempStore::new("corrected_in");
-    let out = TempStore::new("corrected_out");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -834,12 +806,12 @@ fn test_corrected_counts_match_sctransform() {
         &reader,
         &SctResiduals::single(&model, ctx).expect("residual source"),
         &cells,
-        out.path(),
+        out.to_str().unwrap(),
         SctStreamOpts::default(),
     )
     .expect("corrected counts");
 
-    let written = ParallelSparseReader::new(out.path()).expect("corrected store opens");
+    let written = ParallelSparseReader::new(out.to_str().unwrap()).expect("corrected store opens");
     assert!(written.is_gene_based());
     // The correction removes the library-size structure, so there is no target
     // size for the normalised layer to refer to.
@@ -893,21 +865,21 @@ fn test_corrected_counts_match_sctransform() {
 /// way.
 #[test]
 fn test_gene_store_transposes_to_cell_store() {
-    let store = TempStore::new("transpose_in");
-    let out = TempStore::new("transpose_out");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, _) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
     gene_store_to_cell_store(
-        store.path(),
-        out.path(),
+        store.to_str().unwrap(),
+        out.to_str().unwrap(),
         TRANSPOSE_CELLS_PER_PHASE,
         TRANSPOSE_GENE_BATCH,
         0,
     )
     .expect("transpose");
 
-    let cell_reader = ParallelSparseReader::new(out.path()).expect("cell store opens");
+    let cell_reader = ParallelSparseReader::new(out.to_str().unwrap()).expect("cell store opens");
     assert!(cell_reader.is_cell_based());
 
     let header = cell_reader.dims();
@@ -946,13 +918,14 @@ fn test_gene_store_transposes_to_cell_store() {
 /// it were gene-major.
 #[test]
 fn test_transpose_rejects_a_cell_major_source() {
-    let store = TempStore::new("transpose_wrong_mode");
-    let out = TempStore::new("transpose_wrong_mode_out");
-    let writer = CellGeneSparseWriter::new(store.path(), true, 2, 3, 1e4).expect("writer opens");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let writer =
+        CellGeneSparseWriter::new(store.to_str().unwrap(), true, 2, 3, 1e4).expect("writer opens");
     writer.finalise().expect("finalise");
 
     assert!(matches!(
-        gene_store_to_cell_store(store.path(), out.path(), 8, 8, 0),
+        gene_store_to_cell_store(store.to_str().unwrap(), out.to_str().unwrap(), 8, 8, 0),
         Err(ScDataErrors::ReaderModeMismatch { .. })
     ));
 }
@@ -1091,11 +1064,11 @@ fn cov_model_from_fixture() -> SctModel {
 /// `gene_attr$residual_variance` from the covariate run.
 #[test]
 fn test_residual_variance_with_covariate_matches_sctransform() {
-    let store = TempStore::new("cov_resid_var");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let cov = fixture_covariate(&counts, &library_sizes);
@@ -1120,11 +1093,11 @@ fn test_residual_variance_with_covariate_matches_sctransform() {
 /// everything except that term.
 #[test]
 fn test_covariate_changes_the_residuals() {
-    let store = TempStore::new("cov_matters");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
 
@@ -1201,11 +1174,11 @@ fn test_covariates_reject_ragged_columns() {
 /// The full chain with a covariate, off the binary store.
 #[test]
 fn test_fit_sctransform_with_covariate_end_to_end() {
-    let store = TempStore::new("cov_end_to_end");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let cov = fixture_covariate(&counts, &library_sizes);
 
@@ -1327,11 +1300,11 @@ fn two_sample_counts() -> (Vec<Vec<u32>>, Vec<f64>, Vec<u32>) {
 /// changing the one-sample answer everything else in this file is pinned to.
 #[test]
 fn test_grouped_fit_with_one_group_matches_the_single_fit() {
-    let store = TempStore::new("grouped_one_group");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let no_cov = SctCovariates::default();
     let opts = SctStreamOpts::default();
@@ -1371,11 +1344,11 @@ fn test_grouped_fit_with_one_group_matches_the_single_fit() {
 /// Each group's model has to be the model that sample would get on its own.
 #[test]
 fn test_grouped_fit_matches_independent_per_sample_fits() {
-    let store = TempStore::new("grouped_per_sample");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let no_cov = SctCovariates::default();
     let opts = SctStreamOpts::default();
@@ -1436,11 +1409,11 @@ fn test_grouped_fit_matches_independent_per_sample_fits() {
 /// The shared gene axis is the intersection, and the clip range is not.
 #[test]
 fn test_grouped_gene_axis_is_the_intersection() {
-    let store = TempStore::new("grouped_intersection");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let no_cov = SctCovariates::default();
 
@@ -1479,11 +1452,11 @@ fn test_grouped_gene_axis_is_the_intersection() {
 /// A cell's residual has to come from its own sample's model.
 #[test]
 fn test_grouped_residual_row_uses_each_cells_own_model() {
-    let store = TempStore::new("grouped_residual_row");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let no_cov = SctCovariates::default();
@@ -1536,11 +1509,11 @@ fn test_grouped_residual_row_uses_each_cells_own_model() {
 /// that sample alone would produce.
 #[test]
 fn test_grouped_residual_variance_is_per_sample() {
-    let store = TempStore::new("grouped_residual_variance");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let no_cov = SctCovariates::default();
@@ -1593,12 +1566,12 @@ fn test_grouped_residual_variance_is_per_sample() {
 /// Corrected counts route every cell through its own sample's model.
 #[test]
 fn test_grouped_corrected_counts_use_each_groups_model() {
-    let store = TempStore::new("grouped_corrected_src");
-    let out = TempStore::new("grouped_corrected_out");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let no_cov = SctCovariates::default();
@@ -1618,9 +1591,10 @@ fn test_grouped_corrected_counts_use_each_groups_model() {
     let source =
         SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
 
-    sct_corrected_counts(&reader, &source, &cells, out.path(), opts).expect("corrected counts");
+    sct_corrected_counts(&reader, &source, &cells, out.to_str().unwrap(), opts)
+        .expect("corrected counts");
 
-    let written = ParallelSparseReader::new(out.path()).expect("corrected store opens");
+    let written = ParallelSparseReader::new(out.to_str().unwrap()).expect("corrected store opens");
     let header = written.dims();
     // The output gene axis is the shared one, not the store's.
     assert_eq!(header.total_genes, grouped.genes.len());
@@ -1723,11 +1697,11 @@ fn test_grouped_corrected_counts_use_each_groups_model() {
 /// A malformed grouping is named rather than fitted against nothing.
 #[test]
 fn test_grouped_fit_rejects_a_gap_in_the_group_labels() {
-    let store = TempStore::new("grouped_bad_labels");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let no_cov = SctCovariates::default();
 
@@ -1757,11 +1731,11 @@ fn test_grouped_fit_rejects_a_gap_in_the_group_labels() {
 /// point it is consumed.
 #[test]
 fn test_grouped_residual_pca_matches_a_direct_svd() {
-    let store = TempStore::new("grouped_residual_pca");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes, groups) = two_sample_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let no_cov = SctCovariates::default();
@@ -1830,11 +1804,11 @@ fn test_grouped_residual_pca_matches_a_direct_svd() {
 /// flattening the ranking the transformation exists to produce.
 #[test]
 fn test_residual_pca_refuses_variance_normalisation() {
-    let store = TempStore::new("residual_pca_normalise");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
@@ -1869,11 +1843,11 @@ fn test_residual_pca_refuses_variance_normalisation() {
 /// labels removes that cover.
 #[test]
 fn test_grouped_fit_with_covariates_matches_independent_fits() {
-    let store = TempStore::new("grouped_covariates");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let opts = SctStreamOpts::default();
 
@@ -1936,11 +1910,11 @@ fn test_grouped_fit_with_covariates_matches_independent_fits() {
 /// A reordered covariate frame has to be caught, not silently applied.
 #[test]
 fn test_residual_source_rejects_reordered_covariates() {
-    let store = TempStore::new("covariate_order");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
 
@@ -1981,11 +1955,11 @@ fn test_residual_source_rejects_reordered_covariates() {
 /// Duplicate cells are rejected rather than silently shifting the row.
 #[test]
 fn test_sct_rejects_duplicate_cells() {
-    let store = TempStore::new("sct_duplicate_cells");
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let (counts, library_sizes) = fixture_counts();
-    write_store(store.path(), &counts, fx::N_CELLS);
+    write_store(store.to_str().unwrap(), &counts, fx::N_CELLS);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
     let mut cells: Vec<usize> = (0..fx::N_CELLS).collect();
     cells[1] = 0;
 

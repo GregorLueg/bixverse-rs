@@ -66,6 +66,7 @@ from bixverse._core.download import (
     download_pbmc8k,
     download_pbmc_1k_5p,
     download_pbmc_batches,
+    download_pbmc_multiome,
     download_pbmc_totalseq_data,
     download_thymus_ageing,
 )
@@ -135,6 +136,7 @@ __all__ = [
     "download_pbmc8k",
     "download_pbmc_1k_5p",
     "download_pbmc_batches",
+    "download_pbmc_multiome",
     "download_pbmc_totalseq_data",
     "download_thymus_ageing",
     "generate_cellsweep_test_data",

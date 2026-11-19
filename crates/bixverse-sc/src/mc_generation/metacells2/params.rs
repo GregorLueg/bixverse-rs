@@ -178,8 +178,12 @@ pub struct MetacellsParams {
     pub must_complete_cover: bool,
 }
 
-/// Default for [MetacellsParams]
 impl Default for MetacellsParams {
+    /// The default [`MetacellsParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             select: SelectParams::default(),
@@ -238,8 +242,12 @@ pub struct SelectParams {
     pub lateral_gene_mask: Option<Vec<bool>>,
 }
 
-/// Default implementation for [SelectParams]
 impl Default for SelectParams {
+    /// The default [`SelectParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             downsample_min_samples: 750,
@@ -286,8 +294,12 @@ pub struct SimilarityParams {
     pub value_regularisation: f32,
 }
 
-/// Default implementation for [SimilarityParams]
 impl Default for SimilarityParams {
+    /// The default [`SimilarityParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             method: SimilarityMethod::AbsPearson,
@@ -326,8 +338,12 @@ pub struct MC2KnnParams {
     pub knn_k_override: Option<usize>,
 }
 
-/// Default implementation for [MC2KnnParams]
 impl Default for MC2KnnParams {
+    /// The default [`MC2KnnParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             balanced_ranks_factor: 10_f64.sqrt(),
@@ -374,8 +390,12 @@ pub struct PartitionParams {
     pub max_seed_size_quantile: f32,
 }
 
-/// Default implementation for [PartitionParams]
 impl Default for PartitionParams {
+    /// The default [`PartitionParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             cooldown_pass: 0.02,
@@ -431,8 +451,12 @@ pub struct DeviantsParams {
     pub cells_regularisation_quantile: f32,
 }
 
-/// Default implementation for [DeviantsParams]
 impl Default for DeviantsParams {
+    /// The default [`DeviantsParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_gene_fold_factor: 3.0,
@@ -467,8 +491,12 @@ pub struct DissolveParams {
     pub min_convincing_gene_fold_factor: Option<f32>,
 }
 
-/// Default implementation for [DissolveParams]
 impl Default for DissolveParams {
+    /// The default [`DissolveParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_robust_size_factor: 0.5,
@@ -564,8 +592,12 @@ pub struct RareParams {
     pub dissolve_min_convincing_gene_fold_factor: Option<f32>,
 }
 
-/// Default implementation for [RareParams], upstream's `rare_*` defaults.
 impl Default for RareParams {
+    /// Default implementation for [RareParams], upstream's `rare_*` defaults.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             max_genes: 500,
@@ -635,8 +667,12 @@ pub struct DacParams {
     pub rare: Option<RareParams>,
 }
 
-/// Default implementation for [DacParams]
 impl Default for DacParams {
+    /// The default [`DacParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             quick_and_dirty: false,
@@ -695,6 +731,11 @@ pub struct DacParamsSpec {
 }
 
 impl Default for DacParamsSpec {
+    /// The default [`DacParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = DacParams::default();
         Self {

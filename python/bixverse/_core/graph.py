@@ -53,10 +53,11 @@ from bixverse.params import (
 # Globals #
 ###########
 
-DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 5, "louvain": 2}
+DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 2, "louvain": 2}
 
 ClusterAlgorithm = Literal["leiden", "louvain"]
 LocalMoving = Literal["queue", "coloured"]
+NodeOrder = Literal["bfs", "shuffle"]
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +170,16 @@ def _leiden(
     beta: float,
     n_iterations: int | None,
     min_gain: float,
-    local_moving: LocalMoving,
+    local_moving: LocalMoving | None,
+    node_order: NodeOrder | None,
     seed: int,
     run: Callable[..., np.ndarray] = _bixverse.leiden,
 ) -> np.ndarray:
     """Leiden or Louvain on a neighbour graph.
 
     `run` is the extension call, `leiden` of `bixverse._bixverse` or of its
-    GPU twin.
+    GPU twin. `local_moving` and `node_order` left at `None` take the
+    algorithm's defaults on the Rust side.
 
     Returns:
         `uint32` community per node, 0 the largest.
@@ -204,9 +207,12 @@ def _leiden(
         else n_iterations,
         "min_gain": min_gain,
         "refine": algorithm == "leiden",
-        "local_moving": local_moving,
         "seed": seed,
     }
+    if local_moving is not None:
+        params["local_moving"] = local_moving
+    if node_order is not None:
+        params["node_order"] = node_order
     return run(
         graph.data,
         graph.indices,
@@ -335,15 +341,15 @@ def find_neighbours(
         embd_to_use: The embedding, `"pca"` or a name in the cache's
             `embeddings`.
         no_embd_to_use: Number of leading dimensions to use. `None` for all.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, or `"adt"` / `"atac"` on a `SingleCellsMultiModal`.
         neighbours_params: kNN and graph parameters. `None` uses the defaults.
         seed: Seed for the index build.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
     Raises:
-        ValueError: If the embedding is stale, or on `"adt"` without a
-            multi-modal object.
+        ValueError: If the embedding is stale, or on `"adt"` / `"atac"`
+            without a multi-modal object.
 
     Examples:
         >>> bv.graph.find_neighbours(sc, no_embd_to_use=20)
@@ -391,7 +397,7 @@ def get_connectivities(sc: ScOrMc, *, modality: Modality = "rna") -> CsrMatrix |
 
     Args:
         sc: The experiment.
-        modality: `"rna"`, or `"adt"` / `"wnn"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a `SingleCellsMultiModal`.
 
     Returns:
         The graph, or `None` (with a warning) if none was built.
@@ -421,7 +427,8 @@ def find_clusters(
     beta: float = 0.01,
     n_iterations: int | None = None,
     min_gain: float = 0.0,
-    local_moving: LocalMoving = "queue",
+    local_moving: LocalMoving | None = None,
+    node_order: NodeOrder | None = None,
 ) -> None:
     """Leiden or Louvain on the neighbour graph.
 
@@ -433,17 +440,21 @@ def find_clusters(
         cluster_algorithm: `"leiden"` or `"louvain"`.
         res: Modularity resolution; higher gives more communities.
         name: The obs column to write.
-        modality: The graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.
         n_iterations: Full iterations, each starting from the previous
-            partition; negative iterates until stable. `None` is 5 for
-            Leiden and 2 for Louvain.
+            partition; negative iterates until stable. `None` is 2.
         min_gain: With a negative `n_iterations`, also stop once an
             iteration gains no more than this.
         local_moving: `"queue"` (Traag's sequential queue) or `"coloured"`
-            (parallel colour classes on large levels).
+            (parallel colour classes on large levels). `None` is `"queue"` for
+            Leiden and `"coloured"` for Louvain.
+        node_order: Visit order of the queue, `"bfs"` (sweep in BFS order
+            from a random start, about half the work) or `"shuffle"` (as
+            igraph). `None` is `"bfs"` for Leiden and `"shuffle"` for
+            Louvain.
 
     Raises:
         ValueError: If the graph is stale or does not cover the kept cells.
@@ -467,6 +478,7 @@ def find_clusters(
         n_iterations=n_iterations,
         min_gain=min_gain,
         local_moving=local_moving,
+        node_order=node_order,
         run=_bixverse.leiden,
     )
 
@@ -483,7 +495,8 @@ def _find_clusters(
     beta: float,
     n_iterations: int | None,
     min_gain: float,
-    local_moving: LocalMoving,
+    local_moving: LocalMoving | None,
+    node_order: NodeOrder | None,
     run: Callable[..., np.ndarray],
 ) -> None:
     """The body of `find_clusters`, with the extension call `run` supplied,
@@ -510,6 +523,7 @@ def _find_clusters(
         n_iterations=n_iterations,
         min_gain=min_gain,
         local_moving=local_moving,
+        node_order=node_order,
         seed=seed,
         run=run,
     )
@@ -547,7 +561,7 @@ def fast_cluster(
         resolutions: Modularity resolutions.
         fc_params: The parameters. `None` uses the defaults; a `None`
             `n_centroids` becomes `floor(4 * sqrt(n_cells))` and a `None`
-            `n_iterations` 2 for Louvain, 5 for Leiden.
+            `n_iterations` 2.
         n_seeds: Seeds per resolution; 1 skips the stability statistics.
         return_kmeans: Return the k-means assignments and centroids.
         seed: Seed.

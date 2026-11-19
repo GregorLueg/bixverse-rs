@@ -4,38 +4,14 @@
 use bixverse_sc::sc_processing::hvg::get_hvg_vst;
 use bixverse_sc::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_sc::sc_processing::sctransform::stream::{SctStreamOpts, fit_sctransform};
-use bixverse_sc_data::data_io::CellGeneSparseWriter;
-use bixverse_sc_data::in_memory_io::*;
 use bixverse_sc_data::prelude::*;
+use bixverse_sc_data::store::in_memory::*;
+use bixverse_sc_data::store::writer::CellGeneSparseWriter;
+use tempfile::{NamedTempFile, TempPath};
 
 const N_CELLS: usize = 300;
 const N_GENES: usize = 60;
 const SIZE_FACTOR: f32 = 1e4;
-
-/// Removes the scratch store on drop; errors ignored, this runs during
-/// unwind.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Reserve a uniquely named scratch store.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "bixverse_cell_subset_{name}_{}.bin",
-            std::process::id()
-        )))
-    }
-
-    /// Path of the guarded store.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// Sparse `dense[gene][cell]` counts from an LCG, mean rising with the
 /// gene index so the mean-variance trend has range.
@@ -61,14 +37,19 @@ fn synthetic_counts() -> Vec<Vec<u32>> {
 }
 
 /// Write the gene-major and cell-major stores for the same counts.
-fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
+fn write_stores(dense: &[Vec<u32>], genes: &TempPath, cells: &TempPath) {
     let lib: Vec<f32> = (0..N_CELLS)
         .map(|c| dense.iter().map(|g| g[c] as f32).sum::<f32>().max(1.0))
         .collect();
 
-    let mut gene_writer =
-        CellGeneSparseWriter::new(genes.path(), false, N_CELLS, N_GENES, SIZE_FACTOR)
-            .expect("gene writer opens");
+    let mut gene_writer = CellGeneSparseWriter::new(
+        genes.to_str().unwrap(),
+        false,
+        N_CELLS,
+        N_GENES,
+        SIZE_FACTOR,
+    )
+    .expect("gene writer opens");
     for (gene_idx, gene) in dense.iter().enumerate() {
         let (mut raw, mut idx, mut norms) = (Vec::new(), Vec::new(), Vec::new());
         for (cell, &value) in gene.iter().enumerate() {
@@ -92,7 +73,7 @@ fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
     gene_writer.finalise().expect("finalise genes");
 
     let mut cell_writer =
-        CellGeneSparseWriter::new(cells.path(), true, N_CELLS, N_GENES, SIZE_FACTOR)
+        CellGeneSparseWriter::new(cells.to_str().unwrap(), true, N_CELLS, N_GENES, SIZE_FACTOR)
             .expect("cell writer opens");
     for cell in 0..N_CELLS {
         let (mut raw, mut idx) = (Vec::new(), Vec::new());
@@ -120,11 +101,14 @@ fn subset() -> Vec<usize> {
 /// The in-memory subset holds exactly what the filtered gene read sees.
 #[test]
 fn test_cell_subset_matches_filtered_gene_read() {
-    let (genes, cells) = (TempStore::new("read_g"), TempStore::new("read_c"));
+    let (genes, cells) = (
+        NamedTempFile::with_suffix(".bin").unwrap().into_temp_path(),
+        NamedTempFile::with_suffix(".bin").unwrap().into_temp_path(),
+    );
     let dense = synthetic_counts();
     write_stores(&dense, &genes, &cells);
-    let gene_reader = ParallelSparseReader::new(genes.path()).unwrap();
-    let cell_reader = ParallelSparseReader::new(cells.path()).unwrap();
+    let gene_reader = ParallelSparseReader::new(genes.to_str().unwrap()).unwrap();
+    let cell_reader = ParallelSparseReader::new(cells.to_str().unwrap()).unwrap();
 
     let subset = subset();
     let csc = read_cell_subset_csc(&cell_reader, &subset).unwrap();
@@ -149,11 +133,14 @@ fn test_cell_subset_matches_filtered_gene_read() {
 /// VST HVG and the scTransform fit give identical results on both paths.
 #[test]
 fn test_cell_subset_hvg_and_sct_match_gene_path() {
-    let (genes, cells) = (TempStore::new("fit_g"), TempStore::new("fit_c"));
+    let (genes, cells) = (
+        NamedTempFile::with_suffix(".bin").unwrap().into_temp_path(),
+        NamedTempFile::with_suffix(".bin").unwrap().into_temp_path(),
+    );
     let dense = synthetic_counts();
     write_stores(&dense, &genes, &cells);
-    let gene_reader = ParallelSparseReader::new(genes.path()).unwrap();
-    let cell_reader = ParallelSparseReader::new(cells.path()).unwrap();
+    let gene_reader = ParallelSparseReader::new(genes.to_str().unwrap()).unwrap();
+    let cell_reader = ParallelSparseReader::new(cells.to_str().unwrap()).unwrap();
 
     let subset = subset();
     let local: Vec<usize> = (0..subset.len()).collect();

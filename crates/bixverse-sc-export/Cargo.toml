@@ -7,7 +7,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
+readme = "README.md"
 categories.workspace = true
 
 [features]
@@ -26,3 +26,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 bixverse-sc-data = { workspace = true, features = ["zarr"] }
+tempfile.workspace = true

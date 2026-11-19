@@ -163,11 +163,15 @@ impl<T: BixverseFloat> DgrdlCache<T> {
     }
 }
 
-/// Default implementation for DgrdlCache
 impl<T> Default for DgrdlCache<T>
 where
     T: BixverseFloat,
 {
+    /// The default [`DgrdlCache`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             data_hash: 0,
@@ -608,13 +612,11 @@ fn update_dictionary<T: BixverseFloat>(
 /// Implements the Dual Graph Regularized Dictionary Learning algorithm which
 /// learns a sparse dictionary representation while preserving local geometric
 /// structure in both sample and feature spaces through graph regularization.
-///
-/// ### Fields
-///
-/// * `params` - Configuration parameters for the algorithm
 #[derive(Debug)]
 pub struct Dgrdl<T> {
+    /// Configuration parameters for the algorithm
     params: DgrdlParams<T>,
+    /// Laplacians, dictionaries and distances kept across fits
     cache: DgrdlCache<T>,
 }
 

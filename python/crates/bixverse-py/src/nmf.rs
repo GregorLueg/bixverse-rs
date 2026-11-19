@@ -15,7 +15,7 @@ use bixverse_sc::prelude::CompressedSparseData2;
 use bixverse_sc::sc_analysis::nmf_sc::{
     nmf_consensus_run_sc, nmf_k_sweep_run_sc, nmf_multiple_run_sc, nmf_single_run_sc,
 };
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::PyReadonlyArray1;
 use py_common::convert::{csr_from_parts, index_vec};
 use py_common::error::BvErr;

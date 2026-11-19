@@ -151,6 +151,5 @@ pub fn dsb_params_from_r_list(
         isotype_indices,
         pseudocount,
         quantile_clip,
-        ..defaults
     })
 }

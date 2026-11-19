@@ -20,8 +20,11 @@ use bixverse_core::core::math::sparse::*;
 // BBKNN //
 ///////////
 
-// Constants needed for the UMAP stuff
+/// Tolerance of the binary search for the per-cell bandwidth in the UMAP
+/// connectivities.
 const SMOOTH_K_TOLERANCE: f32 = 1e-5;
+/// Floor of the per-cell bandwidth relative to the mean neighbour distance,
+/// as in UMAP's `smooth_knn_dist`.
 const MIN_K_DIST_SCALE: f32 = 1e-3;
 
 /// Default trim as a multiple of the batch-balanced row width
@@ -74,6 +77,11 @@ pub struct BbknnParamsSpec {
 }
 
 impl Default for BbknnParamsSpec {
+    /// The default [`BbknnParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             neighbours_within_batch: 3,

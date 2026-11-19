@@ -143,6 +143,11 @@ impl LandmarkGpParams {
 }
 
 impl Default for LandmarkGpParams {
+    /// The default [`LandmarkGpParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             length_scale: 1.0,

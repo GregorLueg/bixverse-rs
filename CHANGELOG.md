@@ -4,25 +4,98 @@
 
 ### Breaking
 
-- Needs `ann-search-rs` 0.13.1. e-means is now the default k-means for
-  `KMeansParamsWrappers::default()`, Harmony v1 and v2 (CPU, MLX and GPU),
-  fast_cluster (`km_type = "emeans"`, CPU and GPU) and SCENIC. Results differ
-  at the same seed; `k_means_algorithm = "lloyd"` (or `km_type = "standard"`)
-  gives the old behaviour. DSB and NMF consensus stay on Lloyd.
+- `bixverse-sc-data` is split into `store`, `h5` and `mtx` modules; the
+  facade's `single_cell::sc_data` paths follow. Old to new:
+  - `data_io` -> `store::{chunk, quality, reader, writer}`, `v4_io` ->
+    `store::{v4, convert}`, `gene_file_io`, `in_memory_io`, `bin_merge_io`,
+    `archive_io` -> `store::{gene_file, in_memory, merge, archive}`
+  - `h5ad_io`, `h5ad_frame_io`, `h5ad_multifile_io`, `h5_scan`,
+    `h5_chunked`, `h5_filters` -> `h5::{h5ad, h5ad_frame, h5ad_multifile,
+    scan, chunked, filters}`; `h5_10x_io`, `h5_10x_adt_io`,
+    `h5_10x_multifile_io` -> `h5::{tenx, tenx_adt, tenx_multifile}`
+  - `mtx_io` -> `mtx`, `mtx_multifile_io` -> `mtx::multifile`, `obs_var_io`
+    -> `obs_var`, `r_obj_io` -> `r_obj`, `sc_synthetic_data` -> `synthetic`
+  - `CELL_BATCH_SIZE` and the `SC_FILE_VERSION*` constants -> `store`
+- Writers emit store format v5, which 0.10.x cannot read. v4 stores still
+  open; v3 stores no longer do (`V3NeedsConversion`).
+  `store::convert::upgrade_store_to_v5` converts either in place,
+  `convert_*_to_v5` elsewhere. The v4 converters are gone.
+- `ann-search-rs` 0.13.1. Fast clustering picks its k-means through
+  `km_type` alone (`"emeans"`, `"standard"`, `"minibatch"`) and refuses
+  `k_means_algorithm`.
+- `HarmonyKMeansSpec` is replaced by `bixverse_core`'s `KMeansSpec`, shared by
+  the Harmony, fast clustering and GPU k-means specs.
+  `LeidenParamsSpec::local_moving` is optional and joined by `node_order`.
+- `ScDataErrors::UnsupportH5ADFormat` is now `UnsupportedH5adFormat`.
+- `stream_h5_counts()` and `write_h5_csc_to_csr_streaming()` take a
+  `max_nnz_in_memory` budget (see Fixes).
+- GPU kNN method names no longer take an `_mlx` suffix.
 
 ### Features
 
-- New keys `k_means_algorithm` (`"emeans"` or `"lloyd"`) and `e_means_epochs`
-  on the Harmony and GPU k-means parameters, read by the R list conversions;
-  `parse_kmeans_algorithm` parses the first.
+- New crate `bixverse-atac` (facade feature `atac`): fragment files and 10x
+  multiome peaks into peak or tile stores, GTF annotation, fragment QC,
+  AMULET multiplets, a port of MACS3 `callpeak`, gene activity, TF-IDF, top
+  features, LSI, LSI projection and rLSI integration.
+- New crate `bixverse-sc-export` (facade features `export`, `export-zarr`):
+  a store to h5ad or AnnData Zarr through `scx-core`.
+- Features `zarr` and `zarr-blosc`: the h5ad ingest paths, scans and obs /
+  var frames also read anndata Zarr stores, v2 and v3.
+- Store format v5: raw layers (`write_cell_layers()`,
+  `ParallelSparseReader::with_layer()`), feature and norm kinds
+  (`FeatureKind::Peak`, `Tile`, `GeneActivity`), a TF-IDF norm, a cell-ID hash
+  and a genome interval index.
+- Logistic regression test for markers and differential accessibility, a
+  port of Seurat's `LRDETest`, in `sc_analysis::dge_lr`.
+- Seurat label transfer (`find_transfer_anchors()`, `transfer_labels()`) in
+  `sc_annotation::seurat_transfer`, for RNA or gene activity queries.
+- `node_order` (`"bfs"` or `"shuffle"`) on `LeidenParams`;
+  `LeidenParams::for_algorithm()` and `louvain()` give the per-algorithm
+  defaults.
+- `KMeansSpec` takes `k_means_algorithm` (`"emeans"` or `"lloyd"`) and
+  `e_means_epochs`; `parse_kmeans_algorithm()` parses the first.
 
-### Changes
+### Changed results
 
-- Harmony v1 and v2 draw their random block order once per run instead of
-  once per sweep. Results differ at the same seed.
-- MLX Harmony runs its initial k-means on MLX. Results differ at the same seed.
-- Harmony is faster on every backend; apart from the two items above, results
-  are unchanged.
+- e-means is the k-means default everywhere: `KMeansParamsWrappers::default()`,
+  fast clustering (`km_type = "emeans"`, also inside Boost and scDblFinder,
+  which used mini-batch), Harmony v1 and v2 on every backend, SCENIC, DSB and
+  NMF consensus. Results differ at the same seed;
+  `km_type = "standard"` or `k_means_algorithm = "lloyd"` gives Lloyd's back.
+- Leiden runs 2 iterations by default (was 5), as igraph. Louvain defaults to
+  coloured local moving in shuffled order. Results differ at the same seed.
+- Harmony v1 and v2 draw their random block order once per run, and MLX
+  Harmony runs its initial k-means on MLX. Results differ at the same seed.
+- GPU Harmony v2 under Lloyd's runs a fixed iteration count, as harmony2.
+- Seurat rPCA and CCA search within-batch neighbours at `k + 1` and cap each
+  cell at `k_weight` anchor pairs, as Seurat does. Results differ at the same
+  seed.
+- The normalised layer is recomputed in f32, also for v4 stores, which read it
+  at f16 before. Values differ slightly.
+
+### Fixes
+
+- Streaming a CSC h5ad held the whole transpose in memory; it now keeps to
+  the budget it is given.
+
+### Removed
+
+- `kmeans_iters` on `DsbParams` and on the NMF `ConsensusParams` and
+  `ConsensusParamsSpec`.
+- `CscGeneChunk::avg_exp` and `to_sparse_axis()`,
+  `scan_h5_csc_library_sizes()`, `RAW_SLOT_N_SAMPLE`, `RAW_SLOT_THRESHOLD`,
+  `rank_csr_chunk_vec()`, `pca_on_sc_stats()`, `pca_on_sc_residuals_stats()`
+  and `ScDblFinderDiagnostics`.
+- No longer public: `to_compressed_bytes()`, `H5ChunkedReader::is_direct()`
+  and the dense h5ad row helpers in `h5::h5ad_multifile`.
+- `bixverse-r`: `kmeans_params_from_r_list_with_iters()`, `r_local_moving()`
+  and `r_leiden_iterations()`. The R conversions fill `KMeansSpec` and
+  `LeidenParamsSpec` (`kmeans_spec_from_r_map()`).
+
+### Dependencies
+
+- `ann-search-rs` 0.13.1, `bonsai-rs` 0.3.3; new `zarrs` 0.23 (optional) and
+  `scx-core` 0.6.2.
 
 ## 0.10.3
 

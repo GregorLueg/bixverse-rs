@@ -1,0 +1,8 @@
+R 4.6.1
+Signac 1.17.1
+SeuratObject 5.4.0
+GenomicRanges 1.64.0
+Rsamtools 2.28.0
+rtracklayer 1.72.0
+Matrix 1.7.6
+RSpectra 0.16.2

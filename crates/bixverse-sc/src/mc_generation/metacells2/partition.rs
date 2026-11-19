@@ -46,8 +46,12 @@ use super::params::PartitionParams;
 // Consts //
 ////////////
 
+/// Floor inside the log of the edge score, so a partition without edges to a
+/// node scores finite.
 const EPSILON: f64 = 1e-6;
+/// Slope of the [`mass_factor`] penalty inside the `[low, high]` budget.
 const INNER_SLOPE: f64 = 0.02;
+/// Slope of the [`mass_factor`] penalty outside the budget.
 const OUTER_SLOPE: f64 = 0.5;
 
 ///////////

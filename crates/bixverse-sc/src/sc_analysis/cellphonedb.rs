@@ -72,6 +72,10 @@ pub struct CellPhoneDbParams<T> {
 
 impl<T: BixverseFloat> Default for CellPhoneDbParams<T> {
     /// Defaults match CellPhoneDB: 1000 permutations, threshold 0.1.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_perm: 1000,
@@ -169,7 +173,7 @@ struct LrStore {
     indptr: Vec<usize>,
     /// Position of the cell within the included cells.
     cells: Vec<u32>,
-    /// Normalised value, upcast from the stored F16.
+    /// Normalised value.
     vals: Vec<f32>,
 }
 
@@ -764,7 +768,7 @@ where
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use rand::prelude::*;
 
     /// CSC (cells, genes) from dense columns, norm values in `data_2`.

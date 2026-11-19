@@ -257,6 +257,11 @@ impl<F: BixverseFloat> LdaParams<F> {
 }
 
 impl<F: BixverseFloat> Default for LdaParams<F> {
+    /// The default [`LdaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             alpha: F::from_f64(50.0).unwrap(),

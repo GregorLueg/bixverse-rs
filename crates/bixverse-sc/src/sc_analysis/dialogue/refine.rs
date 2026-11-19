@@ -86,8 +86,11 @@ pub struct DialogueResult {
 /// One gene's row in the per-cell-type meta-analysis.
 #[derive(Clone, Debug)]
 struct MetaRow {
+    /// Programme index
     programme: usize,
+    /// Gene index
     gene: usize,
+    /// Whether the gene entered from the up or the down side
     up: bool,
     /// Signed `-log10 p` per partner, `NaN` where that partner had no verdict.
     z: Vec<f64>,
@@ -724,7 +727,7 @@ pub(crate) fn run_step3<S: SingleCellReading>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
     /// A small gene-major store: 12 cells, 5 genes, mixed sparsity.
     fn tiny_store() -> CompressedSparseData2<u32, f32> {

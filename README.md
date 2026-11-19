@@ -33,8 +33,10 @@ version and are released together.
 | `bixverse-sparse` | The compressed sparse structures and their byte serialisation | |
 | `bixverse-core` | `core`, `utils`, `ml`: linear algebra, statistics, SIMD, k-means, Gaussian processes; re-exports the sparse structures | sparse |
 | `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
-| `bixverse-sc-data` | The single cell data layer: the binary store, its readers and writers, MTX (plain or gzipped), h5ad / 10x h5 behind `h5`, and obs / var to Parquet behind `parquet` | sparse |
+| `bixverse-sc-data` | The single cell data layer: the binary store (format v5), its readers and writers, MTX (plain or gzipped), h5ad / 10x h5 behind `h5`, anndata Zarr behind `zarr`, and obs / var to Parquet behind `parquet` | sparse |
 | `bixverse-sc` | The rest of the single cell suite | methods, sc-data |
+| `bixverse-sc-export` | A store to h5ad or AnnData Zarr through `scx-core`, streamed in cell batches, any cell and gene subset | sc-data |
+| `bixverse-atac` | Single cell ATAC: fragments and 10x peaks into peak or tile stores, QC, AMULET, a MACS3 peak caller, gene activity, TF-IDF, LSI, rLSI | sc |
 | `bixverse-gpu` | GPU linear algebra and bulk methods via `cubecl` | methods |
 | `bixverse-sc-gpu` | GPU single cell methods | sc, gpu |
 | `bixverse-mlx` | Experimental MLX backend, Apple Silicon only | sc |
@@ -56,7 +58,8 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN (KmKnn, exhaustive, Annoy, HNSW, IVF, NN-Descent, and the NN-Descent graph built without an index), SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `single_cell` | I/O for h5ad, anndata Zarr and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN (KmKnn, exhaustive, Annoy, HNSW, IVF, NN-Descent, and the NN-Descent graph built without an index), SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony, Seurat label transfer); DGE (Mann-Whitney with AUROC, logistic regression, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `atac` | Fragment and 10x peak ingest, fragment QC (TSS enrichment, nucleosome signal, FRiP), AMULET multiplets, MACS3 `callpeak` port, peak or tile counting, gene activity, TF-IDF, top features, LSI and LSI projection, rLSI integration (feature `atac`) |
 | `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN (exhaustive, IVF, CAGRA, and the NN-Descent graph built without an index), Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
@@ -85,6 +88,11 @@ single crate sets that crate's flag instead (`h5` on `bixverse-sc-data`,
 | `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5`, implies `h5` |
 | `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load, implies `h5` |
 | `parquet` | Writes the h5ad obs / var frames and the 10x barcodes and features to Parquet, ready for DuckDB's `read_parquet`. No arrow, implies `h5` |
+| `zarr` | The h5ad ingest paths also read anndata Zarr stores (v2 and v3), implies `h5` |
+| `zarr-blosc` | Blosc for Zarr, the zarr v2 default codec. Builds C++, implies `zarr` |
+| `export` | `single_cell::sc_export`: a store to h5ad through `scx-core`, streamed in cell batches, implies `h5` |
+| `export-zarr` | Export to AnnData Zarr as well, implies `export` and `zarr` |
+| `atac` | `single_cell::atac`, single cell ATAC, implies `single-cell`; with `h5` also the 10x multiome peak reader |
 | `multi-modal` | `single_cell::multi_modal` (WNN, DSB), implies `single-cell` |
 | `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek`: the bulk GPU methods |
@@ -114,7 +122,7 @@ Everything through the facade:
 
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.10", features = ["single-cell", "h5"] }
+bixverse-rs = { version = "0.11", features = ["single-cell", "h5"] }
 ```
 
 ```rust
@@ -125,7 +133,7 @@ Or only the layer you need, e.g. the binary store without HDF5:
 
 ```toml
 [dependencies]
-bixverse-sc-data = "0.10"
+bixverse-sc-data = "0.11"
 ```
 
 Every crate has a prelude that re-exports the ones below it: the errors, sparse
@@ -167,11 +175,11 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 
 The [`bixverse`](https://github.com/GregorLueg/bixverse-rs/tree/main/python)
 Python package has about 70% of what the R package does, with the single cell
-suite as the bulk of it. It uses PyO3 and maturin, built on `bixverse-core`,
-`bixverse-methods`, `bixverse-sc` and `bixverse-sc-data`. No R install needed. It
-opens the same experiment directories as R, so a directory
-written on one side opens on the other, and parity tests compare it against the
-R package function by function. The
+suite as the bulk of it, plus single cell ATAC. It uses PyO3 and maturin, built
+on `bixverse-core`, `bixverse-methods`, `bixverse-sc`, `bixverse-sc-data`,
+`bixverse-sc-export` and `bixverse-atac`. No R install needed. It opens the same
+experiment directories as R, so a directory written on one side opens on the
+other. The
 [`bixverse-gpu`](https://github.com/GregorLueg/bixverse-rs/tree/main/python/gpu)
 wheel adds GPU twins on `bixverse-gpu` and `bixverse-sc-gpu`. On top sit a
 minibatch loader and scVI on torch, MLX or JAX, trained straight off the store.
@@ -185,7 +193,7 @@ uv pip install "bixverse[torch]"         # scVI on torch; also [mlx], [jax]
 
 What's in each module is in the
 [Python README](https://github.com/GregorLueg/bixverse-rs/blob/main/python/README.md),
-with docs and 22 vignettes
+with docs and 23 vignettes
 [here](https://gregorlueg.github.io/bixverse-rs/). The Python package is
 versioned on its own line, see its
 [changelog](https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md).
@@ -223,7 +231,8 @@ versioned on its own line, see its
 - [x] Data loader to pull the counts out of the binary files and expose them to
   Python-based deep learning frameworks (PyTorch, MLX, JAX).
 - [x] scVI trained straight off the binary files, on torch, MLX and JAX.
-- [x] The R single cell suite ported, with parity tests against the R package.
+- [x] The R single cell suite ported.
+- [x] Single cell ATAC, from fragments to differential accessibility.
 - [x] GPU twins of the expensive methods in a separate wheel.
 
 ## Updates

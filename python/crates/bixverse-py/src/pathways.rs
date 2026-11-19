@@ -42,7 +42,7 @@ use bixverse_sc::sc_analysis::vision::{
 };
 use bixverse_sc::sc_processing::knn::knn_or_generate;
 use bixverse_sc::sc_processing::metrics::pairwise_gene_correlations;
-use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use faer::{Mat, MatRef};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;

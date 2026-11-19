@@ -119,6 +119,10 @@ impl PpcaParams {
 
 impl Default for PpcaParams {
     /// pcaMethods' defaults.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_pcs: 2,
@@ -174,6 +178,10 @@ impl BpcaParams {
 
 impl Default for BpcaParams {
     /// pcaMethods' defaults.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_pcs: 2,

@@ -52,8 +52,10 @@ use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Gamma, LogNormal, Poisson};
 use rayon::prelude::*;
 
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CsrCellChunk, DataLayerReturn, ParallelSparseReader, SingleCellReading,
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CsrCellChunk, DataLayerReturn},
+    reader::{ParallelSparseReader, SingleCellReading},
+    writer::CellGeneSparseWriter,
 };
 
 ////////////
@@ -438,7 +440,7 @@ fn time_fused(reader: &ParallelSparseReader, order: &[usize], batch_size: usize)
     let start = Instant::now();
     for batch in order.chunks(batch_size) {
         let csr = reader
-            .read_cells_csr(batch, &DataLayerReturn::Norm)
+            .read_cells_csr(batch, None, &DataLayerReturn::Norm)
             .expect("read batch");
         nnz += csr.indices.len();
         black_box(&csr);

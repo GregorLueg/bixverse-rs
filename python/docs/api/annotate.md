@@ -51,6 +51,7 @@ Worked through in [Clustering, cell type annotation and reference mapping](../vi
       members:
         - map_symphony_query
         - transfer_labels_symphony
+        - transfer_labels_seurat
 
 ## Saving and loading
 

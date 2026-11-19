@@ -31,6 +31,7 @@ jobs:
         -p bixverse-core
         -p bixverse-methods --features dge
         -p bixverse-sc-data --features hdf5-static
+        -p bixverse-sc-export --features zarr,hdf5-static
         -p bixverse-sc --features multi-modal
         -p bixverse-rs --features single-cell,multi-modal
         -p bixverse-rs --features single-cell,multi-modal,hdf5-static

@@ -10,14 +10,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_export::ad_export::{
     AdFormat, AdParts, Column, ColumnData, CsMatI, DenseMatrix, Embeddings, LevelType, ObsTable,
     UnsTable, VarTable, Varm, save_store, write_csr,
 };
 use bixverse_sc_export::errors::ExportErrors;
 use numpy::{PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
-use py_common::convert::CSlice;
+use py_common::convert::{CSlice, index_vec, path_str};
 use py_common::error::{BixverseError, BvErr};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -237,14 +237,16 @@ fn ad_format(zarr: bool) -> AdFormat {
 /// * `norm` - Write the normalised instead of the raw counts
 /// * `obs_index` - One name per written cell
 /// * `obs` - obs columns, see [to_columns]
-/// * `var_index` - One name per gene
+/// * `var_index` - One name per written gene
 /// * `var` - var columns
 /// * `obsm` - Cell embeddings
-/// * `varm` - Gene loadings
+/// * `varm` - Gene loadings, one row per written gene
 /// * `obsp` - Cell graphs as `(data, indices, indptr)`
 /// * `uns_json` - JSON object for `uns`
 /// * `chunk_size` - Cells per streaming batch
 /// * `zarr` - Write an AnnData Zarr store instead of an h5ad file
+/// * `gene_indices` - 0-based genes to write, in output order, or `None`
+///   for every gene
 ///
 /// ### Returns
 ///
@@ -252,7 +254,7 @@ fn ad_format(zarr: bool) -> AdFormat {
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cell_indices, norm, obs_index, obs, var_index, var, obsm, varm,
-    obsp, uns_json, chunk_size = 10_000, zarr = false
+    obsp, uns_json, chunk_size = 10_000, zarr = false, gene_indices = None
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn save_h5ad(
@@ -278,20 +280,25 @@ pub fn save_h5ad(
     uns_json: &str,
     chunk_size: usize,
     zarr: bool,
+    gene_indices: Option<PyReadonlyArray1<'_, u32>>,
 ) -> PyResult<()> {
-    let cells: Vec<usize> = cell_indices
-        .c_slice()?
-        .iter()
-        .map(|&c| c as usize)
-        .collect();
-    let path = f_path_cells
-        .to_str()
-        .ok_or_else(|| PyValueError::new_err("f_path_cells is not valid UTF-8"))?;
+    let cells = index_vec(&cell_indices)?;
+    let genes = gene_indices.as_ref().map(index_vec).transpose()?;
+    let path = path_str(&f_path_cells)?;
     let parts = build_parts(obs_index, obs, var_index, var, obsm, varm, obsp, uns_json)?;
     let format = ad_format(zarr);
     py.detach(|| {
         let reader = ParallelSparseReader::new(path).map_err(ExportErrors::from)?;
-        save_store(&reader, &h5_path, format, &cells, norm, parts, chunk_size)
+        save_store(
+            &reader,
+            &h5_path,
+            format,
+            &cells,
+            genes.as_deref(),
+            norm,
+            parts,
+            chunk_size,
+        )
     })
     .map_err(export_err)
 }

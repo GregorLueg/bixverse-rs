@@ -8,35 +8,37 @@
 
 use std::path::{Path, PathBuf};
 
-use bixverse_sc_data::archive_io::{archive_cell_file, restore_archive};
-use bixverse_sc_data::bin_merge_io::{BinMergeTask, merge_sc_bin_files};
-use bixverse_sc_data::data_io::{
-    CellQuality, MinCellQuality, ParallelSparseReader, SingleCellReading, peek_file_version,
+use bixverse_sc_data::h5::h5ad::{
+    RawDataSlot, parse_raw_slot, stream_h5_counts, write_h5_counts, write_h5_normalised_counts,
 };
-use bixverse_sc_data::gene_file_io::{GENE_FILE_BYTES_PER_NNZ, write_gene_file};
-use bixverse_sc_data::h5_10x_io::{
+use bixverse_sc_data::h5::h5ad_multifile::{self, H5adFileTask};
+use bixverse_sc_data::h5::scan::{detect_raw_count_slot, get_h5ad_dimensions, read_h5_strings};
+use bixverse_sc_data::h5::tenx::{
     TenxFeatures, TenxVersion, detect_tenx_version, get_tenx_dimensions, parse_tenx_version,
     stream_h5_tenx_counts, write_tenx_h5,
 };
-use bixverse_sc_data::h5_10x_multifile_io::{TenxFileTask, multi_10x_h5_to_file};
-use bixverse_sc_data::h5_scan::{detect_raw_count_slot, get_h5ad_dimensions, read_h5_strings};
-use bixverse_sc_data::h5ad_io::{
-    RawDataSlot, parse_raw_slot, stream_h5_counts, write_h5_counts, write_h5_normalised_counts,
-};
-use bixverse_sc_data::h5ad_multifile_io::{self, H5adFileTask};
-use bixverse_sc_data::mtx_io::MtxReader;
-use bixverse_sc_data::mtx_multifile_io::{self, MtxFileTask};
-use bixverse_sc_data::obs_var_io::{
+use bixverse_sc_data::h5::tenx_multifile::{TenxFileTask, multi_10x_h5_to_file};
+use bixverse_sc_data::mtx::MtxReader;
+use bixverse_sc_data::mtx::multifile::{self, MtxFileTask};
+use bixverse_sc_data::obs_var::{
     FrameKind, ParquetColumnType, ParquetFrameInfo, h5ad_frame_to_parquet, parse_frame_kind,
     tenx_frame_to_parquet, to_snake_case,
 };
 use bixverse_sc_data::prelude::CompressedSparseData2;
-use bixverse_sc_data::r_obj_io::write_r_counts;
-use bixverse_sc_data::v4_io::{parse_chunk_codec, upgrade_store_to_v5};
-use bixverse_sc_data::v5_io::set_cell_ids as v5_set_cell_ids;
+use bixverse_sc_data::r_obj::write_r_counts;
+use bixverse_sc_data::store::archive::{archive_cell_file, restore_archive};
+use bixverse_sc_data::store::convert::upgrade_store_to_v5;
+use bixverse_sc_data::store::gene_file::write_gene_file;
+use bixverse_sc_data::store::merge::{BinMergeTask, merge_sc_bin_files};
+use bixverse_sc_data::store::v4::parse_chunk_codec;
+use bixverse_sc_data::store::v5::set_cell_ids as v5_set_cell_ids;
+use bixverse_sc_data::store::{
+    quality::{CellQuality, MinCellQuality},
+    reader::{ParallelSparseReader, SingleCellReading, peek_file_version},
+};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
-use py_common::convert::{from_py, u32_array};
+use py_common::convert::{from_py, max_nnz, path_str, u32_array};
 use py_common::error::BvErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -45,33 +47,6 @@ use pyo3::types::{PyDict, PyList};
 /////////////
 // Helpers //
 /////////////
-
-/// A path as UTF-8, which the crate's string-typed signatures need
-///
-/// ### Params
-///
-/// * `p` - The path
-///
-/// ### Returns
-///
-/// The path as `&str`, or a `ValueError` for a non UTF-8 path.
-fn path_str(p: &Path) -> PyResult<&str> {
-    p.to_str()
-        .ok_or_else(|| PyValueError::new_err(format!("{} is not valid UTF-8", p.display())))
-}
-
-/// Memory budget of the CSR to CSC conversion as a non-zero count
-///
-/// ### Params
-///
-/// * `max_mem_gb` - Budget in GB, `None` for a single phase
-///
-/// ### Returns
-///
-/// The maximum non-zeros held at once, at least one.
-fn max_nnz(max_mem_gb: Option<f64>) -> Option<usize> {
-    max_mem_gb.map(|gb| ((gb * 1e9) as usize / GENE_FILE_BYTES_PER_NNZ).max(1))
-}
 
 /// Directory for the mtx loader's spill files
 ///
@@ -399,6 +374,8 @@ pub fn csr_to_file<'py>(
 /// * `streaming` - Stream the counts instead of materialising the filtered
 ///   matrix first
 /// * `verbose` - Controls verbosity
+/// * `max_mem_gb` - Memory for the streamed CSC transpose buffers in GB,
+///   `None` for one phase
 ///
 /// ### Returns
 ///
@@ -406,7 +383,7 @@ pub fn csr_to_file<'py>(
 #[pyfunction]
 #[pyo3(signature = (
     f_path_cells, h5_path, cs_type, no_cells, no_genes, qc_params, slot = "X",
-    streaming = true, verbose = 1
+    streaming = true, verbose = 1, max_mem_gb = None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn h5ad_to_file<'py>(
@@ -420,27 +397,37 @@ pub fn h5ad_to_file<'py>(
     slot: &str,
     streaming: bool,
     verbose: usize,
+    max_mem_gb: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let qc: MinCellQuality = from_py(qc_params, "qc_params")?;
     let slot = raw_slot(slot)?;
     let cs_type = cs_type.to_string();
     let (n_cells, n_genes, cell_qc) = py
         .detach(|| {
-            let run = if streaming {
-                stream_h5_counts
+            if streaming {
+                stream_h5_counts(
+                    h5_path.as_path(),
+                    f_path_cells.as_path(),
+                    &cs_type,
+                    no_cells,
+                    no_genes,
+                    qc,
+                    slot,
+                    max_nnz(max_mem_gb),
+                    verbose > 0,
+                )
             } else {
-                write_h5_counts
-            };
-            run(
-                h5_path.as_path(),
-                f_path_cells.as_path(),
-                &cs_type,
-                no_cells,
-                no_genes,
-                qc,
-                slot,
-                verbose > 0,
-            )
+                write_h5_counts(
+                    h5_path.as_path(),
+                    f_path_cells.as_path(),
+                    &cs_type,
+                    no_cells,
+                    no_genes,
+                    qc,
+                    slot,
+                    verbose > 0,
+                )
+            }
         })
         .map_err(BvErr::from)?;
     qc_dict(py, n_cells, n_genes, &cell_qc)
@@ -640,7 +627,7 @@ pub fn multi_h5ad_to_file<'py>(
     let tasks: Vec<H5adFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
         .detach(|| {
-            h5ad_multifile_io::multi_h5ad_to_file(
+            h5ad_multifile::multi_h5ad_to_file(
                 &tasks,
                 &f_path_cells,
                 universe_size,
@@ -693,13 +680,7 @@ pub fn multi_mtx_to_file<'py>(
     let tasks: Vec<MtxFileTask> = from_py(file_tasks, "file_tasks")?;
     let res = py
         .detach(|| {
-            mtx_multifile_io::multi_mtx_to_file(
-                &tasks,
-                &f_path_cells,
-                universe_size,
-                &qc,
-                verbose > 0,
-            )
+            multifile::multi_mtx_to_file(&tasks, &f_path_cells, universe_size, &qc, verbose > 0)
         })
         .map_err(BvErr::from)?;
     let per_file = res
@@ -944,6 +925,22 @@ pub fn restore_cells_archive(
 #[pyfunction]
 pub fn file_version(path: PathBuf) -> PyResult<u32> {
     Ok(peek_file_version(&path).map_err(BvErr::from)?)
+}
+
+/// Read what the features of a store are from its header
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary (v4 or v5)
+///
+/// ### Returns
+///
+/// `"gene"`, `"peak"`, `"tile"`, `"snp"`, `"protein"` or `"gene_activity"`;
+/// a v4 file is `"gene"`.
+#[pyfunction]
+pub fn store_feature_kind(path: PathBuf) -> PyResult<&'static str> {
+    let reader = ParallelSparseReader::new(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(reader.feature_kind().name())
 }
 
 /// Convert both binaries (v3 or v4) to the v5 format in place

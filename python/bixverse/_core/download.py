@@ -4,8 +4,9 @@ The pinned `bixverse-data` GitHub release first, the Zenodo copy second. Each
 helper caches into `cache_dir` and returns the path straight away when the
 extracted result is already there, so only the first call touches the network.
 
-`download_kang_pbmc` and `download_thymus_ageing` fetch h5ad files; they
-live in the GitHub release only.
+`download_kang_pbmc` and `download_thymus_ageing` fetch h5ad files and
+`download_pbmc_multiome` the ATAC multiome files; they live in the GitHub
+release only.
 """
 
 from __future__ import annotations
@@ -37,6 +38,14 @@ DOWNLOAD_TRIES: int = 4
 RETRY_BACKOFF_S: int = 5
 
 ZENODO_MAIN: str = "20977604"
+
+PBMC_MULTIOME_FILES: tuple[str, ...] = (
+    "pbmc_unsorted_3k_filtered_feature_bc_matrix.h5",
+    "pbmc_unsorted_3k_atac_fragments.tsv.gz",
+    "pbmc_unsorted_3k_atac_fragments.tsv.gz.tbi",
+    "pbmc_unsorted_3k_atac_peaks.bed",
+    "gencode.v32.primary_assembly.annotation.gtf.gz",
+)
 
 
 ###########
@@ -387,3 +396,27 @@ def download_thymus_ageing(
         The h5ad file.
     """
     return _fetch_gz("thymus_ageing_droplet.h5ad.gz", None, cache_dir, quiet)
+
+
+@beartype
+def download_pbmc_multiome(
+    cache_dir: Path | str | None = None, *, quiet: bool = False
+) -> Path:
+    """The 10x PBMC unsorted 3k multiome (Cell Ranger ARC 2.0).
+
+    The filtered feature barcode matrix (RNA and Cell Ranger's peak counts in
+    one h5), the fragment file with its tabix index, Cell Ranger's peaks and
+    the GENCODE v32 annotation its GRCh38 reference was built from. 10x
+    Genomics data, CC BY 4.0.
+
+    Args:
+        cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
+        quiet: Suppress progress logging.
+
+    Returns:
+        The `pbmc_multiome` directory holding the files under their 10x names.
+    """
+    root = _cache(cache_dir) / "pbmc_multiome"
+    for file in PBMC_MULTIOME_FILES:
+        _fetch_file(file, data_urls(file), root, quiet)
+    return root

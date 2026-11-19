@@ -1,9 +1,9 @@
 """Parameter bundles for the single cell suite.
 
 One frozen dataclass per parameter bundle, flat as Rust sees them:
-`ScrubletParams(no_pcs=10, k=0)` rather than nested blocks. Field names,
-defaults and ranges are generated from the parameter specs. `ScenicParams` is
-written by hand, see `bixverse.params._scenic`.
+`ScrubletParams(no_pcs=10, k=0)` rather than nested blocks. Field names
+match the keys the Rust structs deserialise; each bundle checks its ranges in
+`__post_init__`. `ScenicParams` sits in `bixverse.params._scenic`.
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ import sys
 
 from beartype import beartype
 
-from bixverse.params import _generated
-from bixverse.params._generated import *  # noqa: F403
+from bixverse.params import _specs
 from bixverse.params._scenic import ScenicParams
+from bixverse.params._specs import *  # noqa: F403
 
-__all__ = [*_generated.__all__, "ScenicParams"]
+__all__ = [*_specs.__all__, "ScenicParams"]
 
 
 @beartype
@@ -39,7 +39,7 @@ def to_rust(p: object) -> dict[str, object]:
     """
     if not dataclasses.is_dataclass(p) or isinstance(p, type):
         raise TypeError(f"Expected a param bundle, got {type(p).__name__}.")
-    # each generated module carries the renames of its own bundles
+    # each bundle module carries the renames of its own bundles
     names = getattr(sys.modules[type(p).__module__], "RUST_NAMES", {})
     renames = names.get(type(p).__name__, {})
     out: dict[str, object] = {}

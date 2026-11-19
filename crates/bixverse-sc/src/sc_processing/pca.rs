@@ -196,8 +196,12 @@ impl SingleCellPcaParams {
     }
 }
 
-/// Default implementation for [SingleCellPcaParams]
 impl Default for SingleCellPcaParams {
+    /// The default [`SingleCellPcaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             mean_center: true,
@@ -271,8 +275,7 @@ pub(crate) fn solve_dense_pca(
 // Helpers //
 /////////////
 
-/// [`CscGeneChunk::transform_to_clr`] over an `f32` layer, without the F16
-/// round trip.
+/// [`CscGeneChunk::transform_to_clr`] over a flat buffer, in parallel.
 ///
 /// ### Params
 ///
@@ -1017,56 +1020,6 @@ pub fn pca_on_sc<S: SingleCellReading>(
     Ok((scores, loadings, s, scaled_f32))
 }
 
-/// Calculate the PCs for single cell data (with stats)
-///
-/// This uses a dense path under the hood that can be faster than the implicit
-/// centering, scaling via matrix algebra. Additionally, it returns the
-/// feature means and standard deviations for downstream consumption.
-///
-/// ### Params
-///
-/// * `reader` - Reader over the gene-based count store.
-/// * `cell_indices` - Slice of indices for the cells.
-/// * `gene_indices` - Slice of indices for the genes.
-/// * `no_pcs` - Number of principal components to calculate
-/// * `params_pca` - The parameters for this single cell PCA run, see
-///   [SingleCellPcaParams].
-/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
-/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
-///   transformation here.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Return
-///
-/// The [SingleCellPcaResScaled]
-#[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_stats<S: SingleCellReading>(
-    reader: &S,
-    cell_indices: &[usize],
-    gene_indices: &[usize],
-    no_pcs: usize,
-    params_pca: &SingleCellPcaParams,
-    clr_offsets: Option<&[f64]>,
-    seed: usize,
-    verbose: usize,
-) -> SingleCellPcaResStats {
-    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
-        reader,
-        cell_indices,
-        gene_indices,
-        no_pcs,
-        params_pca,
-        PcaColumnSource::Normalised { clr_offsets },
-        seed,
-        false,
-        verbose,
-    )?;
-
-    Ok((scores, loadings, s, feature_means, feature_sds))
-}
-
 //////////////////
 // Residual PCA //
 //////////////////
@@ -1126,53 +1079,6 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
     )?;
 
     Ok((scores, loadings, s, scaled_f32))
-}
-
-/// PCA on scTransform Pearson residuals, with the feature statistics.
-///
-/// As [`pca_on_sc_residuals`], but returns the per-gene residual mean and
-/// standard deviation rather than the residual matrix. The means are the
-/// centring applied, which a projection of new cells onto these components
-/// needs.
-///
-/// ### Params
-///
-/// * `reader` - Reader over the gene-based count store.
-/// * `cell_indices` - Slice of indices for the cells.
-/// * `gene_indices` - Slice of indices for the genes.
-/// * `no_pcs` - Number of principal components to calculate.
-/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
-/// * `source` - The fitted residual source, scTransform or analytic Pearson.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - `0` silent, `1` normal, `2` detailed.
-///
-/// ### Return
-///
-/// The [SingleCellPcaResStats].
-#[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
-    reader: &S,
-    cell_indices: &[usize],
-    gene_indices: &[usize],
-    no_pcs: usize,
-    params_pca: &SingleCellPcaParams,
-    source: &dyn ResidualSource,
-    seed: usize,
-    verbose: usize,
-) -> SingleCellPcaResStats {
-    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
-        reader,
-        cell_indices,
-        gene_indices,
-        no_pcs,
-        params_pca,
-        PcaColumnSource::Residual { source },
-        seed,
-        false,
-        verbose,
-    )?;
-
-    Ok((scores, loadings, s, feature_means, feature_sds))
 }
 
 ///////////////////////
@@ -1431,6 +1337,51 @@ fn sparse_pca<S: SingleCellReading>(
         println!("Sparse PCA: Loaded in data in {:.2?}", end_reading);
     }
 
+    let res = sparse_pca_on_matrix(matrix, no_pcs, params_pca, clr_offsets, seed, verbose)?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA: total run time -> {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    Ok(res)
+}
+
+/// Sparse PCA of an already loaded matrix
+///
+/// The SVD half of [`pca_on_sc_sparse`], for callers that build the values
+/// themselves (the ATAC rLSI computes TF-IDF with a per-batch IDF). Rows are
+/// cells, columns features, the values are read from the second layer
+/// (`data_2`). CSR or CSC both work.
+///
+/// ### Params
+///
+/// * `matrix` - Cells x features, values in `data_2`
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this run, see [SingleCellPcaParams].
+///   `clr` is not applied here; the values are taken as they are
+/// * `clr_offsets` - Pre-computed CLR offsets, if the values are CLR scaled
+/// * `seed` - Seed for the solver start vector (Lanczos) or sketch
+///   (randomised).
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResStats]
+pub fn sparse_pca_on_matrix(
+    matrix: CompressedSparseData2<f32>,
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaResStats {
+    let verbosity = parse_verbosity_level(verbose);
+    let (n_cells, n_genes) = matrix.shape;
+
     let start_data_prep = Instant::now();
 
     let (col_means, col_stds): (Vec<f64>, Vec<f64>) = if matrix.cs_type.is_csr() {
@@ -1493,27 +1444,19 @@ fn sparse_pca<S: SingleCellReading>(
         return Err(ScErrors::PcaTooFewComponents {
             requested: no_pcs,
             found: svd_res.s().len(),
-            n_cells: cell_set.len(),
-            n_genes: gene_indices.len(),
+            n_cells,
+            n_genes,
         });
     }
     let scores_f64 = compute_pc_scores(&svd_res);
-    let scores = Mat::<f32>::from_fn(cell_set.len(), no_pcs, |i, j| scores_f64[(i, j)] as f32);
-    let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
-        svd_res.v()[(i, j)] as f32
-    });
+    let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+    let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| svd_res.v()[(i, j)] as f32);
     let s: Vec<f32> = svd_res.s()[..no_pcs].iter().map(|&x| x as f32).collect();
 
     let end_svd = start_svd.elapsed();
 
     if verbosity.normal_verbosity() {
         println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
-    }
-
-    let end_total = start_total.elapsed();
-
-    if verbosity.normal_verbosity() {
-        println!("Sparse PCA: total run time -> {:.2?}", end_total);
     }
 
     let col_means = col_means.iter().map(|x| *x as f32).collect();

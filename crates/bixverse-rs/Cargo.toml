@@ -31,9 +31,9 @@ dge = ["bixverse-methods/dge"]
 ## for the h5ad and 10x h5 readers.
 single-cell = ["dge", "dep:bixverse-sc", "dep:bixverse-sc-data"]
 ## The h5ad and 10x h5 readers and writers. Pulls in HDF5.
-h5 = ["single-cell", "bixverse-sc-data/h5", "dep:hdf5"]
+h5 = ["single-cell", "bixverse-sc-data/h5", "bixverse-atac?/h5", "dep:hdf5"]
 ## Compile the bundled HDF5 C library from source. See `bixverse-sc-data`.
-hdf5-static = ["h5", "bixverse-sc-data/hdf5-static", "bixverse-sc-export?/hdf5-static"]
+hdf5-static = ["h5", "bixverse-sc-data/hdf5-static", "bixverse-sc-export?/hdf5-static", "bixverse-atac?/hdf5-static"]
 ## Compile the LZF and Blosc filters into the HDF5 build. See
 ## `bixverse-sc-data`.
 hdf5-filters = ["h5", "bixverse-sc-data/hdf5-filters"]
@@ -49,6 +49,9 @@ export = ["h5", "dep:bixverse-sc-export"]
 ## Export to AnnData Zarr as well. scx-core switches on blosc with it, which
 ## builds C++.
 export-zarr = ["export", "zarr", "bixverse-sc-export/zarr"]
+## Single cell ATAC-seq: peak and tile stores, TF-IDF, LSI (requires
+## single-cell). The 10x multiome peak reader comes with `h5`.
+atac = ["single-cell", "dep:bixverse-atac"]
 ## Multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell", "bixverse-sc/multi-modal"]
 ## Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
@@ -64,7 +67,7 @@ sc-gpu = ["gpu", "single-cell", "dep:bixverse-sc-gpu"]
 mlx = ["single-cell", "dep:bixverse-mlx"]
 ## Slow but asserting tests: the GPU parity gates and the large-scale numerical
 ## checks. Run in release or the CPU reference solves dominate.
-large-test = ["bixverse-methods/large-test", "bixverse-sc?/large-test", "bixverse-gpu?/large-test", "bixverse-sc-gpu?/large-test", "bixverse-mlx?/large-test"]
+large-test = ["bixverse-methods/large-test", "bixverse-sc?/large-test", "bixverse-gpu?/large-test", "bixverse-sc-gpu?/large-test", "bixverse-mlx?/large-test", "bixverse-atac?/large-test"]
 ## Unasserted diagnostic sweeps that print tables for a human to read.
 large_scale_diagnostics = ["bixverse-methods/large_scale_diagnostics", "bixverse-sc?/large_scale_diagnostics", "bixverse-gpu?/large_scale_diagnostics", "bixverse-sc-gpu?/large_scale_diagnostics", "bixverse-mlx?/large_scale_diagnostics"]
 
@@ -77,6 +80,7 @@ bixverse-core.workspace = true
 bixverse-methods.workspace = true
 bixverse-sc-data = { workspace = true, optional = true, features = ["analysis"] }
 bixverse-sc = { workspace = true, optional = true }
+bixverse-atac = { workspace = true, optional = true }
 bixverse-gpu = { workspace = true, optional = true }
 bixverse-sc-export = { workspace = true, optional = true }
 bixverse-sc-gpu = { workspace = true, optional = true }
@@ -103,6 +107,7 @@ rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+tempfile.workspace = true
 wide.workspace = true
 
 ###########
@@ -153,6 +158,16 @@ harness = false
 required-features = ["single-cell"]
 
 [[bench]]
+name = "atac_bench"
+harness = false
+required-features = ["atac"]
+
+[[bench]]
+name = "peak_call_bench"
+harness = false
+required-features = ["atac"]
+
+[[bench]]
 name = "dge_scan_bench"
 harness = false
 required-features = ["single-cell"]
@@ -196,6 +211,10 @@ required-features = ["sc-gpu"]
 name = "harmony_bench"
 harness = false
 required-features = ["single-cell"]
+
+[[bench]]
+name = "leiden_bench"
+harness = false
 
 #################
 # Documentation #

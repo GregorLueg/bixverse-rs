@@ -44,7 +44,7 @@ use rand_distr::{Distribution, Gamma, LogNormal, Poisson};
 use rayon::prelude::*;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::hvg::*;
 
 ////////////

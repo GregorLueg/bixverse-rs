@@ -1,5 +1,5 @@
 //! Helpers to extract genes for plotting. Can densify raw and normalised
-//! counts, do Z-score normalisation for groups and caclulate proportion
+//! counts, do Z-score normalisation for groups and calculate proportion
 //! of cells.
 
 use indexmap::IndexSet;
@@ -58,6 +58,8 @@ fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
 
 /// Extract raw counts for a single gene as a dense vector over the given cells.
 ///
+/// The R package calls this; there is no caller in the workspace.
+///
 /// ### Params
 ///
 /// * `reader` - Reader over the gene-based count store.
@@ -91,6 +93,8 @@ pub fn extract_raw_counts<S: SingleCellReading>(
 }
 
 /// Extract normalised (log1p) counts for a single gene, dense, over given cells.
+///
+/// The R package calls this; there is no caller in the workspace.
 ///
 /// If `scale` is true, z-scores across all selected cells (including zeros).
 /// If `clip` is provided, scaled values are clamped to `[-clip, clip]`.

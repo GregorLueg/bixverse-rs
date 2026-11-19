@@ -19,6 +19,7 @@ publish = false
 
 [workspace.dependencies]
 py-common = { path = "crates/py-common" }
+bixverse-atac = { path = "../crates/bixverse-atac" }
 bixverse-core = { path = "../crates/bixverse-core" }
 bixverse-gpu = { path = "../crates/bixverse-gpu" }
 bixverse-methods = { path = "../crates/bixverse-methods" }

@@ -33,6 +33,7 @@ from beartype import beartype
 from bixverse._core.graph import (
     ClusterAlgorithm,
     LocalMoving,
+    NodeOrder,
     find_clusters,
     find_neighbours,
 )
@@ -510,7 +511,7 @@ def step_neighbours(
     Args:
         embd_to_use: The embedding, forwarded.
         no_embd_to_use: Number of leading dimensions, forwarded.
-        modality: `"rna"` or `"adt"`, forwarded.
+        modality: `"rna"`, `"adt"` or `"atac"`, forwarded.
         neighbours_params: kNN and graph parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -542,7 +543,8 @@ def step_clusters(
     beta: float = 0.01,
     n_iterations: int | None = None,
     min_gain: float = 0.0,
-    local_moving: LocalMoving = "queue",
+    local_moving: LocalMoving | None = None,
+    node_order: NodeOrder | None = None,
 ) -> Step:
     """Pipeline step for `bixverse.graph.find_clusters`.
 
@@ -556,6 +558,7 @@ def step_clusters(
         n_iterations: Full iterations, forwarded.
         min_gain: Stopping gain with a negative `n_iterations`, forwarded.
         local_moving: `"queue"` or `"coloured"`, forwarded.
+        node_order: `"bfs"` or `"shuffle"`, forwarded.
     """
     return Step(
         "clusters",
@@ -570,6 +573,7 @@ def step_clusters(
             "n_iterations": n_iterations,
             "min_gain": min_gain,
             "local_moving": local_moving,
+            "node_order": node_order,
         },
         accepts=STEP_CLASSES,
     )
@@ -580,6 +584,7 @@ def step_harmony(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2Params | None = None,
     seed: int = 42,
@@ -591,7 +596,8 @@ def step_harmony(
         batch_column: obs column with the primary batch, forwarded.
         additional_batch_columns: Further obs columns to regress out,
             forwarded.
-        modality: The PCA to correct, forwarded.
+        embd_to_use: The embedding to correct, forwarded.
+        modality: The cache to read and write, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -603,6 +609,7 @@ def step_harmony(
         {
             "batch_column": batch_column,
             "additional_batch_columns": additional_batch_columns,
+            "embd_to_use": embd_to_use,
             "modality": modality,
             "harmony_params": harmony_params,
             "seed": seed,
@@ -616,6 +623,7 @@ def step_harmony_v1(
     batch_column: str,
     *,
     additional_batch_columns: Sequence[str] | None = None,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyParams | None = None,
     seed: int = 42,
@@ -627,7 +635,8 @@ def step_harmony_v1(
         batch_column: obs column with the primary batch, forwarded.
         additional_batch_columns: Further obs columns to regress out,
             forwarded.
-        modality: The PCA to correct, forwarded.
+        embd_to_use: The embedding to correct, forwarded.
+        modality: The cache to read and write, forwarded.
         harmony_params: The parameters, forwarded.
         seed: Seed, forwarded.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -639,6 +648,7 @@ def step_harmony_v1(
         {
             "batch_column": batch_column,
             "additional_batch_columns": additional_batch_columns,
+            "embd_to_use": embd_to_use,
             "modality": modality,
             "harmony_params": harmony_params,
             "seed": seed,

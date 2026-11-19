@@ -1,7 +1,5 @@
-"""Neighbours and clustering without R: state handling, persistence and edge
+"""Neighbours and clustering: state handling, persistence and edge
 cases.
-
-Parity with the R helpers is in `test_graph_r.py`.
 """
 
 import warnings
@@ -253,6 +251,25 @@ def test_fast_cluster_shapes(sc):
     assert res.centroids is not None
     assert res.centroids.shape == (20, 10)
     assert "res_1" not in sc.obs().columns
+
+
+@pytest.mark.parametrize("km_type", ["emeans", "standard", "minibatch"])
+def test_fast_cluster_km_types(sc, km_type):
+    res = graph.fast_cluster(
+        sc,
+        resolutions=[1.0],
+        fc_params=FastClusterParams(n_centroids=20, km_type=km_type),
+        return_kmeans=True,
+    )
+    assert res.k_means_cluster is not None
+    assert res.k_means_cluster.max() < 20
+
+
+def test_fast_cluster_defaults_to_emeans():
+    d = bv.params.to_rust(FastClusterParams())
+    assert d["km_type"] == "emeans"
+    # Rust refuses the key on the CPU fast clustering: km_type picks the k-means
+    assert "k_means_algorithm" not in d
 
 
 def test_fast_cluster_seed_stats(sc):

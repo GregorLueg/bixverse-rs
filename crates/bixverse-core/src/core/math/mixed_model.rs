@@ -420,6 +420,11 @@ impl RandomInterceptParams {
 }
 
 impl Default for RandomInterceptParams {
+    /// The default [`RandomInterceptParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             lambda_max: DEFAULT_LAMBDA_MAX,

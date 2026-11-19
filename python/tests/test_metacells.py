@@ -1,7 +1,5 @@
-"""MetaCells without R: generation, aggregation, accessors, merge, metrics on
+"""MetaCells: generation, aggregation, accessors, merge, metrics on
 edge cases and the persistence round trip.
-
-Parity with the R meta cell suite is in `test_metacells_r.py`.
 """
 
 import warnings

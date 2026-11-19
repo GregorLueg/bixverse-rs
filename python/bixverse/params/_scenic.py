@@ -1,9 +1,8 @@
-"""SCENIC parameters, written by hand.
+"""SCENIC parameters.
 
-The learner block is picked at call time, so the spec was left out of the
-generator. `ScenicParams` holds the learner as one of the three generated
-learner bundles and `to_rust` splices its fields in after the top-level ones,
-giving the flat list Rust reads.
+The learner block is picked at call time. `ScenicParams` holds the learner as
+one of the three learner bundles and `to_rust` splices its fields in after the
+top-level ones, giving the flat list Rust reads.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Literal
 from beartype import BeartypeConf, beartype
 
 from bixverse.params._checks import check_range
-from bixverse.params._generated import (
+from bixverse.params._specs import (
     ScenicExtraTreesDefaults,
     ScenicGradientBoostingDefaults,
     ScenicRandomForestDefaults,

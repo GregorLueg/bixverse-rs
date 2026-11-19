@@ -173,8 +173,12 @@ pub struct WnnParams {
     pub knn_params: KnnParams,
 }
 
-/// Default implementation
 impl Default for WnnParams {
+    /// The default [`WnnParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k_nn: 20,

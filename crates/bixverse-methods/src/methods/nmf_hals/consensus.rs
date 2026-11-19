@@ -47,9 +47,6 @@ const DEFAULT_DENSITY_THRESHOLD: f64 = 0.5;
 /// on scikit-learn's `n_init = 10` for the same purpose.
 const DEFAULT_KMEANS_N_INIT: usize = 3;
 
-/// Default Lloyd iterations per k-means restart.
-const DEFAULT_KMEANS_ITERS: usize = 100;
-
 /// Norm below which a pooled component counts as collapsed and is dropped
 /// before anything else runs. A zero-norm row has no direction, so cosine
 /// distance against it is meaningless.
@@ -106,8 +103,6 @@ pub struct ConsensusParams<F: BixverseFloat> {
     /// Mean cosine distance to those neighbours above which a component is
     /// dropped. `None` disables filtering entirely.
     pub density_threshold: Option<F>,
-    /// Lloyd iterations per k-means restart.
-    pub kmeans_iters: usize,
     /// Number of k-means restarts; the lowest-inertia labelling wins.
     pub kmeans_n_init: usize,
     /// Seed for the k-means restarts.
@@ -124,7 +119,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
     ///   for the `0.3 * n_runs` heuristic.
     /// * `density_threshold` - Mean cosine distance cutoff. `None` disables the
     ///   filter.
-    /// * `kmeans_iters` - Lloyd iterations per k-means restart.
     /// * `kmeans_n_init` - Number of k-means restarts.
     /// * `seed` - Seed for the k-means restarts.
     ///
@@ -135,7 +129,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
         target: ConsensusTarget,
         n_neighbours: Option<usize>,
         density_threshold: Option<F>,
-        kmeans_iters: usize,
         kmeans_n_init: usize,
         seed: u64,
     ) -> Self {
@@ -143,7 +136,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
             target,
             n_neighbours,
             density_threshold,
-            kmeans_iters,
             kmeans_n_init,
             seed,
         }
@@ -151,12 +143,16 @@ impl<F: BixverseFloat> ConsensusParams<F> {
 }
 
 impl<F: BixverseFloat> Default for ConsensusParams<F> {
+    /// The default [`ConsensusParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             target: ConsensusTarget::default(),
             n_neighbours: None,
             density_threshold: Some(F::from_f64(DEFAULT_DENSITY_THRESHOLD).unwrap()),
-            kmeans_iters: DEFAULT_KMEANS_ITERS,
             kmeans_n_init: DEFAULT_KMEANS_N_INIT,
             seed: 42,
         }
@@ -179,8 +175,6 @@ pub struct ConsensusParamsSpec {
     pub n_neighbours: usize,
     /// Mean cosine distance cutoff; 2 or more disables the filter
     pub density_threshold: f64,
-    /// Lloyd iterations per k-means restart
-    pub kmeans_iters: usize,
     /// Number of k-means restarts
     pub kmeans_n_init: usize,
     /// Seed for the k-means restarts; `None` keeps the default
@@ -188,12 +182,16 @@ pub struct ConsensusParamsSpec {
 }
 
 impl Default for ConsensusParamsSpec {
+    /// The default [`ConsensusParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             consensus_target: "h".to_string(),
             n_neighbours: 0,
             density_threshold: DEFAULT_DENSITY_THRESHOLD,
-            kmeans_iters: DEFAULT_KMEANS_ITERS,
             kmeans_n_init: DEFAULT_KMEANS_N_INIT,
             consensus_seed: None,
         }
@@ -223,7 +221,6 @@ impl ConsensusParamsSpec {
             target,
             (self.n_neighbours > 0).then_some(self.n_neighbours),
             density_threshold,
-            self.kmeans_iters,
             self.kmeans_n_init,
             self.consensus_seed
                 .unwrap_or_else(|| ConsensusParams::<F>::default().seed),
@@ -541,8 +538,7 @@ where
 ///
 /// * `data` - Unit-L2 rows to cluster, shape `n x dim`.
 /// * `k` - Number of clusters.
-/// * `params` - Consensus options supplying the iteration count, restart count
-///   and seed.
+/// * `params` - Consensus options supplying the restart count and seed.
 ///
 /// ### Returns
 ///
@@ -555,9 +551,9 @@ fn cluster_best_of_n<F>(
 where
     F: BixverseFloat + AnnSearchFloat,
 {
-    // Both floored at one: a zero arriving from R would otherwise give an
-    // init-only clustering, or no clustering at all, rather than an error.
-    let kmeans_params = KMeansParamsWrappers::new(params.kmeans_iters.max(1), None, None);
+    // Floored at one: a zero arriving from R would otherwise run no clustering
+    // at all rather than error.
+    let kmeans_params = KMeansParamsWrappers::default();
     let n_init = params.kmeans_n_init.max(1);
 
     let mut best: Option<(F, Vec<usize>)> = None;
@@ -1189,8 +1185,7 @@ mod tests {
         }
         let outlier = (n_runs - 1) * k;
 
-        let unfiltered =
-            ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let unfiltered = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 3, 42);
         let all = consensus_from_restarts(&restarts, k, &unfiltered, 0).unwrap();
         assert_eq!(all.n_dropped, 0);
 
@@ -1224,7 +1219,7 @@ mod tests {
         }
         let collapsed = k;
 
-        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 3, 42);
         let clusters = consensus_from_restarts(&restarts, k, &params, 0).unwrap();
 
         assert!(clusters.labels[collapsed].is_none());
@@ -1240,12 +1235,11 @@ mod tests {
         let input = DenseInput::new(v.as_ref()).unwrap();
         let restarts = stabilised_nmf(&input, k, n_runs, 0, &test_opts(), 0).unwrap();
 
-        let h_params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let h_params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 3, 42);
         let h_res = consensus_from_restarts(&restarts, k, &h_params, 0).unwrap();
         assert_eq!(h_res.consensus.ncols(), n);
 
-        let w_params =
-            ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 100, 3, 42);
+        let w_params = ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 3, 42);
         let w_res = consensus_from_restarts(&restarts, k, &w_params, 0).unwrap();
         assert_eq!(w_res.consensus.ncols(), m);
     }
@@ -1283,7 +1277,7 @@ mod tests {
         let (m, n, k) = (30, 24, 3);
         let v = rank_k_input(m, n, k);
         let input = DenseInput::new(v.as_ref()).unwrap();
-        let params = ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 3, 42);
 
         let res = nmf_consensus(&input, k, 4, 0, &test_opts(), Some(params), 0).unwrap();
 
@@ -1517,7 +1511,7 @@ mod tests {
             restarts.w_all[(row, target_col)] = if row == m - 1 { 1.0 } else { 0.0 };
         }
 
-        let params = ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::WColumns, None, None, 3, 42);
         let clusters = consensus_from_restarts(&restarts, k, &params, 0).unwrap();
 
         let worst = clusters
@@ -1543,7 +1537,7 @@ mod tests {
             restarts.h_per_run[run][(comp, j)] = if j == n - 1 { 1.0 } else { 0.0 };
         }
 
-        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 3, 42);
         let clusters = consensus_from_restarts(&restarts, k, &params, 0).unwrap();
 
         let worst = clusters
@@ -1570,7 +1564,7 @@ mod tests {
         let unfiltered = consensus_from_restarts(
             &restarts,
             k,
-            &ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 3, 42),
+            &ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 3, 42),
             0,
         )
         .unwrap();
@@ -1584,7 +1578,7 @@ mod tests {
         let threshold = densities[densities.len() / 2];
 
         let params =
-            ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(threshold), 100, 3, 42);
+            ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(threshold), 3, 42);
         let clusters = consensus_from_restarts(&restarts, k, &params, 0).unwrap();
 
         for &i in &clusters.kept {
@@ -1625,7 +1619,7 @@ mod tests {
             }
         }
 
-        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 100, 1, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, None, 1, 42);
         let clusters = consensus_from_restarts(&restarts, k, &params, 0).unwrap();
         assert!(clusters.n_empty_clusters > 0, "sizes {:?}", clusters.sizes);
     }
@@ -1639,8 +1633,7 @@ mod tests {
         let v = rank_k_input(m, n, 2);
         let input = DenseInput::new(v.as_ref()).unwrap();
         // Negative threshold: nothing can survive.
-        let params =
-            ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(-1.0), 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(-1.0), 3, 42);
 
         let sweep = nmf_k_sweep(&input, &[2, 3], 3, 0, &test_opts(), Some(params), 0).unwrap();
 
@@ -1660,8 +1653,7 @@ mod tests {
     fn over_pruning_errors_for_a_single_k() {
         let v = rank_k_input(25, 18, 2);
         let input = DenseInput::new(v.as_ref()).unwrap();
-        let params =
-            ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(-1.0), 100, 3, 42);
+        let params = ConsensusParams::<f64>::new(ConsensusTarget::HRows, None, Some(-1.0), 3, 42);
 
         assert!(matches!(
             nmf_consensus(&input, 2, 4, 0, &test_opts(), Some(params), 0),

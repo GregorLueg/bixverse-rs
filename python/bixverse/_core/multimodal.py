@@ -1,7 +1,8 @@
-"""`SingleCellsMultiModal`: RNA in the store, ADT counts in memory, a WNN slot.
+"""`SingleCellsMultiModal`: RNA in the store, ADT in memory, ATAC in its own
+store, a WNN slot.
 
 The RNA side is a `SingleCells` in every respect, so every RNA method takes
-one unchanged. On top of it sit three things:
+one unchanged. On top of it sit four things:
 
 - `adt`: the ADT counts of the cells kept when they were added, raw and
   normalised (CLR or DSB), keyed by barcode. They are not in the store and
@@ -9,6 +10,10 @@ one unchanged. On top of it sit three things:
   file. Their feature table is the `var_adt` table in the DuckDB and their
   per-cell totals land in obs.
 - `adt_cache`: PCA, embeddings, kNN and graph over the ADT counts.
+- `atac`: peak or tile counts in a second store under `atac/`, written for
+  every cell of the RNA store in the same order, so both share `cell_idx`.
+  Its feature table is `var_atac`, its per-cell metrics `atac_*` obs columns;
+  `atac_cache` holds the LSI and anything built on it.
 - `wnn`: the fused kNN, its graph, the per-cell modality weights and any
   embeddings laid out on it.
 
@@ -51,8 +56,9 @@ from bixverse.params import DsbParams
 # Globals #
 ###########
 
-Modality = Literal["rna", "adt", "wnn"]
-CacheModality = Literal["rna", "adt"]
+Modality = Literal["rna", "adt", "atac", "wnn"]
+CacheModality = Literal["rna", "adt", "atac"]
+CountMode = Literal["insertion", "paired-insertion", "fragment"]
 
 MODALITY_ONLY_MM = "modality = '{}' is only supported for SingleCellsMultiModal."
 
@@ -140,6 +146,46 @@ class AdtCounts:
 
 @beartype
 @dataclass(repr=False)
+class AtacInfo:
+    """What the ATAC store holds and how far it was processed.
+
+    Attributes:
+        kind: `"peak"` or `"tile"`.
+        count_mode: What one count is: `"insertion"` (up to two per
+            fragment), `"paired-insertion"` or `"fragment"` (one per fragment
+            and feature). The 10x `Peaks` matrix counts insertions.
+        tf_idf: Whether the store is TF-IDF normalised.
+        depth_cor: Correlation of each LSI component with the library size,
+            all components including any dropped one.
+        lsi_dropped: 0-based LSI components left out of the `"lsi"` embedding.
+        lsi_features: 0-based `var_atac` rows the LSI was fitted on.
+        lsi_loadings: Features x components loadings of the LSI, all
+            components, for projecting other cells onto it.
+        lsi_singular_values: Singular values of the LSI.
+    """
+
+    kind: Literal["peak", "tile"]
+    count_mode: CountMode
+    tf_idf: bool = False
+    depth_cor: np.ndarray | None = None
+    lsi_dropped: tuple[int, ...] = ()
+    lsi_features: np.ndarray | None = None
+    lsi_loadings: np.ndarray | None = None
+    lsi_singular_values: np.ndarray | None = None
+
+    def __repr__(self) -> str:
+        return compact_repr(
+            "AtacInfo",
+            kind=self.kind,
+            count_mode=self.count_mode,
+            tf_idf=self.tf_idf,
+            lsi=self.depth_cor is not None,
+            lsi_dropped=list(self.lsi_dropped),
+        )
+
+
+@beartype
+@dataclass(repr=False)
 class WnnSlot:
     """The weighted nearest neighbour integration.
 
@@ -172,7 +218,7 @@ class WnnSlot:
 
 
 class SingleCellsMultiModal(SingleCells):
-    """A single cell experiment with RNA and ADT.
+    """A single cell experiment with RNA plus ADT and / or ATAC.
 
         >>> import bixverse as bv
         >>> mm = bv.SingleCellsMultiModal("my_experiment")
@@ -187,12 +233,14 @@ class SingleCellsMultiModal(SingleCells):
         cache: The RNA cache.
         adt: The ADT counts, once added.
         adt_cache: The ADT cache.
+        atac: The ATAC store state, once added.
+        atac_cache: The ATAC cache.
         wnn: The WNN integration, once generated.
     """
 
     @beartype
     def __init__(self, directory: Path | str) -> None:
-        """Open an experiment directory, with no ADT counts yet.
+        """Open an experiment directory, with no ADT or ATAC yet.
 
         Args:
             directory: Holds `sc_duckdb.db` and `counts_cells.bin`.
@@ -200,6 +248,8 @@ class SingleCellsMultiModal(SingleCells):
         super().__init__(directory)
         self.adt: AdtCounts | None = None
         self.adt_cache = ScCache()
+        self.atac: AtacInfo | None = None
+        self.atac_cache = ScCache()
         self.wnn: WnnSlot | None = None
 
     ##########
@@ -218,6 +268,8 @@ class SingleCellsMultiModal(SingleCells):
                 return self.cache
             case "adt":
                 return self.adt_cache
+            case "atac":
+                return self.atac_cache
             case "wnn":
                 if self.wnn is None:
                     raise ValueError(
@@ -230,7 +282,7 @@ class SingleCellsMultiModal(SingleCells):
 
     def _caches(self) -> dict[str, ScCache]:
         """Every cache present, by modality."""
-        out = {"rna": self.cache, "adt": self.adt_cache}
+        out = {"rna": self.cache, "adt": self.adt_cache, "atac": self.atac_cache}
         if self.wnn is not None:
             out["wnn"] = self.wnn.cache
         return out
@@ -247,6 +299,7 @@ class SingleCellsMultiModal(SingleCells):
         """Drop every cache: all modalities share the kept cell set."""
         self.cache = ScCache()
         self.adt_cache = ScCache()
+        self.atac_cache = ScCache()
         self.wnn = None
 
     ##############
@@ -325,16 +378,18 @@ class SingleCellsMultiModal(SingleCells):
         Args:
             indices: Optional 0-based gene or feature indices.
             cols: Optional columns.
-            modality: `"rna"` for `var`, `"adt"` for `var_adt`.
+            modality: `"rna"` for `var`, `"adt"` for `var_adt`, `"atac"` for
+                `var_atac`.
 
         Raises:
-            TableNotFoundError: For `"adt"` before ADT counts were added.
+            TableNotFoundError: Before the modality was added.
         """
         if modality == "rna":
             return super().var(indices=indices, cols=cols)
         idx = None if indices is None else np.asarray(indices, dtype=np.uint32)
+        table = "var_adt" if modality == "adt" else "var_atac"
         with db.connect(self.db_path, read_only=True) as con:
-            return db.get_table(con, "var_adt", indices=idx, cols=cols)
+            return db.get_table(con, table, indices=idx, cols=cols)
 
     def __repr__(self) -> str:
         base = super().__repr__().removeprefix("SingleCells(").rstrip(")\n")
@@ -345,7 +400,9 @@ class SingleCellsMultiModal(SingleCells):
             f"{base}\n"
             f"  adt={adt}, adt_pca={c.pca_factors is not None}, "
             f"adt_knn={c.knn is not None}, adt_graph={c.connectivities is not None},\n"
-            f"  adt_embeddings={sorted(c.embeddings) or 'none'}, "
+            f"  adt_embeddings={sorted(c.embeddings) or 'none'},\n"
+            f"  atac={'none' if self.atac is None else repr(self.atac)}, "
+            f"atac_embeddings={sorted(self.atac_cache.embeddings) or 'none'}, "
             f"wnn={self.wnn is not None}\n"
             ")"
         )
@@ -569,9 +626,30 @@ _DSB_ARRAYS: tuple[str, ...] = (
 
 @beartype
 def mm_payload(mm: SingleCellsMultiModal) -> tuple[dict[str, np.ndarray], dict]:
-    """The ADT counts, the ADT cache and the WNN slot as npz arrays and JSON."""
+    """The ADT counts and cache, the ATAC state and cache and the WNN slot as
+    npz arrays and JSON."""
     arrays, adt_meta = cache_payload(mm.adt_cache, "adt_cache")
-    meta: dict = {"adt_cache": adt_meta, "adt": None, "wnn": None}
+    atac_arrays, atac_meta = cache_payload(mm.atac_cache, "atac_cache")
+    arrays |= atac_arrays
+    meta: dict = {
+        "adt_cache": adt_meta,
+        "adt": None,
+        "atac_cache": atac_meta,
+        "atac": None,
+        "wnn": None,
+    }
+    if mm.atac is not None:
+        a = mm.atac
+        for k in ("depth_cor", "lsi_features", "lsi_loadings", "lsi_singular_values"):
+            v = getattr(a, k)
+            if v is not None:
+                arrays[f"atac/{k}"] = v
+        meta["atac"] = {
+            "kind": a.kind,
+            "count_mode": a.count_mode,
+            "tf_idf": a.tf_idf,
+            "lsi_dropped": list(a.lsi_dropped),
+        }
     if mm.adt is not None:
         a = mm.adt
         arrays |= {
@@ -611,6 +689,21 @@ def mm_from_payload(
 ) -> None:
     """Restore what `mm_payload` wrote onto an experiment."""
     mm.adt_cache = cache_from_payload(arrays, meta["adt_cache"], "adt_cache")
+    # files saved before ATAC support carry no ATAC keys
+    if meta.get("atac_cache") is not None:
+        mm.atac_cache = cache_from_payload(arrays, meta["atac_cache"], "atac_cache")
+    if meta.get("atac") is not None:
+        a = meta["atac"]
+        mm.atac = AtacInfo(
+            kind=a["kind"],
+            count_mode=a["count_mode"],
+            tf_idf=a["tf_idf"],
+            depth_cor=arrays.get("atac/depth_cor"),
+            lsi_dropped=tuple(a["lsi_dropped"]),
+            lsi_features=arrays.get("atac/lsi_features"),
+            lsi_loadings=arrays.get("atac/lsi_loadings"),
+            lsi_singular_values=arrays.get("atac/lsi_singular_values"),
+        )
     if meta["adt"] is not None:
         dsb = meta["adt"]["dsb"]
         mm.adt = AdtCounts(

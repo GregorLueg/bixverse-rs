@@ -660,53 +660,6 @@ pub(crate) fn append_cell_chunks(
     }
 }
 
-/// Helper function to rank all cells within a given chunk vector
-///
-/// ### Params
-///
-/// * `chunk_vec` - Vector of `CsrCellChunk` to rank.
-/// * `no_genes` - Number of represented genes in this data.
-/// * `rank_within_rows` - This boolean controls if the ranking happens within
-///   cells (for example for AUCell) or across genes (for example for DGE).
-///
-/// ### Returns
-///
-/// A `Vec<Vec<f32>>` that pending the rank_within_rows represents the ranks
-/// across genes or across cells.
-pub fn rank_csr_chunk_vec(
-    chunk_vec: Vec<CsrCellChunk>,
-    no_genes: usize,
-    rank_within_rows: bool,
-) -> Vec<Vec<f32>> {
-    let no_cells = chunk_vec.len();
-    let mut all_data: Vec<Vec<f32>> = Vec::with_capacity(chunk_vec.len());
-    let mut all_indices: Vec<Vec<u32>> = Vec::with_capacity(chunk_vec.len());
-    let mut indptr: Vec<usize> = Vec::with_capacity(chunk_vec.len() + 1);
-    let mut current_indptr = 0_usize;
-
-    indptr.push(current_indptr);
-
-    for chunk in chunk_vec {
-        let data_len = chunk.data_norm.len();
-        all_data.push(chunk.data_norm);
-        all_indices.push(chunk.indices);
-        current_indptr += data_len;
-        indptr.push(current_indptr);
-    }
-
-    let all_data = flatten_vector(all_data);
-    let all_indices = flatten_vector(all_indices);
-
-    fast_csr_ranking(
-        &indptr,
-        &all_indices,
-        &all_data,
-        no_cells,
-        no_genes,
-        rank_within_rows,
-    )
-}
-
 ///////////////
 // MetaCells //
 ///////////////
@@ -806,17 +759,12 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    // Owned copy of a literal slice
-    fn owned(values: &[f32]) -> Vec<f32> {
-        values.to_vec()
-    }
-
     /// A row with no stored entries ranks as one tie across the full gene width.
     #[test]
     fn test_all_zeros_row() {
         let row_ptr = vec![0, 0, 3];
         let col_indices = vec![0, 1, 2];
-        let data = owned(&[1.0, 2.0, 3.0]);
+        let data = vec![1.0, 2.0, 3.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
 
@@ -829,7 +777,7 @@ mod tests {
     fn test_multiple_tied_zeros() {
         let row_ptr = vec![0, 2];
         let col_indices = vec![0, 3];
-        let data = owned(&[1.0, 2.0]);
+        let data = vec![1.0, 2.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 1, 4, true);
 
@@ -846,7 +794,7 @@ mod tests {
     fn test_row_vs_column_ranking() {
         let row_ptr = vec![0, 3, 4];
         let col_indices = vec![0, 1, 2, 0];
-        let data = owned(&[1.0, 2.0, 5.0, 3.0]);
+        let data = vec![1.0, 2.0, 5.0, 3.0];
 
         let row_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
         let col_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, false);
@@ -866,7 +814,7 @@ mod tests {
     fn test_column_ranking_with_ties() {
         let row_ptr = vec![0, 2, 3, 4];
         let col_indices = vec![0, 1, 1, 0];
-        let data = owned(&[2.0, 1.0, 1.0, 2.0]);
+        let data = vec![2.0, 1.0, 1.0, 2.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 3, 2, false);
 
@@ -897,7 +845,7 @@ mod tests {
         // [2.0, 1.0, 0.0, 0.0]
         let row_ptr = vec![0, 2, 4, 5, 8, 9, 11];
         let col_indices: Vec<u32> = vec![0, 2, 1, 2, 0, 0, 1, 2, 2, 0, 1];
-        let data = owned(&[2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 3.0, 4.0, 1.0, 2.0, 1.0]);
+        let data = vec![2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 3.0, 4.0, 1.0, 2.0, 1.0];
 
         let n_grp1 = 3;
         let (nrow, ncol) = (6, 4);
@@ -925,7 +873,7 @@ mod tests {
         // S = (27 - 3) + (8 - 2) + (1 - 1) = 30
         let row_ptr = vec![0, 1, 2, 3, 4, 5, 5];
         let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0];
-        let data = owned(&[1.0, 1.0, 1.0, 2.0, 2.0]);
+        let data = vec![1.0, 1.0, 1.0, 2.0, 2.0];
 
         let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
 
@@ -942,7 +890,7 @@ mod tests {
         // Six distinct values, no zeros: S must be exactly 0.
         let row_ptr = vec![0, 1, 2, 3, 4, 5, 6];
         let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0, 0];
-        let data = owned(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
 
         let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
 

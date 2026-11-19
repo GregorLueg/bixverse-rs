@@ -24,7 +24,7 @@ Single-cell streaming for Python, in Rust.
 - `ScCache`: Analysis results held in memory.
 - `ScMap`: Ids and index sets of an experiment.
 - `SingleCells`: A single cell experiment on disk.
-- `SingleCellsMultiModal`: A single cell experiment with RNA and ADT.
+- `SingleCellsMultiModal`: A single cell experiment with RNA plus ADT and / or ATAC.
 - `SingleCellsSubset`: The cells of one level of an obs column.
 - `SparseFileError`: A sparse store is missing, truncated, corrupt, or of the wrong format version or layout.
 - `Stamp`: Provenance of one cached artefact.
@@ -57,6 +57,7 @@ Getting counts into an experiment directory, and back out.
 - `download_pbmc8k`: The 10x PBMC 8k data.
 - `download_pbmc_1k_5p`: The unfiltered 10x PBMC 1k 5' matrix.
 - `download_pbmc_batches`: Two PBMC h5ad files, for batch correction.
+- `download_pbmc_multiome`: The 10x PBMC unsorted 3k multiome (Cell Ranger ARC 2.0).
 - `download_pbmc_totalseq_data`: The 10k PBMC TotalSeq-B data, with ADT counts.
 - `download_thymus_ageing`: The Baran-Gale et al. ageing thymus data (Development, 2020).
 - `generate_cellsweep_test_data`: Synthetic counts with a planted ambient profile, for CellSweep.
@@ -188,8 +189,8 @@ Batch correction and integration metrics.
 - `calculate_lisi`: LISI on the cached kNN.
 - `calculate_pcr`: Principal component regression on batch.
 - `fast_mnn`: fastMNN on a PCA of the batch-aware HVGs.
-- `harmony`: Harmony (v2) on the PCA.
-- `harmony_v1`: The original Harmony (v1) on the PCA.
+- `harmony`: Harmony (v2) on the PCA or another embedding.
+- `harmony_v1`: The original Harmony (v1) on the PCA or another embedding.
 - `seurat_cca`: Seurat CCA anchor integration.
 - `seurat_rpca`: Seurat reciprocal PCA anchor integration.
 
@@ -204,8 +205,8 @@ Marker genes, donor-aware differential expression and differential abundance.
 - `ScNebula`: NEBULA fits.
 - `ScSpecificMarkers`: One-vs-many specific markers.
 - `add_nhoods_info`: The majority cell type of each neighbourhood.
-- `find_all_markers`: One-vs-rest Wilcoxon DGE for every group of a column.
-- `find_markers`: Wilcoxon DGE between two groups of cells.
+- `find_all_markers`: One-vs-rest Wilcoxon or logistic regression DGE for every group.
+- `find_markers`: Wilcoxon or logistic regression DGE between two groups of cells.
 - `find_specific_markers`: Markers that hold up against every rival group separately.
 - `get_differential_abundance_res`: The differential abundance table; warns and returns `None` if untested.
 - `get_index_cells`: The neighbourhood index cells, 0-based positions among the kept cells.
@@ -222,7 +223,7 @@ Marker genes, donor-aware differential expression and differential abundance.
 
 ## bv.annotate
 
-Cell type annotation with ScType and reference mapping with Symphony.
+Cell type annotation with ScType, reference mapping with Symphony and Seurat.
 
 - `CellMarkers`: The marker genes of one cell type, one entry of the
 - `ScTypeCellResults`: Per-cell ScType calls.
@@ -242,6 +243,7 @@ Cell type annotation with ScType and reference mapping with Symphony.
 - `prepare_cell_markers`: Marker genes per cell type.
 - `save_symphony_ref`: Write a reference to one `.npz`, readable without pickling.
 - `score_clusters`: One ScType call per cluster.
+- `transfer_labels_seurat`: Seurat label transfer: CCA anchors, then `TransferData`.
 - `transfer_labels_symphony`: kNN majority vote of reference labels onto a mapped query.
 
 ## bv.pathways
@@ -380,6 +382,24 @@ Multi-modal single cell: ADT counts, their PCA and the WNN graph.
 - `new_adt_counts_clr`: CLR-normalised ADT counts.
 - `new_adt_counts_dsb`: DSB-normalised ADT counts.
 
+## bv.atac
+
+Single cell ATAC: peak or tile counts next to the RNA, QC, TF-IDF and LSI.
+
+- `AtacInfo`: What the ATAC store holds and how far it was processed.
+- `add_atac_fragments`: Count a fragment file into peaks or genome tiles as the ATAC store.
+- `add_atac_tenx`: Add the `Peaks` of a 10x multiome h5 as the ATAC store.
+- `amulet`: Flag multiplets from fragment overlaps (AMULET), written to obs.
+- `atac_fragment_qc`: Per-cell QC from the fragment file, written to obs.
+- `calculate_lsi`: LSI over the TF-IDF of the kept cells (Signac `RunSVD`).
+- `call_peaks`: Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
+- `find_top_features`: The most accessible features (Signac `FindTopFeatures`).
+- `gene_activity`: Count fragments over gene body plus promoter into a gene activity store.
+- `get_lsi_depth_cor`: Correlation of each LSI component with the library size.
+- `project_lsi`: Project the query's kept cells onto the reference LSI.
+- `run_rlsi`: rLSI integration (Signac's `FindIntegrationAnchors(reduction = "rlsi")`
+- `run_tfidf`: Switch the ATAC store to TF-IDF over the kept cells (Signac method 1).
+
 ## bv.pipeline
 
 Pipelines: the preprocessing calls you repeat on every subset, written once.
@@ -464,7 +484,6 @@ Parameter bundles for the single cell suite.
 - `DsbParams`: Default parameters for DSB ADT normalisation
 - `EdgerQlParams`: Wrapper function for parameters for the edgeR quasi-likelihood workflow
 - `EmptyDropletsParams`: Parameters for identifying empty droplets
-- `FastClusterDefault`: Helper function to generate default parameters for the fast clustering for the doublet detection methods
 - `FastClusterParams`: Fast single cell clustering parameters
 - `FastmnnParams`: Wrapper function for the fastMNN parameters
 - `GeneTrendsParams`: Wrapper function for gene trend parameters
@@ -474,7 +493,6 @@ Parameter bundles for the single cell suite.
 - `HvgDefaults`: Helper function to generate HVG defaults
 - `HvgParams`: Wrapper function for HVG detection parameters.
 - `HvgScranDefaults`: Helper function to generate the scran HVG trend defaults
-- `KmeansDefaults`: K-mean parameter defaults.
 - `KnnDefaults`: Helper function to generate kNN defaults
 - `KnnGraphDefaults`: Helper function to generate the kNN graph defaults
 - `KnnParams`: Parameters for single cell kNN searches

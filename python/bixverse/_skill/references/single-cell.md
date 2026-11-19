@@ -5,7 +5,8 @@
 A `SingleCells` object holds no counts in Python memory. It is a handle over a
 directory:
 
-- `counts_cells.bin`, cell-major (CSR), for per-cell operations
+- `counts_cells.bin`, cell-major (CSR), for per-cell operations (store
+  format v5)
 - `counts_genes.bin`, gene-major (CSC), for per-gene operations
 - `sc_duckdb.db`, the obs and var tables
 
@@ -67,7 +68,7 @@ sc = bv.io.load_existing("exp/pbmc")
 | Input | Function |
 |---|---|
 | Cell Ranger MTX directory | `bv.io.load_mtx()`, with `bv.io.get_cell_ranger_params(path)` |
-| h5ad | `bv.io.load_h5ad()`, `load_h5ad_norm()` for log-normalised only, `stream_h5ad()` |
+| h5ad or anndata Zarr store | `bv.io.load_h5ad()`, `load_h5ad_norm()` for log-normalised only, `stream_h5ad()` |
 | 10x HDF5 | `bv.io.load_tenx_h5()` (`feature_type="Gene Expression"`) |
 | in-memory CSR + obs + var | `bv.io.load_csr(directory, counts, obs, var)` |
 | a directory written earlier | `bv.io.load_existing(directory)` |
@@ -90,9 +91,10 @@ Shared keywords: `qc=MinQualityParams(...)`, `csc_mem_gb=None`,
 `bixverse.params.MinQualityParams` defaults: `min_unique_genes=100` and
 `min_lib_size=250` per cell, `min_cells=10` per gene, `target_size=1e4`.
 Genes are filtered first, then cells are checked against the reduced gene
-set. The store holds two layers: raw integer counts and
-`log1p(count / lib_size * target_size)` at `float16` precision. There is no
-`normalise()` function and you should not write one. obs gains `lib_size` and
+set. The store holds the raw integer counts;
+`log1p(count / lib_size * target_size)` is recomputed from them in `float32`
+whenever the normalised layer is read. There is no `normalise()` function and
+you should not write one. obs gains `lib_size` and
 `nnz`; var gains `no_cells_exp`.
 
 **The load-time cutoffs are irreversible.** Failing cells and genes are never
@@ -102,6 +104,10 @@ min_cells=0)`, and do the real QC with `bv.qc.run_cell_qc()`, which is
 reversible.
 
 ### h5ad specifics
+
+Everything here takes an anndata Zarr store (v2 or v3, a directory) in place
+of the h5ad file: the loaders, `detect_raw_count_slot`, `read_h5ad_metadata`
+and `get_h5ad_dimensions`.
 
 - `detect_raw_count_slot(path)` tests `"layers.counts"`, `"raw.X"`, `"X"` in
   that order and returns the first whose sampled non-zeros are at least 99 %
@@ -141,7 +147,7 @@ sc = bv.io.load_multi_h5ad("exp/pooled", prescan)
   experiments: shared genes, kept cells, no cache.
 
 `csc_mem_gb` caps the buffers of the CSR-to-CSC conversion that builds the
-gene-major store (`None` is one pass); pass e.g. `8.0` for million-cell
+gene-major store, and of the transpose of a CSC h5ad (`None` is one pass); pass e.g. `8.0` for million-cell
 inputs. With `None` the buffers need about 8 bytes per non-zero (about 21 GB
 for 2.6e9 non-zeros, estimate); above physical RAM the conversion swaps and
 dominates the load time. Half of physical RAM is a safe cap: data that fits
@@ -154,8 +160,10 @@ batches above `bv.qc.N_CELLS_STREAMING_THRESHOLD` (100,000 kept cells);
 
 - Loading into a directory that already holds an experiment overwrites its
   stores and deletes `memory_py.*`.
-- `load_existing()` warns on a v3 store; `bv.io.upgrade_sc_store(sc)`
-  converts it in place (`keep_backup=True` leaves `<file>.v3.bak`).
+- `load_existing()` warns on a v4 store and refuses a v3 one.
+  `bv.io.upgrade_sc_store(sc)` converts a v4 store in place, and
+  `bv.io.upgrade_sc_store("dir")` a v3 one (`keep_backup=True` leaves
+  `<file>.v<n>.bak`).
 - The DuckDB `obs.to_keep` column is the source of truth for the cell filter.
   If it disagrees with `memory_py.npz`, `load_existing()` warns, uses
   `to_keep`, and the cached artefacts load as stale.
@@ -176,6 +184,8 @@ cell batches.
 `obsm/X_pca`, `obsm/X_<name>` per embedding, `varm/PCs` (padded to all genes
 from the genes the PCA ran on, only alongside `X_pca`) and
 `obsp/connectivities`. Stale artefacts are skipped with a warning.
+`bv.io.save_zarr(sc, path)` writes the same to an AnnData Zarr store, with the
+same arguments.
 
 `write_h5ad_sc()` holds the whole matrix in memory and writes `X` as `float32`
 CSR, the first obs / var column as index. It converts its input to contiguous
@@ -473,7 +483,9 @@ bv.pp.calculate_pca(
 ## Batch correction
 
 All run after `calculate_pca()` and write a new named embedding for
-`find_neighbours(embd_to_use=...)`.
+`find_neighbours(embd_to_use=...)`. Harmony also corrects another embedding:
+`harmony(mm, "batch", embd_to_use="lsi", modality="atac")` writes `"harmony"`
+to the ATAC cache.
 
 | Function | Embedding | Params |
 |---|---|---|
@@ -493,6 +505,8 @@ metrics = bv.integrate.calculate_integration_metrics(
 )
 ```
 
+- Harmony's initial clustering is e-means; `HarmonyV2Params(
+  k_means_algorithm="lloyd")` gives Lloyd's.
 - `find_hvg_batch_aware()` returns a `BatchHvg` (`hvg_genes`,
   `hvg_gene_idx`, `hvg_data`) and leaves `sc.map.hvg` alone.
   `gene_comb_method` is `"union"` (default), `"average"` or
@@ -535,11 +549,16 @@ bv.graph.find_clusters(sc, res=1.0, name="leiden_clusters")
   `"ivf"`, `"exhaustive"`.
 - `find_clusters()` writes 0-based `Int32` labels, 0 the largest community,
   to obs column `name` (default `"leiden_clustering"`, also for Louvain).
+  Both algorithms run 2 iterations by default (`n_iterations`). Leiden visits
+  nodes in BFS order (`node_order="bfs"`), Louvain moves them in parallel
+  colour classes on large levels (`local_moving="coloured"`).
+  `local_moving="queue"`, `node_order="shuffle"` is igraph's order.
 - `get_connectivities(sc).scipy_csr()` gives scipy; hand the three vectors to
   igraph or networkx.
 - `fast_cluster(sc, resolutions=(2.0, 1.0, 0.5), n_seeds=1)` coarsens with
-  k-means and clusters the centroids. Its `memberships` (`cell_idx`,
-  `res_<value>`) go straight into `sc.add_obs()`.
+  k-means (e-means by default; `FastClusterParams(km_type="standard")` for
+  Lloyd's, `"minibatch"` for mini-batch) and clusters the centroids. Its
+  `memberships` (`cell_idx`, `res_<value>`) go straight into `sc.add_obs()`.
 
 ### Traps
 
@@ -581,6 +600,11 @@ t-SNE, den-SNE and PHATE.
 The full DE suite lives in `bv.de`; the core chain needs one call:
 
 `markers = bv.de.find_all_markers(sc, "leiden_clusters", min_prop=0.05)`.
+
+- `method=None` runs a Wilcoxon on RNA. `method="lr"` runs Seurat's logistic
+  regression test with the library size as covariate (`z_scores` are then
+  signed roots of the likelihood ratio). `modality="atac"` tests the peaks of
+  a `SingleCellsMultiModal` and defaults to `"lr"`.
 
 - Columns: `grp`, `gene_id`, `lfc`, `prop1`, `prop2`, `z_scores`,
   `p_values`, `fdr`. `alternative="greater"` (default) tests genes up in the
@@ -726,5 +750,7 @@ tmp.cleanup()
 
 For real data: `bv.io.download_pbmc3k()`, `download_pbmc8k()`,
 `download_pbmc_batches()`, `download_pbmc_1k_5p()`, `download_kang_pbmc()`,
-`download_cd34_data()`, `download_demuxlet_pbmc()`. Each caches to
-`~/.cache/bixverse` and returns the path.
+`download_cd34_data()`, `download_demuxlet_pbmc()`, and
+`download_pbmc_multiome()` for RNA plus ATAC (h5, fragments with index,
+Cell Ranger peaks, GTF). Each caches to `~/.cache/bixverse` and returns the
+path.

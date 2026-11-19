@@ -53,6 +53,7 @@ approx.workspace = true
 bincode.workspace = true
 bixverse-core = { workspace = true, optional = true }
 bixverse-sparse.workspace = true
+crc32fast.workspace = true
 document-features.workspace = true
 faer = { workspace = true, optional = true }
 flate2.workspace = true
@@ -62,6 +63,7 @@ hdf5 = { workspace = true, optional = true }
 hdf5-sys = { workspace = true, optional = true }
 indexmap.workspace = true
 lz4_flex.workspace = true
+memchr.workspace = true
 memmap2.workspace = true
 ndarray = { workspace = true, optional = true }
 num-traits.workspace = true
@@ -76,6 +78,9 @@ thousands.workspace = true
 xxhash-rust.workspace = true
 zarrs = { workspace = true, optional = true }
 zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

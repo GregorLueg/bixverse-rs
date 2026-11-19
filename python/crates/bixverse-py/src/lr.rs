@@ -15,7 +15,7 @@ use bixverse_sc::sc_analysis::nichenet::ligand_regulatory_potential::{
 use bixverse_sc::sc_analysis::nichenet::prioritisation::{
     ClusterExpressionStats, compute_cluster_expression_stats,
 };
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use faer::MatRef;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;

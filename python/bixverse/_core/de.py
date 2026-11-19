@@ -1,7 +1,7 @@
 """Differential expression, markers and differential abundance.
 
-Wilcoxon markers, pseudobulk edgeR, NEBULA, Milo neighbourhoods and MELD.
-The work runs in Rust.
+Wilcoxon and logistic regression markers (also on ATAC peaks), pseudobulk
+edgeR, NEBULA, Milo neighbourhoods and MELD. The work runs in Rust.
 
 Marker tests return polars frames; the specific markers, NEBULA, Milo and
 MELD return frozen records. Nothing is written to obs.
@@ -35,9 +35,11 @@ import polars as pl
 from beartype import BeartypeConf, beartype
 
 from bixverse import _bixverse
+from bixverse._core.atac import atac_paths, require_atac
 from bixverse._core.doublets import _as_character
 from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.integrate import _hard_state
+from bixverse._core.multimodal import SingleCellsMultiModal
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import Selection, SingleCells
@@ -60,7 +62,7 @@ DOUBLE_EPS: float = float(np.finfo(np.float64).eps)
 INTERCEPT: str = "(Intercept)"
 
 Alternative = Literal["twosided", "greater", "less"]
-Method = Literal["wilcox"]
+Method = Literal["wilcox", "lr"]
 Coef = int | str | Sequence[int] | Sequence[str]
 MiloNorm = Literal["TMM", "TMMwsp", "RLE", "upperquartile", "logMS"]
 FdrWeighting = Literal["k-distance", "graph-overlap", "none"]
@@ -419,6 +421,35 @@ def _tested(
     return _coef_positions(n_coef - 1 if coef is None else coef, names, n_coef), None
 
 
+DeModality = Literal["rna", "atac"]
+
+
+@beartype(conf=_CONF)
+def _de_store(sc: ScOrScSubset, modality: DeModality) -> tuple[str, str, np.ndarray]:
+    """Cell file, feature file and feature ids of the store a test reads.
+
+    Raises:
+        ValueError: If `modality="atac"` on anything but a
+            `SingleCellsMultiModal` with an ATAC store.
+    """
+    if modality == "rna":
+        return str(sc.cells_path), str(sc.genes_path), sc.gene_ids()
+    if not isinstance(sc, SingleCellsMultiModal):
+        raise ValueError('modality="atac" needs a SingleCellsMultiModal.')
+    require_atac(sc)
+    cells, features = atac_paths(sc)
+    ids = sc.var(modality="atac")["feature_id"].to_numpy()
+    return str(cells), str(features), ids
+
+
+@beartype(conf=_CONF)
+def _marker_method(method: Method | None, modality: DeModality) -> Method:
+    """The marker test, `None` resolving to `"lr"` on ATAC, `"wilcox"` on RNA."""
+    if method is not None:
+        return method
+    return "lr" if modality == "atac" else "wilcox"
+
+
 @beartype(conf=_CONF)
 def _groups_to_cells(
     obs: pl.DataFrame, col: str, groups: Sequence[object]
@@ -443,20 +474,29 @@ def find_markers(
     cells_1: Selection,
     cells_2: Selection,
     *,
-    method: Method = "wilcox",
+    method: Method | None = None,
     alternative: Alternative = "twosided",
     min_prop: float = 0.05,
+    modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> pl.DataFrame:
-    """Wilcoxon DGE between two groups of cells.
+    """Wilcoxon or logistic regression DGE between two groups of cells.
 
     Args:
         sc: The experiment.
         cells_1: 0-based cell indices or ids of group 1.
         cells_2: 0-based cell indices or ids of group 2.
-        method: Only `"wilcox"`, reserved.
+        method: `"wilcox"`, or `"lr"` for Seurat's logistic regression test
+            (`group ~ feature + library size` against `group ~ library size`,
+            a likelihood ratio test), which corrects for the depth difference
+            between the groups. `None` picks `"lr"` for `modality="atac"`,
+            `"wilcox"` otherwise. With `"lr"`, `z_scores` are the signed roots
+            of the likelihood ratio statistics. Neither test accounts for cells
+            being pseudoreplicates of their sample.
         alternative: The test alternative.
         min_prop: A gene is tested if this share of either group expresses it.
+        modality: `"rna"`, or `"atac"` for the peaks or tiles of a
+            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -471,17 +511,19 @@ def find_markers(
         >>> res = bv.de.find_markers(sc, ct1, ct2, alternative="greater")
     """
     check_range("min_prop", min_prop, 0, 1, False, False)
-    res = _bixverse.dge_mann_whitney(
-        str(sc.cells_path),
-        sc._resolve_cells(cells_1),
-        sc._resolve_cells(cells_2),
-        min_prop,
-        alternative,
-        verbose,
-    )
+    cells_path, genes_path, ids = _de_store(sc, modality)
+    c1, c2 = sc._resolve_cells(cells_1), sc._resolve_cells(cells_2)
+    if _marker_method(method, modality) == "lr":
+        res = _bixverse.dge_lr(
+            cells_path, genes_path, c1, c2, min_prop, alternative, verbose
+        )
+    else:
+        res = _bixverse.dge_mann_whitney(
+            cells_path, c1, c2, min_prop, alternative, verbose
+        )
     return pl.DataFrame(
         {
-            "gene_id": sc.gene_ids()[res["genes_to_keep"]],
+            "gene_id": ids[res["genes_to_keep"]],
             **{k: res[k] for k in ("lfc", "prop1", "prop2", "z_scores")},
             "p_values": res["p_values"],
             "fdr": res["fdr"],
@@ -494,12 +536,13 @@ def find_all_markers(
     sc: ScOrScSubset,
     column_of_interest: str,
     *,
-    method: Method = "wilcox",
+    method: Method | None = None,
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
+    modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> pl.DataFrame:
-    """One-vs-rest Wilcoxon DGE for every group of a column.
+    """One-vs-rest Wilcoxon or logistic regression DGE for every group.
 
     All groups are tested in one pass over the genes. Cells without a label
     are left out of every group and of every rest.
@@ -507,11 +550,19 @@ def find_all_markers(
     Args:
         sc: The experiment.
         column_of_interest: The obs column holding the groups.
-        method: Only `"wilcox"`, reserved.
+        method: `"wilcox"`, or `"lr"` for Seurat's logistic regression test
+            (`group ~ feature + library size` against `group ~ library size`,
+            a likelihood ratio test), which corrects for the depth difference
+            between the groups. `None` picks `"lr"` for `modality="atac"`,
+            `"wilcox"` otherwise. With `"lr"`, `z_scores` are the signed roots
+            of the likelihood ratio statistics. Neither test accounts for cells
+            being pseudoreplicates of their sample.
         alternative: The test alternative; `"greater"` asks for genes up in
             the group.
         min_prop: A gene is tested for a group if this share of the group or
             of the rest expresses it.
+        modality: `"rna"`, or `"atac"` for the peaks or tiles of a
+            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -529,14 +580,16 @@ def find_all_markers(
         column_of_interest
     )
     groups = obs[column_of_interest].unique(maintain_order=True)
-    arms = _bixverse.dge_one_vs_rest(
-        str(sc.genes_path),
-        _groups_to_cells(obs, column_of_interest, groups.to_list()),
-        min_prop,
-        alternative,
-        verbose,
-    )
-    gene_ids = sc.gene_ids()
+    cells_path, genes_path, gene_ids = _de_store(sc, modality)
+    cell_groups = _groups_to_cells(obs, column_of_interest, groups.to_list())
+    if _marker_method(method, modality) == "lr":
+        arms = _bixverse.dge_one_vs_rest_lr(
+            cells_path, genes_path, cell_groups, min_prop, alternative, verbose
+        )
+    else:
+        arms = _bixverse.dge_one_vs_rest(
+            genes_path, cell_groups, min_prop, alternative, verbose
+        )
     frames = [
         pl.DataFrame(
             {
@@ -559,9 +612,10 @@ def find_specific_markers(
     column_of_interest: str,
     *,
     reference_group: str | None = None,
-    method: Method = "wilcox",
+    method: Method | None = None,
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
+    modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> ScSpecificMarkers | None:
     """Markers that hold up against every rival group separately.
@@ -577,10 +631,17 @@ def find_specific_markers(
         column_of_interest: The obs column holding the groups.
         reference_group: The one reference to report. `None` runs every group
             in turn.
-        method: Only `"wilcox"`, reserved.
+        method: `"wilcox"`, or `"lr"` for Seurat's logistic regression test with
+            the library size as the covariate, reference against each rival.
+            Only the per-comparison `z_scores`, `p_values` and `fdr` and the
+            `simes_*` and `max_p*` summaries change; the AUROCs are the
+            Wilcoxon ones either way. `None` picks `"lr"` for
+            `modality="atac"`, `"wilcox"` otherwise.
         alternative: The test alternative; `"greater"` asks for genes up in
             the reference.
         min_prop: A gene is tested if this share of any group expresses it.
+        modality: `"rna"`, or `"atac"` for the peaks or tiles of a
+            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -630,14 +691,24 @@ def find_specific_markers(
         )
     refs = grp_names if reference_group is None else [reference_group]
     ref_idx = [grp_names.index(r) for r in refs]
-    arms = _bixverse.dge_one_vs_many(
-        str(sc.genes_path),
-        _groups_to_cells(obs, "grp", grp_names),
-        np.asarray(ref_idx, dtype=np.uint32),
-        min_prop,
-        alternative,
-        verbose,
-    )
+    cells_path, genes_path, gene_ids = _de_store(sc, modality)
+    cell_groups = _groups_to_cells(obs, "grp", grp_names)
+    references = np.asarray(ref_idx, dtype=np.uint32)
+    method = _marker_method(method, modality)
+    if method == "lr":
+        arms = _bixverse.dge_one_vs_many_lr(
+            cells_path,
+            genes_path,
+            cell_groups,
+            references,
+            min_prop,
+            alternative,
+            verbose,
+        )
+    else:
+        arms = _bixverse.dge_one_vs_many(
+            genes_path, cell_groups, references, min_prop, alternative, verbose
+        )
     keep = arms[0]["genes_to_keep"]
     if not keep.any():
         warnings.warn(
@@ -647,7 +718,7 @@ def find_specific_markers(
         )
         return None
 
-    genes = sc.gene_ids()[keep]
+    genes = gene_ids[keep]
     names = np.asarray(grp_names, dtype=object)
     summaries, comparisons = [], []
     for r, arm in zip(ref_idx, arms, strict=True):
@@ -744,6 +815,7 @@ def get_pseudobulked(
     *,
     return_format: Literal["dense", "sparse"] = "dense",
     assay: Literal["raw", "norm"] = "raw",
+    modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> PseudoBulked:
     """Pseudobulk groups of cells.
@@ -754,6 +826,8 @@ def get_pseudobulked(
         return_format: A dense array or a CSR matrix.
         assay: `"raw"` sums the raw counts, `"norm"` averages the normalised
             counts over the group, zeros included.
+        modality: `"rna"`, or `"atac"` for the peaks or tiles of a
+            `SingleCellsMultiModal`; `gene_ids` then holds peak ids.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -777,17 +851,18 @@ def get_pseudobulked(
             "Some of the elements in your cell_list could not be matched to any "
             "cell index. Please check your inputs!"
         )
+    cells_path, _, ids = _de_store(sc, modality)
     res = _bixverse.pseudobulk(
-        str(sc.cells_path), groups, assay, return_format == "sparse", verbose
+        cells_path, groups, assay, return_format == "sparse", verbose
     )
     if return_format == "sparse":
         data, indices, indptr = res
         counts: np.ndarray | CsrMatrix = CsrMatrix(
-            data.astype(np.float32), indices, indptr, (len(groups), sc.n_genes)
+            data.astype(np.float32), indices, indptr, (len(groups), len(ids))
         )
     else:
         counts = res
-    return PseudoBulked(counts=counts, samples=tuple(cell_list), gene_ids=sc.gene_ids())
+    return PseudoBulked(counts=counts, samples=tuple(cell_list), gene_ids=ids)
 
 
 @beartype(conf=_CONF)
@@ -881,6 +956,7 @@ def pseudobulk_dge(
     coef: Coef | None = None,
     contrast: np.ndarray | Sequence[float] | None = None,
     edger_params: EdgerQlParams | None = None,
+    modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> pl.DataFrame:
     """edgeR quasi-likelihood DGE on pseudobulked cells.
@@ -895,11 +971,13 @@ def pseudobulk_dge(
         coef: See `run_edger_ql`.
         contrast: See `run_edger_ql`.
         edger_params: See `run_edger_ql`.
+        modality: `"rna"`, or `"atac"` for differential accessibility on the
+            peaks or tiles of a `SingleCellsMultiModal`.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
     Returns:
-        See `run_edger_ql`; `feature_id` holds the gene ids.
+        See `run_edger_ql`; `feature_id` holds the gene (or peak) ids.
 
     Raises:
         ValueError: If the design rows do not match the samples.
@@ -918,7 +996,9 @@ def pseudobulk_dge(
             f"The design has {n_rows} rows against {len(cell_list)} pseudo-bulk "
             "samples."
         )
-    agg = get_pseudobulked(sc, cell_list, assay="raw", verbose=verbose)
+    agg = get_pseudobulked(
+        sc, cell_list, assay="raw", modality=modality, verbose=verbose
+    )
     assert isinstance(agg.counts, np.ndarray)
     return run_edger_ql(
         agg.counts.T,

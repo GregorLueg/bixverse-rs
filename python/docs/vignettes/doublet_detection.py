@@ -245,10 +245,8 @@ boosted_doublets_fast = bv.doublets.doublet_detection_boost(
     boost_params=BoostParams(
         fast_cluster=True,
         # in this case, we set the n_centroids to n_cells / 10
-        # you want this to not be too low; also the data is so small, we just
-        # use standard k-means over mini batch
+        # you want this to not be too low
         n_centroids=1500,
-        km_type="standard",
     ),
 )
 

@@ -52,7 +52,7 @@ use std::time::Instant;
 use crate::mc_generation::seacells::compute_diffusion_kernel;
 use crate::prelude::*;
 use bixverse_core::core::math::sparse::{csr_matmul_dense_block, normalise_csr_rows_l1};
-use bixverse_sc_data::data_io::SingleCellReading;
+use bixverse_sc_data::store::reader::SingleCellReading;
 
 ////////////
 // Consts //
@@ -221,6 +221,11 @@ impl MagicParams {
 }
 
 impl Default for MagicParams {
+    /// The default [`MagicParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_steps: 3,
@@ -617,6 +622,7 @@ pub fn magic_impute_dense(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+    use tempfile::NamedTempFile;
 
     /// A path graph over `n` cells, each cell holding its two nearest
     /// neighbours. Distances grow with the hop, so the adaptive bandwidth has
@@ -874,28 +880,11 @@ mod tests {
     // Streaming path //
     ////////////////////
 
-    use bixverse_sc_data::data_io::{
-        CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+    use bixverse_sc_data::store::{
+        chunk::{CscGeneChunk, RawCounts},
+        reader::ParallelSparseReader,
+        writer::CellGeneSparseWriter,
     };
-
-    /// Scratch store that removes itself on drop.
-    struct TempStore(std::path::PathBuf);
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_magic_{name}.bin")))
-        }
-
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
 
     /// Write `dense[gene][cell]` raw counts out as a gene-based store.
     fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
@@ -949,10 +938,10 @@ mod tests {
     #[test]
     fn test_streaming_matches_dense_and_is_block_invariant() {
         let (n_genes, n_cells) = (17usize, 25usize);
-        let store = TempStore::new("stream");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let dense = synthetic_counts(n_genes, n_cells);
-        write_store(store.path(), &dense, n_cells);
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        write_store(store.to_str().unwrap(), &dense, n_cells);
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
 
         let op = path_operator(n_cells);
         let genes: Vec<usize> = (0..n_genes).collect();
@@ -1006,10 +995,10 @@ mod tests {
     #[test]
     fn test_streaming_honours_cell_subset_and_gene_order() {
         let (n_genes, n_cells) = (8usize, 20usize);
-        let store = TempStore::new("subset");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let dense = synthetic_counts(n_genes, n_cells);
-        write_store(store.path(), &dense, n_cells);
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        write_store(store.to_str().unwrap(), &dense, n_cells);
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
 
         // Ten of the twenty cells, deliberately not contiguous.
         let selection: Vec<usize> = (0..n_cells).step_by(2).collect();
@@ -1050,10 +1039,10 @@ mod tests {
     #[test]
     fn test_streaming_raw_layer() {
         let (n_genes, n_cells) = (6usize, 12usize);
-        let store = TempStore::new("rawlayer");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let dense = synthetic_counts(n_genes, n_cells);
-        write_store(store.path(), &dense, n_cells);
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        write_store(store.to_str().unwrap(), &dense, n_cells);
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
 
         let op = path_operator(n_cells);
         let genes: Vec<usize> = (0..n_genes).collect();
@@ -1097,10 +1086,10 @@ mod tests {
     #[test]
     fn test_streaming_clip_across_blocks() {
         let (n_genes, n_cells) = (9usize, 18usize);
-        let store = TempStore::new("clip");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let dense = synthetic_counts(n_genes, n_cells);
-        write_store(store.path(), &dense, n_cells);
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        write_store(store.to_str().unwrap(), &dense, n_cells);
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
 
         let op = path_operator(n_cells);
         let genes: Vec<usize> = (0..n_genes).collect();
@@ -1141,10 +1130,10 @@ mod tests {
     #[test]
     fn test_streaming_rejects_store_size_mismatch() {
         let (n_genes, n_cells) = (4usize, 16usize);
-        let store = TempStore::new("sizemismatch");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let dense = synthetic_counts(n_genes, n_cells);
-        write_store(store.path(), &dense, n_cells);
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        write_store(store.to_str().unwrap(), &dense, n_cells);
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
 
         // The operator is told the store holds 8 cells when it holds 16. Every
         // selected index is below 8, so `from_knn` is happy; the scatter would
@@ -1168,11 +1157,11 @@ mod tests {
     /// A cell-based store must be rejected rather than silently misread.
     #[test]
     fn test_streaming_rejects_cell_based_store() {
-        use bixverse_sc_data::data_io::CsrCellChunk;
+        use bixverse_sc_data::store::chunk::CsrCellChunk;
 
-        let store = TempStore::new("cellbased");
-        let mut writer =
-            CellGeneSparseWriter::new(store.path(), true, 3, 2, 1e4).expect("writer opens");
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut writer = CellGeneSparseWriter::new(store.to_str().unwrap(), true, 3, 2, 1e4)
+            .expect("writer opens");
         for cell in 0..3usize {
             writer
                 .write_cell_chunk(CsrCellChunk::from_data(
@@ -1186,7 +1175,7 @@ mod tests {
         }
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
         let op = path_operator(3);
 
         assert!(matches!(

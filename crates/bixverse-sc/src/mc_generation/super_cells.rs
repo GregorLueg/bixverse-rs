@@ -63,6 +63,10 @@ pub struct SuperCellParams {
 
 impl Default for SuperCellParams {
     /// The fallbacks of the R list conversion.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             walk_length: 3,

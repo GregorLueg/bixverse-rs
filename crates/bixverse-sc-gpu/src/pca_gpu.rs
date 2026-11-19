@@ -138,7 +138,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use cubecl::wgpu::WgpuDevice;
 
     /// Synthetic CSC (cells x genes), rank-4 signal plus LCG noise, `data_2`

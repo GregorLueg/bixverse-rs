@@ -48,7 +48,7 @@ from bixverse._core.integrate import (
 )
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 from bixverse.params import (
     HarmonyParams,
@@ -370,6 +370,7 @@ def calc_sc_type_scores(
     Examples:
         >>> scores = bv.annotate.calc_sc_type_scores(sc, markers, sensitivity=False)
     """
+    check_rna_counts(sc, "calc_sc_type_scores", refuse=False)
     check_range("weight_floor", weight_floor, 0, 1, False, False)
     if not cell_marker_list:
         raise ValueError("cell_marker_list holds no cell types.")
@@ -1045,4 +1046,124 @@ def load_symphony_ref(path: Path | str) -> SymphonyReference:
         slim=bool(meta["slim"]),
         labels=labels,
         **arrays,
+    )
+
+
+##########################
+# Seurat label transfer  #
+##########################
+
+
+@beartype
+def transfer_labels_seurat(
+    reference: SingleCells,
+    query: SingleCells,
+    label_column: str,
+    weight_embedding: np.ndarray,
+    *,
+    features: Sequence[str] | None = None,
+    n_cc: int = 30,
+    k_anchor: int = 5,
+    k_score: int = 30,
+    scale_max: float = 10.0,
+    l2_norm: bool = True,
+    k_weight: int = 50,
+    sd: float = 1.0,
+    knn_params: KnnParams | None = None,
+    seed: int = 42,
+    verbose: Verbose = 0,
+) -> pl.DataFrame:
+    """Seurat label transfer: CCA anchors, then `TransferData`.
+
+    `FindTransferAnchors(reduction = "cca")` between the kept cells of both
+    experiments on shared genes, then the anchor labels weighted per query
+    cell in `weight_embedding`. For RNA to ATAC the query is the gene activity
+    from `bv.atac.gene_activity` and the weights come from the ATAC LSI, as in
+    the Signac vignette; RNA to RNA works the same with the query PCA.
+
+    Args:
+        reference: The annotated experiment (RNA).
+        query: The experiment to label (RNA or gene activity), matched to the
+            reference on `gene_id`.
+        label_column: Reference obs column with the labels.
+        weight_embedding: Kept query cells x dimensions for the weights, e.g.
+            `mm.atac_cache.embeddings["lsi"]`.
+        features: Gene ids to anchor on. `None` uses the reference HVGs. Only
+            those in both experiments are used.
+        n_cc: Canonical correlation vectors.
+        k_anchor: Neighbours for the anchors.
+        k_score: Neighbours for the anchor scores.
+        scale_max: Clip of the scaled features.
+        l2_norm: L2 normalise the CCA space per cell.
+        k_weight: Anchors per query cell in the weights, capped at the number
+            of anchor cells.
+        sd: Bandwidth divisor of the weights.
+        knn_params: kNN backend. `None` uses the defaults.
+        seed: Seed of the kNN backend.
+        verbose: `0` silent, `1` normal, `2` detailed.
+
+    Returns:
+        Per kept query cell `predicted_<label_column>`,
+        `confidence_<label_column>` (the top prediction score) and one
+        `score_<label>` column per label. The first two are also written to
+        the query's obs.
+
+    Raises:
+        ValueError: Without features, or if `weight_embedding` does not cover
+            the kept query cells.
+    """
+    if weight_embedding.ndim != 2 or weight_embedding.shape[0] != query.n_cells:
+        raise ValueError(
+            f"weight_embedding needs {query.n_cells} rows, one per kept query "
+            f"cell, got shape {weight_embedding.shape}."
+        )
+    ref_ids = reference.gene_ids().tolist()
+    if features is None:
+        if reference.map.hvg is None:
+            raise ValueError("Pass features or run find_hvg() on the reference.")
+        features = [ref_ids[i] for i in reference.map.hvg]
+    ref_lookup = {g: i for i, g in enumerate(ref_ids)}
+    query_lookup = {g: i for i, g in enumerate(query.gene_ids().tolist())}
+    shared = [g for g in features if g in ref_lookup and g in query_lookup]
+    if not shared:
+        raise ValueError("No feature is in both the reference and the query.")
+
+    obs = _obs_aligned(reference, [label_column])
+    if label_column not in obs.columns:
+        raise ValueError(f"Reference obs has no column '{label_column}'.")
+    codes, levels = _label_codes(obs[label_column], label_column)
+    scores = _bixverse.transfer_labels_seurat(
+        str(reference.genes_path),
+        np.asarray(reference.cells_to_keep, dtype=np.uint32),
+        np.asarray([ref_lookup[g] for g in shared], dtype=np.uint32),
+        str(query.genes_path),
+        np.asarray(query.cells_to_keep, dtype=np.uint32),
+        np.asarray([query_lookup[g] for g in shared], dtype=np.uint32),
+        codes,
+        len(levels),
+        np.ascontiguousarray(weight_embedding, dtype=np.float32),
+        n_cc,
+        k_anchor,
+        k_score,
+        scale_max,
+        l2_norm,
+        k_weight,
+        sd,
+        to_rust(knn_params or KnnParams()),
+        seed,
+        verbose,
+    )
+    top = scores.argmax(axis=1)
+    out = pl.DataFrame(
+        {
+            f"predicted_{label_column}": pl.Series(
+                [levels[i] for i in top.tolist()], dtype=pl.String
+            ),
+            f"confidence_{label_column}": scores.max(axis=1).astype(np.float64),
+        }
+    )
+    query.add_obs(out.with_columns(pl.Series("cell_idx", query.cells_to_keep)))
+    return out.with_columns(
+        pl.Series(f"score_{lvl}", scores[:, j].astype(np.float64))
+        for j, lvl in enumerate(levels)
     )

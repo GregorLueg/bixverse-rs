@@ -218,36 +218,76 @@ impl Ord for F16 {
 
 impl F16 {
     /// Get the raw bits representation
+    ///
+    /// ### Returns
+    ///
+    /// The bits.
     pub fn to_bits(self) -> u16 {
         self.0
     }
 
     /// Create from raw bits
+    ///
+    /// ### Params
+    ///
+    /// * `bits` - IEEE 754 half-precision bits
+    ///
+    /// ### Returns
+    ///
+    /// The value.
     pub fn from_bits(bits: u16) -> Self {
         F16(bits)
     }
 
     /// From f32
+    ///
+    /// ### Params
+    ///
+    /// * `f` - The value, rounded to nearest
+    ///
+    /// ### Returns
+    ///
+    /// The value.
     pub fn from_f32(f: f32) -> Self {
         F16::from(f16::from_f32(f))
     }
 
     /// Convert to little-endian bytes
+    ///
+    /// ### Returns
+    ///
+    /// The bytes.
     pub fn to_le_bytes(self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
 
     /// Create from little-endian bytes
+    ///
+    /// ### Params
+    ///
+    /// * `bytes` - Little-endian bits
+    ///
+    /// ### Returns
+    ///
+    /// The value.
     pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
         F16(u16::from_le_bytes(bytes))
     }
 
     /// From F16 to f32
+    ///
+    /// ### Returns
+    ///
+    /// The value, exact.
     pub fn to_f32(self) -> f32 {
         f16::from_bits(self.0).to_f32()
     }
 
-    /// From F16 fo f64
+    /// From F16 to f64
+    ///
+    /// ### Returns
+    ///
+    /// The value, exact.
     pub fn to_f64(self) -> f64 {
         f16::from_bits(self.0).to_f32() as f64
     }
@@ -260,6 +300,10 @@ impl F16 {
 /// Trait for types that can be converted to f32 and u16.
 pub trait FloatAndUInt: Copy {
     /// Transform u16 to f32 for fast conversions
+    ///
+    /// ### Returns
+    ///
+    /// The value as f32.
     fn to_f32(self) -> f32;
 
     /// Transform u32/f32 to u16, **saturating** at `u16::MAX`.
@@ -267,9 +311,17 @@ pub trait FloatAndUInt: Copy {
     /// Prefer [`Self::to_u32`] plus `RawCounts::from_u32_auto` on any path that
     /// reaches the binary format: that narrows to u16 only when every value
     /// fits, instead of silently clipping high-expression genes.
+    ///
+    /// ### Returns
+    ///
+    /// The value as u16, saturating.
     fn to_u16(self) -> u16;
 
     /// Transform f32/u16 to u32
+    ///
+    /// ### Returns
+    ///
+    /// The value as u32.
     fn to_u32(self) -> u32;
 }
 
@@ -409,9 +461,8 @@ mod tests {
     /// x86 runner does not agree.
     ///
     /// So nothing that is stored or compared across machines may use this.
-    /// `data_io` and `in_memory_io` accumulate `avg_exp` in f32 and narrow once,
-    /// which is what `pca.rs` already did and what makes the two platforms
-    /// agree.
+    /// Accumulate in f32 and narrow once instead, which is what `pca.rs` does
+    /// and what makes the two platforms agree.
     #[test]
     fn f16_sum_is_not_portable_over_long_columns() {
         // Exact on both targets while the running total stays small.

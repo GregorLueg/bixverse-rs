@@ -420,6 +420,19 @@ pub enum ScErrors {
         n_groups: usize,
     },
 
+    /// The per-cell latent covariate does not cover every cell of the store.
+    #[error("DGE: the latent covariate has {len} values; the store has {n_cells} cells")]
+    DgeLatentLength {
+        /// Length of the latent vector
+        len: usize,
+        /// Total cells in the store
+        n_cells: usize,
+    },
+
+    /// A test alternative other than `"twosided"`, `"greater"` or `"less"`.
+    #[error("DGE: unknown test alternative '{0}'; use twosided, greater or less")]
+    DgeUnknownAlternative(String),
+
     // -- NEBULA --
     /// Every gene failed NEBULA's own expression filter.
     ///

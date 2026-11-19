@@ -30,6 +30,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
+from bixverse._core.single_cells import check_rna_counts
 from bixverse._core.subset import ScOrMc
 from bixverse._validate import Verbose
 from bixverse.params import NmfConsensusParams, NmfHalsParams, to_rust
@@ -435,6 +436,7 @@ def _nmf(
 ) -> NmfResult:
     """The body of `nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "nmf", refuse=False)
     _check_k(k, 1)
     hals = nmf_hals_params or NmfHalsParams()
     cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
@@ -546,6 +548,7 @@ def _stabilised_nmf(
 ) -> StabilisedNmfResult:
     """The body of `stabilised_nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "stabilised_nmf", refuse=False)
     _check_k(k, 1)
     if n_runs < 1:
         raise ValueError("n_runs must be at least 1.")
@@ -713,6 +716,7 @@ def _consensus_nmf(
 ) -> ConsensusNmfResult:
     """The body of `consensus_nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "consensus_nmf", refuse=False)
     _check_k(k, 2)
     if n_runs < 2:
         raise ValueError("n_runs must be at least 2.")
@@ -858,6 +862,7 @@ def _nmf_k_sweep(
 ) -> NmfKSweepResult:
     """The body of `nmf_k_sweep`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "nmf_k_sweep", refuse=False)
     ks = [int(k) for k in k_range]
     if not ks or len(set(ks)) != len(ks) or min(ks) < 2:
         raise ValueError("k_range must hold unique integers of at least 2.")

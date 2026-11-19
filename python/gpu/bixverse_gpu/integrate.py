@@ -1,7 +1,7 @@
 """GPU batch correction: Harmony v2, BBKNN and fastMNN.
 
 Harmony and fastMNN write their corrected embedding as `"harmony_gpu"` and
-`"mnn_gpu"`, stamped as derived from `"pca"`; BBKNN writes
+`"mnn_gpu"`, stamped as derived from the embedding they corrected; BBKNN writes
 the kNN and the connectivities as `bixverse.integrate.bbknn` does.
 
     >>> harmony(sc, "batch")
@@ -42,23 +42,26 @@ def harmony(
     sc: ScOrScSubset,
     batch_column: str,
     *,
+    embd_to_use: str = "pca",
     modality: CacheModality = "rna",
     harmony_params: HarmonyV2GpuParams | None = None,
     seed: int = 42,
     verbose: Verbose = True,
     backend: Backend = "wgpu",
 ) -> None:
-    """Harmony v2 on the PCA on the GPU.
+    """Harmony v2 on the PCA or another embedding on the GPU.
 
     One batch covariate only. The corrected embedding goes to the modality's
-    `embeddings["harmony_gpu"]`, stamped as derived from `"pca"`, on either
-    backend.
+    `embeddings["harmony_gpu"]`, stamped as derived from `embd_to_use`, on
+    either backend.
 
     Args:
-        sc: The experiment, with a PCA.
+        sc: The experiment, with the embedding.
         batch_column: obs column with the batch.
-        modality: The PCA to correct and the cache to write: `"rna"`, or
-            `"adt"` on a `SingleCellsMultiModal`.
+        embd_to_use: The embedding to correct, `"pca"` or a name in the
+            modality's `embeddings` (`"lsi"` for ATAC).
+        modality: The cache to read and write: `"rna"`, or `"adt"` / `"atac"`
+            on a `SingleCellsMultiModal`.
         harmony_params: The parameters. `None` uses the defaults; a `None`
             `k` becomes `min(round(n_cells / 30), 100)`.
         seed: Seed.
@@ -68,8 +71,8 @@ def harmony(
             source build with the `mlx` feature; see `mlx_available()`).
 
     Raises:
-        ValueError: If the PCA is stale, or the batch column is missing or
-            incomplete.
+        ValueError: If the embedding is stale, or the batch column is missing
+            or incomplete.
         BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
             build without the MLX twins.
 
@@ -83,6 +86,7 @@ def harmony(
         harmony_params or HarmonyV2GpuParams(),
         "harmony_gpu",
         pick("harmony_v2", backend),
+        embd_to_use,
         modality,
         seed,
         verbose,

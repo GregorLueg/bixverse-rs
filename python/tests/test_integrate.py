@@ -1,7 +1,5 @@
-"""Batch correction and integration metrics without R: state handling,
+"""Batch correction and integration metrics: state handling,
 persistence and edge cases.
-
-Parity with the R functions is in `test_integrate_r.py`.
 """
 
 import numpy as np
@@ -85,7 +83,7 @@ def test_harmony_refuses_stale_pca(sc):
 
 def test_harmony_without_pca_warns(sc):
     sc.cache.pca_factors = None
-    with pytest.warns(UserWarning, match="No PCA"):
+    with pytest.warns(UserWarning, match="No 'pca' embedding"):
         integrate.harmony(sc, BATCH)
     assert "harmony" not in sc.cache.embeddings
 

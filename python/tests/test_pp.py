@@ -1,7 +1,4 @@
-"""Processing without R: state handling and the edge cases of each step.
-
-Parity with the R helpers is in `test_pp_r.py`.
-"""
+"""Processing: state handling and the edge cases of each step."""
 
 import math
 import warnings

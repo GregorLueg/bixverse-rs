@@ -1500,6 +1500,11 @@ pub struct ScDblSimParams {
 }
 
 impl Default for ScDblSimParams {
+    /// The default [`ScDblSimParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             resamp_frac: 0.25,
@@ -1853,6 +1858,11 @@ pub struct UnrecognisableFilterParams {
 }
 
 impl Default for UnrecognisableFilterParams {
+    /// The default [`UnrecognisableFilterParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_size: 5,
@@ -2850,7 +2860,7 @@ mod tests {
     /// sign, on a three-cell-type store.
     #[test]
     fn test_pca_observed_covariance_matches_lanczos() {
-        use bixverse_sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+        use bixverse_sc_data::store::{reader::ParallelSparseReader, writer::CellGeneSparseWriter};
 
         let (n_cells, n_genes, no_pcs) = (300, 30, 3);
         let hash = |a: usize, b: usize| ((a * 2654435761 + b * 40503) % 1000) as f32 / 1000.0;
@@ -2869,8 +2879,10 @@ mod tests {
             })
             .collect();
 
-        let path = std::env::temp_dir().join("bixverse_pca_observed_solvers.bin");
-        let path = path.to_str().expect("utf8 path");
+        let temp = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let path = temp.to_str().expect("utf8 path");
         let mut writer =
             CellGeneSparseWriter::new(path, false, n_cells, n_genes, 1e4).expect("writer");
         for gene in 0..n_genes {

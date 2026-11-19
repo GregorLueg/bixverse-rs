@@ -375,7 +375,8 @@ def load_h5ad(
             not it.
         h5ad_streaming: Stream the counts in batches instead of materialising
             the filtered matrix first.
-        csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers.
+        csc_mem_gb: Memory in GB for the CSR to CSC conversion buffers, and
+            for the cell-major transpose of a streamed CSC h5ad.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -410,6 +411,7 @@ def load_h5ad(
         slot,
         h5ad_streaming,
         verbose,
+        max_mem_gb=csc_mem_gb,
     )
     return _finish(
         path,

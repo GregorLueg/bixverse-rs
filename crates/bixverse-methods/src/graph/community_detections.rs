@@ -62,23 +62,29 @@ pub(crate) fn remap_communities_by_size(labels: &[usize]) -> Vec<usize> {
 /////////////////
 
 /// Per-thread dense buffers for the random-walk propagation
-///
-/// ### Fields
-///
-/// * `cur` - Current probabilities, nonzero only at `cur_nodes`
-/// * `next` - Probabilities of the next step, nonzero only at `next_nodes`
-/// * `cur_nodes` - Nodes holding mass in `cur`
-/// * `next_nodes` - Nodes holding mass in `next`
-/// * `seen` - Membership flags for `next_nodes` while a step is running
 struct WalkScratch<T> {
+    /// Current probabilities, nonzero only at `cur_nodes`
     cur: Vec<T>,
+    /// Probabilities of the next step, nonzero only at `next_nodes`
     next: Vec<T>,
+    /// Nodes holding mass in `cur`
     cur_nodes: Vec<u32>,
+    /// Nodes holding mass in `next`
     next_nodes: Vec<u32>,
+    /// Membership flags for `next_nodes` while a step is running
     seen: Vec<bool>,
 }
 
 impl<T: BixverseFloat> WalkScratch<T> {
+    /// Zeroed buffers for a graph of `n` nodes.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of nodes
+    ///
+    /// ### Returns
+    ///
+    /// The scratch.
     fn new(n: usize) -> Self {
         Self {
             cur: vec![T::zero(); n],

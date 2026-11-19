@@ -44,13 +44,14 @@ bixverse-gpu = { path = "crates/bixverse-gpu", version = "0.11.0", default-featu
 bixverse-sc-gpu = { path = "crates/bixverse-sc-gpu", version = "0.11.0", default-features = false }
 bixverse-sc-export = { path = "crates/bixverse-sc-export", version = "0.11.0", default-features = false }
 bixverse-mlx = { path = "crates/bixverse-mlx", version = "0.11.0", default-features = false }
+bixverse-atac = { path = "crates/bixverse-atac", version = "0.11.0", default-features = false }
 bixverse-rs = { path = "crates/bixverse-rs", version = "0.11.0", default-features = false }
 
 # External
 approx = "0.5.1"
 ann-search-rs = { version = "0.13.1", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"] }
-bonsai-rs = { version = "0.3.1", features = ["sanity"] }
+bonsai-rs = { version = "0.3.3", features = ["sanity"] }
 cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
 cubek = { version = "0.3.0", features = ["matmul"] }
@@ -68,7 +69,9 @@ hdf5 = { package = "hdf5-metno", version = "0.15.0", features = ["zlib"] }
 hdf5-sys = { package = "hdf5-metno-sys", version = "0.12.4" }
 indexmap = "2.13.0"
 libc = "0.2.178"
+crc32fast = "1.5"
 lz4_flex = "0.12.0"
+memchr = "2.7"
 memmap2 = "0.9.9"
 ndarray = "0.17.2"
 num-traits = "0.2.19"
@@ -86,6 +89,8 @@ serde_json = "1"
 scx-core = { version = "0.6.2", default-features = false }
 sprs = "0.11"
 statrs = "0.18.0"
+# Test and bench scratch files only
+tempfile = "3.27.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"

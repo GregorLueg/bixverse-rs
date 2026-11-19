@@ -73,7 +73,7 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// The k-means for the fast clustering path, standard or mini-batch
+    /// The k-means for the fast clustering path (e-means by default, Lloyd or mini-batch)
     #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
@@ -126,6 +126,11 @@ pub struct ScDblFinderParams {
 }
 
 impl Default for ScDblFinderParams {
+    /// The default [`ScDblFinderParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: true,
@@ -142,11 +147,7 @@ impl Default for ScDblFinderParams {
             cluster_iters: 10,
             fast_cluster: false,
             fast_cluster_kmeans: CpuKMeans::new(
-                CpuKMeansKind::MiniBatch {
-                    batch_size: 4096,
-                    drift_threshold: 1e-4,
-                    lr_alpha: 1.0,
-                },
+                CpuKMeansKind::Standard,
                 KMeansParamsWrappers::default(),
             ),
             fast_cluster_params: FastClusterParams::default(),
@@ -198,32 +199,15 @@ pub struct ScDblFinderResult {
 
 /// Per-cell kNN-derived intermediate values.
 struct CellKnnFeatures {
+    /// Share of simulated doublets among the neighbours, per k
     k_ratios: Vec<f32>,
+    /// Distance-weighted share of simulated doublets
     weighted: f32,
+    /// Distance to the nearest real neighbour
     dist_real: f32,
+    /// Most likely parent cluster pair; `None` without heterotypic
+    /// simulated neighbours
     origin: Option<(usize, usize)>,
-}
-
-/// Per-cell intermediate scores for diagnostics and comparison
-/// against R's scDblFinder output.
-///
-/// All vectors are length `n_obs` (observed cells only).
-#[derive(Clone, Debug)]
-pub struct ScDblFinderDiagnostics {
-    /// Distance-weighted kNN doublet proportion.
-    pub weighted: Vec<f32>,
-    /// Raw kNN ratio at the largest k value.
-    pub ratio: Vec<f32>,
-    /// Co-expression doublet score.
-    pub cxds_score: Vec<f32>,
-    /// Distance to the nearest real neighbour.
-    pub dist_to_real: Vec<f32>,
-    /// Identification difficulty (1 - mean class-weighted score for this cell's
-    /// most likely doublet origin; 1.0 if no origin assigned).
-    pub difficulty: Vec<f32>,
-    /// Most likely parent cluster pair (canonical ordering); None for cells
-    /// with no heterotypic sim neighbours.
-    pub most_likely_origin: Vec<Option<(usize, usize)>>,
 }
 
 /// Classifier features for the observed samples.

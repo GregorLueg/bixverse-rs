@@ -13,7 +13,7 @@ use bixverse_sc::sc_processing::cellsweep::{
 use bixverse_sc::sc_processing::doublet_detection::{BoostClassifier, BoostParams};
 use bixverse_sc::sc_processing::scdblfinder::{ScDblFinder, ScDblFinderParams};
 use bixverse_sc::sc_processing::scrublet::{Scrublet, ScrubletParams};
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use py_common::convert::CSlice;
 use py_common::convert::{f64_array, u32_array};

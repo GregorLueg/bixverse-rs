@@ -24,9 +24,14 @@ const WANG_MIRROR_TILE: usize = 64;
 /// Enum to define the different semantic similarity types
 #[derive(Clone, Debug, Default)]
 enum OntoSemSimType {
+    /// Resnik: information content of the most informative common ancestor,
+    /// scaled by the maximum information content
     #[default]
     Resnik,
+    /// Lin: twice the common ancestor's information content over the sum of
+    /// the two terms'
     Lin,
+    /// Mean of the Resnik and Lin similarities
     Combined,
 }
 
@@ -61,15 +66,12 @@ pub struct OntoSimRes<'a, T> {
 
 /// Terms interned to dense ids, with each term's ancestors that carry
 /// information content as an id-sorted list
-///
-/// ### Fields
-///
-/// * `ids` - Term name to id
-/// * `ancestors` - Per term id, sorted `(ancestor id, information content)`
-/// * `term_ic` - Per term id, information content (1 when missing)
 struct InternedOntology<'a, T> {
+    /// Term name to id
     ids: FxHashMap<&'a str, u32>,
+    /// Per term id, sorted `(ancestor id, information content)`
     ancestors: Vec<Vec<(u32, T)>>,
+    /// Per term id, information content (1 when missing)
     term_ic: Vec<T>,
 }
 

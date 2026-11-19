@@ -255,6 +255,11 @@ impl<T> Default for HalsOpts<T>
 where
     T: BixverseFloat,
 {
+    /// The default [`HalsOpts`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             max_iter: 250,
@@ -287,6 +292,11 @@ pub struct HalsOptsSpec {
 }
 
 impl Default for HalsOptsSpec {
+    /// The default [`HalsOptsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HalsOpts::<f64>::default();
         Self {

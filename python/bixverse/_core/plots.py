@@ -621,7 +621,7 @@ def feature_plot(
         scale: z-score the expression.
         clip: Clip the z-scores, with `scale`.
         expr_modality: `"rna"` or `"adt"`.
-        embd_modality: `"rna"`, `"adt"` or `"wnn"`.
+        embd_modality: `"rna"`, `"adt"`, `"atac"` or `"wnn"`.
         layer: `"norm"` or `"magic"`.
         point_size: Point size in mm; Seurat's auto size when `None`.
         point_alpha: Point alpha.

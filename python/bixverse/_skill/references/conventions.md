@@ -8,9 +8,10 @@ An experiment lives on disk; `bv.SingleCells` is a handle on it.
 
 | File | Holds | Written by |
 |---|---|---|
-| `counts_cells.bin`, `counts_genes.bin` | raw counts, cell-major and gene-major, memory-mapped on read | the `bv.io.load_*` loaders |
+| `counts_cells.bin`, `counts_genes.bin` | raw counts, cell-major and gene-major, memory-mapped on read (store format v5) | the `bv.io.load_*` loaders |
 | `sc_duckdb.db` | obs and var, plus the `obs.to_keep` cell filter | loaders, `add_obs`, `set_cells_to_keep`, at once |
 | `memory_py.npz`, `memory_py.json` | the HVG set, the cell filter and the cache | `bv.io.save(sc)` only |
+| `atac/` | the ATAC store of a `SingleCellsMultiModal`, one row per cell of the RNA store | `bv.atac.add_atac_tenx`, `add_atac_fragments` |
 
 The handle carries `sc.dir`, `sc.map` (`cell_ids`, `gene_ids`,
 `cells_to_keep`, `hvg`) and `sc.cache` (PCA, embeddings, kNN, neighbour graph,
@@ -45,7 +46,7 @@ an empty cache.
 
 ## Parameter bundles
 
-Methods with many tunables take one bundle from `bixverse.params`: 66 classes,
+Methods with many tunables take one bundle from `bixverse.params`: 64 classes,
 named `<Method>Params` (`HvgParams`, `PcaParams`, `NeighboursParams`,
 `ScrubletParams`, `HarmonyV2Params`, `MinQualityParams`).
 
@@ -232,6 +233,7 @@ the type hints say which functions accept which class.
 | `TypeError` | non-integer index arrays, unknown bundle fields, positional bundle arguments |
 | `KeyError` | a missing obs or var column |
 | `FileNotFoundError`, `OSError` | a missing store or DuckDB, or an I/O failure in Rust |
+| `RuntimeError` | `load_existing` on a v3 store; convert it with `bv.io.upgrade_sc_store("dir")` |
 | `bv.BixverseError` | any failure in the Rust core, and every `bixverse_gpu` call without a GPU |
 | `bv.SparseFileError` | a store that is truncated, corrupt or of the wrong format version; subclass of `BixverseError` |
 | `bv.TableNotFoundError` | a DuckDB table the call needs is missing |

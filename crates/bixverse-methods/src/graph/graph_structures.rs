@@ -350,33 +350,27 @@ where
 //////////////////////////////////
 
 /// Represents one level in the hierarchy
-///
-/// ### Fields
-///
-/// * `graph` - The sparse graph
-/// * `node_map` - Maps fine node -> coarse node
-/// * `coarse_weights` - Number of fine nodes that mapped to each coarse node
 #[allow(dead_code)]
 pub struct CoarseLevel<T>
 where
     T: Clone,
 {
+    /// The sparse graph
     graph: SparseGraph<T>,
+    /// Maps fine node -> coarse node
     node_map: Vec<usize>,
+    /// Number of fine nodes that mapped to each coarse node
     coarse_weights: Vec<usize>,
 }
 
 /// Multi-level graph hierarchy
-///
-/// ### Fields
-///
-/// * `finest` - Original finest level graph
-/// * `levels` - Coarse levels
 pub struct GraphHierarchy<T>
 where
     T: Clone,
 {
+    /// Original finest level graph
     finest: SparseGraph<T>,
+    /// Coarse levels
     levels: Vec<CoarseLevel<T>>,
 }
 

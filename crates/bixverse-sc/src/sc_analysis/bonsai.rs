@@ -38,7 +38,7 @@ use std::time::Instant;
 pub use bonsai_rs::tree::NO_NODE;
 
 use crate::prelude::*;
-use bixverse_sc_data::data_io::SingleCellReading;
+use bixverse_sc_data::store::reader::SingleCellReading;
 
 ///////////////
 // Constants //

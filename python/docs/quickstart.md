@@ -158,9 +158,8 @@ for batch in loader:
 
 A `Batch` carries `raw`, `norm`, `indices`, `indptr`, `shape` and `cell_ids`;
 the layer you didn't ask for is `None`. `layer` is `"raw"`, `"norm"` or
-`"both"`. `norm` is `log1p(count / library_size * target_size)` at `float16`
-precision, so expect agreement with your own recomputation to about three
-decimal places.
+`"both"`. `norm` is `log1p(count / library_size * target_size)`, recomputed
+from the raw counts in `float32` as the batch is read.
 
 Pass an index array to iterate a subset, and `genes=` (store gene indices, in
 the column order you want) to subset or reorder genes:

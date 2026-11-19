@@ -1,9 +1,12 @@
-//! Moving buffers across the FFI boundary: NumPy in and out, parameter dicts
-//! into crate structs, kNN and CSR parts into the crate layouts.
+//! Moving buffers across the FFI boundary: NumPy in and out, paths and
+//! parameter dicts into crate types, kNN and CSR parts into the crate layouts.
 //!
 //! Every index is 0-based. Matrices cross row-major and C-contiguous.
 
+use std::path::Path;
+
 use bixverse_sc_data::prelude::{BixverseNumeric, CompressedSparseData2, CompressedSparseFormat};
+use bixverse_sc_data::store::gene_file::GENE_FILE_BYTES_PER_NNZ;
 use faer::{Mat, MatRef};
 use numpy::{
     IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -56,6 +59,37 @@ impl<T: numpy::Element, D: numpy::ndarray::Dimension> CSlice<T>
         }
         Ok(self.as_slice()?)
     }
+}
+
+///////////
+// Paths //
+///////////
+
+/// A path as UTF-8, which the crates' string-typed signatures need
+///
+/// ### Params
+///
+/// * `p` - The path
+///
+/// ### Returns
+///
+/// The path as `&str`, or a `ValueError` for a non UTF-8 path.
+pub fn path_str(p: &Path) -> PyResult<&str> {
+    p.to_str()
+        .ok_or_else(|| PyValueError::new_err(format!("{} is not valid UTF-8", p.display())))
+}
+
+/// Memory budget of the CSR to CSC conversion as a non-zero count
+///
+/// ### Params
+///
+/// * `max_mem_gb` - Budget in GB, `None` for a single phase
+///
+/// ### Returns
+///
+/// The maximum non-zeros held at once, at least one.
+pub fn max_nnz(max_mem_gb: Option<f64>) -> Option<usize> {
+    max_mem_gb.map(|gb| ((gb * 1e9) as usize / GENE_FILE_BYTES_PER_NNZ).max(1))
 }
 
 ////////////

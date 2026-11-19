@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::prelude::*;
-use bixverse_sc_data::data_io::CsrCellChunk;
+use bixverse_sc_data::store::chunk::CsrCellChunk;
 
 /// Cells read per batch by the streaming QC passes.
 ///

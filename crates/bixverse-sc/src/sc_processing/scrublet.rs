@@ -112,9 +112,13 @@ pub struct ScrubletParams {
     pub knn_params: KnnParams,
 }
 
-/// The fallbacks of the R list conversion. `params_scrublet()` always sends
-/// every key, and its defaults differ from these.
 impl Default for ScrubletParams {
+    /// The fallbacks of the R list conversion. `params_scrublet()` always sends
+    /// every key, and its defaults differ from these.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: false,

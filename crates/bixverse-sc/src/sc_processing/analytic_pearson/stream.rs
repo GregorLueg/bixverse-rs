@@ -20,7 +20,7 @@ use crate::errors::ScErrors;
 use crate::prelude::*;
 use crate::sc_processing::residuals::{distinct_cell_set, validate_groups};
 use crate::sc_processing::sctransform::stream::SctStreamOpts;
-use bixverse_sc_data::data_io::{RawCounts, SingleCellReading};
+use bixverse_sc_data::store::{chunk::RawCounts, reader::SingleCellReading};
 
 use super::model::{AprModel, AprParams};
 

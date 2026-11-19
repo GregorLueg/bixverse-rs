@@ -183,6 +183,11 @@ impl PalantirParams {
 }
 
 impl Default for PalantirParams {
+    /// The default [`PalantirParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -223,6 +228,11 @@ pub struct PalantirParamsSpec {
 }
 
 impl Default for PalantirParamsSpec {
+    /// The default [`PalantirParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = PalantirParams::default();
         Self {

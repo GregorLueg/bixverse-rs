@@ -1,7 +1,5 @@
-"""Palantir, PAGA, gene trends and Bonsai without R: structure, guards and
+"""Palantir, PAGA, gene trends and Bonsai: structure, guards and
 the object plumbing on a planted Y-shaped kNN graph.
-
-Parity with the R package is in `test_traj_r.py`.
 """
 
 import numpy as np

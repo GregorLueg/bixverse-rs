@@ -15,7 +15,7 @@ use bixverse_sc::sc_analysis::bonsai::{
     BonsaiScParams, BonsaiScResult, SANITY_GENE_CHUNK, chunk_sanity_params, keep_for_bonsai,
     run_bonsai_sc, stream_chunks, stream_sanity,
 };
-use bixverse_sc_data::data_io::SingleCellReading;
+use bixverse_sc_data::store::reader::SingleCellReading;
 
 /// Counts on disk to a laid-out Bonsai tree, Sanity on the GPU.
 ///

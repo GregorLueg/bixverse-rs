@@ -1,7 +1,7 @@
 //! Scrublet on the GPU, the twin of `rs_sc_scrublet_gpu`.
 
 use bixverse_sc::sc_processing::knn::KnnParams;
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_gpu::knn_gpu::KnnParamsGpu;
 use bixverse_sc_gpu::scrublet_gpu::{ScrubletGpuSpec, ScrubletKnnBackend, run_scrublet_gpu};
 use numpy::PyReadonlyArray1;

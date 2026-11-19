@@ -40,3 +40,6 @@ rustc-hash.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 thousands.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
