@@ -1,6 +1,7 @@
 //! Differential expression and abundance, the Python twins of
 //! `rs_calculate_dge_mann_whitney`, `rs_calculate_dge_one_vs_rest`,
-//! `rs_calculate_dge_one_vs_many`, `rs_pseudobulk_cells_dense` /
+//! `rs_calculate_dge_one_vs_many` (plus their logistic regression variants,
+//! which have no R twin yet), `rs_pseudobulk_cells_dense` /
 //! `_sparse`, `rs_edger_ql`, `rs_nebula_sc`, `rs_make_milor_nhoods`,
 //! `rs_spatial_fdr` and `rs_meld_sc`.
 //!
@@ -13,6 +14,9 @@ use bixverse_sc::mc_generation::cell_aggregation_utils::{
     get_pseudo_bulked_counts_dense, get_pseudo_bulked_counts_sparse, parse_pseudo_bulk,
 };
 use bixverse_sc::prelude::ScErrors;
+use bixverse_sc::sc_analysis::dge_lr::{
+    DgeLrRes, calculate_dge_grps_lr, calculate_dge_one_vs_many_lr, calculate_dge_one_vs_rest_lr,
+};
 use bixverse_sc::sc_analysis::dge_pathway_scores::{
     DgeAurocMultiRes, DgeMannWhitneyRes, calculate_dge_grps_mann_whitney,
     calculate_dge_one_vs_many_auroc, calculate_dge_one_vs_rest_mann_whitney,
@@ -20,7 +24,7 @@ use bixverse_sc::sc_analysis::dge_pathway_scores::{
 use bixverse_sc::sc_analysis::meld::{MeldParams, meld as meld_rs};
 use bixverse_sc::sc_analysis::milo_r::{MiloRParams, make_milor_nhoods, spatial_fdr as sfdr};
 use bixverse_sc::sc_analysis::nebula::{NebulaScParams, run_nebula};
-use bixverse_sc_data::store::reader::ParallelSparseReader;
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use edge_rs::glm::test::Tested;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;
@@ -84,6 +88,51 @@ fn mann_whitney_dict<'py>(py: Python<'py>, res: DgeMannWhitneyRes) -> PyResult<B
     out.set_item("fdr", res.fdr.into_pyarray(py))?;
     out.set_item("genes_to_keep", res.genes_to_keep.into_pyarray(py))?;
     Ok(out)
+}
+
+/// The per-gene fields of a two-group logistic regression result
+///
+/// ### Params
+///
+/// * `py` - GIL token
+/// * `res` - The result
+///
+/// ### Returns
+///
+/// Dict with `lfc`, `prop1`, `prop2`, `lr_stat`, `z_scores` (signed root of
+/// `lr_stat`), `p_values`, `fdr` and `converged` over the kept genes and the
+/// full-length `genes_to_keep` mask.
+fn lr_dict<'py>(py: Python<'py>, res: DgeLrRes) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("lfc", f64_array(py, &res.lfc))?;
+    out.set_item("prop1", f64_array(py, &res.prop1))?;
+    out.set_item("prop2", f64_array(py, &res.prop2))?;
+    out.set_item("lr_stat", res.lr_stat.into_pyarray(py))?;
+    out.set_item("z_scores", res.z_scores.into_pyarray(py))?;
+    out.set_item("p_values", res.p_vals.into_pyarray(py))?;
+    out.set_item("fdr", res.fdr.into_pyarray(py))?;
+    out.set_item("converged", res.converged.into_pyarray(py))?;
+    out.set_item("genes_to_keep", res.genes_to_keep.into_pyarray(py))?;
+    Ok(out)
+}
+
+/// Every cell's library size, the latent covariate of the logistic
+/// regression tests
+///
+/// ### Params
+///
+/// * `f_path_cell` - The cell-based binary
+///
+/// ### Returns
+///
+/// The library sizes as `f64`.
+fn store_library_sizes(f_path_cell: &str) -> PyResult<Vec<f64>> {
+    let reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
+    let cells: Vec<usize> = (0..reader.dims().total_cells).collect();
+    let lib = reader
+        .read_cell_library_sizes(&cells)
+        .map_err(BvErr::from)?;
+    Ok(lib.into_iter().map(|l| l as f64).collect())
 }
 
 /// Per-rival vectors as one `(n_rivals, n_kept)` array
@@ -256,6 +305,138 @@ pub fn dge_one_vs_many<'py>(
                 &reader,
                 &groups,
                 &references,
+                min_prop,
+                alternative,
+                verbose,
+            )
+        })
+        .map_err(BvErr::from)?;
+    let out = PyList::empty(py);
+    for arm in arms {
+        out.append(one_vs_many_dict(py, arm)?)?;
+    }
+    Ok(out)
+}
+
+/// Logistic regression DGE between two cell groups, Seurat's `LRDETest`
+/// with the library size as the latent variable
+///
+/// ### Params
+///
+/// * `f_path_cell` - The cell-based binary, for the library sizes
+/// * `f_path_gene` - The gene-based binary
+/// * `cells_1` - 0-based cells of group 1
+/// * `cells_2` - 0-based cells of group 2
+/// * `min_prop` - Minimum share of expressing cells in either group
+/// * `alternative` - `"twosided"`, `"greater"` or `"less"`
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// See [lr_dict].
+#[pyfunction]
+#[pyo3(signature = (f_path_cell, f_path_gene, cells_1, cells_2, min_prop, alternative, verbose = 1))]
+#[allow(clippy::too_many_arguments)]
+pub fn dge_lr<'py>(
+    py: Python<'py>,
+    f_path_cell: &str,
+    f_path_gene: &str,
+    cells_1: PyReadonlyArray1<'py, u32>,
+    cells_2: PyReadonlyArray1<'py, u32>,
+    min_prop: f32,
+    alternative: &str,
+    verbose: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (c1, c2) = (index_vec(&cells_1)?, index_vec(&cells_2)?);
+    let latent = store_library_sizes(f_path_cell)?;
+    let reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
+    let res = py
+        .detach(|| {
+            calculate_dge_grps_lr(&reader, &c1, &c2, &latent, min_prop, alternative, verbose)
+        })
+        .map_err(BvErr::from)?;
+    lr_dict(py, res)
+}
+
+/// One-vs-rest logistic regression DGE for every group
+///
+/// ### Params
+///
+/// * `f_path_cell` - The cell-based binary, for the library sizes
+/// * `f_path_gene` - The gene-based binary
+/// * `cell_groups` - 0-based cells per group
+/// * `min_prop` - Minimum share of expressing cells in the group or the rest
+/// * `alternative` - `"twosided"`, `"greater"` or `"less"`
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// One [lr_dict] per group, in group order.
+#[pyfunction]
+#[pyo3(signature = (f_path_cell, f_path_gene, cell_groups, min_prop, alternative, verbose = 1))]
+pub fn dge_one_vs_rest_lr<'py>(
+    py: Python<'py>,
+    f_path_cell: &str,
+    f_path_gene: &str,
+    cell_groups: Vec<PyReadonlyArray1<'py, u32>>,
+    min_prop: f32,
+    alternative: &str,
+    verbose: usize,
+) -> PyResult<Bound<'py, PyList>> {
+    let groups = group_lists(&cell_groups)?;
+    let latent = store_library_sizes(f_path_cell)?;
+    let reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
+    let arms = py
+        .detach(|| {
+            calculate_dge_one_vs_rest_lr(&reader, &groups, &latent, min_prop, alternative, verbose)
+        })
+        .map_err(BvErr::from)?;
+    let out = PyList::empty(py);
+    for arm in arms {
+        out.append(lr_dict(py, arm)?)?;
+    }
+    Ok(out)
+}
+
+/// One-vs-many specific markers with logistic regression p-values
+///
+/// ### Params
+///
+/// * `f_path_cell` - The cell-based binary, for the library sizes
+/// * `f_path_gene` - The gene-based binary
+/// * `cell_groups` - 0-based cells per group
+/// * `references` - 0-based positions in `cell_groups` of the reference arms
+/// * `min_prop` - Minimum share of expressing cells in any group
+/// * `alternative` - `"twosided"`, `"greater"` or `"less"`
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// One [one_vs_many_dict] per reference, in reference order.
+#[pyfunction]
+#[pyo3(signature = (f_path_cell, f_path_gene, cell_groups, references, min_prop, alternative, verbose = 1))]
+#[allow(clippy::too_many_arguments)]
+pub fn dge_one_vs_many_lr<'py>(
+    py: Python<'py>,
+    f_path_cell: &str,
+    f_path_gene: &str,
+    cell_groups: Vec<PyReadonlyArray1<'py, u32>>,
+    references: PyReadonlyArray1<'py, u32>,
+    min_prop: f32,
+    alternative: &str,
+    verbose: usize,
+) -> PyResult<Bound<'py, PyList>> {
+    let groups = group_lists(&cell_groups)?;
+    let references = index_vec(&references)?;
+    let latent = store_library_sizes(f_path_cell)?;
+    let reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
+    let arms = py
+        .detach(|| {
+            calculate_dge_one_vs_many_lr(
+                &reader,
+                &groups,
+                &references,
+                &latent,
                 min_prop,
                 alternative,
                 verbose,

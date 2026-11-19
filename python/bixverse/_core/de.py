@@ -63,6 +63,7 @@ INTERCEPT: str = "(Intercept)"
 
 Alternative = Literal["twosided", "greater", "less"]
 Method = Literal["wilcox"]
+MarkerTest = Literal["wilcox", "lr"]
 Coef = int | str | Sequence[int] | Sequence[str]
 MiloNorm = Literal["TMM", "TMMwsp", "RLE", "upperquartile", "logMS"]
 FdrWeighting = Literal["k-distance", "graph-overlap", "none"]
@@ -443,6 +444,14 @@ def _de_store(sc: ScOrScSubset, modality: DeModality) -> tuple[str, str, np.ndar
 
 
 @beartype(conf=_CONF)
+def _marker_test(test: MarkerTest | None, modality: DeModality) -> MarkerTest:
+    """The marker test, `None` resolving to `"lr"` on ATAC, `"wilcox"` on RNA."""
+    if test is not None:
+        return test
+    return "lr" if modality == "atac" else "wilcox"
+
+
+@beartype(conf=_CONF)
 def _groups_to_cells(
     obs: pl.DataFrame, col: str, groups: Sequence[object]
 ) -> list[np.ndarray]:
@@ -467,18 +476,26 @@ def find_markers(
     cells_2: Selection,
     *,
     method: Method = "wilcox",
+    test: MarkerTest | None = None,
     alternative: Alternative = "twosided",
     min_prop: float = 0.05,
     modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> pl.DataFrame:
-    """Wilcoxon DGE between two groups of cells.
+    """Wilcoxon or logistic regression DGE between two groups of cells.
 
     Args:
         sc: The experiment.
         cells_1: 0-based cell indices or ids of group 1.
         cells_2: 0-based cell indices or ids of group 2.
         method: Only `"wilcox"`, reserved.
+        test: `"wilcox"`, or `"lr"` for Seurat's logistic regression test
+            (`group ~ feature + library size` against `group ~ library size`,
+            a likelihood ratio test), which corrects for the depth difference
+            between the groups. `None` picks `"lr"` for `modality="atac"`,
+            `"wilcox"` otherwise. With `"lr"`, `z_scores` are the signed roots
+            of the likelihood ratio statistics. Neither test accounts for cells
+            being pseudoreplicates of their sample.
         alternative: The test alternative.
         min_prop: A gene is tested if this share of either group expresses it.
         modality: `"rna"`, or `"atac"` for the peaks or tiles of a
@@ -497,15 +514,16 @@ def find_markers(
         >>> res = bv.de.find_markers(sc, ct1, ct2, alternative="greater")
     """
     check_range("min_prop", min_prop, 0, 1, False, False)
-    cells_path, _, ids = _de_store(sc, modality)
-    res = _bixverse.dge_mann_whitney(
-        cells_path,
-        sc._resolve_cells(cells_1),
-        sc._resolve_cells(cells_2),
-        min_prop,
-        alternative,
-        verbose,
-    )
+    cells_path, genes_path, ids = _de_store(sc, modality)
+    c1, c2 = sc._resolve_cells(cells_1), sc._resolve_cells(cells_2)
+    if _marker_test(test, modality) == "lr":
+        res = _bixverse.dge_lr(
+            cells_path, genes_path, c1, c2, min_prop, alternative, verbose
+        )
+    else:
+        res = _bixverse.dge_mann_whitney(
+            cells_path, c1, c2, min_prop, alternative, verbose
+        )
     return pl.DataFrame(
         {
             "gene_id": ids[res["genes_to_keep"]],
@@ -522,12 +540,13 @@ def find_all_markers(
     column_of_interest: str,
     *,
     method: Method = "wilcox",
+    test: MarkerTest | None = None,
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
     modality: DeModality = "rna",
     verbose: Verbose = True,
 ) -> pl.DataFrame:
-    """One-vs-rest Wilcoxon DGE for every group of a column.
+    """One-vs-rest Wilcoxon or logistic regression DGE for every group.
 
     All groups are tested in one pass over the genes. Cells without a label
     are left out of every group and of every rest.
@@ -536,6 +555,13 @@ def find_all_markers(
         sc: The experiment.
         column_of_interest: The obs column holding the groups.
         method: Only `"wilcox"`, reserved.
+        test: `"wilcox"`, or `"lr"` for Seurat's logistic regression test
+            (`group ~ feature + library size` against `group ~ library size`,
+            a likelihood ratio test), which corrects for the depth difference
+            between the groups. `None` picks `"lr"` for `modality="atac"`,
+            `"wilcox"` otherwise. With `"lr"`, `z_scores` are the signed roots
+            of the likelihood ratio statistics. Neither test accounts for cells
+            being pseudoreplicates of their sample.
         alternative: The test alternative; `"greater"` asks for genes up in
             the group.
         min_prop: A gene is tested for a group if this share of the group or
@@ -559,14 +585,16 @@ def find_all_markers(
         column_of_interest
     )
     groups = obs[column_of_interest].unique(maintain_order=True)
-    _, genes_path, gene_ids = _de_store(sc, modality)
-    arms = _bixverse.dge_one_vs_rest(
-        genes_path,
-        _groups_to_cells(obs, column_of_interest, groups.to_list()),
-        min_prop,
-        alternative,
-        verbose,
-    )
+    cells_path, genes_path, gene_ids = _de_store(sc, modality)
+    cell_groups = _groups_to_cells(obs, column_of_interest, groups.to_list())
+    if _marker_test(test, modality) == "lr":
+        arms = _bixverse.dge_one_vs_rest_lr(
+            cells_path, genes_path, cell_groups, min_prop, alternative, verbose
+        )
+    else:
+        arms = _bixverse.dge_one_vs_rest(
+            genes_path, cell_groups, min_prop, alternative, verbose
+        )
     frames = [
         pl.DataFrame(
             {
@@ -590,6 +618,7 @@ def find_specific_markers(
     *,
     reference_group: str | None = None,
     method: Method = "wilcox",
+    test: MarkerTest | None = None,
     alternative: Alternative = "greater",
     min_prop: float = 0.05,
     modality: DeModality = "rna",
@@ -609,6 +638,12 @@ def find_specific_markers(
         reference_group: The one reference to report. `None` runs every group
             in turn.
         method: Only `"wilcox"`, reserved.
+        test: `"wilcox"`, or `"lr"` for Seurat's logistic regression test with
+            the library size as the covariate, reference against each rival.
+            Only the per-comparison `z_scores`, `p_values` and `fdr` and the
+            `simes_*` and `max_p*` summaries change; the AUROCs are the
+            Wilcoxon ones either way. `None` picks `"lr"` for
+            `modality="atac"`, `"wilcox"` otherwise.
         alternative: The test alternative; `"greater"` asks for genes up in
             the reference.
         min_prop: A gene is tested if this share of any group expresses it.
@@ -663,15 +698,24 @@ def find_specific_markers(
         )
     refs = grp_names if reference_group is None else [reference_group]
     ref_idx = [grp_names.index(r) for r in refs]
-    _, genes_path, gene_ids = _de_store(sc, modality)
-    arms = _bixverse.dge_one_vs_many(
-        genes_path,
-        _groups_to_cells(obs, "grp", grp_names),
-        np.asarray(ref_idx, dtype=np.uint32),
-        min_prop,
-        alternative,
-        verbose,
-    )
+    cells_path, genes_path, gene_ids = _de_store(sc, modality)
+    cell_groups = _groups_to_cells(obs, "grp", grp_names)
+    references = np.asarray(ref_idx, dtype=np.uint32)
+    test = _marker_test(test, modality)
+    if test == "lr":
+        arms = _bixverse.dge_one_vs_many_lr(
+            cells_path,
+            genes_path,
+            cell_groups,
+            references,
+            min_prop,
+            alternative,
+            verbose,
+        )
+    else:
+        arms = _bixverse.dge_one_vs_many(
+            genes_path, cell_groups, references, min_prop, alternative, verbose
+        )
     keep = arms[0]["genes_to_keep"]
     if not keep.any():
         warnings.warn(
@@ -732,6 +776,7 @@ def find_specific_markers(
         per_comparison=pl.concat(comparisons),
         params={
             "method": method,
+            "test": test,
             "alternative": alternative,
             "min_prop": min_prop,
             "column_of_interest": column_of_interest,

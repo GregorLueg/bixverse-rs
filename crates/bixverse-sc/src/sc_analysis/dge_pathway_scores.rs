@@ -487,7 +487,7 @@ fn competition_ranks_desc(values: &[f32]) -> Vec<usize> {
 /// The combined p-value. The `k = m` term is `max(p)`, so the result can never
 /// exceed 1 on valid input; the clamp is defence against a caller passing
 /// something that is not a p-value.
-fn simes_combine(p_vals: &mut [f64]) -> f64 {
+pub(crate) fn simes_combine(p_vals: &mut [f64]) -> f64 {
     let m = p_vals.len();
     if m == 0 {
         return f64::NAN;
@@ -676,14 +676,14 @@ fn empty_auroc_multi_res(n_comparisons: usize, genes_to_keep: Vec<bool>) -> DgeA
 /// Bounds the decoded chunks held at once; the per-gene work runs in parallel
 /// within a block. A whole 20k gene x 20k cell store decodes in ~25 ms, so the
 /// block size is not where the time goes.
-const GENE_CHUNK_SIZE: usize = 1_000;
+pub(crate) const GENE_CHUNK_SIZE: usize = 1_000;
 
 /// Cell-to-group assignment for the gene-wise scans
-struct GroupLayout {
+pub(crate) struct GroupLayout {
     /// Group label per cell of the store, [NO_GROUP] outside every group
-    lookup: Vec<u16>,
+    pub(crate) lookup: Vec<u16>,
     /// Number of cells per group
-    sizes: Vec<usize>,
+    pub(crate) sizes: Vec<usize>,
 }
 
 /// Validate the cell groups and build the cell-to-group lookup
@@ -700,7 +700,10 @@ struct GroupLayout {
 /// ### Returns
 ///
 /// The [GroupLayout].
-fn build_group_layout(groups: &[Vec<usize>], n_cells: usize) -> Result<GroupLayout, ScErrors> {
+pub(crate) fn build_group_layout(
+    groups: &[Vec<usize>],
+    n_cells: usize,
+) -> Result<GroupLayout, ScErrors> {
     let n_groups = groups.len();
     if n_groups < 2 {
         return Err(ScErrors::DgeTooFewGroups { n_groups });

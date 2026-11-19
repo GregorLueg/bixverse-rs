@@ -107,6 +107,27 @@ def test_find_markers_ranks_planted_markers(sc):
     assert set(top) == set(sc.gene_ids()[:10])
 
 
+def test_lr_test_dispatch(sc):
+    obs = sc.obs(filtered=True)
+    g1 = obs.filter(pl.col("cell_grp") == "cell_type_1")["cell_idx"].to_numpy()
+    g2 = obs.filter(pl.col("cell_grp") == "cell_type_2")["cell_idx"].to_numpy()
+    wil = de.find_markers(sc, g1, g2, verbose=False)
+    assert wil.equals(de.find_markers(sc, g1, g2, test="wilcox", verbose=False))
+    lr = de.find_markers(sc, g1, g2, test="lr", verbose=False)
+    assert lr.columns == wil.columns
+    assert not np.allclose(lr["p_values"].to_numpy(), wil["p_values"].to_numpy())
+
+    arms = de.find_all_markers(sc, "cell_grp", test="lr", verbose=False)
+    assert arms.columns == de.find_all_markers(sc, "cell_grp", verbose=False).columns
+    res = de.find_specific_markers(sc, "cell_grp", test="lr", verbose=False)
+    assert res is not None and res.params["test"] == "lr"
+    ref = de.find_specific_markers(sc, "cell_grp", verbose=False)
+    assert ref is not None and ref.params["test"] == "wilcox"
+    # the AUROCs are the Wilcoxon ones either way, the p-values are not
+    assert res.summary["min_auroc"].equals(ref.summary["min_auroc"])
+    assert not res.summary["simes_p"].equals(ref.summary["simes_p"])
+
+
 def test_find_all_markers_one_block_per_group(sc):
     res = de.find_all_markers(sc, "cell_grp")
     assert res.columns[:2] == ["grp", "gene_id"]
@@ -341,6 +362,61 @@ def test_meld_rows_are_likelihoods(sc):
 ########################
 # Independent oracles #
 ########################
+
+
+def test_find_markers_lr_matches_scipy_mle(sc):
+    # the likelihood ratio from maximising both binomial likelihoods with
+    # scipy, `group ~ x + lib_size` against `group ~ lib_size`
+    from scipy import optimize, special, stats
+
+    obs = sc.obs(filtered=True)
+    g1 = obs.filter(pl.col("cell_grp") == "cell_type_1")
+    g2 = obs.filter(pl.col("cell_grp") == "cell_type_2")
+    cells = np.concatenate([g1["cell_idx"].to_numpy(), g2["cell_idx"].to_numpy()])
+    res = de.find_markers(
+        sc, cells[: g1.height], cells[g1.height :], test="lr", verbose=False
+    )
+
+    genes = res["gene_id"].head(12).to_list()
+    x = bv.get_counts(sc, cells=cells, genes=genes, layer="norm").scipy_csr().toarray()
+    lib = np.concatenate([g1["lib_size"].to_numpy(), g2["lib_size"].to_numpy()])
+    lib = (lib - lib.mean()) / lib.std()
+    y = np.r_[np.ones(g1.height), np.zeros(g2.height)]
+
+    def deviance(design: np.ndarray) -> float:
+        def nll(b: np.ndarray) -> tuple[float, np.ndarray]:
+            eta = design @ b
+            return (
+                float(np.sum(np.logaddexp(0, eta) - y * eta)),
+                design.T @ (special.expit(eta) - y),
+            )
+
+        fit = optimize.minimize(
+            nll,
+            np.zeros(design.shape[1]),
+            jac=True,
+            method="BFGS",
+            options={"gtol": 1e-10},
+        )
+        return 2 * fit.fun
+
+    ones = np.ones_like(lib)
+    null = deviance(np.column_stack([ones, lib]))
+    stat = np.array(
+        [
+            null
+            - deviance(
+                np.column_stack([ones, (x[:, j] - x[:, j].mean()) / x[:, j].std(), lib])
+            )
+            for j in range(len(genes))
+        ]
+    )
+    np.testing.assert_allclose(
+        res["z_scores"].head(len(genes)).to_numpy() ** 2, stat, rtol=1e-6, atol=1e-8
+    )
+    np.testing.assert_allclose(
+        res["p_values"].head(len(genes)).to_numpy(), stats.chi2.sf(stat, 1), rtol=1e-5
+    )
 
 
 def test_find_markers_matches_scipy(sc):

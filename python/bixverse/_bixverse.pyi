@@ -560,6 +560,32 @@ def dge_one_vs_many(
     alternative: str,
     verbose: int = 1,
 ) -> list[dict[str, Any]]: ...
+def dge_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cells_1: np.ndarray,
+    cells_2: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> dict[str, Any]: ...
+def dge_one_vs_rest_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> list[dict[str, Any]]: ...
+def dge_one_vs_many_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    references: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> list[dict[str, Any]]: ...
 def pseudobulk(
     f_path_cell: str,
     cell_groups: list[np.ndarray],
