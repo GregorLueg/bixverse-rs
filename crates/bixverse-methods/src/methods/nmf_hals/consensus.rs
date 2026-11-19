@@ -12,7 +12,7 @@
 //!
 //! Kotliar et al., eLife, 2019
 
-use ann_search_rs::prelude::AnnSearchFloat;
+use ann_search_rs::prelude::{AnnSearchFloat, KMeansAlgorithm};
 use ann_search_rs::{build_exhaustive_index, query_exhaustive_self};
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
@@ -47,7 +47,8 @@ const DEFAULT_DENSITY_THRESHOLD: f64 = 0.5;
 /// on scikit-learn's `n_init = 10` for the same purpose.
 const DEFAULT_KMEANS_N_INIT: usize = 3;
 
-/// Default Lloyd iterations per k-means restart.
+/// Default Lloyd iterations per k-means restart. Unused while the restarts
+/// run e-means, which ignores it.
 const DEFAULT_KMEANS_ITERS: usize = 100;
 
 /// Norm below which a pooled component counts as collapsed and is dropped
@@ -106,7 +107,7 @@ pub struct ConsensusParams<F: BixverseFloat> {
     /// Mean cosine distance to those neighbours above which a component is
     /// dropped. `None` disables filtering entirely.
     pub density_threshold: Option<F>,
-    /// Lloyd iterations per k-means restart.
+    /// Lloyd iterations per k-means restart; ignored by the e-means restarts.
     pub kmeans_iters: usize,
     /// Number of k-means restarts; the lowest-inertia labelling wins.
     pub kmeans_n_init: usize,
@@ -124,7 +125,8 @@ impl<F: BixverseFloat> ConsensusParams<F> {
     ///   for the `0.3 * n_runs` heuristic.
     /// * `density_threshold` - Mean cosine distance cutoff. `None` disables the
     ///   filter.
-    /// * `kmeans_iters` - Lloyd iterations per k-means restart.
+    /// * `kmeans_iters` - Lloyd iterations per k-means restart; ignored by the
+    ///   e-means restarts.
     /// * `kmeans_n_init` - Number of k-means restarts.
     /// * `seed` - Seed for the k-means restarts.
     ///
@@ -179,7 +181,7 @@ pub struct ConsensusParamsSpec {
     pub n_neighbours: usize,
     /// Mean cosine distance cutoff; 2 or more disables the filter
     pub density_threshold: f64,
-    /// Lloyd iterations per k-means restart
+    /// Lloyd iterations per k-means restart; ignored by the e-means restarts
     pub kmeans_iters: usize,
     /// Number of k-means restarts
     pub kmeans_n_init: usize,
@@ -557,7 +559,8 @@ where
 {
     // Both floored at one: a zero arriving from R would otherwise give an
     // init-only clustering, or no clustering at all, rather than an error.
-    let kmeans_params = KMeansParamsWrappers::new(params.kmeans_iters.max(1), None, None);
+    let kmeans_params = KMeansParamsWrappers::new(params.kmeans_iters.max(1), None, None)
+        .with_algorithm(KMeansAlgorithm::default());
     let n_init = params.kmeans_n_init.max(1);
 
     let mut best: Option<(F, Vec<usize>)> = None;

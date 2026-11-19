@@ -18,16 +18,12 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::ops::Range;
 
-use ann_search_rs::prelude::EMeansParams;
 use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 
 use crate::prelude::*;
 use crate::sc_batch_correction::harmony::BatchInfo;
-use bixverse_core::ml::clustering::k_means::{
-    KMeansParamsWrappers, parse_kmean_path, parse_kmeans_algorithm, parse_kmeans_init,
-};
+use bixverse_core::ml::clustering::k_means::{KMeansParamsWrappers, KMeansSpec};
 use bixverse_core::utils::gemm::gemm;
-use serde::Deserialize;
 
 ///////////
 // Const //
@@ -39,10 +35,9 @@ use serde::Deserialize;
 pub(crate) const RUN_CELLS: usize = 1024;
 
 /// Lloyd iterations of the initial k-means, when Lloyd's is picked over the
-/// default e-means. R harmony 2.0.5 runs 10
-/// (`kmeans_centers` in `src/utils.cpp`). Against 30 on 829k cells x 50 PCs it
-/// halved `kmeans_init` with a marginally lower final objective in both v1 and
-/// v2, and corrected embeddings within 3% relative Frobenius.
+/// default e-means. R harmony 2.0.5 runs 10 (`kmeans_centers` in
+/// `src/utils.cpp`). The Harmony iterations refine the centroids anyway, so
+/// fewer initial iterations cost little in the final objective.
 pub const HARMONY_KMEANS_ITERS: usize = 10;
 
 /// Cells per task in the block assignment update. Blocks are 5% of the data
@@ -61,71 +56,21 @@ const ARROWHEAD_EPS: f64 = 1e-10;
 // k-means keys //
 //////////////////
 
-/// The k-means keys of the R `params_sc_harmony()` and
-/// `params_sc_harmony_v2()` lists, as `kmeans_params_from_r_list_with_iters`
-/// reads them with [`HARMONY_KMEANS_ITERS`] as the fallback; missing keys
-/// take its defaults.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct HarmonyKMeansSpec {
-    /// `"emeans"` or `"lloyd"`, see `parse_kmeans_algorithm`
-    pub k_means_algorithm: String,
-    /// e-means epoch budget, ignored for Lloyd's
-    pub e_means_epochs: f64,
-    /// Lloyd iterations of the initial k-means
-    pub k_means_iter: usize,
-    /// Optional initialisation, see `parse_kmeans_init`
-    pub k_means_init: Option<String>,
-    /// Optional GEMM assignment
-    pub gemm: Option<bool>,
-    /// Optional Hamerly bounds
-    pub hamerly: Option<bool>,
-}
-
-impl Default for HarmonyKMeansSpec {
-    fn default() -> Self {
-        Self {
-            k_means_algorithm: "emeans".to_string(),
-            e_means_epochs: EMeansParams::default().epochs,
-            k_means_iter: HARMONY_KMEANS_ITERS,
-            k_means_init: None,
-            gemm: None,
-            hamerly: None,
-        }
-    }
-}
-
-impl TryFrom<HarmonyKMeansSpec> for KMeansParamsWrappers {
-    type Error = String;
-
-    /// Check the initialisation and assemble the k-means parameters.
-    ///
-    /// No path is set when neither `gemm` nor `hamerly` is given; one missing
-    /// flag of the two counts as `false`.
-    ///
-    /// ### Params
-    ///
-    /// * `spec` - The keys
-    ///
-    /// ### Returns
-    ///
-    /// The [`KMeansParamsWrappers`], or an error naming an unknown algorithm
-    /// or initialisation.
-    fn try_from(spec: HarmonyKMeansSpec) -> Result<Self, String> {
-        let algorithm = parse_kmeans_algorithm(&spec.k_means_algorithm, spec.e_means_epochs)
-            .ok_or_else(|| format!("Invalid k-means algorithm: {}", spec.k_means_algorithm))?;
-        let init = spec
-            .k_means_init
-            .map(|s| {
-                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
-            })
-            .transpose()?;
-        let path = match (spec.gemm, spec.hamerly) {
-            (None, None) => None,
-            (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
-        };
-        Ok(KMeansParamsWrappers::new(spec.k_means_iter, init, path).with_algorithm(algorithm))
-    }
+/// The k-means parameters of Harmony from the shared k-means keys: e-means
+/// unless `k_means_algorithm` asks for Lloyd's, which then runs
+/// [`HARMONY_KMEANS_ITERS`] iterations unless `k_means_iter` says otherwise.
+///
+/// ### Params
+///
+/// * `spec` - The k-means keys of the R `params_sc_harmony()` and
+///   `params_sc_harmony_v2()` lists
+///
+/// ### Returns
+///
+/// The [`KMeansParamsWrappers`], or an error naming an unknown algorithm or
+/// initialisation.
+pub fn harmony_kmeans_params(spec: KMeansSpec) -> Result<KMeansParamsWrappers, String> {
+    KMeansParamsWrappers::try_from(spec.with_default_iters(HARMONY_KMEANS_ITERS))
 }
 
 ///////////

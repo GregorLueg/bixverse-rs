@@ -12,8 +12,7 @@ use cubecl::Device;
 use faer::{Mat, MatRef};
 
 use crate::prelude::*;
-use ann_search_rs::prelude::EMeansParams;
-use bixverse_core::ml::clustering::k_means::{parse_kmeans_algorithm, parse_kmeans_init};
+use bixverse_core::ml::clustering::k_means::KMeansSpec;
 use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
 use serde::Deserialize;
 
@@ -21,20 +20,18 @@ use serde::Deserialize;
 // Params //
 ////////////
 
+/// Lloyd's iterations of the GPU k-means when the keys set none.
+pub const GPU_KMEANS_ITERS: usize = 50;
+
 /// The k-means keys of the R `params_sc_fast_cluster_gpu()` and
 /// `params_kmeans_gpu()` lists, as `KMeansGpuParams::from_r_list` reads them;
-/// missing keys take its defaults.
+/// missing keys take the defaults.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct KMeansGpuSpec {
-    /// `"emeans"` or `"lloyd"`, see `parse_kmeans_algorithm`
-    pub k_means_algorithm: String,
-    /// e-means epoch budget, ignored for Lloyd's
-    pub e_means_epochs: f64,
-    /// Lloyd's iterations
-    pub k_means_iter: usize,
-    /// Optional initialisation, see `parse_kmeans_init`
-    pub k_means_init: Option<String>,
+    /// The shared k-means keys; `gemm` and `hamerly` have no GPU counterpart
+    #[serde(flatten)]
+    pub kmeans: KMeansSpec,
     /// Run every iteration without a convergence check
     pub fixed: bool,
     /// Hold the data buffer at fp16 on the device
@@ -42,12 +39,14 @@ pub struct KMeansGpuSpec {
 }
 
 impl Default for KMeansGpuSpec {
+    /// e-means, with convergence checks, data at full precision.
+    ///
+    /// ### Returns
+    ///
+    /// The default keys.
     fn default() -> Self {
         Self {
-            k_means_algorithm: "emeans".to_string(),
-            e_means_epochs: EMeansParams::default().epochs,
-            k_means_iter: 50,
-            k_means_init: None,
+            kmeans: KMeansSpec::default(),
             fixed: true,
             quantise: false,
         }
@@ -55,24 +54,18 @@ impl Default for KMeansGpuSpec {
 }
 
 impl KMeansGpuSpec {
-    /// Check the initialisation and assemble the GPU k-means parameters.
+    /// Check the names and assemble the GPU k-means parameters. A missing
+    /// `k_means_iter` takes [`GPU_KMEANS_ITERS`].
     ///
     /// ### Returns
     ///
     /// The [`KMeansGpuParams`], or an error naming an unknown algorithm or
     /// initialisation.
     pub fn into_params(self) -> Result<KMeansGpuParams, String> {
-        let algorithm = parse_kmeans_algorithm(&self.k_means_algorithm, self.e_means_epochs)
-            .ok_or_else(|| format!("Invalid k-means algorithm: {}", self.k_means_algorithm))?;
-        let init = self
-            .k_means_init
-            .map(|s| {
-                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
-            })
-            .transpose()?;
+        let iters = self.kmeans.k_means_iter.unwrap_or(GPU_KMEANS_ITERS);
         Ok(
-            KMeansGpuParams::new(self.k_means_iter, init, self.fixed, self.quantise)
-                .with_algorithm(algorithm),
+            KMeansGpuParams::new(iters, self.kmeans.init()?, self.fixed, self.quantise)
+                .with_algorithm(self.kmeans.algorithm()?),
         )
     }
 }
@@ -83,7 +76,8 @@ impl KMeansGpuSpec {
 
 /// GPU k-means coarsener for fast clustering.
 ///
-/// Full-batch Lloyd's on the device; there is no mini-batch path.
+/// k-means on the device, e-means or Lloyd's as `params` picks (`None` takes
+/// the ann-search-rs defaults, e-means); there is no mini-batch path.
 #[derive(Clone, Debug)]
 pub struct GpuKMeans {
     /// GPU k-means parameters; `None` takes the ann-search-rs defaults

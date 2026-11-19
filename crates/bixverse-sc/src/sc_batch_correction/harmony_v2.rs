@@ -15,15 +15,15 @@ use thousands::*;
 
 use crate::prelude::parse_verbosity_level;
 use crate::prelude::*;
-use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
+use bixverse_core::ml::clustering::k_means::{KMeansParamsWrappers, KMeansSpec};
 
 use super::harmony::{
     BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_info, create_batch_infos,
 };
 use super::harmony_core::{
-    CellOrder, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, kmeans_centroids,
-    normalise_rows_into, objective, r_to_mat, restart_assignments, ridge_correction,
-    row_major_to_mat, to_row_major, update_assignments, window_converged,
+    CellOrder, RidgeSettings, Variant, base_error_and_entropy, harmony_kmeans_params,
+    kmeans_centroids, normalise_rows_into, objective, r_to_mat, restart_assignments,
+    ridge_correction, row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -86,8 +86,7 @@ impl Default for HarmonyParamsV2 {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: HarmonyKMeansSpec::default()
-                .try_into()
+            kmeans_params: harmony_kmeans_params(KMeansSpec::default())
                 .expect("default k-means keys parse"),
         }
     }
@@ -129,7 +128,7 @@ pub struct HarmonyParamsV2Spec {
     pub use_dynamic_lambda: bool,
     /// The k-means keys
     #[serde(flatten)]
-    pub kmeans: HarmonyKMeansSpec,
+    pub kmeans: KMeansSpec,
 }
 
 impl Default for HarmonyParamsV2Spec {
@@ -150,7 +149,7 @@ impl Default for HarmonyParamsV2Spec {
             tau: d.tau,
             batch_proportion_cutoff: d.batch_proportion_cutoff,
             use_dynamic_lambda: d.use_dynamic_lambda,
-            kmeans: HarmonyKMeansSpec::default(),
+            kmeans: KMeansSpec::default(),
         }
     }
 }
@@ -184,7 +183,7 @@ impl TryFrom<HarmonyParamsV2Spec> for HarmonyParamsV2 {
             tau: s.tau,
             batch_proportion_cutoff: s.batch_proportion_cutoff,
             use_dynamic_lambda: s.use_dynamic_lambda,
-            kmeans_params: s.kmeans.try_into()?,
+            kmeans_params: harmony_kmeans_params(s.kmeans)?,
         })
     }
 }

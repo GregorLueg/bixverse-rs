@@ -10,7 +10,7 @@
 //! Stage one is behind the [`Coarsener`] trait, so the GPU and MLX crates swap
 //! in their own k-means (and nearest-centroid search) and reuse the rest.
 
-use ann_search_rs::prelude::{EMeansParams, KMeansAlgorithm};
+use ann_search_rs::prelude::KMeansAlgorithm;
 use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::utils::k_means_utils::assign_all_parallel_top_m;
 use ann_search_rs::utils::matrix_to_flat;
@@ -24,7 +24,7 @@ use std::fmt::Debug;
 use std::time::Instant;
 
 use crate::prelude::*;
-use crate::sc_processing::knn::{de_ann_dist, generate_knn_with_dist};
+use crate::sc_processing::knn::generate_knn_with_dist;
 use bixverse_core::core::math::vector_helpers::{mean_nan, median};
 use bixverse_core::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_core::ml::clustering::k_means::*;
@@ -32,8 +32,7 @@ use bixverse_methods::graph::graph_metrics::conductance_undirected;
 use bixverse_methods::graph::graph_structures::*;
 use bixverse_methods::graph::knn_graph::*;
 use bixverse_methods::graph::leiden::{
-    LeidenParams, community_detection, parse_community_algorithm, parse_leiden_iterations,
-    parse_local_moving, parse_node_order,
+    LeidenParams, LeidenParamsSpec, community_detection, parse_community_algorithm,
 };
 
 ///////////
@@ -187,43 +186,45 @@ impl CpuKMeans {
     }
 }
 
-/// The keys a [`CpuKMeans`] deserialises from, as
-/// `cpu_kmeans_from_r_list` reads them; missing keys take its defaults.
+/// Lloyd's and mini-batch iterations of the fast clustering k-means when the
+/// keys set none.
+pub const FAST_CLUSTER_KMEANS_ITERS: usize = 30;
+
+/// The keys a [`CpuKMeans`] deserialises from, as `cpu_kmeans_from_r_list`
+/// fills them; missing keys take the defaults.
+///
+/// `km_type` is the one knob for the algorithm: the `k_means_algorithm` key
+/// of [`KMeansSpec`] is refused here.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct CpuKMeansSpec {
-    /// `"emeans"`, `"standard"` (Lloyd's) or `"minibatch"`
+    /// `"emeans"`, `"standard"` (Lloyd's) or `"minibatch"`, see
+    /// [`parse_k_means`]
     pub km_type: String,
-    /// e-means epoch budget
-    pub e_means_epochs: f64,
     /// Mini-batch: cells per batch
     pub batch_size: usize,
     /// Mini-batch: stop once the centroids move less than this
     pub drift_threshold: f32,
     /// Mini-batch: learning rate exponent
     pub lr_alpha: f32,
-    /// k-means iterations
-    pub k_means_iter: usize,
-    /// Optional initialisation, see `parse_kmeans_init`
-    pub k_means_init: Option<String>,
-    /// Optional GEMM assignment
-    pub gemm: Option<bool>,
-    /// Optional Hamerly bounds
-    pub hamerly: Option<bool>,
+    /// The shared k-means keys
+    #[serde(flatten)]
+    pub kmeans: KMeansSpec,
 }
 
 impl Default for CpuKMeansSpec {
+    /// e-means, and the mini-batch knobs of Sculley's mini-batch k-means.
+    ///
+    /// ### Returns
+    ///
+    /// The default keys.
     fn default() -> Self {
         Self {
             km_type: "emeans".to_string(),
-            e_means_epochs: EMeansParams::default().epochs,
             batch_size: 4096,
             drift_threshold: 1e-4,
             lr_alpha: 1.0,
-            k_means_iter: 30,
-            k_means_init: None,
-            gemm: None,
-            hamerly: None,
+            kmeans: KMeansSpec::default(),
         }
     }
 }
@@ -240,21 +241,29 @@ impl TryFrom<CpuKMeansSpec> for CpuKMeans {
     /// ### Returns
     ///
     /// The [`CpuKMeans`], or an error naming an unknown `km_type` or
-    /// initialisation.
+    /// initialisation, or a `k_means_algorithm` key.
     fn try_from(spec: CpuKMeansSpec) -> Result<Self, String> {
-        let (kind, algorithm) = match parse_k_means(&spec.km_type) {
-            Some(KMeansType::EMeans) => (
+        if let Some(a) = &spec.kmeans.k_means_algorithm {
+            return Err(format!(
+                "fast clustering picks the k-means through km_type; got k_means_algorithm = '{a}'"
+            ));
+        }
+        let params = KMeansParamsWrappers::try_from(
+            spec.kmeans.with_default_iters(FAST_CLUSTER_KMEANS_ITERS),
+        )?;
+        let (kind, params) = match parse_k_means(&spec.km_type) {
+            Some(KMeansType::EMeans) => (CpuKMeansKind::Standard, params),
+            Some(KMeansType::StandardKMeans) => (
                 CpuKMeansKind::Standard,
-                KMeansAlgorithm::EMeans(EMeansParams::new(spec.e_means_epochs)),
+                params.with_algorithm(KMeansAlgorithm::Lloyd),
             ),
-            Some(KMeansType::StandardKMeans) => (CpuKMeansKind::Standard, KMeansAlgorithm::Lloyd),
             Some(KMeansType::MiniBatchKMeans) => (
                 CpuKMeansKind::MiniBatch {
                     batch_size: spec.batch_size,
                     drift_threshold: spec.drift_threshold,
                     lr_alpha: spec.lr_alpha,
                 },
-                KMeansAlgorithm::Lloyd,
+                params.with_algorithm(KMeansAlgorithm::Lloyd),
             ),
             None => {
                 return Err(format!(
@@ -263,20 +272,7 @@ impl TryFrom<CpuKMeansSpec> for CpuKMeans {
                 ));
             }
         };
-        let init = spec
-            .k_means_init
-            .map(|s| {
-                parse_kmeans_init(&s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
-            })
-            .transpose()?;
-        let path = match (spec.gemm, spec.hamerly) {
-            (None, None) => None,
-            (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
-        };
-        Ok(CpuKMeans::new(
-            kind,
-            KMeansParamsWrappers::new(spec.k_means_iter, init, path).with_algorithm(algorithm),
-        ))
+        Ok(CpuKMeans::new(kind, params))
     }
 }
 
@@ -372,9 +368,14 @@ pub struct FastClusterParams {
     pub max_evals: usize,
 }
 
-/// Defaults: 1000 centroids, Euclidean, the default [`CentroidGraph`] and
-/// multi-level Louvain with one iteration
 impl Default for FastClusterParams {
+    /// 1000 centroids, Euclidean, the default [`CentroidGraph`] and
+    /// multi-level Louvain at [`LeidenParams::louvain`]: two iterations,
+    /// coloured local moving, shuffled node order.
+    ///
+    /// ### Returns
+    ///
+    /// The default parameters.
     fn default() -> Self {
         Self {
             n_centroids: 1000,
@@ -395,7 +396,6 @@ pub struct FastClusterParamsSpec {
     /// Number of k-means centroids; `None` keeps the default
     pub n_centroids: Option<usize>,
     /// `"euclidean"` or `"cosine"`
-    #[serde(deserialize_with = "de_ann_dist")]
     pub dist: String,
     /// Build the cell-mediated graph instead of the centroid kNN
     pub cell_mediated: bool,
@@ -463,6 +463,12 @@ impl TryFrom<FastClusterParamsSpec> for FastClusterParams {
     /// The [`FastClusterParams`], or an error naming an unusable value.
     fn try_from(spec: FastClusterParamsSpec) -> Result<Self, String> {
         let defaults = FastClusterParams::default();
+        if parse_ann_dist(&spec.dist).is_none() {
+            return Err(format!(
+                "distance must be one of 'euclidean', 'cosine' or 'manhattan', got '{}'",
+                spec.dist
+            ));
+        }
         let graph = if spec.cell_mediated {
             CentroidGraph::CellMediated {
                 n_anchors: spec.n_anchors,
@@ -474,30 +480,21 @@ impl TryFrom<FastClusterParamsSpec> for FastClusterParams {
             }
         };
 
-        let mut community = defaults.community;
-        if let Some(a) = spec.algorithm {
-            let refine = parse_community_algorithm(&a)
-                .ok_or_else(|| format!("algorithm must be 'louvain' or 'leiden', got '{a}'"))?;
-            community = LeidenParams::for_algorithm(refine);
-        }
-        if let Some(v) = spec.n_iterations {
-            community.n_iterations = parse_leiden_iterations(v).ok_or_else(|| {
-                format!(
-                    "n_iterations must be a positive whole number, or negative to iterate \
-                     until stable; got {v}"
-                )
-            })?;
-        }
-        if let Some(s) = spec.local_moving {
-            community.local_moving = parse_local_moving(&s)
-                .ok_or_else(|| format!("local_moving must be 'queue' or 'coloured', got '{s}'"))?;
-        }
-        if let Some(s) = spec.node_order {
-            community.node_order = parse_node_order(&s)
-                .ok_or_else(|| format!("node_order must be 'bfs' or 'shuffle', got '{s}'"))?;
-        }
-        community.beta = spec.beta.unwrap_or(community.beta);
-        community.min_gain = spec.min_gain.unwrap_or(community.min_gain);
+        let refine = match spec.algorithm {
+            None => defaults.community.refine,
+            Some(a) => parse_community_algorithm(&a)
+                .ok_or_else(|| format!("algorithm must be 'louvain' or 'leiden', got '{a}'"))?,
+        };
+        let leiden = LeidenParamsSpec::default();
+        let community = LeidenParams::try_from(LeidenParamsSpec {
+            refine,
+            beta: spec.beta.unwrap_or(leiden.beta),
+            n_iterations: spec.n_iterations,
+            min_gain: spec.min_gain.unwrap_or(leiden.min_gain),
+            local_moving: spec.local_moving,
+            node_order: spec.node_order,
+            ..leiden
+        })?;
 
         Ok(Self {
             n_centroids: spec.n_centroids.unwrap_or(defaults.n_centroids),
@@ -1059,6 +1056,33 @@ mod tests {
         assert_ne!(majority(blob_a), majority(blob_b));
     }
 
+    /// `km_type` is the one algorithm knob: e-means by default, Lloyd's for
+    /// `"standard"`, and a `k_means_algorithm` key is refused.
+    #[test]
+    fn test_cpu_kmeans_spec_km_type_is_the_only_knob() {
+        let default = CpuKMeans::try_from(CpuKMeansSpec::default()).unwrap();
+        assert!(matches!(default.kind, CpuKMeansKind::Standard));
+        assert!(matches!(
+            default.params.get_data().algorithm,
+            KMeansAlgorithm::EMeans(_)
+        ));
+
+        let lloyd = CpuKMeans::try_from(CpuKMeansSpec {
+            km_type: "standard".into(),
+            ..CpuKMeansSpec::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            lloyd.params.get_data().algorithm,
+            KMeansAlgorithm::Lloyd
+        ));
+        assert_eq!(lloyd.params.get_data().iters, FAST_CLUSTER_KMEANS_ITERS);
+
+        let mut conflict = CpuKMeansSpec::default();
+        conflict.kmeans.k_means_algorithm = Some("lloyd".into());
+        assert!(CpuKMeans::try_from(conflict).is_err());
+    }
+
     /// Zero seeds is an argument error, not a panic.
     #[test]
     fn test_fast_clusters_rejects_zero_seeds() {
@@ -1099,32 +1123,30 @@ mod tests {
         }
     }
 
-    /// On easy data every resolution reports a high mean ARI and still splits
-    /// the two blobs.
+    /// On easy data the seed grid is stable: over several outer seeds the
+    /// median of the mean ARI is high at every resolution, and every run
+    /// splits the two blobs. At resolution 1 a single grid can still split one
+    /// blob in two, so no single seed is asserted on.
     #[test]
     fn test_fast_clusters_grid_well_separated_blobs_are_stable() {
         let n_per = 250;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
         let params = params_with(knn_graph(KnnSymmetrisation::Knn { binary: false }));
-        let res = run(
-            &data,
-            &CpuKMeans::default(),
-            &params,
-            &[1.0, 0.5, 0.25],
-            5,
-            // at resolution 1 about 1 seed in 4 gives mean ARI ~0.8; 1 is a good draw
-            1,
-        );
-        for r in &res.per_resolution {
-            let s = r.stability.as_ref().unwrap();
-            assert!(
-                s.mean_ari > 0.9,
-                "mean_ari {} at {}",
-                s.mean_ari,
-                r.resolution
-            );
-            let (blob_a, blob_b) = r.labels.split_at(n_per);
-            assert_ne!(majority(blob_a), majority(blob_b));
+        let resolutions = [1.0, 0.5, 0.25];
+        let runs: Vec<FastClusterResult> = (0..7)
+            .map(|seed| run(&data, &CpuKMeans::default(), &params, &resolutions, 5, seed))
+            .collect();
+        for (i, resolution) in resolutions.iter().enumerate() {
+            let ari: Vec<f32> = runs
+                .iter()
+                .map(|r| r.per_resolution[i].stability.as_ref().unwrap().mean_ari)
+                .collect();
+            let m = median(&ari).unwrap();
+            assert!(m > 0.9, "median of mean_ari {m} at {resolution}");
+            for r in &runs {
+                let (blob_a, blob_b) = r.per_resolution[i].labels.split_at(n_per);
+                assert_ne!(majority(blob_a), majority(blob_b));
+            }
         }
     }
 

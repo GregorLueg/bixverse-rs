@@ -14,6 +14,7 @@
 //! (if available) and a per-cell background mean estimated by a 2-component
 //! k-means on that cell's protein vector.
 
+use ann_search_rs::prelude::KMeansAlgorithm;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -129,7 +130,8 @@ pub struct DsbParams {
     /// Pseudocount added before log transform. DSB recommends 10 for the
     /// EmptyDroplets variant and 1 for ModelNegative.
     pub pseudocount: f64,
-    /// k-means iterations for second step per-cell background estimation.
+    /// Lloyd iterations of the second step background k-means; ignored by the
+    /// e-means it runs.
     pub kmeans_iters: usize,
     /// Optional quantile clipping per protein column: (low, high), both in
     /// [0, 1]. None disables clipping.
@@ -296,7 +298,7 @@ fn col_sds(rows: &[Vec<f64>], means: &[f64]) -> Vec<f64> {
 /// ### Params
 ///
 /// * `values` - The 1D column on which to apply the two-component k-means
-/// * `n_iters` - Number of iterations to use for the k-means
+/// * `n_iters` - Lloyd iterations, ignored by the e-means it runs
 /// * `seed` - The random seed for reproducibility
 ///
 /// ### Returns
@@ -310,7 +312,8 @@ fn lower_centroid_kmeans(values: &[f64], n_iters: usize, seed: usize) -> Result<
     // wrap as N x 1 f32 Mat for k_means_clusters
     let m = Mat::<f32>::from_fn(n, 1, |i, _| values[i] as f32);
 
-    let k_means_params = KMeansParamsWrappers::new(n_iters, None, None);
+    let k_means_params =
+        KMeansParamsWrappers::new(n_iters, None, None).with_algorithm(KMeansAlgorithm::default());
 
     let (centroids, _assignments) = k_means_clusters(
         m.as_ref(),
@@ -364,7 +367,7 @@ fn col_quantile(rows: &[Vec<f64>], j: usize, q: f64) -> f64 {
 /// ### Params
 ///
 /// * `cells` - Cells x proteins after the first step of the algorithm.
-/// * `n_iters` - The number of iterations for the k-means clustering
+/// * `n_iters` - Lloyd iterations, ignored by the e-means it runs
 /// * `seed` - The random seed for reproducibility
 ///
 /// ### Returns

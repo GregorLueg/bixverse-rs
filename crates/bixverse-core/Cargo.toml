@@ -28,6 +28,7 @@ rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
 statrs.workspace = true
 thiserror.workspace = true
 thousands.workspace = true
