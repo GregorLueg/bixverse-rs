@@ -469,7 +469,6 @@ def scrublet(
         >>> res = bv.doublets.scrublet(sc)
         >>> res = bv.doublets.scrublet(sc, group_by="sample_id", return_pairs=True)
     """
-    check_rna_counts(sc, "scrublet", refuse=True)
     return _scrublet(
         sc,
         to_rust(scrublet_params or ScrubletParams()),
@@ -500,6 +499,7 @@ def _scrublet(
 ) -> ScrubletRes:
     """The body of `scrublet` over `to_rust(params)`, with the extension call
     `rust_fn` supplied, so the GPU twin shares it."""
+    check_rna_counts(sc, "scrublet", refuse=True)
     cells = _cells(sc, cells_to_use)
 
     def run(c: np.ndarray, v: int) -> dict[str, Any]:

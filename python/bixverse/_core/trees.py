@@ -254,7 +254,6 @@ def bonsai(
         >>> bv.pp.find_hvg(sc, hvg_no=500)
         >>> tree = bv.trees.bonsai(sc, hvg=sc.map.hvg)
     """
-    check_rna_counts(sc, "bonsai", refuse=True)
     return _bonsai(
         sc, hvg=hvg, bonsai_params=bonsai_params, verbose=verbose, ext=_bixverse
     )
@@ -271,6 +270,7 @@ def _bonsai(
 ) -> BonsaiTree:
     """The body of `bonsai`, with the extension module `ext` (its `sc_bonsai`
     and `mc_bonsai`) supplied, so the GPU twin shares it."""
+    check_rna_counts(sc, "bonsai", refuse=True)
     params = bonsai_params or BonsaiParams()
     genes_in = _genes_in(hvg, sc.n_genes)
     gene_ids = sc.gene_ids(genes_in)

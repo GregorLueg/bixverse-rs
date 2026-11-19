@@ -294,7 +294,6 @@ def scenic_grn(
     Examples:
         >>> grn = bv.pathways.scenic_grn(sc, tf_ids, genes_to_take=keep)
     """
-    check_rna_counts(sc, "scenic_grn", refuse=False)
     return _scenic_grn(
         sc,
         tf_ids,
@@ -323,6 +322,7 @@ def _scenic_grn(
 ) -> ScenicGrn:
     """The body of `scenic_grn`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "scenic_grn", refuse=False)
     params = scenic_params or ScenicParams()
     if isinstance(sc, MetaCells):
         params = _mc_params(params, verbose)

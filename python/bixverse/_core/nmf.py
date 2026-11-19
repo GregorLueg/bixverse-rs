@@ -406,7 +406,6 @@ def nmf(
         >>> res = bv.nmf.nmf(sc, k=5, preprocessing="sd")
         >>> sc.add_obs(bv.nmf.get_data(res))
     """
-    check_rna_counts(sc, "nmf", refuse=False)
     return _nmf(
         sc,
         k,
@@ -437,6 +436,7 @@ def _nmf(
 ) -> NmfResult:
     """The body of `nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "nmf", refuse=False)
     _check_k(k, 1)
     hals = nmf_hals_params or NmfHalsParams()
     cells, genes, c_ids, g_ids = _selection(sc, cell_ids, gene_ids)
@@ -516,7 +516,6 @@ def stabilised_nmf(
         >>> stab = bv.nmf.stabilised_nmf(sc, k=5, n_runs=10)
         >>> best = bv.nmf.get_best_run(stab)
     """
-    check_rna_counts(sc, "stabilised_nmf", refuse=False)
     return _stabilised_nmf(
         sc,
         k,
@@ -549,6 +548,7 @@ def _stabilised_nmf(
 ) -> StabilisedNmfResult:
     """The body of `stabilised_nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "stabilised_nmf", refuse=False)
     _check_k(k, 1)
     if n_runs < 1:
         raise ValueError("n_runs must be at least 1.")
@@ -682,7 +682,6 @@ def consensus_nmf(
         >>> sc.add_obs(bv.nmf.get_data(res))
         >>> stability = bv.nmf.get_stability(res)
     """
-    check_rna_counts(sc, "consensus_nmf", refuse=False)
     return _consensus_nmf(
         sc,
         k,
@@ -717,6 +716,7 @@ def _consensus_nmf(
 ) -> ConsensusNmfResult:
     """The body of `consensus_nmf`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "consensus_nmf", refuse=False)
     _check_k(k, 2)
     if n_runs < 2:
         raise ValueError("n_runs must be at least 2.")
@@ -828,7 +828,6 @@ def nmf_k_sweep(
         >>> sweep = bv.nmf.nmf_k_sweep(sc, k_range=range(3, 8), n_runs=10)
         >>> sweep.frame
     """
-    check_rna_counts(sc, "nmf_k_sweep", refuse=False)
     return _nmf_k_sweep(
         sc,
         k_range,
@@ -863,6 +862,7 @@ def _nmf_k_sweep(
 ) -> NmfKSweepResult:
     """The body of `nmf_k_sweep`, with the extension module `ext` supplied, so
     the GPU twin shares it."""
+    check_rna_counts(sc, "nmf_k_sweep", refuse=False)
     ks = [int(k) for k in k_range]
     if not ks or len(set(ks)) != len(ks) or min(ks) < 2:
         raise ValueError("k_range must hold unique integers of at least 2.")
