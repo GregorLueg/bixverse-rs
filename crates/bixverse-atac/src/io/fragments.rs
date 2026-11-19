@@ -1758,7 +1758,14 @@ mod tests {
         // chr1's bytes under chr2's name, as a stale index would give
         spans[0].name = "chr2".into();
         let idx = BarcodeIndex::new(&cells).unwrap();
-        let r = fold_fragment_spans(&file, &spans[..1], &idx, || 0usize, |a, _, f| *a += f.len(), |a, b| a + b);
+        let r = fold_fragment_spans(
+            &file,
+            &spans[..1],
+            &idx,
+            || 0usize,
+            |a, _, f| *a += f.len(),
+            |a, b| a + b,
+        );
         assert!(matches!(r, Err(AtacErrors::InvalidArgument(m)) if m.contains("tabix")));
     }
 
@@ -1768,14 +1775,26 @@ mod tests {
         let fold = |a: &mut usize, _: &str, f: &[Fragment]| *a += f.len();
         let run = |cells: &[String], targets: Option<&[&str]>| {
             let idx = BarcodeIndex::new(cells).unwrap();
-            fold_fragments_checked(&file, cells, &idx, targets, "features", || 0usize, fold, |a, b| a + b)
+            fold_fragments_checked(
+                &file,
+                cells,
+                &idx,
+                targets,
+                "features",
+                || 0usize,
+                fold,
+                |a, b| a + b,
+            )
         };
         let cells: Vec<String> = ["AAAC-1", "NONE-1"].map(String::from).to_vec();
 
         let (_, cov) = run(&cells, Some(&["chr1", "chr2"])).unwrap();
         assert_eq!(cov.cells_missing, 1);
         assert_eq!(cov.fragments_total, cov.per_chrom.values().sum::<u64>());
-        assert!((cov.off_target_fraction() - 1.0 / 3.0).abs() < 0.05, "chrX is off target");
+        assert!(
+            (cov.off_target_fraction() - 1.0 / 3.0).abs() < 0.05,
+            "chrX is off target"
+        );
 
         let suffixless: Vec<String> = ["AAAC", "CCCG"].map(String::from).to_vec();
         assert!(matches!(
@@ -1794,14 +1813,24 @@ mod tests {
         let autosome = |c: &str| c != "chrX";
         for bytes in [text.clone().into_bytes(), bgzf_bytes(text.as_bytes(), 997)] {
             let f = temp_file(&bytes);
-            assert_eq!(last_used_chromosome(&f, autosome).unwrap().as_deref(), Some("chr2"));
-            assert_eq!(last_used_chromosome(&f, |_| true).unwrap().as_deref(), Some("chrX"));
+            assert_eq!(
+                last_used_chromosome(&f, autosome).unwrap().as_deref(),
+                Some("chr2")
+            );
+            assert_eq!(
+                last_used_chromosome(&f, |_| true).unwrap().as_deref(),
+                Some("chrX")
+            );
             assert_eq!(last_used_chromosome(&f, |c| c == "chrY").unwrap(), None);
         }
         let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
         gz.write_all(text.as_bytes()).unwrap();
         let f = temp_file(&gz.finish().unwrap());
-        assert_eq!(last_used_chromosome(&f, autosome).unwrap(), None, "plain gzip");
+        assert_eq!(
+            last_used_chromosome(&f, autosome).unwrap(),
+            None,
+            "plain gzip"
+        );
     }
 
     #[test]

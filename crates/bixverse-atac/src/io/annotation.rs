@@ -171,14 +171,22 @@ fn read_gtf_rows(path: &Path, feature: &str) -> Result<Vec<GeneRecord>, AtacErro
             .filter(|n| !n.is_empty())
             .unwrap_or(&gene_id)
             .to_string();
-        let biotype = ["gene_type", "gene_biotype", "transcript_type", "transcript_biotype"]
-            .iter()
-            .find_map(|k| gtf_attribute(f[8], k))
-            .unwrap_or("")
-            .to_string();
+        let biotype = [
+            "gene_type",
+            "gene_biotype",
+            "transcript_type",
+            "transcript_biotype",
+        ]
+        .iter()
+        .find_map(|k| gtf_attribute(f[8], k))
+        .unwrap_or("")
+        .to_string();
         // gene rows stand as they are; transcript and exon rows of one gene on
         // one chromosome collapse to their span
-        if let Some(&i) = by_id.get(&gene_id).filter(|&&i| feature != "gene" && genes[i].chrom == f[0]) {
+        if let Some(&i) = by_id
+            .get(&gene_id)
+            .filter(|&&i| feature != "gene" && genes[i].chrom == f[0])
+        {
             let g = &mut genes[i];
             g.start = g.start.min(start - 1);
             g.end = g.end.max(end);
@@ -239,7 +247,12 @@ fn check_biotypes(genes: &[GeneRecord], biotypes: &[String]) -> Result<(), AtacE
     let present = if present == [""] {
         "none (the GTF carries no biotype attributes); pass an empty biotype list".to_string()
     } else {
-        present.iter().take(5).copied().collect::<Vec<_>>().join(", ")
+        present
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     Err(AtacErrors::InvalidArgument(format!(
         "no gene has a biotype in {biotypes:?}; the GTF has: {present}"
@@ -266,6 +279,29 @@ pub fn tss_positions(
         .iter()
         .filter(|g| keep_biotype(g, biotypes))
         .map(|g| (g.chrom.clone(), g.tss()))
+        .collect())
+}
+
+/// TSSs with their strand, for strand-aware profiles.
+///
+/// ### Params
+///
+/// * `genes` - From [`read_gtf_genes`]
+/// * `biotypes` - Biotypes to keep, empty for all
+///
+/// ### Returns
+///
+/// `(chromosome, 0-based position, strand)` per kept gene, in input order,
+/// or an error when the filter keeps no gene.
+pub fn tss_sites(
+    genes: &[GeneRecord],
+    biotypes: &[String],
+) -> Result<Vec<(String, u32, i8)>, AtacErrors> {
+    check_biotypes(genes, biotypes)?;
+    Ok(genes
+        .iter()
+        .filter(|g| keep_biotype(g, biotypes))
+        .map(|g| (g.chrom.clone(), g.tss(), g.strand))
         .collect())
 }
 
@@ -304,6 +340,9 @@ fn make_unique(names: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Regions, gene names and gene ids of the gene activity features, parallel.
+pub type GeneActivityRegions = (Vec<FeatureInterval>, Vec<String>, Vec<String>);
+
 /// Gene body plus promoter regions for gene activity (Signac
 /// `GeneActivity`).
 ///
@@ -325,7 +364,7 @@ fn make_unique(names: &[String]) -> Vec<String> {
 pub fn gene_activity_regions(
     genes: &[GeneRecord],
     params: &GeneActivityParams,
-) -> Result<(Vec<FeatureInterval>, Vec<String>, Vec<String>), AtacErrors> {
+) -> Result<GeneActivityRegions, AtacErrors> {
     check_biotypes(genes, &params.biotypes)?;
     let kept: Vec<&GeneRecord> = genes
         .iter()

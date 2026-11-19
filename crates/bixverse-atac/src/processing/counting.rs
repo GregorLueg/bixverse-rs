@@ -18,7 +18,9 @@ use bixverse_sc_data::store::interval_index::{
 use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
 use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
-use crate::io::fragments::{BarcodeIndex, Coverage, Fragment, extend_larger, fold_fragments_checked};
+use crate::io::fragments::{
+    BarcodeIndex, Coverage, Fragment, extend_larger, fold_fragments_checked,
+};
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 

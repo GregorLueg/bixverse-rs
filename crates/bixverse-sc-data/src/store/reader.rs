@@ -1411,7 +1411,10 @@ impl ParallelSparseReader {
             .get(at..at + 8)
             .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
             .ok_or_else(corrupt)?;
-        let end = (start + 8).checked_add(size).filter(|&e| e <= limit).ok_or_else(corrupt)?;
+        let end = (start + 8)
+            .checked_add(size)
+            .filter(|&e| e <= limit)
+            .ok_or_else(corrupt)?;
         Ok((&self.mmap[at + 8..end as usize], at))
     }
 
@@ -2787,8 +2790,7 @@ impl SingleCellReading for ParallelSparseReader {
     /// before the field entered the header and stores whose norm is not
     /// log-CPM (see [`ParallelSparseReader::norm_scale`] for those).
     fn target_size(&self) -> Option<f32> {
-        (self.target_size != 0.0 && self.norm_kind == NormKind::LogCpm)
-            .then_some(self.target_size)
+        (self.target_size != 0.0 && self.norm_kind == NormKind::LogCpm).then_some(self.target_size)
     }
 }
 

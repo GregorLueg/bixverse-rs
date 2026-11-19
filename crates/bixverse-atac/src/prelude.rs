@@ -26,4 +26,5 @@ pub use crate::processing::lsi::{
     LsiParams, LsiResult, TF_IDF_SCALE, lsi_on_matrix, lsi_on_store, project_lsi, read_tf_idf,
     set_tf_idf_on_store,
 };
+pub use crate::processing::profiles::{FragmentProfiles, fragment_profiles};
 pub use crate::processing::qc::{FragmentQc, FragmentQcParams, fragment_qc};

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use bixverse_sc_data::store::chunk::CsrCellChunk;
 use bixverse_sc_data::store::gene_file::write_gene_file;
 use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
-use bixverse_sc_data::store::v5::{FeatureKind, NormKind, set_cell_ids, set_store_metadata, verify_store};
+use bixverse_sc_data::store::v5::{
+    FeatureKind, NormKind, set_cell_ids, set_store_metadata, verify_store,
+};
 use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
 /// Target size of both stores.
@@ -67,7 +69,11 @@ fn check(cells: &str, genes: &str, version: u32) {
         assert_eq!(cell.indices, idx, "cell {c}");
         assert_eq!(cell.data_raw.iter().collect::<Vec<_>>(), raw, "cell {c}");
         for (k, &g) in idx.iter().enumerate() {
-            assert_eq!(cell.data_norm[k].to_bits(), norm(c, g as usize).to_bits(), "cell {c}");
+            assert_eq!(
+                cell.data_norm[k].to_bits(),
+                norm(c, g as usize).to_bits(),
+                "cell {c}"
+            );
         }
     }
     for g in 0..6 {
@@ -105,7 +111,10 @@ fn test_golden_v5_store_reads() {
 #[ignore]
 fn regenerate_golden_fixtures() {
     std::fs::create_dir_all(dir()).unwrap();
-    for (version, cells, genes) in [(4, "v4_cells.bin", "v4_genes.bin"), (5, "v5_cells.bin", "v5_genes.bin")] {
+    for (version, cells, genes) in [
+        (4, "v4_cells.bin", "v4_genes.bin"),
+        (5, "v5_cells.bin", "v5_genes.bin"),
+    ] {
         let (cells, genes) = (path(cells), path(genes));
         let mut w = if version == 4 {
             CellGeneSparseWriter::new_v4(&cells, true, 5, 6, TARGET).unwrap()

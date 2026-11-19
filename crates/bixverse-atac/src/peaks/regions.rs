@@ -265,7 +265,11 @@ mod tests {
     #[test]
     fn test_read_bed_takes_spaces_and_skips_empty_records() {
         let p = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        std::fs::write(&p, "track name=x\nchr1 10 20\nchr1\t30\t30\tzero\nchr2\t5\t9\tname\t0\t+\n").unwrap();
+        std::fs::write(
+            &p,
+            "track name=x\nchr1 10 20\nchr1\t30\t30\tzero\nchr2\t5\t9\tname\t0\t+\n",
+        )
+        .unwrap();
         let r = read_bed(&p).unwrap();
         assert_eq!(r, vec![region("chr1", 10, 20), region("chr2", 5, 9)]);
         std::fs::write(&p, "chr1\t20\t10\n").unwrap();

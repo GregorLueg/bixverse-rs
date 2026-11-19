@@ -1253,7 +1253,10 @@ pub fn check_store_pair(
     if cells.norm_scale().to_bits() != genes.norm_scale().to_bits() {
         return differ("norm target size or TF-IDF scale");
     }
-    let bits = |r: &ParallelSparseReader| r.idf().map(|w| w.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+    let bits = |r: &ParallelSparseReader| {
+        r.idf()
+            .map(|w| w.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
+    };
     if bits(cells) != bits(genes) {
         return differ("IDF");
     }
@@ -1374,7 +1377,12 @@ mod tests {
         let codes = section_codes(&s[0]);
         assert!(codes.contains(&99), "unknown section carried");
         assert!(!codes.contains(&98), "unknown derived section dropped");
-        assert!(ParallelSparseReader::new(&s[0]).unwrap().cell_id_hash().is_some());
+        assert!(
+            ParallelSparseReader::new(&s[0])
+                .unwrap()
+                .cell_id_hash()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1416,7 +1424,10 @@ mod tests {
         reseal(&s[0]);
         let r = ParallelSparseReader::new(&s[0]).unwrap();
         assert_eq!(r.feature_kind(), FeatureKind::Unknown(77));
-        assert_eq!(r.read_cell(3).unwrap().indices, synthetic_cells()[3].indices);
+        assert_eq!(
+            r.read_cell(3).unwrap().indices,
+            synthetic_cells()[3].indices
+        );
     }
 
     #[test]
@@ -1461,11 +1472,23 @@ mod tests {
         let original = std::fs::read(&s[0]).unwrap();
 
         patch(&s[0], |b| b[at + 8 + 25] |= 0x80);
-        assert!(ParallelSparseReader::new(&s[0]).unwrap().read_cell(0).is_err());
+        assert!(
+            ParallelSparseReader::new(&s[0])
+                .unwrap()
+                .read_cell(0)
+                .is_err()
+        );
 
         std::fs::write(&s[0], &original).unwrap();
-        patch(&s[0], |b| b[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes()));
-        assert!(ParallelSparseReader::new(&s[0]).unwrap().read_cell(0).is_err());
+        patch(&s[0], |b| {
+            b[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes())
+        });
+        assert!(
+            ParallelSparseReader::new(&s[0])
+                .unwrap()
+                .read_cell(0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1596,7 +1619,14 @@ mod tests {
         merge_sc_bin_files(&[task], &s[1], 4, true, TARGET, false).unwrap();
         let out = ParallelSparseReader::new(&s[1]).unwrap();
         assert_eq!(out.feature_kind(), FeatureKind::Snp);
-        assert_eq!(out.read_cell(1).unwrap().data_raw.iter().collect::<Vec<_>>(), [1, 5]);
+        assert_eq!(
+            out.read_cell(1)
+                .unwrap()
+                .data_raw
+                .iter()
+                .collect::<Vec<_>>(),
+            [1, 5]
+        );
     }
 
     #[test]

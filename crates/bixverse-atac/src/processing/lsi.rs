@@ -20,8 +20,8 @@ use rayon::prelude::*;
 
 use bixverse_core::core::math::vector_helpers::{mean_sd_f64, pearson_correlation};
 use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
-use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
 use bixverse_sc_data::store::chunk::norm_value;
+use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
 
 use crate::prelude::*;
 

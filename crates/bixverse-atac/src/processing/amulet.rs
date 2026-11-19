@@ -469,8 +469,18 @@ pub fn amulet(
         return Err(AtacErrors::InvalidArgument(format!(
             "no restriction region lies on a chromosome AMULET used (regions on {}, fragments on \
              {}); check the chromosome naming",
-            restrict_chroms.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
-            used_seen.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            restrict_chroms
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            used_seen
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
 

@@ -1,13 +1,13 @@
-"""SnapATAC2 and muon reference values on the chr22 fixture inputs.
+"""SnapATAC2 reference values on the chr22 fixture inputs.
 
 Run from the repository root, after gen_atac_inputs.R and gen_atac_signac.R:
 
     RAYON_NUM_THREADS=1 POLARS_MAX_THREADS=1 OMP_NUM_THREADS=1 \\
     OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \\
-    uv run --python 3.12 --with snapatac2==2.10.0 --with muon==0.2.1 \\
+    uv run --python 3.12 --with snapatac2==2.10.0 \\
         --with beartype python dev/atac/gen_atac_scverse.py
 
-Writes snapatac2/ and muon/ under
+Writes snapatac2/ under
 crates/bixverse-atac/tests/fixtures/pbmc3k_chr22/. Coordinates are 0-based
 half-open throughout (SnapATAC2 works in BED coordinates already).
 """
@@ -16,8 +16,6 @@ import gzip
 from importlib.metadata import version
 from pathlib import Path
 
-import anndata as ad
-import muon as mu
 import numpy as np
 import scipy.sparse as sp
 import snapatac2 as snap
@@ -29,7 +27,6 @@ from beartype import beartype
 
 FIX_DIR: Path = Path("crates/bixverse-atac/tests/fixtures/pbmc3k_chr22")
 STRATEGIES: list[str] = ["fragment", "insertion", "paired-insertion"]
-MUON_N_COMPS: int = 10
 
 
 @beartype
@@ -214,11 +211,6 @@ def run_snapatac2(cells: list[str], out: Path) -> None:
         [[str(i - 2000), str(int(v))] for i, v in enumerate(profile)],
         out / "tss_profile.tsv",
     )
-    write_dense(
-        ["library_tsse", "frac_overlap_TSS"],
-        [[fmt(float(data.uns["library_tsse"])), fmt(float(data.uns["frac_overlap_TSS"]))]],
-        out / "library_tsse.tsv",
-    )
     distr = np.asarray(data.uns["frag_size_distr"])
     write_dense(
         ["size", "fragments"],
@@ -229,59 +221,6 @@ def run_snapatac2(cells: list[str], out: Path) -> None:
     with gzip.open(out / "tss.bed.gz", "wt") as f:
         for c, t, s in tss:
             f.write(f"{c}\t{t}\t{t + 1}\t.\t.\t{s}\n")
-
-
-@beartype
-def run_muon(cells: list[str], out: Path) -> None:
-    """muon TF-IDF and LSI on the Signac FeatureMatrix peak counts."""
-    out.mkdir(parents=True, exist_ok=True)
-    peak_lines = (FIX_DIR / "peaks.bed").read_text().splitlines()
-    peaks = [tuple(line.split("\t")) for line in peak_lines]
-    feats = [(c, int(s), int(e), f"{c}:{s}-{e}") for c, s, e in peaks]
-    counts = read_triplets(
-        FIX_DIR / "signac" / "peaks" / "matrix.tsv.gz", len(peaks), len(cells)
-    )
-    adata = ad.AnnData(X=counts.astype(np.float64))
-    adata.obs_names = cells
-    adata.var_names = [f[3] for f in feats]
-
-    # the TF-IDF matrix itself is not written (size); idf.tsv plus the formula
-    # in the README reproduce it
-    col_sums = np.asarray(counts.sum(axis=0)).ravel()
-    mu.atac.pp.tfidf(adata)
-    with np.errstate(divide="ignore"):
-        idf = np.log1p(len(cells) / col_sums)
-    write_dense(
-        ["feature_idx", "count", "log1p_idf"],
-        [[str(i), str(int(c)), fmt(float(v))] for i, (c, v) in enumerate(zip(col_sums, idf))],
-        out / "idf.tsv",
-    )
-
-    # scipy svds (ARPACK) draws its start vector from the global numpy state
-    np.random.seed(0)
-    mu.atac.tl.lsi(adata, n_comps=MUON_N_COMPS)
-    comps = [f"LSI_{i + 1}" for i in range(MUON_N_COMPS)]
-    emb = adata.obsm["X_lsi"]
-    write_dense(
-        ["barcode", *comps],
-        [[b, *map(fmt, map(float, emb[i]))] for i, b in enumerate(cells)],
-        out / "lsi_embeddings.tsv.gz",
-    )
-    load = adata.varm["LSI"]
-    write_dense(
-        ["feature_idx", *comps],
-        [[str(i), *map(fmt, map(float, load[i]))] for i in range(load.shape[0])],
-        out / "lsi_loadings.tsv.gz",
-    )
-    stdev = adata.uns["lsi"]["stdev"]
-    write_dense(
-        ["component", "d", "sdev"],
-        [
-            [str(i + 1), fmt(float(stdev[i] * np.sqrt(adata.n_obs - 1))), fmt(float(stdev[i]))]
-            for i in range(MUON_N_COMPS)
-        ],
-        out / "lsi_components.tsv",
-    )
 
 
 @beartype
@@ -313,11 +252,9 @@ def check_signac_overlap(cells: list[str]) -> None:
 def main() -> None:
     cells = (FIX_DIR / "cells.txt").read_text().split()
     run_snapatac2(cells, FIX_DIR / "snapatac2")
-    run_muon(cells, FIX_DIR / "muon")
     check_signac_overlap(cells)
     for out, pkgs in (
         (FIX_DIR / "snapatac2" / "versions.txt", ["snapatac2", "anndata", "numpy", "scipy"]),
-        (FIX_DIR / "muon" / "versions.txt", ["muon", "anndata", "scanpy", "numpy", "scipy"]),
     ):
         out.write_text("".join(f"{p} {version(p)}\n" for p in pkgs))
 

@@ -14,6 +14,7 @@ its OverlapSummary.txt (gzipped) next to the input:
         crates/bixverse-atac/tests/fixtures/pbmc3k_chr22 \\
         crates/bixverse-atac/tests/fixtures/amulet_trailing 4000
 """
+
 import gzip
 import sys
 from pathlib import Path
@@ -29,7 +30,9 @@ with gzip.open(fix / "fragments.tsv.gz", "rt") as fh:
     for line in fh:
         (header if line.startswith("#") else body).append(line.rstrip("\n").split("\t"))
 body = body[: int(sys.argv[3])]
-cells = [l.strip() for l in open(fix / "cells.txt") if l.strip()][:5]
+cells = [l.strip() for l in (fix / "cells.txt").read_text().splitlines() if l.strip()][
+    :5
+]
 top = max(int(p[1]) for p in body)
 pos = top + 10_000
 extra = []

@@ -306,7 +306,10 @@ fn verify_conversion(old: &str, new: &str) -> Result<(), ScDataErrors> {
         if a.read_cell_library_sizes(&all)? != b.read_cell_library_sizes(&all)? {
             return differ("library sizes");
         }
-        let (x, y) = (a.read_cells_parallel(&sample)?, b.read_cells_parallel(&sample)?);
+        let (x, y) = (
+            a.read_cells_parallel(&sample)?,
+            b.read_cells_parallel(&sample)?,
+        );
         let raw = |c: &CsrCellChunk| (c.indices.clone(), c.data_raw.iter().collect::<Vec<u32>>());
         if x.iter().map(raw).ne(y.iter().map(raw)) {
             return differ("raw counts");
