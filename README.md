@@ -35,7 +35,7 @@ version and are released together.
 | `bixverse-methods` | `enrichment`, `graph`, `methods`, `ontology` | core |
 | `bixverse-sc-data` | The single cell data layer: the binary store (format v5), its readers and writers, MTX (plain or gzipped), h5ad / 10x h5 behind `h5`, anndata Zarr behind `zarr`, and obs / var to Parquet behind `parquet` | sparse |
 | `bixverse-sc` | The rest of the single cell suite | methods, sc-data |
-| `bixverse-sc-export` | A store to h5ad or AnnData Zarr through `scx-core` | sc-data |
+| `bixverse-sc-export` | A store to h5ad or AnnData Zarr through `scx-core`, streamed in cell batches, any cell and gene subset | sc-data |
 | `bixverse-atac` | Single cell ATAC: fragments and 10x peaks into peak or tile stores, QC, AMULET, a MACS3 peak caller, gene activity, TF-IDF, LSI, rLSI | sc |
 | `bixverse-gpu` | GPU linear algebra and bulk methods via `cubecl` | methods |
 | `bixverse-sc-gpu` | GPU single cell methods | sc, gpu |
@@ -90,7 +90,7 @@ single crate sets that crate's flag instead (`h5` on `bixverse-sc-data`,
 | `parquet` | Writes the h5ad obs / var frames and the 10x barcodes and features to Parquet, ready for DuckDB's `read_parquet`. No arrow, implies `h5` |
 | `zarr` | The h5ad ingest paths also read anndata Zarr stores (v2 and v3), implies `h5` |
 | `zarr-blosc` | Blosc for Zarr, the zarr v2 default codec. Builds C++, implies `zarr` |
-| `export` | `single_cell::sc_export`: a store to h5ad through `scx-core`, implies `h5` |
+| `export` | `single_cell::sc_export`: a store to h5ad through `scx-core`, streamed in cell batches, implies `h5` |
 | `export-zarr` | Export to AnnData Zarr as well, implies `export` and `zarr` |
 | `atac` | `single_cell::atac`, single cell ATAC, implies `single-cell`; with `h5` also the 10x multiome peak reader |
 | `multi-modal` | `single_cell::multi_modal` (WNN, DSB), implies `single-cell` |

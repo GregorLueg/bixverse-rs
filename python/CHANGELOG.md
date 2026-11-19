@@ -36,7 +36,9 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 - `bv.annotate.transfer_labels_seurat`: Seurat's CCA anchors and
   `TransferData`, RNA to RNA or RNA to gene activity.
 - The h5ad loaders and readers take anndata Zarr stores (v2 and v3, Blosc
-  included); `bv.io.save_zarr` writes one.
+  included); `bv.io.save_zarr` writes one, `genes=` included.
+- `bv.io.save_h5ad` takes `genes=` (indices or ids, in column order) and
+  streams only those genes out of the store (#129).
 - `bv.io.download_pbmc_multiome`, and a joint RNA and ATAC vignette on it.
 - `node_order` on `find_clusters` and the fast clustering bundles; the
   Harmony bundles take `k_means_algorithm` and `e_means_epochs`, fast

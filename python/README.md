@@ -56,6 +56,10 @@ next to them and come back as polars frames. QC doesn't delete anything:
 `sc.set_cells_to_keep()` decides which cells every later step sees. Functions take
 the experiment first and write into it, and the cache tracks what has gone stale.
 
+Need it in ScanPy? `bv.io.save_h5ad(sc, "out.h5ad")` (or `save_zarr`) streams
+the kept cells out of the store in batches, so the matrix never sits in memory
+whole. `genes=` takes indices or ids and writes only those, in that order.
+
 Everything reports progress by default. `verbose` takes `0` (`False`) for silent,
 `1` (`True`) for progress and `2` for extra detail where the method has it.
 `logging.getLogger("bixverse").setLevel(logging.WARNING)` silences the Python log
