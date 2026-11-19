@@ -57,6 +57,7 @@ Getting counts into an experiment directory, and back out.
 - `download_pbmc8k`: The 10x PBMC 8k data.
 - `download_pbmc_1k_5p`: The unfiltered 10x PBMC 1k 5' matrix.
 - `download_pbmc_batches`: Two PBMC h5ad files, for batch correction.
+- `download_pbmc_multiome`: The 10x PBMC unsorted 3k multiome (Cell Ranger ARC 2.0).
 - `download_pbmc_totalseq_data`: The 10k PBMC TotalSeq-B data, with ADT counts.
 - `download_thymus_ageing`: The Baran-Gale et al. ageing thymus data (Development, 2020).
 - `generate_cellsweep_test_data`: Synthetic counts with a planted ambient profile, for CellSweep.
@@ -188,8 +189,8 @@ Batch correction and integration metrics.
 - `calculate_lisi`: LISI on the cached kNN.
 - `calculate_pcr`: Principal component regression on batch.
 - `fast_mnn`: fastMNN on a PCA of the batch-aware HVGs.
-- `harmony`: Harmony (v2) on the PCA.
-- `harmony_v1`: The original Harmony (v1) on the PCA.
+- `harmony`: Harmony (v2) on the PCA or another embedding.
+- `harmony_v1`: The original Harmony (v1) on the PCA or another embedding.
 - `seurat_cca`: Seurat CCA anchor integration.
 - `seurat_rpca`: Seurat reciprocal PCA anchor integration.
 
@@ -204,8 +205,8 @@ Marker genes, donor-aware differential expression and differential abundance.
 - `ScNebula`: NEBULA fits.
 - `ScSpecificMarkers`: One-vs-many specific markers.
 - `add_nhoods_info`: The majority cell type of each neighbourhood.
-- `find_all_markers`: One-vs-rest Wilcoxon DGE for every group of a column.
-- `find_markers`: Wilcoxon DGE between two groups of cells.
+- `find_all_markers`: One-vs-rest Wilcoxon or logistic regression DGE for every group.
+- `find_markers`: Wilcoxon or logistic regression DGE between two groups of cells.
 - `find_specific_markers`: Markers that hold up against every rival group separately.
 - `get_differential_abundance_res`: The differential abundance table; warns and returns `None` if untested.
 - `get_index_cells`: The neighbourhood index cells, 0-based positions among the kept cells.
