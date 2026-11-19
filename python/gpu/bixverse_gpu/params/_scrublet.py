@@ -1,8 +1,8 @@
-"""GPU Scrublet parameters, written by hand.
+"""GPU Scrublet parameters.
 
-The kNN block is the GPU or the CPU one depending on `knn_backend`, so the
-bundle is not generated. Both blocks share five key names, so the block has to
-match the backend; a CPU-only knob would otherwise do nothing on the GPU arm.
+The kNN block is the GPU or the CPU one depending on `knn_backend`. Both blocks
+share five key names, so the block has to match the backend; a CPU-only knob
+would otherwise do nothing on the GPU arm.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from beartype import BeartypeConf, beartype
 
 from bixverse.params import HvgDefaults, KnnDefaults, NormDoubletsDefaults
 from bixverse.params._checks import check_range
-from bixverse_gpu.params._generated import KnnGpuDefaults
+from bixverse_gpu.params._specs import KnnGpuDefaults
 
 _CONF = BeartypeConf(is_pep484_tower=True)
 

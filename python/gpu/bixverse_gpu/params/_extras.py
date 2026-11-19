@@ -1,7 +1,6 @@
-"""Cross-field rules for the generated GPU param bundles.
+"""Cross-field rules for the GPU param bundles in `_specs`.
 
-The generator cannot express these, so they are written here by hand and keyed
-by class name, as `bixverse.params._extras` does for the CPU bundles.
+Keyed by class name, as `bixverse.params._extras` does for the CPU bundles.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ def run(p: object) -> None:
     """Apply the cross-field rule for this bundle's class, if it has one.
 
     Args:
-        p: A generated param bundle.
+        p: A param bundle.
 
     Raises:
         ValueError: If a rule fails.
