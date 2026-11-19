@@ -1,6 +1,6 @@
 ---
 name: bixverse-python
-description: How to USE the bixverse Python package (`import bixverse as bv`), a single cell suite on the bixverse-rs Rust crates. Covers installation and extras, the on-disk SingleCells store, loading MTX / h5ad / 10x h5 / in-memory matrices, QC, doublets and empty droplets, CellSweep ambient RNA removal, HVG, PCA, Pearson residuals, batch correction (Harmony, fastMNN, BBKNN, Seurat CCA/rPCA) and integration metrics, neighbours and Leiden clustering, UMAP/t-SNE/PHATE, markers and differential expression (pseudobulk edgeR, NEBULA), differential abundance (miloR, MELD), ScType and Symphony annotation, ligand-receptor analysis, gene set scoring, HotSpot and SCENIC, NMF, DIALOGUE, trajectories, Bonsai, metacells, CITE-seq/WNN, the minibatch loader and scVI (bixverse.nn), and the bixverse-gpu twins. Use this whenever Python code imports bixverse or bixverse_gpu, calls any bv.io / bv.qc / bv.pp / bv.graph / bv.integrate / bv.de / bv.annotate / bv.params function, or works with SingleCells, SingleCellsSubset, MetaCells, CellLoader or get_counts. Apply even when the package is not named but the user works on single cell data in a Python project that depends on bixverse.
+description: How to USE the bixverse Python package (`import bixverse as bv`), a single cell suite on the bixverse-rs Rust crates. Covers installation and extras, the on-disk SingleCells store, loading MTX / h5ad / anndata Zarr / 10x h5 / in-memory matrices, store format upgrades, QC, doublets and empty droplets, CellSweep ambient RNA removal, HVG, PCA, Pearson residuals, batch correction (Harmony, fastMNN, BBKNN, Seurat CCA/rPCA) and integration metrics, neighbours and Leiden clustering, UMAP/t-SNE/PHATE, markers (Wilcoxon or logistic regression) and differential expression (pseudobulk edgeR, NEBULA), differential abundance (miloR, MELD), ScType, Symphony and Seurat label transfer, ligand-receptor analysis, gene set scoring, HotSpot and SCENIC, NMF, DIALOGUE, trajectories, Bonsai, metacells, CITE-seq/WNN, single cell ATAC (fragments, peak calling, TF-IDF, LSI, rLSI, gene activity, differential accessibility), the minibatch loader and scVI (bixverse.nn), and the bixverse-gpu twins. Use this whenever Python code imports bixverse or bixverse_gpu, calls any bv.io / bv.qc / bv.pp / bv.graph / bv.integrate / bv.de / bv.annotate / bv.atac / bv.params function, or works with SingleCells, SingleCellsSubset, SingleCellsMultiModal, MetaCells, CellLoader or get_counts. Apply even when the package is not named but the user works on single cell data in a Python project that depends on bixverse.
 ---
 
 # Using bixverse in Python
@@ -9,7 +9,7 @@ description: How to USE the bixverse Python package (`import bixverse as bv`), a
 bixverse-rs Rust crates. An experiment lives on disk, so a million cells on a
 laptop is the design target.
 
-The API has about 400 public names across 22 modules. Do not guess at
+The API has about 420 public names across 23 modules. Do not guess at
 signatures. Check `references/api-index.md` for whether something exists, then
 `help(bv.<module>.<name>)` or `inspect.signature()` for how to call it.
 
@@ -55,7 +55,7 @@ did not need.
 | Installing, extras, building from source, the GPU wheel, nn backends | `references/install.md` |
 | The store, obs / var, params classes, cells to keep, indices, cache and staleness, errors | `references/conventions.md` |
 | Single cell: load, write (incl. streaming a gene subset of a large store to h5ad), read counts, QC, doublets, HVG, PCA, residuals, batch correction, neighbours, clustering, embeddings, markers, CellSweep | `references/single-cell.md` |
-| Single cell downstream: DE, differential abundance, annotation, ligand-receptor, gene set scores, HotSpot, SCENIC, NMF, DIALOGUE, trajectories, Bonsai, metacells, CITE-seq / WNN, pipelines, loader, scVI | `references/single-cell-analysis.md` |
+| Single cell downstream: DE, differential abundance, annotation, ligand-receptor, gene set scores, HotSpot, SCENIC, NMF, DIALOGUE, trajectories, Bonsai, metacells, CITE-seq / WNN, single cell ATAC, pipelines, loader, scVI | `references/single-cell-analysis.md` |
 | Does function X exist? What is it called? | `references/api-index.md` |
 
 ## Smoke test
@@ -122,5 +122,11 @@ print(sc)  # the cache should list hvg, pca and knn
 - **`reset_cells_to_keep` raises without `force=True`.**
 - **The cache survives a restart only after `bv.io.save(sc)`** (written to
   `memory_py.*`). `bv.io.save()` does not persist the residual model.
+- **Stores are format v5.** `load_existing` warns on a v4 store and refuses a
+  v3 one; `bv.io.upgrade_sc_store` converts both. A v5 store does not open in
+  bixverse 0.3.x or in an R build on bixverse-rs 0.10.x.
+- **k-means defaults to e-means** in Harmony, fast clustering (also inside
+  Boost and scDblFinder), SCENIC, DSB and NMF consensus. Lloyd's is opt-in:
+  `km_type="standard"` or `k_means_algorithm="lloyd"`.
 - **GPU twins write their own slots for Harmony and fastMNN**
   (`harmony_gpu`, `mnn_gpu`); pass that name as `embd_to_use` downstream.

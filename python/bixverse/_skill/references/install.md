@@ -78,9 +78,10 @@ bixverse = { git = "https://github.com/GregorLueg/bixverse-rs", branch = "main",
 ```
 
 Python extras cannot switch Rust features, so every wheel carries all of them:
-multi-modal, Bonsai, the edgeR chain (`dge`), `hdf5-static` and `parquet`. One
-HDF5 feature is not compiled in: `hdf5-filters`. h5ad files written with the
-LZF or Blosc codecs therefore do not load; gzip-compressed files do.
+multi-modal, Bonsai, ATAC, the edgeR chain (`dge`), `hdf5-static`, `parquet`
+and anndata Zarr with Blosc. One HDF5 feature is not compiled in:
+`hdf5-filters`. h5ad files written with the LZF or Blosc codecs therefore do
+not load; gzip-compressed files do. A Zarr store with Blosc loads.
 
 ## The GPU wheel
 
@@ -247,6 +248,6 @@ checkout.
 | `BixverseError` from every `bvg.*` call | no GPU adapter; check `bvg.gpu_available()` |
 | source build fails in `hdf5-metno-src` | install CMake and a C compiler (unverified error text) |
 | source build fails on edition 2024 | `rustup update`; rustc 1.85 or newer |
-| h5ad does not load, file uses LZF or Blosc | rewrite it with gzip compression, or export the counts as MTX |
+| h5ad does not load, file uses LZF or Blosc | rewrite it with gzip compression or as an anndata Zarr store, or export the counts as MTX |
 | warning that the store uses the v4 format | `bv.io.upgrade_sc_store(sc)`; v4 still works, v5 is the current format |
 | `RuntimeError` that the store uses the v3 format | `bv.io.upgrade_sc_store("dir")`; v3 no longer opens |
