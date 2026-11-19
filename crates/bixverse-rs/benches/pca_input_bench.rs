@@ -183,7 +183,7 @@ fn main() {
     });
 
     let genes = ParallelSparseReader::new(&path).expect("gene file");
-    let n_cells = genes.get_header().total_cells;
+    let n_cells = genes.dims().total_cells;
     let cells: Vec<usize> = (0..n_cells).collect();
     let hvg = hvgs(&path, &genes, &cells, n_hvg);
     let cell_set: IndexSet<u32> = cells.iter().map(|&c| c as u32).collect();

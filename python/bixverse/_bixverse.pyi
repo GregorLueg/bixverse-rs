@@ -167,13 +167,15 @@ def restore_cells_archive(
     verbose: int = ...,
 ) -> None: ...
 def file_version(path: Path) -> int: ...
-def upgrade_to_v4(
+def upgrade_to_v5(
     f_path_cells: Path,
     f_path_genes: Path,
     codec: str = ...,
     keep_backup: bool = ...,
     verbose: int = ...,
 ) -> None: ...
+def set_cell_ids(f_path_cells: Path, f_path_genes: Path, ids: list[str]) -> None: ...
+def cell_id_hash(path: Path) -> str | None: ...
 
 # obs / var and scans
 
@@ -227,6 +229,7 @@ def save_h5ad(
     obsp: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     uns_json: str,
     chunk_size: int = ...,
+    zarr: bool = ...,
 ) -> None: ...
 def write_h5ad(
     h5_path: Path,

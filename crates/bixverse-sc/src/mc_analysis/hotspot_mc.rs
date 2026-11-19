@@ -139,13 +139,11 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use faer::Mat;
-    use half::f16;
 
     use crate::sc_analysis::hotspot::{HotSpotGraphParams, hotspot_gene_clusters};
     use bixverse_sc_data::data_io::{
         CellGeneSparseWriter, CscGeneChunk, CsrCellChunk, ParallelSparseReader, RawCounts,
     };
-    use bixverse_sc_data::sc_traits::F16;
 
     const N_CELLS: usize = 24;
     const N_GENES: usize = 12;
@@ -198,7 +196,7 @@ mod tests {
     }
 
     /// The same counts as a (cells, genes) CSC matrix with both layers. The
-    /// normalised layer is quantised through `f16` exactly as the writer does,
+    /// normalised layer is computed exactly as the writer does,
     /// so the on-disk and in-memory paths see identical inputs.
     fn to_csc(dense: &[Vec<u32>], lib_sizes: &[f32]) -> CompressedSparseData2<u32, f32> {
         let mut data: Vec<u32> = Vec::new();
@@ -211,7 +209,7 @@ mod tests {
                 if value > 0 {
                     data.push(value);
                     let norm = (value as f32 / lib_sizes[cell] * SIZE_FACTOR).ln_1p();
-                    data_2.push(f16::from_f32(norm).to_f32());
+                    data_2.push(norm);
                     indices.push(cell as u32);
                 }
             }
@@ -238,7 +236,7 @@ mod tests {
                     raw.push(value);
                     idx.push(cell);
                     let norm = (value as f32 / lib_sizes[cell] * SIZE_FACTOR).ln_1p();
-                    norms.push(F16::from(f16::from_f32(norm)));
+                    norms.push(norm);
                 }
             }
 

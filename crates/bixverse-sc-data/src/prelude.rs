@@ -12,4 +12,4 @@ pub use crate::data_io::{
 };
 pub use crate::errors::*;
 pub use crate::sc_traits::*;
-pub use crate::{CELL_BATCH_SIZE, SC_FILE_VERSION, SC_FILE_VERSION_V3};
+pub use crate::{CELL_BATCH_SIZE, SC_FILE_VERSION, SC_FILE_VERSION_V3, SC_FILE_VERSION_V4};

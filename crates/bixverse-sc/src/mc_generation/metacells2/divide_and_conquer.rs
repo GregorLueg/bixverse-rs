@@ -686,7 +686,7 @@ pub fn compute_dac_metacells<S: SingleCellReading>(
             .map(|l| l as f32)
             .collect(),
     };
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
 
     let target_pile_size = dac.target_pile_size.unwrap_or_else(|| {
         compute_target_pile_size(

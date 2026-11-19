@@ -192,6 +192,10 @@ def _finish(
             pl.DataFrame({"no_cells_exp": gene_nnz.astype(np.int32)}),
         )
         db.set_to_keep_column(con)
+        # hash the ids obs ended up with, so cell_id_col and multi-file
+        # prefixes count, not the raw source index
+        ids = [str(x) for x in db.get_ids(con, "obs")]
+    _bixverse.set_cell_ids(directory / CELLS_BIN, directory / GENES_BIN, ids)
     return SingleCells(directory)
 
 
@@ -359,11 +363,11 @@ def load_h5ad(
     csc_mem_gb: float | None = None,
     verbose: Verbose = True,
 ) -> SingleCells:
-    """Load an h5ad file.
+    """Load an h5ad file or anndata Zarr store.
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         qc: Cell and gene QC thresholds and the target size.
         raw_count_slot: Where the raw counts are. `"auto"` detects it, see
             `detect_raw_count_slot`.
@@ -433,7 +437,7 @@ def stream_h5ad(
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         qc: Cell and gene QC thresholds and the target size.
         raw_count_slot: Where the raw counts are. `"auto"` detects it, see
             `detect_raw_count_slot`.
@@ -474,7 +478,7 @@ def load_h5ad_norm(
 
     Args:
         directory: The experiment directory, created if missing.
-        h5_path: The h5ad file.
+        h5_path: The h5ad file or anndata Zarr store.
         obs_lib_size_col: obs column with the total counts per cell.
         target_size: Target size of the original normalisation.
         qc: Cell and gene QC thresholds and the target size.
@@ -1030,36 +1034,46 @@ def archive_sc_exp(
 
 @beartype
 def upgrade_sc_store(
-    sc: SingleCells,
+    sc: SingleCells | str | Path,
     *,
     codec: Literal["lz4", "zstd", "none"] = "lz4",
     keep_backup: bool = True,
     verbose: Verbose = True,
-) -> SingleCells:
-    """Convert a v3 store to the v4 format in place.
+) -> SingleCells | None:
+    """Convert a v3 or v4 store to the v5 format in place.
 
     Converts into temporary files, checks them and swaps them in, so a
     failure leaves the store untouched. Nothing else may hold the files open
-    meanwhile. A store already at v4 is left alone.
+    meanwhile. A store already at v5 is left alone. A v3 store no longer
+    opens, so pass its directory instead of an experiment.
 
     Args:
-        sc: The experiment.
+        sc: The experiment, or the directory holding the store.
         codec: Chunk codec of the new files.
-        keep_backup: Keep the originals as `<path>.v3.bak`.
+        keep_backup: Keep the originals as `<path>.v<n>.bak`, `n` their version.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
     Returns:
-        The experiment, reading the converted store.
+        The experiment, reading the converted store, or `None` when a
+        directory was passed.
 
     Examples:
         >>> sc = bv.io.upgrade_sc_store(sc, codec="zstd")
+        >>> bv.io.upgrade_sc_store("experiments/old_v3")
     """
-    versions = [_bixverse.file_version(p) for p in (sc.cells_path, sc.genes_path)]
-    if min(versions) >= 4:
+    if isinstance(sc, SingleCells):
+        cells, genes = sc.cells_path, sc.genes_path
+    else:
+        directory = Path(sc).expanduser()
+        cells, genes = directory / CELLS_BIN, directory / GENES_BIN
+    versions = [_bixverse.file_version(p) for p in (cells, genes)]
+    if min(versions) >= 5:
         if verbose:
-            logger.info("The store is already in the v4 format. Nothing to do.")
-        return sc
-    _bixverse.upgrade_to_v4(sc.cells_path, sc.genes_path, codec, keep_backup, verbose)
-    sc.reader = _bixverse.CellReader(str(sc.cells_path))
+            logger.info("The store is already in the v5 format. Nothing to do.")
+    else:
+        _bixverse.upgrade_to_v5(cells, genes, codec, keep_backup, verbose)
+    if not isinstance(sc, SingleCells):
+        return None
+    sc.reader = _bixverse.CellReader(str(cells))
     return sc

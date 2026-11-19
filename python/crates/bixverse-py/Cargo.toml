@@ -19,7 +19,7 @@ bixverse-sc = { workspace = true, features = ["multi-modal", "bonsai"] }
 # `hdf5-static` compiles the bundled HDF5 C library instead of linking a
 # system one, so the wheel loads without an HDF5 install. `parquet` hands the
 # h5ad / 10x obs and var to DuckDB.
-bixverse-sc-data = { workspace = true, features = ["hdf5-static", "parquet"] }
+bixverse-sc-data = { workspace = true, features = ["hdf5-static", "parquet", "zarr-blosc"] }
 # the neighbour graph and Leiden, and the edgeR chain behind pseudobulk and Milo
 bixverse-methods = { workspace = true, features = ["dge"] }
 # `mad_outlier` for the QC calls; the macOS table below adds Accelerate.
@@ -31,9 +31,8 @@ numpy.workspace = true
 pyo3.workspace = true
 pythonize.workspace = true
 rand.workspace = true
-scx-core.workspace = true
+bixverse-sc-export = { workspace = true, features = ["zarr"] }
 serde_json.workspace = true
-sprs.workspace = true
 
 # Accelerate GEMM on macOS, as the R package builds it.
 [target.'cfg(target_os = "macos")'.dependencies]

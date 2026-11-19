@@ -874,9 +874,9 @@ mod tests {
                 }
             }
             let sum: f32 = data_raw.iter().map(|&x| x as f32).sum();
-            let data_norm: Vec<F16> = data_raw
+            let data_norm: Vec<f32> = data_raw
                 .iter()
-                .map(|&x| F16::from(half::f16::from_f32((x as f32 / sum * 1e4).ln_1p())))
+                .map(|&x| (x as f32 / sum * 1e4).ln_1p())
                 .collect();
             let chunk = CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&data_raw),

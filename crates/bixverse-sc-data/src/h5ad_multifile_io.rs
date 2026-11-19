@@ -1,8 +1,8 @@
 //! Multi-h5ad loading: scan multiple h5ad files, apply global gene QC,
 //! and write all cells into a single binary file.
 
-use hdf5::File;
-use ndarray::{Array2, s};
+use crate::ann_store::AnnFile;
+use ndarray::Array2;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -12,7 +12,6 @@ use thousands::Separable;
 use super::data_io::*;
 use super::h5_filters::check_h5ad_filters;
 use super::h5ad_io::*;
-use crate::h5_chunked::H5ChunkedReader;
 use crate::prelude::*;
 
 //////////////////
@@ -68,12 +67,12 @@ fn scan_gene_nnz_csr(
     task: &H5adFileTask,
     universe_size: usize,
 ) -> Result<Vec<usize>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
+    let indptr = file.indptr(task.raw_slot.get_indptr())?;
+    let indices_rd = file.array(task.raw_slot.get_indices())?;
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -122,11 +121,11 @@ fn scan_gene_nnz_csc(
     task: &H5adFileTask,
     universe_size: usize,
 ) -> Result<Vec<usize>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+    let indptr = file.indptr(task.raw_slot.get_indptr())?;
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -153,16 +152,19 @@ pub fn scan_gene_nnz_dense_row(
     task: &H5adFileTask,
     universe_size: usize,
 ) -> Result<Vec<usize>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
     check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
 
-    let ds = file.dataset(task.raw_slot.get_dense_path())?;
     let mut gene_nnz = vec![0usize; universe_size];
 
     const CHUNK_SIZE: usize = 10_000;
     for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
         let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
-        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        let block: Array2<f32> = file.read_2d::<f32>(
+            task.raw_slot.get_dense_path(),
+            chunk_start..chunk_end,
+            0..task.no_genes,
+        )?;
         for row in block.outer_iter() {
             for (gene_idx, &val) in row.iter().enumerate() {
                 if val != 0.0
@@ -216,13 +218,13 @@ fn scan_cell_stats_csr(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
+    let indptr = file.indptr(task.raw_slot.get_indptr())?;
+    let data_rd = file.array(task.raw_slot.get_data())?;
+    let indices_rd = file.array(task.raw_slot.get_indices())?;
 
     let mut cell_stats = Vec::with_capacity(task.no_cells);
 
@@ -279,13 +281,13 @@ fn scan_cell_stats_csc(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
-    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
+    let indptr = file.indptr(task.raw_slot.get_indptr())?;
+    let data_rd = file.array(task.raw_slot.get_data())?;
+    let indices_rd = file.array(task.raw_slot.get_indices())?;
 
     let mut cell_unique = vec![0usize; task.no_cells];
     let mut cell_lib_size = vec![0.0f32; task.no_cells];
@@ -340,16 +342,19 @@ pub fn scan_cell_stats_dense_row(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
     check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
 
-    let ds = file.dataset(task.raw_slot.get_dense_path())?;
     let mut cell_stats: Vec<(usize, f32)> = Vec::with_capacity(task.no_cells);
 
     const CHUNK_SIZE: usize = 10_000;
     for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
         let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
-        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        let block: Array2<f32> = file.read_2d::<f32>(
+            task.raw_slot.get_dense_path(),
+            chunk_start..chunk_end,
+            0..task.no_genes,
+        )?;
         for row in block.outer_iter() {
             let mut unique = 0usize;
             let mut lib_size = 0.0f32;
@@ -444,9 +449,9 @@ fn write_h5_csr_cells(
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, ScDataErrors> {
     let indptr = {
-        let file = hdf5::File::open(&task.h5_path)?;
+        let file = AnnFile::open(&task.h5_path)?;
         check_h5ad_is_raw(&file, &task.raw_slot, None)?;
-        read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?
+        file.indptr(task.raw_slot.get_indptr())?
     };
 
     let (nnz, lib_size) = write_h5_cell_major_cells(
@@ -492,13 +497,13 @@ fn write_h5_csc_cells(
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, ScDataErrors> {
-    let file = hdf5::File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let data_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(task.raw_slot.get_indices())?);
-    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
+    let data_rd = file.array(task.raw_slot.get_data())?;
+    let indices_rd = file.array(task.raw_slot.get_indices())?;
+    let indptr = file.indptr(task.raw_slot.get_indptr())?;
 
     let cell_map = dense_index_map(cells_to_keep);
 
@@ -578,11 +583,14 @@ pub fn write_h5_dense_row_cells(
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, ScDataErrors> {
-    let file = File::open(&task.h5_path)?;
+    let file = AnnFile::open(&task.h5_path)?;
     check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
 
-    let ds = file.dataset(task.raw_slot.get_dense_path())?;
-    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+    let no_genes_total = file
+        .shape(task.raw_slot.get_dense_path())?
+        .get(1)
+        .copied()
+        .unwrap_or(0);
 
     let gene_map = dense_gene_map_from_options(gene_mapping);
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
@@ -601,7 +609,11 @@ pub fn write_h5_dense_row_cells(
             .max()
             .expect("batch non-empty by construction")
             + 1;
-        let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
+        let block: Array2<f32> = file.read_2d::<f32>(
+            task.raw_slot.get_dense_path(),
+            row_start..row_end,
+            0..no_genes_total,
+        )?;
 
         let first = cell_offset + written;
         let built = cell_batch
@@ -725,7 +737,9 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
     let total_start = Instant::now();
 
     for task in tasks {
-        check_h5ad_filters(&File::open(&task.h5_path)?, &task.raw_slot, &task.cs_type)?;
+        if let Some(h5) = AnnFile::open(&task.h5_path)?.h5() {
+            check_h5ad_filters(h5, &task.raw_slot, &task.cs_type)?;
+        }
     }
 
     if verbose {

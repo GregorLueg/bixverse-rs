@@ -241,7 +241,7 @@ pub fn get_pseudo_bulked_counts_dense<S: SingleCellReading>(
 ) -> Result<Mat<f64>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let n_groups = cell_indices.len();
     let mut result = Mat::zeros(n_groups, n_genes);
     // `result` is column-major, so a group is accumulated in a contiguous row
@@ -263,7 +263,7 @@ pub fn get_pseudo_bulked_counts_dense<S: SingleCellReading>(
                 }
                 PseudoBulk::Norm => {
                     for (value, &gene_idx) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
-                        row[gene_idx as usize] += value.to_f64();
+                        row[gene_idx as usize] += *value as f64;
                     }
                 }
             }
@@ -316,7 +316,7 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
 ) -> Result<CompressedSparseData2<f64>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let n_groups = cell_indices.len();
     let mut row_data: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n_groups];
 
@@ -336,7 +336,7 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
                 PseudoBulk::Norm => {
                     for (value, &gene_idx) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
                         *row_data[group_idx].entry(gene_idx as usize).or_insert(0.0) +=
-                            value.to_f64();
+                            *value as f64;
                     }
                 }
             }
@@ -420,7 +420,7 @@ pub fn pseudo_bulk_genes_dense<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Mat<f64>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let n_cells = reader.get_header().total_cells;
+    let n_cells = reader.dims().total_cells;
     let n_groups = groups.len();
     let n_genes = gene_indices.len();
 
@@ -485,7 +485,7 @@ pub fn pseudo_bulk_genes_dense<S: SingleCellReading>(
                         // Widen out of f16 before accumulating; summing in f16
                         // biases upwards once the running total passes 64.
                         for (value, &cell) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
-                            let v = value.to_f32() as f64;
+                            let v = *value as f64;
                             let c = cell as usize;
                             for g in &membership[offsets[c] as usize..offsets[c + 1] as usize] {
                                 row[*g as usize] += v;

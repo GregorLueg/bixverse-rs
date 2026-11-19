@@ -253,7 +253,7 @@ fn build_gram<S: SingleCellReading>(
 ) -> Result<GeneGram, ScErrors> {
     let n_in_type = view.cells.len();
     let n_genes = genes.len();
-    let total_cells = reader.get_header().total_cells;
+    let total_cells = reader.dims().total_cells;
 
     let position = view.position_table(total_cells);
 
@@ -269,7 +269,7 @@ fn build_gram<S: SingleCellReading>(
             if row == u32::MAX {
                 continue;
             }
-            let v = value.to_f32();
+            let v = *value;
             let vd = v as f64;
             sum_x[slot] += vd;
             sum_xx[slot] += vd * vd;
@@ -300,33 +300,30 @@ fn build_gram<S: SingleCellReading>(
         "by_cell must be sorted by gene slot"
     );
 
-    let raw = by_cell
+    // Parallel over genes, never over cells: every entry sums its cells in one
+    // fixed order, so the Gram (and the refit scores) are bit-identical across
+    // runs and thread counts. `raw[a][b - a]` holds the lower-triangle entry
+    // `(b, a)`.
+    let raw: Vec<Vec<f64>> = chunks
         .par_iter()
-        .fold(
-            || Mat::<f64>::zeros(n_genes, n_genes),
-            |mut acc, entries| {
-                // Entries are sorted by slot, so `gb >= ga`: fill the lower triangle,
-                // which is contiguous in the inner loop of the column-major matrix
-                for (a, (ga, va)) in entries.iter().enumerate() {
-                    let va = *va as f64;
-                    for (gb, vb) in entries.iter().skip(a) {
-                        acc[(*gb as usize, *ga as usize)] += va * (*vb as f64);
-                    }
+        .enumerate()
+        .map(|(ga, chunk)| {
+            let mut col = vec![0.0_f64; n_genes - ga];
+            for (&cell, va) in chunk.indices.iter().zip(chunk.data_norm.iter()) {
+                let row = position[cell as usize];
+                if row == u32::MAX {
+                    continue;
                 }
-                acc
-            },
-        )
-        .reduce(
-            || Mat::<f64>::zeros(n_genes, n_genes),
-            |mut a, b| {
-                for j in 0..n_genes {
-                    for i in j..n_genes {
-                        a[(i, j)] += b[(i, j)];
-                    }
+                let entries = &by_cell[row as usize];
+                let start = entries.partition_point(|(g, _)| (*g as usize) < ga);
+                let va = *va as f64;
+                for (gb, vb) in &entries[start..] {
+                    col[*gb as usize - ga] += va * (*vb as f64);
                 }
-                a
-            },
-        );
+            }
+            col
+        })
+        .collect();
 
     let sum_y: f64 = response.iter().sum();
     let sum_yy: f64 = response.iter().map(|v| v * v).sum();
@@ -334,7 +331,7 @@ fn build_gram<S: SingleCellReading>(
     let mut ztz = Mat::<f64>::zeros(n_genes, n_genes);
     for i in 0..n_genes {
         for j in i..n_genes {
-            let cross = raw[(j, i)];
+            let cross = raw[i][j - i];
             let value = scale[i] * scale[j] * cross
                 + scale[i] * offset[j] * sum_x[i]
                 + scale[j] * offset[i] * sum_x[j]

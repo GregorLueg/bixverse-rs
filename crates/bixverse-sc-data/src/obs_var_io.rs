@@ -20,6 +20,7 @@ use rustc_hash::FxHashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::ann_store::AnnFile;
 use crate::h5_10x_io::{TenxVersion, read_string_dataset};
 use crate::h5ad_frame_io::{ColumnData, H5adFrame, read_frame};
 use crate::prelude::*;
@@ -521,7 +522,7 @@ fn finish(
 ///
 /// ### Params
 ///
-/// * `h5_path` - The h5ad file
+/// * `h5_path` - The h5ad file or Zarr store
 /// * `kind` - Obs or var
 /// * `keep` - Optional 0-based rows to keep, in output order (the cell or
 ///   gene indices the count write kept)
@@ -540,8 +541,7 @@ pub fn h5ad_frame_to_parquet<P: AsRef<Path>, Q: AsRef<Path>>(
     id_col: Option<&str>,
     out_path: Q,
 ) -> Result<ParquetFrameInfo, ScDataErrors> {
-    let file = File::open(h5_path)?;
-    let frame = read_frame(&file.group(kind.group())?)?;
+    let frame = read_frame(&AnnFile::open(h5_path)?, kind.group())?;
     let skipped = frame.skipped.clone();
     let cols = assemble_h5ad(frame, kind, id_col)?;
     let (cols, n_rows) = filter_and_index(cols, keep, kind.idx_name())?;

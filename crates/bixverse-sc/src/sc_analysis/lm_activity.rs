@@ -44,7 +44,7 @@ pub fn calculate_lm_activity<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(verbose);
     let params = params.unwrap_or_default();
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     if n_genes != net.n_features {
         return Err(MethodsErrors::LmActivityShapeMismatch {
             expected: net.n_features,
@@ -71,7 +71,7 @@ pub fn calculate_lm_activity<S: SingleCellReading>(
             cell.indices
                 .iter()
                 .zip(&cell.data_norm)
-                .map(|(&i, v)| (i as usize, v.to_f32() as f64))
+                .map(|(&i, v)| (i as usize, *v as f64))
         });
         let (chunk_es, chunk_pv) = scorer.score(&cp)?;
 
@@ -178,7 +178,7 @@ mod tests {
         let mut mat = Mat::<f64>::zeros(n_genes, n_cells);
         for (c, chunk) in chunks.iter().enumerate() {
             for (&g, v) in chunk.indices.iter().zip(&chunk.data_norm) {
-                mat[(g as usize, c)] = v.to_f32() as f64;
+                mat[(g as usize, c)] = *v as f64;
             }
         }
 

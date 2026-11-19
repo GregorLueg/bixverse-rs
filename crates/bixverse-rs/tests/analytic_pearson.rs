@@ -134,10 +134,7 @@ fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
                 indices.push(cell);
             }
         }
-        let norms: Vec<F16> = raw
-            .iter()
-            .map(|&v| F16::from_f32((v as f32).ln_1p()))
-            .collect();
+        let norms: Vec<f32> = raw.iter().map(|&v| (v as f32).ln_1p()).collect();
 
         writer
             .write_gene_chunk(CscGeneChunk::from_conversion(

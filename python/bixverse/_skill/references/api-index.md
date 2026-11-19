@@ -47,7 +47,7 @@ Getting counts into an experiment directory, and back out.
 - `SyntheticDialogueData`: Synthetic counts with a planted multicellular programme.
 - `TenxH5Meta`: Layout and dimensions of a 10x h5 file, as `get_tenx_h5_metadata()`.
 - `archive_sc_exp`: Archive the counts for cold storage.
-- `detect_raw_count_slot`: Detect which slot of an h5ad file holds raw integer counts.
+- `detect_raw_count_slot`: Detect which slot of an h5ad file or Zarr store holds raw integer counts.
 - `download_cd34_data`: The CD34 data set of the SEACells paper.
 - `download_demuxlet_pbmc`: PBMCs with demuxlet doublet calls, for doublet detection.
 - `download_dialogue_uc`: The ulcerative colitis subset of the DIALOGUE paper.
@@ -64,11 +64,11 @@ Getting counts into an experiment directory, and back out.
 - `generate_single_cell_test_data`: Synthetic RNA counts with planted cell types.
 - `generate_single_cell_test_data_adt`: Synthetic ADT counts, cell for cell with `generate_single_cell_test_data`.
 - `get_cell_ranger_params`: The mtx parameters for a Cell Ranger output directory.
-- `get_h5ad_dimensions`: Dimensions and storage layout of an h5ad file.
+- `get_h5ad_dimensions`: Dimensions and storage layout of an h5ad file or anndata Zarr store.
 - `get_tenx_h5_metadata`: Detect the layout of a 10x h5 file and read its dimensions.
 - `load_csr`: Load an in-memory cells x genes count matrix.
 - `load_existing`: Open an experiment directory and restore any state Python saved.
-- `load_h5ad`: Load an h5ad file.
+- `load_h5ad`: Load an h5ad file or anndata Zarr store.
 - `load_h5ad_norm`: Load an h5ad file holding only normalised counts.
 - `load_mtx`: Load an mtx file with its barcodes and features.
 - `load_multi_h5ad`: Load several h5ad files into one experiment.
@@ -79,12 +79,13 @@ Getting counts into an experiment directory, and back out.
 - `prescan_h5ad_files`: Prescan several h5ad files for a multi-file load.
 - `prescan_mtx_dirs`: Prescan several CellRanger style mtx directories for a multi-file load.
 - `prescan_tenx_h5_files`: Prescan several 10x h5 files for a multi-file load.
-- `read_h5ad_metadata`: Read the obs and var tables and the layout of an h5ad file.
+- `read_h5ad_metadata`: Read the obs and var tables and the layout of an h5ad file or Zarr store.
 - `read_tenx_h5_metadata`: Read the barcode and feature tables and the layout of a 10x h5 file.
 - `save`: Write the map's index sets and the cache next to the stores.
 - `save_h5ad`: Write an experiment to a spec compliant h5ad file.
+- `save_zarr`: Write an experiment to an AnnData Zarr (v3) store.
 - `stream_h5ad`: `load_h5ad` with `h5ad_streaming=True`.
-- `upgrade_sc_store`: Convert a v3 store to the v4 format in place.
+- `upgrade_sc_store`: Convert a v3 or v4 store to the v5 format in place.
 - `write_cellranger_output`: Write counts as a CellRanger style trio.
 - `write_h5ad_sc`: Write in-memory counts to a sparse h5ad file.
 - `write_tenx_h5_sc`: Write in-memory counts to a 10x h5 file.

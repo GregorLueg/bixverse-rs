@@ -332,7 +332,7 @@ impl CellBatchIndex {
     ///
     /// ### Params
     ///
-    /// * `total_cells` - `SparseDataHeader::total_cells` of the store
+    /// * `total_cells` - `StoreDims::total_cells` of the store
     /// * `cell_indices` - Global ids of the cells to include
     /// * `batch_labels` - Batch id per entry of `cell_indices`. `None` puts
     ///   every selected cell into a single batch `0`.
@@ -872,7 +872,7 @@ pub fn accumulate_disp_stats(gene: &CscGeneChunk, index: &CellBatchIndex, out: &
         if slot == 0 {
             continue;
         }
-        let value = (gene.data_norm[i].to_f32() as f64).exp_m1();
+        let value = (gene.data_norm[i] as f64).exp_m1();
         out[slot].0 += value;
         out[slot].1 += value * value;
     }
@@ -923,7 +923,7 @@ pub fn disp_stats_from_sums(sum: f64, sum_sq: f64, no_cells: usize) -> (f32, f32
 /// * `out` - Per-slot `(sum, sum_sq)` accumulators, length `index.n_slots()`
 pub fn accumulate_log_stats(gene: &CscGeneChunk, index: &CellBatchIndex, out: &mut [(f64, f64)]) {
     for (&cell_id, value) in gene.indices.iter().zip(&gene.data_norm) {
-        let value = value.to_f32() as f64;
+        let value = *value as f64;
         let slot = &mut out[index.slot(cell_id)];
         slot.0 += value;
         slot.1 += value * value;
@@ -1328,7 +1328,7 @@ pub fn run_hvg_vst<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1528,7 +1528,7 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1646,7 +1646,7 @@ pub fn run_hvg_scran<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1777,7 +1777,7 @@ pub fn get_hvg_vst<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<HvgRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1810,7 +1810,7 @@ pub fn get_hvg_vst_streaming<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<HvgRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -1845,7 +1845,7 @@ pub fn get_hvg_dispersion<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1877,7 +1877,7 @@ pub fn get_hvg_dispersion_streaming<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -1964,7 +1964,7 @@ pub fn get_hvg_scran<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<HvgScranRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1997,7 +1997,7 @@ pub fn get_hvg_scran_streaming<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<HvgScranRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2046,11 +2046,7 @@ pub fn get_hvg_vst_batch_aware<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<Vec<HvgRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2086,11 +2082,7 @@ pub fn get_hvg_vst_batch_aware_streaming<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<Vec<HvgRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2128,11 +2120,7 @@ pub fn get_hvg_dispersion_batch_aware<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2167,11 +2155,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2272,11 +2256,7 @@ pub fn get_hvg_scran_batch_aware<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<Vec<HvgScranRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2309,11 +2289,7 @@ pub fn get_hvg_scran_batch_aware_streaming<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<Vec<HvgScranRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2467,7 +2443,7 @@ pub fn hvg_on_store(
     verbose: usize,
 ) -> Result<HvgStats, ScErrors> {
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
         Some(sub) => hvg_on_reader(&sub.reader()?, &sub.local, params, streaming, verbose),
         None => hvg_on_reader(&reader, cell_set, params, streaming, verbose),
@@ -2503,7 +2479,7 @@ pub fn hvg_batch_aware_on_store(
     verbose: usize,
 ) -> Result<Vec<HvgStats>, ScErrors> {
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
         Some(sub) => hvg_batch_aware_on_reader(
             &sub.reader()?,
@@ -2640,11 +2616,11 @@ mod tests {
         }
     }
 
-    /// The stored `data_norm` value for a raw count, quantised through `f16`
+    /// The stored `data_norm` value for a raw count, computed
     /// exactly as the writer does so the dense reference and the driver see
     /// identical inputs.
-    fn norm_of(count: u32) -> F16 {
-        F16::from_f32((count as f32).ln_1p())
+    fn norm_of(count: u32) -> f32 {
+        (count as f32).ln_1p()
     }
 
     /// Write a `dense[gene][cell]` count matrix out as a gene-based store.
@@ -2661,7 +2637,7 @@ mod tests {
                     indices.push(cell);
                 }
             }
-            let norms: Vec<F16> = raw.iter().map(|&v| norm_of(v)).collect();
+            let norms: Vec<f32> = raw.iter().map(|&v| norm_of(v)).collect();
 
             writer
                 .write_gene_chunk(CscGeneChunk::from_conversion(
@@ -2763,7 +2739,7 @@ mod tests {
                 if gene[cell] == 0 {
                     continue;
                 }
-                let value = (norm_of(gene[cell]).to_f32() as f64).exp_m1();
+                let value = (norm_of(gene[cell]) as f64).exp_m1();
                 sum += value;
                 sum_sq += value * value;
             }
@@ -3476,7 +3452,7 @@ mod tests {
                         if gene[c] == 0 {
                             0.0
                         } else {
-                            norm_of(gene[c]).to_f32() as f64 / LN_2
+                            norm_of(gene[c]) as f64 / LN_2
                         }
                     })
                     .collect();

@@ -255,7 +255,7 @@ fn main() {
                 .read_gene_parallel(batch)
                 .unwrap()
                 .par_iter()
-                .map(|g| g.data_norm.iter().map(|v| v.to_f32()).sum())
+                .map(|g| g.data_norm.iter().sum())
                 .collect();
             black_box(sums);
         }

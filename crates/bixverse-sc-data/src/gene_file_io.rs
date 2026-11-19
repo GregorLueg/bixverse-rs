@@ -44,10 +44,11 @@ const GENE_FILE_WRITE_BATCH: usize = 1_024;
 pub const GENE_FILE_BYTES_PER_NNZ: usize = 8;
 
 /// Stored bytes per non-zero when the norm has to be carried: raw `u32`,
-/// norm `F16`, cell index `u32`. The phase budget is scaled down by
+/// norm `f32`, cell index `u32`. The phase budget is scaled down by
 /// `GENE_FILE_BYTES_PER_NNZ / GENE_FILE_BYTES_PER_NNZ_WITH_NORM` on that path
-/// so the caller's memory budget still holds.
-const GENE_FILE_BYTES_PER_NNZ_WITH_NORM: usize = 10;
+/// so the caller's memory budget still holds. The norm is carried at f32 so
+/// `avg_exp` sums the same values the derived path recomputes.
+const GENE_FILE_BYTES_PER_NNZ_WITH_NORM: usize = 12;
 
 /////////////
 // Helpers //
@@ -156,7 +157,7 @@ fn derived_avg_exp(
     cells: &[u32],
     raw: &[u32],
     cell_lib: &[f32],
-    cell_norm: &[u16],
+    cell_norm: &[f32],
     target_size: f32,
 ) -> F16 {
     let sum = cells
@@ -165,9 +166,9 @@ fn derived_avg_exp(
         .map(|(&cell, &x)| {
             let slot = (x as usize).wrapping_sub(1);
             if slot < GENE_NORM_LUT_COUNTS {
-                F16::from_bits(cell_norm[cell as usize * GENE_NORM_LUT_COUNTS + slot]).to_f32()
+                cell_norm[cell as usize * GENE_NORM_LUT_COUNTS + slot]
             } else {
-                norm_value(x as f32, cell_lib[cell as usize], target_size).to_f32()
+                norm_value(x as f32, cell_lib[cell as usize], target_size)
             }
         })
         .sum::<f32>();
@@ -255,8 +256,8 @@ fn write_gene_file_impl(
     verbose: bool,
     legacy: bool,
 ) -> Result<(), ScDataErrors> {
-    let reader = ParallelSparseReader::new(cell_path)?;
-    let header = reader.get_header();
+    let reader = ParallelSparseReader::open_any(cell_path)?;
+    let header = reader.dims();
     let n_cells = header.total_cells;
     let n_genes = header.total_genes;
     let chunks = thread_chunks(n_cells);
@@ -265,8 +266,21 @@ fn write_gene_file_impl(
 
     // the norm can be left behind when the output drops it and every cell
     // recomputes it, which the reader then does from the library table
-    let cells_v4 = reader.file_version() == SC_FILE_VERSION;
+    let cells_v4 = reader.file_version() >= SC_FILE_VERSION_V4;
     let skip_norm = !legacy && cells_v4 && reader.count_norm_stored_chunks()? == 0;
+
+    // layers past the first come off their own readers into their own
+    // buffers, at the same positions as layer 0; v5 only, and never with a
+    // stored norm since the layer writers never store one
+    let n_layers = reader.n_layers();
+    if n_layers > 1 && !skip_norm {
+        return Err(ScDataErrors::V4ChunkCorrupt(
+            "a multi-layer cell file with a stored norm".into(),
+        ));
+    }
+    let extra_readers = (1..n_layers)
+        .map(|l| ParallelSparseReader::new(cell_path)?.with_layer(l))
+        .collect::<Result<Vec<_>, ScDataErrors>>()?;
 
     let counts = count_gene_nnz(&reader, &chunks, n_genes, cells_v4)?;
     let mut gene_nnz = vec![0usize; n_genes];
@@ -276,8 +290,9 @@ fn write_gene_file_impl(
         }
     }
 
+    let bytes_per_nnz = GENE_FILE_BYTES_PER_NNZ + 4 * (n_layers - 1);
     let budget = if skip_norm {
-        max_nnz_in_memory
+        max_nnz_in_memory.map(|m| (m * GENE_FILE_BYTES_PER_NNZ / bytes_per_nnz).max(1))
     } else {
         max_nnz_in_memory
             .map(|m| (m * GENE_FILE_BYTES_PER_NNZ / GENE_FILE_BYTES_PER_NNZ_WITH_NORM).max(1))
@@ -300,21 +315,25 @@ fn write_gene_file_impl(
         );
     }
 
-    // The gene file inherits the cell file's normalisation, so it has to carry
-    // the same target size in its header.
-    let ctor = if legacy {
-        CellGeneSparseWriter::new_v3
-    } else {
-        CellGeneSparseWriter::new
+    // The gene file inherits the cell file's normalisation (and on v5 its
+    // kinds, layers, cell-ID hash and IDF), so it is written in the cell
+    // file's version unless the v3 layout is asked for.
+    let ctor = match (legacy, reader.file_version()) {
+        (true, _) => CellGeneSparseWriter::new_v3,
+        (false, SC_FILE_VERSION_V4) => CellGeneSparseWriter::new_v4,
+        _ => CellGeneSparseWriter::new,
     };
     let target_size = reader.target_size().unwrap_or(0.0);
     let mut writer = ctor(gene_path, false, n_cells, n_genes, target_size)?;
+    if writer.format().norm_f32() {
+        writer.inherit_from(&reader)?;
+    }
     let format = writer.format();
 
-    // A v4 gene chunk drops its norm layer and recomputes it from the library
-    // size of each cell, so the file carries that table and the chunks are
-    // encoded against it.
-    let cell_lib_sizes: Vec<u64> = if format.is_v4() {
+    // A v4-codec gene chunk drops its norm layer and recomputes it from the
+    // library size of each cell, so the file carries that table and the chunks
+    // are encoded against it.
+    let cell_lib_sizes: Vec<u64> = if format.uses_v4_codec() {
         reader
             .read_cell_library_sizes(&(0..n_cells).collect::<Vec<_>>())?
             .into_iter()
@@ -324,14 +343,17 @@ fn write_gene_file_impl(
         Vec::new()
     };
     let cell_lib: Vec<f32> = cell_lib_sizes.iter().map(|&l| l as f32).collect();
-    let cell_norm = if skip_norm {
+    // only v4 stores the norm sum in the gene header, see `ChunkFormat::gene_aux`
+    let derive_avg_exp = skip_norm && !format.norm_f32();
+    let cell_norm = if derive_avg_exp {
         gene_norm_table(&cell_lib, target_size)
     } else {
         Vec::new()
     };
 
+    let mut extra_raw = vec![vec![0u32; max_phase_nnz]; n_layers - 1];
     let mut raw = vec![0u32; max_phase_nnz];
-    let mut norm = vec![F16::default(); if skip_norm { 0 } else { max_phase_nnz }];
+    let mut norm = vec![0.0f32; if skip_norm { 0 } else { max_phase_nnz }];
     let mut cell_idx = vec![0u32; max_phase_nnz];
 
     for (phase_i, &(g0, g1)) in phases.iter().enumerate() {
@@ -362,6 +384,10 @@ fn write_gene_file_impl(
         let raw_ptr = ScatterPtr(raw.as_mut_ptr());
         let norm_ptr = ScatterPtr(norm.as_mut_ptr());
         let idx_ptr = ScatterPtr(cell_idx.as_mut_ptr());
+        let extra_ptrs: Vec<ScatterPtr<u32>> = extra_raw
+            .iter_mut()
+            .map(|b| ScatterPtr(b.as_mut_ptr()))
+            .collect();
 
         chunks
             .par_iter()
@@ -370,6 +396,27 @@ fn write_gene_file_impl(
                 for batch_start in (start..end).step_by(GENE_FILE_READ_BATCH) {
                     let batch_end = (batch_start + GENE_FILE_READ_BATCH).min(end);
                     if skip_norm {
+                        // the other layers replay the same cursor run
+                        let batch_cursor = (!extra_readers.is_empty()).then(|| cursor.to_vec());
+                        for (extra, ptr) in extra_readers.iter().zip(&extra_ptrs) {
+                            let mut cur = batch_cursor.clone().expect("set with extra layers");
+                            extra.visit_cells_v4(
+                                batch_start,
+                                batch_end,
+                                true,
+                                |_, genes, counts| {
+                                    let lo = genes.partition_point(|&g| (g as usize) < g0);
+                                    let hi = genes.partition_point(|&g| (g as usize) < g1);
+                                    for k in lo..hi {
+                                        let local = genes[k] as usize - g0;
+                                        let pos = cur[local];
+                                        cur[local] += 1;
+                                        // SAFETY: the same run layer 0 writes
+                                        unsafe { ptr.write(pos, counts[k]) };
+                                    }
+                                },
+                            )?;
+                        }
                         reader.visit_cells_v4(
                             batch_start,
                             batch_end,
@@ -426,15 +473,24 @@ fn write_gene_file_impl(
                 .map(|g| {
                     let s = gene_start[g - g0];
                     let e = gene_start[g - g0 + 1];
+                    if n_layers > 1 {
+                        let layers: Vec<&[u32]> = std::iter::once(&raw[s..e])
+                            .chain(extra_raw.iter().map(|b| &b[s..e]))
+                            .collect();
+                        return Ok((g, format.encode_layers(&cell_idx[s..e], &layers, g, true)?));
+                    }
                     if skip_norm {
                         let (cells, counts) = (&cell_idx[s..e], &raw[s..e]);
-                        let avg_exp =
-                            derived_avg_exp(cells, counts, &cell_lib, &cell_norm, target_size);
+                        let avg_exp = if derive_avg_exp {
+                            derived_avg_exp(cells, counts, &cell_lib, &cell_norm, target_size)
+                        } else {
+                            F16::from_f32(0.0)
+                        };
                         return Ok((g, format.encode_gene_derivable(cells, counts, avg_exp, g)));
                     }
                     let data_norm = norm[s..e].to_vec();
                     // accumulate in f32, see `CscGeneChunk::from_conversion`
-                    let avg_exp = F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
+                    let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
                     let chunk = CscGeneChunk {
                         data_raw: RawCounts::from_u32_auto(&raw[s..e]),
                         data_norm,
@@ -463,7 +519,7 @@ fn write_gene_file_impl(
         }
     }
 
-    if format.is_v4() {
+    if format.uses_v4_codec() {
         writer.set_cell_library_table(cell_lib_sizes)?;
     }
     writer.finalise()?;
@@ -556,13 +612,13 @@ mod tests {
     ///
     /// `(raw, norm bits, cell indices)` per gene.
     #[allow(clippy::type_complexity)]
-    fn reference(cell_path: &str) -> Vec<(Vec<u32>, Vec<u16>, Vec<u32>)> {
+    fn reference(cell_path: &str) -> Vec<(Vec<u32>, Vec<u32>, Vec<u32>)> {
         let reader = ParallelSparseReader::new(cell_path).unwrap();
-        let h = reader.get_header();
+        let h = reader.dims();
         let (mut data, mut data2, mut idx, mut indptr) = (vec![], vec![], vec![], vec![0u32]);
         for cell in reader.get_all_cells().unwrap() {
             data.extend(cell.data_raw.iter());
-            data2.extend(cell.data_norm.iter().map(|v| v.to_f32()));
+            data2.extend_from_slice(&cell.data_norm);
             idx.extend(cell.indices.iter().copied());
             indptr.push(data.len() as u32);
         }
@@ -580,10 +636,7 @@ mod tests {
                 let (s, e) = (csc.indptr[g] as usize, csc.indptr[g + 1] as usize);
                 (
                     csc.data[s..e].to_vec(),
-                    d2[s..e]
-                        .iter()
-                        .map(|&v| F16::from_f32(v).to_bits())
-                        .collect(),
+                    d2[s..e].iter().map(|v| v.to_bits()).collect(),
                     csc.indices[s..e].to_vec(),
                 )
             })
@@ -600,7 +653,7 @@ mod tests {
     ///
     /// `(raw, norm bits, cell indices)` per gene.
     #[allow(clippy::type_complexity)]
-    fn read_genes(gene_path: &str) -> Vec<(Vec<u32>, Vec<u16>, Vec<u32>)> {
+    fn read_genes(gene_path: &str) -> Vec<(Vec<u32>, Vec<u32>, Vec<u32>)> {
         let reader = ParallelSparseReader::new(gene_path).unwrap();
         reader
             .get_all_genes()
@@ -637,7 +690,7 @@ mod tests {
 
         let reader = ParallelSparseReader::new(genes.path()).unwrap();
         for gene in reader.get_all_genes().unwrap() {
-            let sum = gene.data_norm.iter().map(|v| v.to_f32()).sum::<f32>();
+            let sum = gene.data_norm.iter().sum::<f32>();
             assert_eq!(gene.avg_exp.to_bits(), F16::from_f32(sum).to_bits());
         }
     }
@@ -667,6 +720,8 @@ mod tests {
 
         write_gene_file(cells.path(), genes.path(), Some(20), false).unwrap();
 
+        // a gene touching cell 4 stores its whole layer verbatim, at f32 in
+        // v5, so both views agree exactly
         assert_eq!(read_genes(genes.path()), reference(cells.path()));
     }
 
@@ -694,8 +749,8 @@ mod tests {
 
         let reader = ParallelSparseReader::new(genes.path()).unwrap();
         assert!(!reader.is_cell_based());
-        assert_eq!(reader.get_header().total_cells, 20);
-        assert_eq!(reader.get_header().total_genes, 6);
+        assert_eq!(reader.dims().total_cells, 20);
+        assert_eq!(reader.dims().total_genes, 6);
         assert_eq!(reader.target_size(), Some(1e4));
         let g3 = &read_genes(genes.path())[3];
         assert!(g3.0.is_empty() && g3.2.is_empty());

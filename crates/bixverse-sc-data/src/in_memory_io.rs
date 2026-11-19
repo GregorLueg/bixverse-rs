@@ -23,11 +23,10 @@
 use indexmap::IndexSet;
 use num_traits::FromPrimitive;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 use crate::data_io::{
     CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts, RunSource,
-    SingleCellReading, SparseDataHeader, cell_row_map, extend_raw_checked, read_fused,
+    SingleCellReading, StoreDims, cell_row_map, extend_raw_checked, read_fused,
 };
 use crate::prelude::*;
 use crate::sc_traits::F16;
@@ -58,9 +57,6 @@ pub struct InMemorySparseReader<'a> {
     transposed: Option<CompressedSparseData2<u32, f32>>,
     /// Total raw counts per cell, summed once in [`InMemorySparseReader::new`].
     library_sizes: Vec<usize>,
-    /// Header describing the store. The file-layout fields carry no meaning
-    /// here: `chunk_offsets` is empty and `index_map` is the identity.
-    header: SparseDataHeader,
     /// Library size the normalised layer was scaled to, when known.
     target_size: Option<f32>,
 }
@@ -91,25 +87,12 @@ impl<'a> InMemorySparseReader<'a> {
             return Err(SparseErrors::Data2NotAvailable.into());
         }
 
-        let (n_cells, n_genes) = matrix.shape;
-        let library_sizes = cell_library_sizes(matrix, n_cells);
-
-        let header = SparseDataHeader {
-            total_cells: n_cells,
-            total_genes: n_genes,
-            cell_based: false,
-            no_chunks: n_genes,
-            chunk_offsets: Vec::new(),
-            index_map: (0..n_genes)
-                .map(|gene| (gene, gene))
-                .collect::<FxHashMap<_, _>>(),
-        };
+        let library_sizes = cell_library_sizes(matrix, matrix.shape.0);
 
         Ok(Self {
             matrix,
             transposed: None,
             library_sizes,
-            header,
             target_size,
         })
     }
@@ -143,14 +126,10 @@ impl<'a> InMemorySparseReader<'a> {
         target_size: Option<f32>,
     ) -> Result<Self, ScDataErrors> {
         let mut reader = Self::new(matrix, target_size)?;
-        let n_cells = matrix.shape.0;
 
         // `transpose_sparse` keeps the shape and changes the layout, so this is
         // CSR over (cells, genes): one run per cell, gene indices ascending.
         reader.transposed = Some(transpose_sparse(matrix));
-        reader.header.cell_based = true;
-        reader.header.no_chunks = n_cells;
-        reader.header.index_map = (0..n_cells).map(|cell| (cell, cell)).collect();
 
         Ok(reader)
     }
@@ -183,10 +162,7 @@ impl<'a> InMemorySparseReader<'a> {
         let hi = transposed.indptr[cell + 1] as usize;
 
         let data_raw = RawCounts::from_u32_auto(&transposed.data[lo..hi]);
-        let data_norm: Vec<F16> = transposed.data_2.as_ref().expect("checked in `new`")[lo..hi]
-            .iter()
-            .map(|&v| F16::from_f32(v))
-            .collect();
+        let data_norm = transposed.data_2.as_ref().expect("checked in `new`")[lo..hi].to_vec();
 
         Ok(CsrCellChunk {
             data_raw,
@@ -217,12 +193,8 @@ impl<'a> InMemorySparseReader<'a> {
         let hi = self.matrix.indptr[gene + 1] as usize;
 
         let data_raw = RawCounts::from_u32_auto(&self.matrix.data[lo..hi]);
-        let data_norm: Vec<F16> = self.matrix.data_2.as_ref().expect("checked in `new`")[lo..hi]
-            .iter()
-            .map(|&v| F16::from_f32(v))
-            .collect();
-
-        let avg_exp = F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
+        let data_norm = self.matrix.data_2.as_ref().expect("checked in `new`")[lo..hi].to_vec();
+        let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
 
         Ok(CscGeneChunk {
             data_raw,
@@ -421,8 +393,7 @@ pub fn prefer_cell_subset(n_selected: usize, n_total: usize) -> bool {
 ///
 /// Every gene is kept, so gene indices stay store indices. Cells are
 /// renumbered `0..cell_indices.len()` in the given order. The normalised layer
-/// is F16 on disk in both stores, so the F16 -> f32 -> F16 round trip through
-/// the reader is exact.
+/// is the f32 the cell reader returns, unchanged.
 ///
 /// ### Params
 ///
@@ -559,8 +530,7 @@ impl SingleCellReading for InMemorySparseReader<'_> {
 
     /// Read a batch of cells straight into CSR
     ///
-    /// Slices the CSR twin directly, so no chunk is built and the normalised
-    /// layer stays `f32` rather than passing through the chunks' F16.
+    /// Slices the CSR twin directly, so no chunk is built.
     ///
     /// ### Params
     ///
@@ -599,8 +569,7 @@ impl SingleCellReading for InMemorySparseReader<'_> {
 
     /// Read a batch of genes straight into CSC, optionally filtering cells
     ///
-    /// Slices the matrix directly, so no chunk is built and the normalised
-    /// layer stays `f32` rather than passing through the chunks' F16.
+    /// Slices the matrix directly, so no chunk is built.
     ///
     /// ### Params
     ///
@@ -664,13 +633,17 @@ impl SingleCellReading for InMemorySparseReader<'_> {
             .collect()
     }
 
-    /// Return the header of the underlying store
+    /// Dimensions and orientation of the store.
     ///
     /// ### Returns
     ///
-    /// The [SparseDataHeader].
-    fn get_header(&self) -> SparseDataHeader {
-        self.header.clone()
+    /// The matrix shape and whether the reader is in cell-major mode.
+    fn dims(&self) -> StoreDims {
+        StoreDims {
+            total_cells: self.matrix.shape.0,
+            total_genes: self.matrix.shape.1,
+            cell_based: self.is_cell_based(),
+        }
     }
 
     /// Is the store laid out for fast cell retrieval?
@@ -775,7 +748,7 @@ mod tests {
         let matrix = toy_csc();
         let reader = InMemorySparseReader::new(&matrix, Some(1e4)).unwrap();
 
-        let header = reader.get_header();
+        let header = reader.dims();
         assert_eq!(header.total_cells, 4);
         assert_eq!(header.total_genes, 3);
         assert!(!reader.is_cell_based());
@@ -831,8 +804,8 @@ mod tests {
 
         assert!(reader.is_cell_based());
         assert!(!reader.is_gene_based());
-        assert!(reader.get_header().cell_based);
-        assert_eq!(reader.get_header().total_cells, 4);
+        assert!(reader.dims().cell_based);
+        assert_eq!(reader.dims().total_cells, 4);
         assert_eq!(reader.target_size(), Some(1e4));
         assert!(reader.read_gene_parallel(&[0]).is_err());
     }
@@ -891,8 +864,7 @@ mod tests {
         assert_eq!(csc.data_2, matrix.data_2);
     }
 
-    /// A filtered read agrees with the chunk path: raw and pattern exactly,
-    /// norm once narrowed to the chunks' F16.
+    /// A filtered read agrees with the chunk path exactly.
     #[test]
     fn test_read_genes_sparse_filtered_matches_chunk_path() {
         let matrix = toy_csc();
@@ -914,13 +886,7 @@ mod tests {
         assert_eq!(got.indptr, want.indptr);
         assert_eq!(got.indices, want.indices);
         assert_eq!(got.data, want.data);
-        let narrowed: Vec<f32> = got
-            .data_2
-            .unwrap()
-            .iter()
-            .map(|&v| F16::from_f32(v).to_f32())
-            .collect();
-        assert_eq!(narrowed, want.data_2.unwrap());
+        assert_eq!(got.data_2, want.data_2);
     }
 
     /// Reading every cell from the CSR twin is the twin itself; each mode

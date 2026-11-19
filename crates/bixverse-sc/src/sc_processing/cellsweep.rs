@@ -1935,15 +1935,14 @@ fn build_denoised_chunk(
     };
     let norm_total: f32 = norm_source.iter().sum();
 
-    let data_norm: Vec<F16> = norm_source
+    let data_norm: Vec<f32> = norm_source
         .iter()
         .map(|&value| {
-            let scaled = if norm_total > 0.0 {
+            if norm_total > 0.0 {
                 (value / norm_total * target_size).ln_1p()
             } else {
                 0.0
-            };
-            F16::from_f32(scaled)
+            }
         })
         .collect();
 
@@ -2007,7 +2006,7 @@ where
     }
 
     let verbosity = parse_verbosity_level(verbose);
-    let header = reader.get_header();
+    let header = reader.dims();
     let n_genes = header.total_genes;
     let total_cells: usize = samples.iter().map(|s| s.real_cells.len()).sum();
 
@@ -2832,8 +2831,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         let chunk = build_denoised_chunk(&[0, 1], &[3.0, 1.0], 0, 1e4, false, &mut rng);
 
-        // ln1p(0.75 * 1e4) and ln1p(0.25 * 1e4), within f16 resolution.
-        let values: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+        // ln1p(0.75 * 1e4) and ln1p(0.25 * 1e4)
+        let values: Vec<f32> = chunk.data_norm.clone();
         assert_relative_eq!(values[0], (0.75_f32 * 1e4).ln_1p(), epsilon = 1e-2);
         assert_relative_eq!(values[1], (0.25_f32 * 1e4).ln_1p(), epsilon = 1e-2);
     }
@@ -2846,7 +2845,7 @@ mod tests {
         let chunk = build_denoised_chunk(&[0, 1], &[0.4, 8.0], 0, 1e4, true, &mut rng);
 
         let raw: Vec<u32> = chunk.data_raw.iter().collect();
-        let norm: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+        let norm: Vec<f32> = chunk.data_norm.clone();
         for (&count, &value) in raw.iter().zip(&norm) {
             assert_eq!(count == 0, value == 0.0);
         }
@@ -2919,7 +2918,7 @@ mod tests {
         assert_eq!(run.library_size.len(), 50);
 
         let denoised_reader = ParallelSparseReader::new(out.path()).expect("output opens");
-        let header = denoised_reader.get_header();
+        let header = denoised_reader.dims();
         assert_eq!(header.total_cells, 50);
         assert_eq!(header.total_genes, FIXTURE_GENES);
         assert!(denoised_reader.is_cell_based());
@@ -2997,7 +2996,7 @@ mod tests {
         assert_eq!(run.fits[1].alpha.len(), 25);
 
         let denoised_reader = ParallelSparseReader::new(out.path()).expect("output opens");
-        assert_eq!(denoised_reader.get_header().total_cells, 50);
+        assert_eq!(denoised_reader.dims().total_cells, 50);
         // Output indices are the new store's row numbers, not the parent's.
         for (i, chunk) in denoised_reader.get_all_cells().unwrap().iter().enumerate() {
             assert_eq!(chunk.original_index, i);

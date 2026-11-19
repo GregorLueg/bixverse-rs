@@ -58,7 +58,7 @@ fn calculate_vision_scores_for_cell(
     scratch: &mut [f32],
 ) -> Vec<f32> {
     for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
-        scratch[idx as usize] = value.to_f32();
+        scratch[idx as usize] = *value;
     }
     let get_expr = |gene_idx: usize| -> f64 { scratch[gene_idx] as f64 };
 
@@ -66,7 +66,7 @@ fn calculate_vision_scores_for_cell(
     let mut sum = 0.0_f64;
     let mut sum_sq = 0.0_f64;
     for value in &cell.data_norm {
-        let value = value.to_f32() as f64;
+        let value = *value as f64;
         sum += value;
         sum_sq += value * value;
     }
@@ -252,7 +252,7 @@ pub fn calculate_vision<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_read = Instant::now();
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let end_read = start_read.elapsed();
 
@@ -304,7 +304,7 @@ pub fn calculate_vision_streaming<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(verbose);
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
 
     let mut all_results: Vec<Vec<f32>> = Vec::with_capacity(cells_to_keep.len());
 

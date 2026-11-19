@@ -135,6 +135,21 @@ impl H5Elem for u32 {
     }
 }
 
+impl H5Elem for f64 {
+    #[inline]
+    fn from_i64(v: i64) -> Self {
+        v as f64
+    }
+    #[inline]
+    fn from_u64(v: u64) -> Self {
+        v as f64
+    }
+    #[inline]
+    fn from_f64(v: f64) -> Self {
+        v
+    }
+}
+
 impl H5Elem for i64 {
     #[inline]
     fn from_i64(v: i64) -> Self {

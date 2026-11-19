@@ -1,8 +1,8 @@
 //! Contains the h5ad-related parts to do read in data from h5ad files and
 //! transform them into the binarised files for usage in bixverse-rs.
 
-use hdf5::{File, Result};
-use ndarray::{Array2, s};
+use hdf5::Result;
+use ndarray::Array2;
 use num_traits::Float;
 use rayon::prelude::*;
 use serde::{Deserialize, Deserializer, de::Error as _};
@@ -13,11 +13,11 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::H5_CELL_SLICE_SIZE;
+use crate::ann_store::{AnnFile, NodeKind};
 use crate::data_io::{CellGeneSparseWriter, CellOnFileQuality};
 use crate::data_io::{
     INDEX_DROPPED, compress_cell_row, dense_index_map, write_cell_chunks_built, write_cell_rows,
 };
-use crate::h5_chunked::H5ChunkedReader;
 use crate::h5_filters::{check_h5_filters, check_h5ad_filters};
 use crate::prelude::*;
 
@@ -253,14 +253,18 @@ where
 ///
 /// Nothing if okay, Err if not.
 pub fn check_h5ad_is_raw(
-    file: &File,
+    file: &AnnFile,
     raw_slot: &RawDataSlot,
     n_check: Option<usize>,
 ) -> Result<(), ScDataErrors> {
-    let ds = file.dataset(raw_slot.get_data())?;
-    let n_check = n_check.unwrap_or(N_CHECK).min(ds.size());
+    let len = file
+        .shape(raw_slot.get_data())?
+        .first()
+        .copied()
+        .unwrap_or(0);
+    let n_check = n_check.unwrap_or(N_CHECK).min(len);
 
-    let data: Vec<f32> = ds.read_slice(0..n_check)?.to_vec();
+    let data: Vec<f32> = file.array(raw_slot.get_data())?.read(0..n_check)?;
 
     check_is_raw(&data, Some(n_check))?;
 
@@ -280,14 +284,13 @@ pub fn check_h5ad_is_raw(
 ///
 /// Nothing if okay, Err if not.
 pub fn check_h5ad_dense_is_raw(
-    file: &File,
+    file: &AnnFile,
     raw_slot: &RawDataSlot,
     n_check: Option<usize>,
 ) -> Result<(), ScDataErrors> {
     let n_check = n_check.unwrap_or(100);
 
-    let ds = file.dataset(raw_slot.get_dense_path())?;
-    let shape = ds.shape();
+    let shape = file.shape(raw_slot.get_dense_path())?;
     if shape.len() != 2 {
         return Ok(());
     }
@@ -301,13 +304,36 @@ pub fn check_h5ad_dense_is_raw(
     let take_cols = cols.min(n_check.max(1));
     let take_rows = n_check.div_ceil(take_cols).min(rows).max(1);
 
-    let block = ds.read_slice_2d((0..take_rows, 0..take_cols))?;
+    let block = file.read_2d::<f32>(raw_slot.get_dense_path(), 0..take_rows, 0..take_cols)?;
     let nonzeros: Vec<f32> = block.iter().copied().filter(|&v| v != 0.0).collect();
     if nonzeros.is_empty() {
         return Ok(());
     }
     let n = nonzeros.len().min(n_check);
     check_is_raw(&nonzeros[..n], Some(n))
+}
+
+/// Refuse an h5ad whose count datasets use an HDF5 filter this build cannot
+/// decode. Zarr reports a missing codec itself on the first read.
+///
+/// ### Params
+///
+/// * `path` - The h5ad file or Zarr store
+/// * `raw_slot` - Where the counts are
+/// * `format` - How `X` is stored
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`ScDataErrors::UnsupportedH5Filter`].
+fn check_ann_filters(
+    path: &Path,
+    raw_slot: &RawDataSlot,
+    format: &H5ADFormat,
+) -> Result<(), ScDataErrors> {
+    match AnnFile::open(path)?.h5() {
+        Some(file) => check_h5ad_filters(file, raw_slot, format),
+        None => Ok(()),
+    }
 }
 
 /////////////
@@ -357,7 +383,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     let file_format = parse_h5ad_format(h5ad_format)
         .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
 
-    check_h5ad_filters(&File::open(h5_path.as_ref())?, &raw_slot, &file_format)?;
+    check_ann_filters(h5_path.as_ref(), &raw_slot, &file_format)?;
 
     let file_quality = match file_format {
         H5ADFormat::Csr => parse_h5_csr_quality(
@@ -462,23 +488,6 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     ))
 }
 
-/// Read an `indptr` dataset as `usize`.
-///
-/// AnnData switches `indptr` to int64 once a matrix passes 2^31 stored values,
-/// and a single Tahoe-style plate can pass 2^32. Reading straight into `u32`
-/// would not survive that, so every h5 path goes through here.
-///
-/// ### Params
-///
-/// * `ds` - The `indptr` dataset
-///
-/// ### Returns
-///
-/// The offsets as `usize`.
-pub(crate) fn read_indptr(ds: &hdf5::Dataset) -> Result<Vec<usize>> {
-    Ok(ds.read_1d::<usize>()?.to_vec())
-}
-
 /// Function that streams the h5 counts to disk
 ///
 /// This function will avoid (as far as possible) loading in the data into
@@ -520,7 +529,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     let file_format = parse_h5ad_format(h5ad_format)
         .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
 
-    check_h5ad_filters(&File::open(h5_path.as_ref())?, &raw_slot, &file_format)?;
+    check_ann_filters(h5_path.as_ref(), &raw_slot, &file_format)?;
 
     let file_quality = match file_format {
         H5ADFormat::Csr => parse_h5_csr_quality(
@@ -640,8 +649,8 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
         );
     }
 
-    let file = File::open(file_path)?;
-    let indptr = read_indptr(&file.dataset(raw_slot.get_indptr())?)?;
+    let file = AnnFile::open(file_path)?;
+    let indptr = file.indptr(raw_slot.get_indptr())?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
@@ -687,8 +696,8 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     let completed_chunks = Arc::new(AtomicUsize::new(0));
     let report_interval = (num_chunks / 10).max(1);
 
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
+    let data_rd = file.array(raw_slot.get_data())?;
+    let indices_rd = file.array(raw_slot.get_indices())?;
 
     let cell_stats: Vec<(Vec<usize>, Vec<f32>)> = gene_chunks
         .par_iter()
@@ -808,14 +817,13 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
     quality: &CellOnFileQuality,
     raw_slot: &RawDataSlot,
 ) -> Result<Vec<u32>, ScDataErrors> {
-    let file = File::open(file_path)?;
+    let file = AnnFile::open(file_path)?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
-    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let data_rd = file.array(raw_slot.get_data())?;
+    let indices_rd = file.array(raw_slot.get_indices())?;
+    let indptr_raw = file.indptr(raw_slot.get_indptr())?;
 
     // Only track library sizes - very light in terms of memory
     let mut cell_lib_sizes = vec![0u32; quality.cells_to_keep.len()];
@@ -880,16 +888,15 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CompressedSparseData2<u32>, ScDataErrors> {
-    let file = File::open(file_path)?;
+    let file = AnnFile::open(file_path)?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
-    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
+    let data_rd = file.array(raw_slot.get_data())?;
+    let indices_rd = file.array(raw_slot.get_indices())?;
 
     // Read indptr first (small array)
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let indptr_raw = file.indptr(raw_slot.get_indptr())?;
 
     let mut new_data: Vec<u32> = Vec::new();
     let mut new_indices: Vec<usize> = Vec::new();
@@ -998,15 +1005,14 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     target_size: f32,
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
-    let file = File::open(file_path)?;
+    let file = AnnFile::open(file_path)?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
     let n_cells = quality.cells_to_keep.len();
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
-    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let data_rd = file.array(raw_slot.get_data())?;
+    let indices_rd = file.array(raw_slot.get_indices())?;
+    let indptr_raw = file.indptr(raw_slot.get_indptr())?;
 
     // accumulate cells in memory (necessary for CSR)
     // (gene_index, raw_count) - gene index is u32 to support >65k features
@@ -1145,11 +1151,11 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
         );
     }
 
-    let file = File::open(file_path)?;
+    let file = AnnFile::open(file_path)?;
 
     check_h5ad_is_raw(&file, raw_slot, None)?;
 
-    let indptr = read_indptr(&file.dataset(raw_slot.get_indptr())?)?;
+    let indptr = file.indptr(raw_slot.get_indptr())?;
 
     const CELL_CHUNK_SIZE: usize = 10000;
     let chunks: Vec<usize> = (0..shape.0).step_by(CELL_CHUNK_SIZE).collect();
@@ -1163,7 +1169,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     let completed_chunks = Arc::new(AtomicUsize::new(0));
     let report_interval = (num_chunks / 10).max(1);
 
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
+    let indices_rd = file.array(raw_slot.get_indices())?;
 
     let gene_counts: Vec<Vec<usize>> = chunks
         .par_iter()
@@ -1258,7 +1264,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     let second_pass_time = Instant::now();
     let completed_chunks = Arc::new(AtomicUsize::new(0));
 
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
+    let data_rd = file.array(raw_slot.get_data())?;
 
     let cell_stats: Vec<(Vec<usize>, Vec<f32>)> = chunks
         .par_iter()
@@ -1381,13 +1387,12 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CompressedSparseData2<u32>, ScDataErrors> {
-    let file = File::open(file_path)?;
+    let file = AnnFile::open(file_path)?;
 
-    let data_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_data())?);
-    let indices_rd = H5ChunkedReader::new(file.dataset(raw_slot.get_indices())?);
-    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
+    let data_rd = file.array(raw_slot.get_data())?;
+    let indices_rd = file.array(raw_slot.get_indices())?;
 
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let indptr_raw = file.indptr(raw_slot.get_indptr())?;
 
     // Build CSC format directly: indptr = cells, indices = genes. Sized from
     // the kept cells' stored values, an upper bound before gene filtering, so
@@ -1565,9 +1570,9 @@ pub(crate) fn write_h5_cell_major_cells(
 
         scope.spawn(move || {
             let read_all = || -> Result<(), ScDataErrors> {
-                let file = File::open(file_path)?;
-                let data_rd = H5ChunkedReader::new(file.dataset(data_path)?);
-                let indices_rd = H5ChunkedReader::new(file.dataset(indices_path)?);
+                let file = AnnFile::open(file_path)?;
+                let data_rd = file.array(data_path)?;
+                let indices_rd = file.array(indices_path)?;
                 for batch in batches_ref {
                     let start = batch.iter().map(|&c| indptr[c]).min().unwrap_or(0);
                     let end = batch.iter().map(|&c| indptr[c + 1]).max().unwrap_or(0);
@@ -1671,8 +1676,8 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
     let indptr_raw = {
-        let file = File::open(&file_path)?;
-        read_indptr(&file.dataset(raw_slot.get_indptr())?)?
+        let file = AnnFile::open(&file_path)?;
+        file.indptr(raw_slot.get_indptr())?
     };
 
     let mut writer = CellGeneSparseWriter::new(
@@ -1764,7 +1769,7 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
     }
 
     {
-        let file = File::open(file_path)?;
+        let file = AnnFile::open(file_path)?;
         check_h5ad_dense_is_raw(&file, raw_slot, None)?;
     }
 
@@ -1786,11 +1791,14 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
         .map(|&chunk_start| -> Result<Vec<usize>, ScDataErrors> {
             let mut local_counts = vec![0usize; shape.1];
 
-            let file = File::open(file_path)?;
-            let ds = file.dataset(raw_slot.get_dense_path())?;
+            let file = AnnFile::open(file_path)?;
 
             let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
-            let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..shape.1])?;
+            let block: Array2<f32> = file.read_2d::<f32>(
+                raw_slot.get_dense_path(),
+                chunk_start..chunk_end,
+                0..shape.1,
+            )?;
 
             for row in block.outer_iter() {
                 for (gene_idx, &val) in row.iter().enumerate() {
@@ -1871,11 +1879,13 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
                 let mut local_unique = vec![0usize; n];
                 let mut local_lib_size = vec![0.0f32; n];
 
-                let file = File::open(file_path)?;
-                let ds = file.dataset(raw_slot.get_dense_path())?;
+                let file = AnnFile::open(file_path)?;
 
-                let block: Array2<f32> =
-                    ds.read_slice_2d(s![chunk_start..chunk_end, 0..shape.1])?;
+                let block: Array2<f32> = file.read_2d::<f32>(
+                    raw_slot.get_dense_path(),
+                    chunk_start..chunk_end,
+                    0..shape.1,
+                )?;
 
                 for (local_row, row) in block.outer_iter().enumerate() {
                     for (gene_idx, &val) in row.iter().enumerate() {
@@ -1967,9 +1977,12 @@ pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
     raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CompressedSparseData2<u32>, ScDataErrors> {
-    let file = File::open(file_path)?;
-    let ds = file.dataset(raw_slot.get_dense_path())?;
-    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+    let file = AnnFile::open(file_path)?;
+    let no_genes_total = file
+        .shape(raw_slot.get_dense_path())?
+        .get(1)
+        .copied()
+        .unwrap_or(0);
 
     let mut new_data: Vec<u32> = Vec::new();
     let mut new_indices: Vec<usize> = Vec::new();
@@ -2010,7 +2023,11 @@ pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
             .max()
             .expect("batch non-empty by construction")
             + 1;
-        let block = ds.read_slice_2d::<f32, _>((row_start..row_end, 0..no_genes_total))?;
+        let block = file.read_2d::<f32>(
+            raw_slot.get_dense_path(),
+            row_start..row_end,
+            0..no_genes_total,
+        )?;
 
         for &old_cell_idx in cell_chunk {
             let row = block.row(old_cell_idx - row_start);
@@ -2083,9 +2100,12 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
     raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
-    let file = File::open(&file_path)?;
-    let ds = file.dataset(raw_slot.get_dense_path())?;
-    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+    let file = AnnFile::open(&file_path)?;
+    let no_genes_total = file
+        .shape(raw_slot.get_dense_path())?
+        .get(1)
+        .copied()
+        .unwrap_or(0);
 
     let mut writer = CellGeneSparseWriter::new(
         bin_path,
@@ -2139,7 +2159,11 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
             .max()
             .expect("batch non-empty by construction")
             + 1;
-        let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
+        let block: Array2<f32> = file.read_2d::<f32>(
+            raw_slot.get_dense_path(),
+            row_start..row_end,
+            0..no_genes_total,
+        )?;
 
         let built = cell_batch
             .par_iter()
@@ -2213,7 +2237,7 @@ pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
     lib_sizes: &[f32],
     cell_quality: &MinCellQuality,
     verbose: bool,
-) -> hdf5::Result<CellOnFileQuality> {
+) -> Result<CellOnFileQuality, ScDataErrors> {
     let file_path = file_path.as_ref();
 
     if verbose {
@@ -2224,8 +2248,8 @@ pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
         );
     }
 
-    let file = hdf5::File::open(file_path)?;
-    let indptr = read_indptr(&file.dataset("X/indptr")?)?;
+    let file = AnnFile::open(file_path)?;
+    let indptr = file.indptr("X/indptr")?;
 
     // NNZ per gene is directly readable from indptr
     let no_cells_exp_gene: Vec<usize> = (0..shape.1).map(|i| indptr[i + 1] - indptr[i]).collect();
@@ -2247,7 +2271,7 @@ pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
     const GENE_CHUNK_SIZE: usize = 10000;
     let mut cell_unique_genes = vec![0usize; shape.0];
 
-    let indices_rd = H5ChunkedReader::new(file.dataset("X/indices")?);
+    let indices_rd = file.array("X/indices")?;
     for gene_chunk in genes_to_keep.chunks(GENE_CHUNK_SIZE) {
         let start_pos = gene_chunk.iter().map(|&g| indptr[g]).min().unwrap_or(0);
         let end_pos = gene_chunk.iter().map(|&g| indptr[g + 1]).max().unwrap_or(0);
@@ -2256,9 +2280,7 @@ pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
             continue;
         }
 
-        let chunk_indices: Vec<u32> = indices_rd
-            .read(start_pos..end_pos)
-            .map_err(|e| e.to_string())?;
+        let chunk_indices: Vec<u32> = indices_rd.read(start_pos..end_pos)?;
 
         for &gene_idx in gene_chunk {
             let gene_start = indptr[gene_idx];
@@ -2320,7 +2342,7 @@ pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
     lib_sizes: &[f32],
     cell_quality: &MinCellQuality,
     verbose: bool,
-) -> hdf5::Result<CellOnFileQuality> {
+) -> Result<CellOnFileQuality, ScDataErrors> {
     let file_path = file_path.as_ref();
 
     if verbose {
@@ -2331,9 +2353,9 @@ pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
         );
     }
 
-    let file = hdf5::File::open(file_path)?;
-    let indptr = read_indptr(&file.dataset("X/indptr")?)?;
-    let indices_rd = H5ChunkedReader::new(file.dataset("X/indices")?);
+    let file = AnnFile::open(file_path)?;
+    let indptr = file.indptr("X/indptr")?;
+    let indices_rd = file.array("X/indices")?;
 
     // Unique genes per cell is directly readable from indptr
     let cell_unique_genes: Vec<usize> = (0..shape.0).map(|i| indptr[i + 1] - indptr[i]).collect();
@@ -2351,9 +2373,7 @@ pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
             continue;
         }
 
-        let chunk_indices: Vec<u32> = indices_rd
-            .read(data_start..data_end)
-            .map_err(|e| e.to_string())?;
+        let chunk_indices: Vec<u32> = indices_rd.read(data_start..data_end)?;
 
         for cell_idx in chunk_start..=chunk_end {
             let cell_start = indptr[cell_idx] - data_start;
@@ -2454,11 +2474,10 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
     cell_qc: &MinCellQuality,
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
-    let file = hdf5::File::open(file_path)?;
-    let data_rd = H5ChunkedReader::new(file.dataset("X/data")?);
-    let indices_rd = H5ChunkedReader::new(file.dataset("X/indices")?);
-    let indptr_ds = file.dataset("X/indptr")?;
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let file = AnnFile::open(file_path)?;
+    let data_rd = file.array("X/data")?;
+    let indices_rd = file.array("X/indices")?;
+    let indptr_raw = file.indptr("X/indptr")?;
 
     let mut writer = CellGeneSparseWriter::new(
         bin_path,
@@ -2584,11 +2603,10 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     cell_qc: &MinCellQuality,
     verbose: bool,
 ) -> Result<CellQuality, ScDataErrors> {
-    let file = hdf5::File::open(file_path)?;
-    let data_rd = H5ChunkedReader::new(file.dataset("X/data")?);
-    let indices_rd = H5ChunkedReader::new(file.dataset("X/indices")?);
-    let indptr_ds = file.dataset("X/indptr")?;
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let file = AnnFile::open(file_path)?;
+    let data_rd = file.array("X/data")?;
+    let indices_rd = file.array("X/indices")?;
+    let indptr_raw = file.indptr("X/indptr")?;
 
     // Accumulate per-cell data in memory - necessary for CSR output
     // (gene_index, raw_count) - gene index as u32 to support >65k features
@@ -2723,16 +2741,17 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
     let file_format = parse_compressed_sparse_format(cs_type)
         .ok_or_else(|| ScDataErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
-    let file = hdf5::File::open(h5_path.as_ref())?;
+    let file = AnnFile::open(h5_path.as_ref())?;
     let lib_size_path = format!("obs/{}", obs_lib_size_col);
 
-    check_h5_filters(&file, &[&lib_size_path, "X/data", "X/indices", "X/indptr"])?;
+    if let Some(h5) = file.h5() {
+        check_h5_filters(h5, &[&lib_size_path, "X/data", "X/indices", "X/indptr"])?;
+    }
 
-    let lib_sizes_raw: Vec<f32> = file
-        .dataset(&lib_size_path)
-        .map_err(|_| ScDataErrors::ObsColumnMissing(obs_lib_size_col.to_string()))?
-        .read_1d()?
-        .to_vec();
+    if file.node(&lib_size_path) != Some(NodeKind::Array) {
+        return Err(ScDataErrors::ObsColumnMissing(obs_lib_size_col.to_string()));
+    }
+    let lib_sizes_raw: Vec<f32> = file.read_1d(&lib_size_path)?;
 
     if lib_sizes_raw.len() != no_cells {
         return Err(ScDataErrors::LibSizeLengthMismatch {
@@ -2824,6 +2843,7 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hdf5::File;
 
     #[test]
     fn test_read_indptr_past_u32() {
@@ -2836,9 +2856,7 @@ mod tests {
                 .create("indptr")
                 .unwrap();
         }
-        let file = File::open(&path).unwrap();
-        let ds = file.dataset("indptr").unwrap();
-        let got = read_indptr(&ds);
+        let got = AnnFile::open(&path).unwrap().indptr("indptr");
         let _ = std::fs::remove_file(&path);
         assert_eq!(got.unwrap(), vec![0, 5_000_000_000, 5_000_000_007]);
     }
@@ -2854,7 +2872,7 @@ mod tests {
                 .create("data")
                 .unwrap();
         }
-        let file = File::open(&path).unwrap();
+        let file = AnnFile::open(&path).unwrap();
         let res = check_h5ad_is_raw(&file, &RawDataSlot::DataX, None);
         let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());

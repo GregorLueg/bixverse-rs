@@ -1,7 +1,7 @@
 //! Cold-storage archive of the cell-based binary.
 //!
 //! The two on-disk views are laid out for random access, not size: every
-//! non-zero is stored twice (CSR and CSC), each copy carries a derivable f16
+//! non-zero is stored twice (CSR and CSC), each copy may carry a verbatim
 //! norm, and lz4 only sees one chunk at a time. The archive keeps the cell
 //! file only, drops every norm that recomputes bit for bit from the raw
 //! counts, splits blocks of cells into per-field streams (gene index deltas,
@@ -32,6 +32,7 @@ use thousands::Separable;
 use crate::data_io::*;
 use crate::gene_file_io::write_gene_file;
 use crate::prelude::*;
+use crate::v5_io::NormKind;
 
 ////////////
 // Consts //
@@ -40,8 +41,12 @@ use crate::prelude::*;
 /// Leading bytes identifying a bixverse count archive.
 const ARCHIVE_MAGIC: &[u8; 8] = b"BXARCHV1";
 
-/// Archive format version. Independent of `SC_FILE_VERSION`.
-const ARCHIVE_VERSION: u32 = 1;
+/// Archive format version. Independent of `SC_FILE_VERSION`. Version 2 keeps
+/// a verbatim norm as f32; version 1 (f16) still restores.
+const ARCHIVE_VERSION: u32 = 2;
+
+/// The archive version that stored verbatim norms as f16.
+const ARCHIVE_VERSION_F16_NORM: u32 = 1;
 
 /// Fixed header length, see the module docs.
 const ARCHIVE_HEADER_LEN: usize = 40;
@@ -208,7 +213,8 @@ fn norm_derivable(cell: &CsrCellChunk, target_size: f32) -> bool {
 /// nnz u32, library_size u64, original_index delta u64 (all shuffled)
 /// raw_elem_size u8, to_keep u8, norm_stored u8
 /// gene index deltas u32, raw counts u32 (shuffled, length total nnz)
-/// stored norms u16 (shuffled, only for cells with norm_stored = 1)
+/// stored norms f32 (shuffled, only for cells with norm_stored = 1; f16 in
+/// version 1)
 /// ```
 ///
 /// ### Params
@@ -268,7 +274,7 @@ fn encode_block(
             norm_flag.push(0);
         } else {
             norm_flag.push(1);
-            for v in &cell.data_norm {
+            for &v in &cell.data_norm {
                 norm.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -286,7 +292,7 @@ fn encode_block(
     out.extend(norm_flag);
     out.extend(shuffle(&idx, 4));
     out.extend(shuffle(&raw, 4));
-    out.extend(shuffle(&norm, 2));
+    out.extend(shuffle(&norm, 4));
 
     Ok((out, total_nnz, n_norm_stored))
 }
@@ -297,11 +303,16 @@ fn encode_block(
 ///
 /// * `buf` - Decompressed block stream
 /// * `target_size` - Target size from the archive header
+/// * `norm_f16` - Verbatim norms are f16 (archive version 1)
 ///
 /// ### Returns
 ///
 /// The cells, in file order.
-fn decode_block(buf: &[u8], target_size: f32) -> Result<Vec<CsrCellChunk>, ScDataErrors> {
+fn decode_block(
+    buf: &[u8],
+    target_size: f32,
+    norm_f16: bool,
+) -> Result<Vec<CsrCellChunk>, ScDataErrors> {
     let mut cur = Cursor { buf, pos: 0 };
     let n = u32::from_le_bytes(cur.take(4)?.try_into().expect("4 bytes")) as usize;
 
@@ -324,12 +335,22 @@ fn decode_block(buf: &[u8], target_size: f32) -> Result<Vec<CsrCellChunk>, ScDat
 
     let idx: Vec<u32> = le_u32(&cur.take_shuffled(total_nnz, 4)?).collect();
     let raw: Vec<u32> = le_u32(&cur.take_shuffled(total_nnz, 4)?).collect();
-    let norm_bytes = cur.take_shuffled(n_norm, 2)?;
-    let mut stored_norm = norm_bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&c| F16::from_le_bytes(c));
+    let stored: Vec<f32> = if norm_f16 {
+        cur.take_shuffled(n_norm, 2)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| F16::from_le_bytes(c).to_f32())
+            .collect()
+    } else {
+        cur.take_shuffled(n_norm, 4)?
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| f32::from_le_bytes(c))
+            .collect()
+    };
+    let mut stored_norm = stored.into_iter();
 
     let mut cells = Vec::with_capacity(n);
     let (mut start, mut prev_orig) = (0usize, 0u64);
@@ -358,7 +379,7 @@ fn decode_block(buf: &[u8], target_size: f32) -> Result<Vec<CsrCellChunk>, ScDat
             other => return Err(ScDataErrors::RawElemSizeInvalid(other)),
         };
 
-        let data_norm: Vec<F16> = match norm_flag[i] {
+        let data_norm: Vec<f32> = match norm_flag[i] {
             0 => {
                 let l = lib[i] as f32;
                 raw_i
@@ -437,24 +458,24 @@ pub fn archive_cell_file(
             requested: "cell-based",
         });
     }
-    let header = reader.get_header();
+    if reader.n_layers() != 1 || reader.norm_kind() != NormKind::LogCpm {
+        return Err(ScDataErrors::ArchiveCorrupt(
+            "the archive holds single-layer log-CPM stores only".into(),
+        ));
+    }
+    let dims = reader.dims();
     let target_size = reader.target_size().unwrap_or(0.0);
 
     // file order, so the restored file lays chunks out identically
-    let mut order = vec![usize::MAX; header.no_chunks];
-    for (&orig, &chunk) in &header.index_map {
-        *order.get_mut(chunk).ok_or_else(|| {
-            ScDataErrors::ArchiveCorrupt(format!("chunk {chunk} outside the file"))
-        })? = orig;
-    }
+    let order = reader.chunk_order()?;
 
     let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(out_path)?);
     writer.write_all(ARCHIVE_MAGIC)?;
     writer.write_all(&ARCHIVE_VERSION.to_le_bytes())?;
     writer.write_all(&target_size.to_le_bytes())?;
-    writer.write_all(&(header.total_cells as u64).to_le_bytes())?;
-    writer.write_all(&(header.total_genes as u64).to_le_bytes())?;
-    writer.write_all(&(header.no_chunks as u64).to_le_bytes())?;
+    writer.write_all(&(dims.total_cells as u64).to_le_bytes())?;
+    writer.write_all(&(dims.total_genes as u64).to_le_bytes())?;
+    writer.write_all(&(order.len() as u64).to_le_bytes())?;
 
     let blocks: Vec<&[usize]> = order.chunks(ARCHIVE_BLOCK_CELLS).collect();
     let (mut nnz, mut n_norm_stored) = (0usize, 0usize);
@@ -481,7 +502,7 @@ pub fn archive_cell_file(
     drop(writer);
 
     let stats = ArchiveStats {
-        n_cells: header.no_chunks,
+        n_cells: order.len(),
         nnz,
         n_norm_stored,
         archive_bytes: std::fs::metadata(out_path)?.len(),
@@ -546,7 +567,7 @@ pub fn restore_archive(
         return Err(ScDataErrors::ArchiveMagicMismatch);
     }
     let version = u32::from_le_bytes(head[8..12].try_into().expect("4 bytes"));
-    if version != ARCHIVE_VERSION {
+    if version != ARCHIVE_VERSION && version != ARCHIVE_VERSION_F16_NORM {
         return Err(ScDataErrors::ArchiveVersionMismatch {
             expected: ARCHIVE_VERSION,
             found: version,
@@ -592,7 +613,7 @@ pub fn restore_archive(
             .map(|frame| {
                 let stream = zstd::stream::decode_all(&frame[..])
                     .map_err(|e| ScDataErrors::ArchiveCorrupt(e.to_string()))?;
-                decode_block(&stream, target_size)?
+                decode_block(&stream, target_size, version == ARCHIVE_VERSION_F16_NORM)?
                     .into_iter()
                     .map(|c| {
                         Ok(CellPayload {
@@ -685,10 +706,7 @@ mod tests {
             }
             let mut chunk = CsrCellChunk::from_data(&data, &idx, i, target.max(1.0), true);
             if odd_norm.contains(&i) {
-                chunk
-                    .data_norm
-                    .iter_mut()
-                    .for_each(|v| *v = F16::from_f32(1.5));
+                chunk.data_norm.iter_mut().for_each(|v| *v = 1.5);
             }
             writer.write_cell_chunk(chunk).unwrap();
         }
@@ -696,7 +714,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn read_cells(path: &str) -> Vec<(Vec<u32>, Vec<u16>, Vec<u32>, usize, usize, bool, u8)> {
+    fn read_cells(path: &str) -> Vec<(Vec<u32>, Vec<u32>, Vec<u32>, usize, usize, bool, u8)> {
         ParallelSparseReader::new(path)
             .unwrap()
             .get_all_cells()

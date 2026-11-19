@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -50,7 +51,15 @@ def _check_output(path: Path, *, overwrite: bool) -> None:
     if path.exists():
         if not overwrite:
             raise FileExistsError(f"{path} already exists and overwrite = False.")
-        path.unlink()
+        _remove(path)
+
+
+def _remove(path: Path) -> None:
+    """Remove a file, or a directory such as a Zarr store."""
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 @beartype
@@ -240,6 +249,67 @@ def _export_cache(
 
 
 @beartype
+def _save_ad(
+    sc: SingleCells,
+    path: Path,
+    *,
+    zarr: bool,
+    assay: Literal["raw", "norm"],
+    chunk_size: int,
+    overwrite: bool,
+    verbose: Verbose,
+) -> Path:
+    """The shared body of `save_h5ad` and `save_zarr`."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    _check_output(path, overwrite=overwrite)
+
+    keep = sc.cells_to_keep
+    order = np.argsort(keep, kind="stable")
+    cells = np.ascontiguousarray(keep[order], dtype=np.uint32)
+
+    obs = sc.obs(filtered=True).sort("cell_idx")
+    obs = obs.select(
+        "cell_id",
+        *[c for c in obs.columns if c not in ("cell_idx", "cell_id", "to_keep")],
+    )
+    var = sc.var().sort("gene_idx").drop("gene_idx")
+    var = var.select("gene_id", *[c for c in var.columns if c != "gene_id"])
+    if obs.height != len(cells) or var.height != sc.n_genes:
+        raise ValueError("The obs / var tables do not match the cells being written.")
+
+    obsm, varm, obsp, uns_json = _export_cache(sc, order)
+    if verbose:
+        logger.info(
+            "Writing %i cells x %i genes to %s.",
+            obs.height,
+            var.height,
+            "Zarr" if zarr else "h5ad",
+        )
+    try:
+        _bixverse.save_h5ad(
+            sc.cells_path,
+            path,
+            cells,
+            assay == "norm",
+            _ids(obs),
+            h5ad_columns(obs.drop("cell_id"), factorise=True),
+            _ids(var),
+            h5ad_columns(var.drop("gene_id"), factorise=True),
+            obsm,
+            varm,
+            obsp,
+            uns_json,
+            chunk_size,
+            zarr=zarr,
+        )
+    except BaseException:
+        _remove(path)
+        raise
+    return path
+
+
+@beartype
 def save_h5ad(
     sc: SingleCells,
     h5_path: Path | str,
@@ -275,48 +345,60 @@ def save_h5ad(
     Examples:
         >>> bv.io.save_h5ad(sc, "path/to/out.h5ad", assay="norm")
     """
-    if chunk_size < 1:
-        raise ValueError("chunk_size must be positive")
-    path = Path(h5_path).expanduser()
-    _check_output(path, overwrite=overwrite)
-
-    keep = sc.cells_to_keep
-    order = np.argsort(keep, kind="stable")
-    cells = np.ascontiguousarray(keep[order], dtype=np.uint32)
-
-    obs = sc.obs(filtered=True).sort("cell_idx")
-    obs = obs.select(
-        "cell_id",
-        *[c for c in obs.columns if c not in ("cell_idx", "cell_id", "to_keep")],
+    return _save_ad(
+        sc,
+        Path(h5_path).expanduser(),
+        zarr=False,
+        assay=assay,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        verbose=verbose,
     )
-    var = sc.var().sort("gene_idx").drop("gene_idx")
-    var = var.select("gene_id", *[c for c in var.columns if c != "gene_id"])
-    if obs.height != len(cells) or var.height != sc.n_genes:
-        raise ValueError("The obs / var tables do not match the cells being written.")
 
-    obsm, varm, obsp, uns_json = _export_cache(sc, order)
-    if verbose:
-        logger.info("Writing %i cells x %i genes to h5ad.", obs.height, var.height)
-    try:
-        _bixverse.save_h5ad(
-            sc.cells_path,
-            path,
-            cells,
-            assay == "norm",
-            _ids(obs),
-            h5ad_columns(obs.drop("cell_id"), factorise=True),
-            _ids(var),
-            h5ad_columns(var.drop("gene_id"), factorise=True),
-            obsm,
-            varm,
-            obsp,
-            uns_json,
-            chunk_size,
-        )
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    return path
+
+@beartype
+def save_zarr(
+    sc: SingleCells,
+    zarr_path: Path | str,
+    *,
+    assay: Literal["raw", "norm"] = "raw",
+    chunk_size: int = 10_000,
+    overwrite: bool = True,
+    verbose: Verbose = True,
+) -> Path:
+    """Write an experiment to an AnnData Zarr (v3) store.
+
+    Writes what `save_h5ad` writes, as a Zarr directory that
+    `anndata.read_zarr` opens. A failed write leaves no store behind.
+
+    Args:
+        sc: The experiment.
+        zarr_path: Directory to write.
+        assay: Which counts go into `X`.
+        chunk_size: Cells per streaming batch.
+        overwrite: Replace an existing store.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+
+    Returns:
+        The written path.
+
+    Raises:
+        FileExistsError: If the store exists and `overwrite` is false.
+        ValueError: If `chunk_size` is not positive.
+
+    Examples:
+        >>> bv.io.save_zarr(sc, "path/to/out.zarr")
+    """
+    return _save_ad(
+        sc,
+        Path(zarr_path).expanduser(),
+        zarr=True,
+        assay=assay,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        verbose=verbose,
+    )
 
 
 @beartype

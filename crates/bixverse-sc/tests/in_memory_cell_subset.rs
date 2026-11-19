@@ -1,8 +1,6 @@
 //! Cell subsets read from the in-memory store against the gene-major path,
 //! including the HVG and scTransform results that sit on top.
 
-use half::f16;
-
 use bixverse_sc::sc_processing::hvg::get_hvg_vst;
 use bixverse_sc::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_sc::sc_processing::sctransform::stream::{SctStreamOpts, fit_sctransform};
@@ -78,7 +76,7 @@ fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
                 raw.push(value);
                 idx.push(cell);
                 let norm = (value as f32 / lib[cell] * SIZE_FACTOR).ln_1p();
-                norms.push(F16::from(f16::from_f32(norm)));
+                norms.push(norm);
             }
         }
         gene_writer

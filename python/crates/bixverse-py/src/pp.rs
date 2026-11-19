@@ -683,7 +683,7 @@ pub fn magic_impute<'py>(
     let res = py
         .detach(|| {
             let reader = ParallelSparseReader::new(f_path_gene)?;
-            let total_cells = reader.get_header().total_cells;
+            let total_cells = reader.dims().total_cells;
             let operator = MagicOperator::from_knn(&indices, &distances, &cells, total_cells)?;
             magic_impute_genes(&reader, &operator, &genes, Some(params), verbose)
         })

@@ -1,35 +1,40 @@
-//! The v4 chunk encoding and the v3 -> v4 converters.
+//! The v4 chunk encoding, shared by the v4 and v5 containers, and the
+//! converters from v3 and v4 to v5.
 //!
-//! v4 keeps the v3 container (per-chunk length prefix, offsets, index map,
-//! library-size index) and changes what a chunk holds. Per chunk:
+//! Per chunk:
 //!
 //! * gene (or cell) indices as delta bit-packed blocks of 128 instead of
 //!   absolute `u32`, which lz4 cannot compress;
-//! * raw counts bit-packed the same way instead of `u16` / `u32`;
+//! * each raw layer bit-packed the same way (v4 has exactly one, v5 up to
+//!   `MAX_LAYERS`);
 //! * the normalised layer dropped when it recomputes bit for bit from the raw
-//!   counts, library size and target size, stored verbatim otherwise;
+//!   counts, library size and target size, stored verbatim otherwise (f16 in
+//!   v4, f32 in v5);
 //! * an uncompressed fixed header, so nnz and library size are readable
 //!   without decompressing, and an optional byte codec over the body.
 //!
 //! Gene-based files recompute the norm of an entry from the library size of
-//! its cell, so they carry a per-cell library-size table in the tail, pointed
-//! at by the file header's `library_index_offset`.
+//! its cell, so they carry a per-cell library-size table in the tail.
 //!
 //! Chunk layout (all little endian):
 //!
 //! ```text
 //! [0..4)   nnz            u32
 //! [4..8)   body_len       u32   decoded body length
-//! [8..16)  aux            u64   cell: library size; gene: avg_exp f16 bits
+//! [8..16)  aux            u64   cell: library size; gene: v4 avg_exp f16
+//!                               bits, v5 sum of raw layer 0
 //! [16..24) original_index u64
 //! [24]     to_keep        u8
-//! [25]     flags          u8    bit 0: norm stored, bit 1: raw stored minus one
+//! [25]     flags          u8    bit 0: norm stored, bit 1: layer 0 stored
+//!                               minus one
 //! [26]     codec          u8    0 none, 1 lz4, 2 zstd
-//! [27..32) reserved
+//! [27]     minus_one      u8    bit k - 1: layer k stored minus one (v5)
+//! [28..32) reserved
 //! ```
 //!
-//! The body is the packed indices, the packed raw counts and, when flagged,
-//! the f16 norm layer, then compressed with `codec`.
+//! The body is the packed indices, the packed raw layers in order and, when
+//! flagged, the norm layer, then compressed with `codec`. With one layer the
+//! body is the same in v4 and v5 unless the norm is stored.
 
 use lz4_flex::block::{compress as lz4_compress, decompress_into as lz4_decompress_into};
 use rayon::prelude::*;
@@ -38,6 +43,7 @@ use thousands::Separable;
 
 use crate::data_io::*;
 use crate::prelude::*;
+use crate::v5_io::{MAX_LAYERS, NormKind};
 
 ////////////
 // Consts //
@@ -64,7 +70,7 @@ const NORM_LUT_MAX: usize = 255;
 
 /// Counts covered by the per-cell norm table of a gene file, see
 /// [`gene_norm_table`]. Larger counts fall back to one `ln_1p`. Not tuned: it
-/// trades table size (two bytes per cell per count) against how often the
+/// trades table size (four bytes per cell per count) against how often the
 /// fallback runs.
 pub(crate) const GENE_NORM_LUT_COUNTS: usize = 4;
 
@@ -375,6 +381,9 @@ pub(crate) struct V4Header {
     flags: u8,
     /// Codec of the body.
     codec: ChunkCodec,
+    /// Bit `k`: raw layer `k` is stored minus one. Bit 0 mirrors
+    /// [`FLAG_RAW_MINUS_ONE`].
+    minus_one: u16,
 }
 
 impl V4Header {
@@ -408,6 +417,7 @@ impl V4Header {
             to_keep: chunk[24] != 0,
             flags: chunk[25],
             codec: ChunkCodec::from_u8(chunk[26])?,
+            minus_one: ((chunk[25] & FLAG_RAW_MINUS_ONE != 0) as u16) | ((chunk[27] as u16) << 1),
         })
     }
 
@@ -426,14 +436,36 @@ impl V4Header {
 // Encode //
 ////////////
 
+/// Replace an f16 norm layer by its f32 recompute when every entry agrees at
+/// f16 precision.
+///
+/// v3 holds the norm as f16, which never passes the bit-exact f32 check the
+/// encoder applies. A v3 layer that is the f16 rounding of [`norm_value`]
+/// becomes the f32 value, so the converted chunk drops it. A layer with any
+/// other entry is left alone and stored verbatim.
+///
+/// ### Params
+///
+/// * `norm` - The layer, as read from v3
+/// * `recompute` - [`norm_value`] of entry `k`
+fn snap_v3_norm(norm: &mut [f32], recompute: impl Fn(usize) -> f32) {
+    let same =
+        |k: usize, v: f32| F16::from_f32(recompute(k)).to_bits() == F16::from_f32(v).to_bits();
+    if norm.iter().enumerate().all(|(k, &v)| same(k, v)) {
+        norm.iter_mut()
+            .enumerate()
+            .for_each(|(k, v)| *v = recompute(k));
+    }
+}
+
 /// Everything [`encode_chunk`] needs about one cell or gene.
 struct EncodeIn<'a> {
     /// Gene (cell chunks) or cell (gene chunks) indices, ascending.
     indices: &'a [u32],
-    /// Raw counts.
-    raw: &'a [u32],
-    /// Stored normalised layer, written only when it does not recompute.
-    norm: &'a [F16],
+    /// Raw layers, each as long as `indices`. At least one.
+    layers: &'a [&'a [u32]],
+    /// Normalised layer, written only when it does not recompute.
+    norm: &'a [f32],
     /// The header `aux` field.
     aux: u64,
     /// Original index of the cell or gene.
@@ -442,6 +474,8 @@ struct EncodeIn<'a> {
     to_keep: bool,
     /// Whether the norm layer recomputes bit for bit and can be dropped.
     norm_derivable: bool,
+    /// Store a verbatim norm as f32 (v5) rather than f16 (v4).
+    norm_f32: bool,
 }
 
 /// Serialise one chunk into the v4 layout.
@@ -459,6 +493,7 @@ struct EncodeIn<'a> {
 ///
 /// Header plus body.
 fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Vec<u8> {
+    debug_assert!((1..=MAX_LAYERS).contains(&p.layers.len()));
     let n = p.indices.len();
 
     let mut deltas = Vec::with_capacity(n);
@@ -473,21 +508,32 @@ fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Vec<u8> {
     }
 
     let mut flags = 0u8;
-    let mut body = Vec::with_capacity(n * 2);
+    let mut mask = 0u8;
+    let mut body = Vec::with_capacity(n * (1 + p.layers.len()));
     pack(&deltas, &mut body);
 
-    if p.raw.iter().all(|&x| x >= 1) {
-        flags |= FLAG_RAW_MINUS_ONE;
-        let minus_one: Vec<u32> = p.raw.iter().map(|&x| x - 1).collect();
-        pack(&minus_one, &mut body);
-    } else {
-        pack(p.raw, &mut body);
+    for (l, layer) in p.layers.iter().enumerate() {
+        if layer.iter().all(|&x| x >= 1) {
+            if l == 0 {
+                flags |= FLAG_RAW_MINUS_ONE;
+            } else {
+                mask |= 1 << (l - 1);
+            }
+            let minus_one: Vec<u32> = layer.iter().map(|&x| x - 1).collect();
+            pack(&minus_one, &mut body);
+        } else {
+            pack(layer, &mut body);
+        }
     }
 
     if !p.norm_derivable {
         flags |= FLAG_NORM_STORED;
-        for v in p.norm {
-            body.extend_from_slice(&v.to_le_bytes());
+        for &v in p.norm {
+            if p.norm_f32 {
+                body.extend_from_slice(&v.to_le_bytes());
+            } else {
+                body.extend_from_slice(&F16::from_f32(v).to_le_bytes());
+            }
         }
     }
 
@@ -509,32 +555,28 @@ fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Vec<u8> {
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&p.aux.to_le_bytes());
     out.extend_from_slice(&(p.original_index as u64).to_le_bytes());
-    out.extend_from_slice(&[p.to_keep as u8, flags, used.to_u8(), 0, 0, 0, 0, 0]);
+    out.extend_from_slice(&[p.to_keep as u8, flags, used.to_u8(), mask, 0, 0, 0, 0]);
     out.extend_from_slice(&payload);
     out
 }
 
 impl CsrCellChunk {
-    /// Serialise the cell into a v4 chunk.
+    /// Serialise the cell into a v4-codec chunk.
     ///
     /// The norm layer is dropped when every entry recomputes bit for bit from
-    /// the raw count, the library size and `target_size`.
+    /// the raw count, the library size and the format's target size, and
+    /// stored verbatim otherwise.
     ///
     /// ### Params
     ///
-    /// * `target_size` - Target size of the file the cell goes into, `0.0` if
-    ///   unknown, which stores the norm
-    /// * `codec` - Body codec
+    /// * `format` - Format of the file the cell goes into. A target size of
+    ///   `0.0` stores the norm.
     ///
     /// ### Returns
     ///
     /// The chunk bytes, or [`ScDataErrors::V4ChunkCorrupt`] for layers of
     /// unequal length.
-    pub fn to_v4_bytes(
-        &self,
-        target_size: f32,
-        codec: ChunkCodec,
-    ) -> Result<Vec<u8>, ScDataErrors> {
+    pub fn to_v4_bytes(&self, format: &ChunkFormat) -> Result<Vec<u8>, ScDataErrors> {
         let n = self.indices.len();
         if self.data_raw.len() != n || self.data_norm.len() != n {
             return Err(ScDataErrors::V4ChunkCorrupt(format!(
@@ -544,40 +586,42 @@ impl CsrCellChunk {
         }
         let raw: Vec<u32> = self.data_raw.iter().collect();
         let lib = self.library_size as f32;
+        let target_size = format.target_size;
         let norm_derivable = target_size != 0.0
             && raw
                 .iter()
                 .zip(&self.data_norm)
-                .all(|(&x, v)| norm_value(x as f32, lib, target_size).to_bits() == v.to_bits());
+                .all(|(&x, &v)| norm_value(x as f32, lib, target_size).to_bits() == v.to_bits());
 
         Ok(encode_chunk(
             &EncodeIn {
                 indices: &self.indices,
-                raw: &raw,
+                layers: &[&raw],
                 norm: &self.data_norm,
                 aux: self.library_size as u64,
                 original_index: self.original_index,
                 to_keep: self.to_keep,
                 norm_derivable,
+                norm_f32: format.norm_f32(),
             },
-            codec,
+            format.codec,
         ))
     }
 }
 
 impl CscGeneChunk {
-    /// Serialise the gene into a v4 chunk.
+    /// Serialise the gene into a v4-codec chunk.
     ///
     /// The norm layer is dropped when every entry recomputes bit for bit from
-    /// the raw count, the library size of its cell and `target_size`.
+    /// the raw count, the library size of its cell and the format's target
+    /// size, and stored verbatim otherwise.
     ///
     /// ### Params
     ///
     /// * `cell_lib` - Library size of every cell as `f32`, indexed by the cell
     ///   indices this chunk stores
-    /// * `target_size` - Target size of the file the gene goes into, `0.0` if
-    ///   unknown, which stores the norm
-    /// * `codec` - Body codec
+    /// * `format` - Format of the file the gene goes into. A target size of
+    ///   `0.0` stores the norm.
     ///
     /// ### Returns
     ///
@@ -586,8 +630,7 @@ impl CscGeneChunk {
     pub fn to_v4_bytes(
         &self,
         cell_lib: &[f32],
-        target_size: f32,
-        codec: ChunkCodec,
+        format: &ChunkFormat,
     ) -> Result<Vec<u8>, ScDataErrors> {
         let n = self.indices.len();
         if self.data_raw.len() != n || self.data_norm.len() != n {
@@ -597,13 +640,14 @@ impl CscGeneChunk {
             )));
         }
         let raw: Vec<u32> = self.data_raw.iter().collect();
+        let target_size = format.target_size;
         let norm_derivable = target_size != 0.0
             && self
                 .indices
                 .iter()
                 .zip(&raw)
                 .zip(&self.data_norm)
-                .all(|((&cell, &x), v)| {
+                .all(|((&cell, &x), &v)| {
                     cell_lib.get(cell as usize).is_some_and(|&lib| {
                         norm_value(x as f32, lib, target_size).to_bits() == v.to_bits()
                     })
@@ -612,14 +656,15 @@ impl CscGeneChunk {
         Ok(encode_chunk(
             &EncodeIn {
                 indices: &self.indices,
-                raw: &raw,
+                layers: &[&raw],
                 norm: &self.data_norm,
-                aux: self.avg_exp.to_bits() as u64,
+                aux: format.gene_aux(self.avg_exp, &raw),
                 original_index: self.original_index,
                 to_keep: self.to_keep,
                 norm_derivable,
+                norm_f32: format.norm_f32(),
             },
-            codec,
+            format.codec,
         ))
     }
 }
@@ -648,12 +693,39 @@ pub(crate) struct V4Decoded {
 pub(crate) struct V4Ctx<'a> {
     /// Target size from the file header, `0.0` if unknown.
     pub target_size: f32,
-    /// Per-cell library sizes as `f32`, present on gene-based v4 files.
+    /// Per-cell library sizes as `f32`, present on gene-based files.
     pub cell_lib: Option<&'a [f32]>,
     /// Normalised value of small counts per cell, see [`gene_norm_table`].
-    pub cell_norm: Option<&'a [u16]>,
+    /// Only valid without `weights`.
+    pub cell_norm: Option<&'a [f32]>,
     /// Whether the chunk is a cell (CSR) chunk.
     pub is_cell: bool,
+    /// Raw layers per chunk, 1 for v4.
+    pub n_layers: usize,
+    /// The raw layer reads return, and the norm is derived from.
+    pub layer: usize,
+    /// Whether a verbatim norm is f32 (v5) rather than f16 (v4).
+    pub norm_f32: bool,
+    /// How the norm derives from the raw counts.
+    pub norm_kind: NormKind,
+    /// Per-feature weight `w_f` of the norm (the IDF of [`NormKind::TfIdf`]),
+    /// `None` for `w_f = 1`.
+    pub weights: Option<&'a [f32]>,
+}
+
+impl V4Ctx<'_> {
+    /// Whether the store has a normalised layer to derive.
+    ///
+    /// ### Returns
+    ///
+    /// `false` for [`NormKind::None`] and for TF-IDF without an IDF table.
+    pub(crate) fn norm_available(&self) -> bool {
+        match self.norm_kind {
+            NormKind::None => false,
+            NormKind::LogCpm => true,
+            NormKind::TfIdf => self.weights.is_some(),
+        }
+    }
 }
 
 /// Decode one v4 chunk into `s`.
@@ -761,21 +833,39 @@ pub(crate) fn decode_v4_into(
 
     let norm_stored = h.flags & FLAG_NORM_STORED != 0;
     let want_norm = norm.is_some();
+    if want_norm && !norm_stored {
+        match (ctx.norm_kind, ctx.weights) {
+            (NormKind::None, _) => {
+                return Err(ScDataErrors::NormNotAvailable("norm kind none".into()));
+            }
+            (NormKind::TfIdf, None) => {
+                return Err(ScDataErrors::NormNotAvailable(
+                    "tf_idf without an IDF table".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
     let need_raw = want_raw || (want_norm && !norm_stored);
     let rest = &body[used..];
 
-    let raw_len = if need_raw {
-        raw.clear();
-        let len = unpack(rest, n, raw)?;
-        if h.flags & FLAG_RAW_MINUS_ONE != 0 {
-            raw.iter_mut().for_each(|x| *x = x.wrapping_add(1));
+    // walk the layers: decode the selected one, skip the ones before it, and
+    // the ones after it only when the stored norm behind them is wanted
+    let mut pos = 0usize;
+    for l in 0..ctx.n_layers {
+        let from = rest.get(pos..).ok_or_else(truncated)?;
+        if need_raw && l == ctx.layer {
+            raw.clear();
+            pos += unpack(from, n, raw)?;
+            if (h.minus_one >> l) & 1 == 1 {
+                raw.iter_mut().for_each(|x| *x = x.wrapping_add(1));
+            }
+        } else if (need_raw && l < ctx.layer) || (want_norm && norm_stored) {
+            pos += packed_len(from, n)?;
+        } else {
+            break;
         }
-        len
-    } else if want_norm {
-        packed_len(rest, n)?
-    } else {
-        0
-    };
+    }
 
     let Some(norm) = norm else {
         return Ok(h);
@@ -783,24 +873,84 @@ pub(crate) fn decode_v4_into(
 
     norm.reserve(n);
     if norm_stored {
-        let stored_norm = rest.get(raw_len..raw_len + n * 2).ok_or_else(truncated)?;
-        norm.extend(
-            stored_norm
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&c| F16::from_le_bytes(c).to_f32()),
-        );
+        if ctx.norm_f32 {
+            let stored_norm = rest.get(pos..pos + n * 4).ok_or_else(truncated)?;
+            norm.extend(
+                stored_norm
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&c| f32::from_le_bytes(c)),
+            );
+        } else {
+            let stored_norm = rest.get(pos..pos + n * 2).ok_or_else(truncated)?;
+            norm.extend(
+                stored_norm
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&c| F16::from_le_bytes(c).to_f32()),
+            );
+        }
     } else if ctx.is_cell {
         let lib = h.aux as f32;
-        let top = raw.iter().copied().max().unwrap_or(0) as usize;
-        let lut: Vec<f32> = (0..=top.min(NORM_LUT_MAX))
-            .map(|x| norm_value(x as f32, lib, ctx.target_size).to_f32())
-            .collect();
-        norm.extend(raw.iter().map(|&x| match lut.get(x as usize) {
-            Some(&v) => v,
-            None => norm_value(x as f32, lib, ctx.target_size).to_f32(),
+        if let Some(w) = ctx.weights {
+            // TF-IDF: the target varies per gene, so no per-count table
+            let mut outside = None;
+            norm.extend(idx[start..].iter().zip(raw.iter()).map(
+                |(&g, &x)| match w.get(g as usize) {
+                    Some(&wg) => norm_value(x as f32, lib, ctx.target_size * wg),
+                    None => {
+                        outside = Some(g);
+                        0.0
+                    }
+                },
+            ));
+            if let Some(g) = outside {
+                return Err(ScDataErrors::V4ChunkCorrupt(format!(
+                    "feature {g} outside the IDF table"
+                )));
+            }
+        } else {
+            let top = raw.iter().copied().max().unwrap_or(0) as usize;
+            let lut: Vec<f32> = (0..=top.min(NORM_LUT_MAX))
+                .map(|x| norm_value(x as f32, lib, ctx.target_size))
+                .collect();
+            norm.extend(raw.iter().map(|&x| match lut.get(x as usize) {
+                Some(&v) => v,
+                None => norm_value(x as f32, lib, ctx.target_size),
+            }));
+        }
+    } else if let Some(w) = ctx.weights {
+        let cell_lib = match ctx.cell_lib {
+            Some(table) => table,
+            None if n == 0 => &[],
+            None => return Err(ScDataErrors::V4MissingCellLibraryTable),
+        };
+        let target = w
+            .get(h.original_index)
+            .map(|&wg| ctx.target_size * wg)
+            .ok_or_else(|| {
+                ScDataErrors::V4ChunkCorrupt(format!(
+                    "feature {} outside the IDF table",
+                    h.original_index
+                ))
+            })?;
+        let mut outside = None;
+        norm.extend(idx[start..].iter().zip(raw.iter()).map(|(&cell, &x)| {
+            match cell_lib.get(cell as usize) {
+                Some(&lib) => norm_value(x as f32, lib, target),
+                None => {
+                    outside = Some(cell);
+                    0.0
+                }
+            }
         }));
+        if let Some(cell) = outside {
+            return Err(ScDataErrors::V4ChunkCorrupt(format!(
+                "cell {cell} outside the library table"
+            )));
+        }
     } else {
         // an empty run has nothing to recompute and needs no table
         let cell_lib = match ctx.cell_lib {
@@ -815,12 +965,12 @@ pub(crate) fn decode_v4_into(
         norm.extend(idx[start..].iter().zip(raw.iter()).map(|(&cell, &x)| {
             let slot = (x as usize).wrapping_sub(1);
             if slot < GENE_NORM_LUT_COUNTS
-                && let Some(&bits) = table.get(cell as usize * GENE_NORM_LUT_COUNTS + slot)
+                && let Some(&v) = table.get(cell as usize * GENE_NORM_LUT_COUNTS + slot)
             {
-                return F16::from_bits(bits).to_f32();
+                return v;
             }
             match cell_lib.get(cell as usize) {
-                Some(&lib) => norm_value(x as f32, lib, ctx.target_size).to_f32(),
+                Some(&lib) => norm_value(x as f32, lib, ctx.target_size),
                 None => {
                     outside = Some(cell);
                     0.0
@@ -843,8 +993,7 @@ pub(crate) fn decode_v4_into(
 /// per-run lookup table as in the cell view. Nearly every UMI count is small,
 /// so a flat table indexed by `cell * GENE_NORM_LUT_COUNTS + count - 1` turns
 /// the per-entry `ln_1p` into a load. Built once when the file is opened, with
-/// the same [`norm_value`] the encoder verified against, so values stay bit
-/// identical.
+/// the same [`norm_value`] the fallback calls, so values stay bit identical.
 ///
 /// ### Params
 ///
@@ -853,15 +1002,15 @@ pub(crate) fn decode_v4_into(
 ///
 /// ### Returns
 ///
-/// f16 bits, `cell_lib.len() * GENE_NORM_LUT_COUNTS` long.
-pub(crate) fn gene_norm_table(cell_lib: &[f32], target_size: f32) -> Vec<u16> {
-    let mut table = vec![0u16; cell_lib.len() * GENE_NORM_LUT_COUNTS];
+/// The values, `cell_lib.len() * GENE_NORM_LUT_COUNTS` long.
+pub(crate) fn gene_norm_table(cell_lib: &[f32], target_size: f32) -> Vec<f32> {
+    let mut table = vec![0.0f32; cell_lib.len() * GENE_NORM_LUT_COUNTS];
     table
         .par_chunks_mut(GENE_NORM_LUT_COUNTS)
         .zip(cell_lib.par_iter())
         .for_each(|(row, &lib)| {
             for (k, v) in row.iter_mut().enumerate() {
-                *v = norm_value((k + 1) as f32, lib, target_size).to_bits();
+                *v = norm_value((k + 1) as f32, lib, target_size);
             }
         });
     table
@@ -943,16 +1092,17 @@ impl RunSource for V4Run<'_> {
 ///
 /// ### Returns
 ///
-/// The cell, with both layers.
+/// The cell, with the selected raw layer and the norm, or an empty norm on a
+/// store without one (see [`V4Ctx::norm_available`]).
 pub(crate) fn v4_cell_chunk(
     chunk: &[u8],
     ctx: &V4Ctx,
     s: &mut V4Decoded,
 ) -> Result<CsrCellChunk, ScDataErrors> {
-    let h = decode_v4(chunk, ctx, true, true, s)?;
+    let h = decode_v4(chunk, ctx, true, ctx.norm_available(), s)?;
     Ok(CsrCellChunk {
         data_raw: RawCounts::from_u32_auto(&s.raw),
-        data_norm: s.norm.iter().map(|&x| F16::from_f32(x)).collect(),
+        data_norm: s.norm.clone(),
         library_size: h.aux as usize,
         indices: s.idx.clone(),
         original_index: h.original_index,
@@ -970,17 +1120,24 @@ pub(crate) fn v4_cell_chunk(
 ///
 /// ### Returns
 ///
-/// The gene, with both layers.
+/// The gene, with the selected raw layer and the norm, or an empty norm on a
+/// store without one. v5 keeps the feature total in the header, so `avg_exp`
+/// is summed from the decoded norm there.
 pub(crate) fn v4_gene_chunk(
     chunk: &[u8],
     ctx: &V4Ctx,
     s: &mut V4Decoded,
 ) -> Result<CscGeneChunk, ScDataErrors> {
-    let h = decode_v4(chunk, ctx, true, true, s)?;
+    let h = decode_v4(chunk, ctx, true, ctx.norm_available(), s)?;
+    let avg_exp = if ctx.norm_f32 {
+        F16::from_f32(s.norm.iter().sum::<f32>())
+    } else {
+        F16::from_bits(h.aux as u16)
+    };
     Ok(CscGeneChunk {
         data_raw: RawCounts::from_u32_auto(&s.raw),
-        data_norm: s.norm.iter().map(|&x| F16::from_f32(x)).collect(),
-        avg_exp: F16::from_bits(h.aux as u16),
+        data_norm: s.norm.clone(),
+        avg_exp,
         nnz: h.nnz,
         indices: s.idx.clone(),
         original_index: h.original_index,
@@ -998,9 +1155,10 @@ pub(crate) fn v4_gene_chunk(
 /// borrowing it.
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkFormat {
-    /// File version: [`SC_FILE_VERSION`] or [`SC_FILE_VERSION_V3`].
+    /// File version: [`SC_FILE_VERSION`], [`SC_FILE_VERSION_V4`] or
+    /// [`SC_FILE_VERSION_V3`].
     pub version: u32,
-    /// Body codec of v4 chunks. Unused by v3.
+    /// Body codec of v4-codec chunks. Unused by v3.
     pub codec: ChunkCodec,
     /// Target size in the file header, which readers recompute the norm layer
     /// with. `0.0` stores the norm layer verbatim.
@@ -1008,13 +1166,92 @@ pub struct ChunkFormat {
 }
 
 impl ChunkFormat {
-    /// Whether this format is the current (v4) one.
+    /// Whether chunks use the v4 codec, i.e. the file is v4 or v5.
     ///
     /// ### Returns
     ///
-    /// `true` for v4.
-    pub fn is_v4(&self) -> bool {
-        self.version == SC_FILE_VERSION
+    /// `false` only for v3.
+    pub fn uses_v4_codec(&self) -> bool {
+        self.version >= SC_FILE_VERSION_V4
+    }
+
+    /// Whether a verbatim norm is stored as f32 (v5) rather than f16 (v4).
+    ///
+    /// ### Returns
+    ///
+    /// `true` for v5.
+    pub(crate) fn norm_f32(&self) -> bool {
+        self.version >= SC_FILE_VERSION
+    }
+
+    /// The `aux` header field of a gene chunk.
+    ///
+    /// ### Params
+    ///
+    /// * `avg_exp` - Sum of the normalised layer, what v4 stores
+    /// * `raw` - Raw layer 0, whose sum v5 stores
+    ///
+    /// ### Returns
+    ///
+    /// The field.
+    pub(crate) fn gene_aux(&self, avg_exp: F16, raw: &[u32]) -> u64 {
+        if self.norm_f32() {
+            raw.iter().map(|&x| x as u64).sum()
+        } else {
+            avg_exp.to_bits() as u64
+        }
+    }
+
+    /// Encode a chunk with several raw layers and a derived (or no) norm.
+    ///
+    /// v5 only. `aux` is the sum of layer 0: the library size of a cell, the
+    /// feature total of a gene.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene (cell chunk) or cell (gene chunk) indices, ascending
+    /// * `layers` - Raw layers, each as long as `indices`, 1 to
+    ///   [`MAX_LAYERS`]
+    /// * `original_index` - Index of the cell or gene
+    /// * `to_keep` - Keep flag
+    ///
+    /// ### Returns
+    ///
+    /// The payload, or [`ScDataErrors::V4ChunkCorrupt`] for a layer count out
+    /// of range, layers of unequal length or a pre-v5 format.
+    pub fn encode_layers(
+        &self,
+        indices: &[u32],
+        layers: &[&[u32]],
+        original_index: usize,
+        to_keep: bool,
+    ) -> Result<Vec<u8>, ScDataErrors> {
+        if !self.norm_f32() {
+            return Err(ScDataErrors::V4ChunkCorrupt(
+                "raw layers need a v5 store".into(),
+            ));
+        }
+        if !(1..=MAX_LAYERS).contains(&layers.len())
+            || layers.iter().any(|l| l.len() != indices.len())
+        {
+            return Err(ScDataErrors::V4ChunkCorrupt(format!(
+                "chunk {original_index}: {} layers, or of unequal length",
+                layers.len()
+            )));
+        }
+        Ok(encode_chunk(
+            &EncodeIn {
+                indices,
+                layers,
+                norm: &[],
+                aux: layers[0].iter().map(|&x| x as u64).sum(),
+                original_index,
+                to_keep,
+                norm_derivable: true,
+                norm_f32: true,
+            },
+            self.codec,
+        ))
     }
 
     /// Encode a cell chunk for a file of this format.
@@ -1027,8 +1264,8 @@ impl ChunkFormat {
     ///
     /// The payload the writer's `write_compressed_cell_chunks` expects.
     pub fn encode_cell(&self, chunk: &CsrCellChunk) -> Result<Vec<u8>, ScDataErrors> {
-        if self.is_v4() {
-            chunk.to_v4_bytes(self.target_size, self.codec)
+        if self.uses_v4_codec() {
+            chunk.to_v4_bytes(self)
         } else {
             Ok(chunk.to_compressed_bytes()?)
         }
@@ -1050,8 +1287,8 @@ impl ChunkFormat {
         chunk: &CscGeneChunk,
         cell_lib: &[f32],
     ) -> Result<Vec<u8>, ScDataErrors> {
-        if self.is_v4() {
-            chunk.to_v4_bytes(cell_lib, self.target_size, self.codec)
+        if self.uses_v4_codec() {
+            chunk.to_v4_bytes(cell_lib, self)
         } else {
             Ok(chunk.to_compressed_bytes()?)
         }
@@ -1081,16 +1318,17 @@ impl ChunkFormat {
         avg_exp: F16,
         original_index: usize,
     ) -> Vec<u8> {
-        debug_assert!(self.is_v4() && indices.len() == raw.len());
+        debug_assert!(self.uses_v4_codec() && indices.len() == raw.len());
         encode_chunk(
             &EncodeIn {
                 indices,
-                raw,
+                layers: &[raw],
                 norm: &[],
-                aux: avg_exp.to_bits() as u64,
+                aux: self.gene_aux(avg_exp, raw),
                 original_index,
                 to_keep: true,
                 norm_derivable: true,
+                norm_f32: self.norm_f32(),
             },
             self.codec,
         )
@@ -1101,27 +1339,7 @@ impl ChunkFormat {
 // Converters //
 ////////////////
 
-/// Inverse of the index map: original index per chunk, in file order.
-///
-/// ### Params
-///
-/// * `header` - The store header
-///
-/// ### Returns
-///
-/// `order[chunk] = original index`, or [`ScDataErrors::V4ChunkCorrupt`] for a
-/// map that points outside the file.
-fn chunk_order(header: &SparseDataHeader) -> Result<Vec<usize>, ScDataErrors> {
-    let mut order = vec![usize::MAX; header.no_chunks];
-    for (&orig, &chunk) in &header.index_map {
-        *order.get_mut(chunk).ok_or_else(|| {
-            ScDataErrors::V4ChunkCorrupt(format!("chunk {chunk} outside the file"))
-        })? = orig;
-    }
-    Ok(order)
-}
-
-/// Refuse anything but a v3 input.
+/// Refuse anything but a v3 or v4 input.
 ///
 /// ### Params
 ///
@@ -1129,61 +1347,66 @@ fn chunk_order(header: &SparseDataHeader) -> Result<Vec<usize>, ScDataErrors> {
 ///
 /// ### Returns
 ///
-/// `Ok(())` for v3, [`ScDataErrors::FileVersionMismatch`] otherwise.
-fn require_v3(reader: &ParallelSparseReader) -> Result<(), ScDataErrors> {
-    if reader.file_version() != SC_FILE_VERSION_V3 {
-        return Err(ScDataErrors::FileVersionMismatch {
-            expected: SC_FILE_VERSION_V3,
-            found: reader.file_version(),
-        });
+/// `Ok(())` for v3 and v4, [`ScDataErrors::FileVersionMismatch`] otherwise.
+fn require_pre_v5(reader: &ParallelSparseReader) -> Result<(), ScDataErrors> {
+    match reader.file_version() {
+        SC_FILE_VERSION_V3 | SC_FILE_VERSION_V4 => Ok(()),
+        found => Err(ScDataErrors::FileVersionMismatch {
+            expected: SC_FILE_VERSION_V4,
+            found,
+        }),
     }
-    Ok(())
 }
 
-/// Convert a v3 cell-based file to v4.
+/// Convert a v3 or v4 cell-based file to v5.
 ///
 /// Streams in batches of [`CONVERT_CELL_BATCH`] chunks, in file order, so the
-/// index map of the output equals the input's.
+/// original index of every chunk is kept. A v3 norm that is the f16 rounding
+/// of the recompute is dropped (see [`snap_v3_norm`]); a verbatim v4 norm
+/// widens to f32 exactly.
 ///
 /// ### Params
 ///
-/// * `cell_in` - Path to the v3 cell-based file
-/// * `cell_out` - Path of the v4 file to write
+/// * `cell_in` - Path to the v3 or v4 cell-based file
+/// * `cell_out` - Path of the v5 file to write
 /// * `codec` - Body codec of the output
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
 /// Library sizes indexed by original cell index, `total_cells` long at least,
-/// which [`convert_gene_file_to_v4`] needs to drop the gene-file norm.
-pub fn convert_cell_file_to_v4(
+/// which [`convert_gene_file_to_v5`] needs to drop the gene-file norm.
+pub fn convert_cell_file_to_v5(
     cell_in: &str,
     cell_out: &str,
     codec: ChunkCodec,
     verbose: bool,
 ) -> Result<Vec<u64>, ScDataErrors> {
     let start = Instant::now();
-    let reader = ParallelSparseReader::new(cell_in)?;
-    require_v3(&reader)?;
+    let reader = ParallelSparseReader::open_any(cell_in)?;
+    require_pre_v5(&reader)?;
     if !reader.is_cell_based() {
         return Err(ScDataErrors::ReaderModeMismatch {
             actual: "gene-based",
             requested: "cell-based",
         });
     }
-    let header = reader.get_header();
+    let dims = reader.dims();
+    let from_v3 = reader.file_version() == SC_FILE_VERSION_V3;
     let target_size = reader.target_size().unwrap_or(0.0);
-    let order = chunk_order(&header)?;
+    let order = reader.chunk_order()?;
 
-    let mut writer = CellGeneSparseWriter::new(
+    let writer = CellGeneSparseWriter::new(
         cell_out,
         true,
-        header.total_cells,
-        header.total_genes,
+        dims.total_cells,
+        dims.total_genes,
         target_size,
     )?;
+    let mut writer = writer.with_codec(codec);
+    let format = writer.format();
 
-    let table_len = header
+    let table_len = dims
         .total_cells
         .max(order.iter().copied().max().map_or(0, |m| m + 1));
     let mut lib_table = vec![0u64; table_len];
@@ -1192,18 +1415,25 @@ pub fn convert_cell_file_to_v4(
     for batch in order.chunks(CONVERT_CELL_BATCH) {
         let cells = reader.read_cells_parallel(batch)?;
         let payloads = cells
-            .par_iter()
-            .map(|cell| {
+            .into_par_iter()
+            .map(|mut cell| {
+                if from_v3 {
+                    let lib = cell.library_size as f32;
+                    let raw: Vec<u32> = cell.data_raw.iter().collect();
+                    snap_v3_norm(&mut cell.data_norm, |k| {
+                        norm_value(raw[k] as f32, lib, target_size)
+                    });
+                }
                 Ok(CellPayload {
                     original_index: cell.original_index,
                     library_size: cell.library_size,
-                    bytes: cell.to_v4_bytes(target_size, codec)?,
+                    bytes: cell.to_v4_bytes(&format)?,
                 })
             })
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
         for p in &payloads {
             lib_table[p.original_index] = p.library_size as u64;
-            stored_norm += (V4Header::parse(&p.bytes)?.flags & FLAG_NORM_STORED != 0) as usize;
+            stored_norm += V4Header::parse(&p.bytes)?.norm_stored() as usize;
         }
         writer.write_compressed_cell_chunks(&payloads)?;
     }
@@ -1211,8 +1441,8 @@ pub fn convert_cell_file_to_v4(
 
     if verbose {
         println!(
-            "  Converted {} cells to v4 ({} with stored norm) in {:.2?}.",
-            header.no_chunks.separate_with_underscores(),
+            "  Converted {} cells to v5 ({} with stored norm) in {:.2?}.",
+            order.len().separate_with_underscores(),
             stored_norm.separate_with_underscores(),
             start.elapsed()
         );
@@ -1221,24 +1451,24 @@ pub fn convert_cell_file_to_v4(
     Ok(lib_table)
 }
 
-/// Convert a v3 gene-based file to v4.
+/// Convert a v3 or v4 gene-based file to v5.
 ///
 /// Streams in batches of [`CONVERT_GENE_BATCH`] chunks, in file order. The
 /// output carries `cell_lib` as its library-size table.
 ///
 /// ### Params
 ///
-/// * `gene_in` - Path to the v3 gene-based file
-/// * `gene_out` - Path of the v4 file to write
+/// * `gene_in` - Path to the v3 or v4 gene-based file
+/// * `gene_out` - Path of the v5 file to write
 /// * `cell_lib` - Library sizes indexed by original cell index, as returned by
-///   [`convert_cell_file_to_v4`]
+///   [`convert_cell_file_to_v5`]
 /// * `codec` - Body codec of the output
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
 /// `Ok(())` once the output is finalised.
-pub fn convert_gene_file_to_v4(
+pub fn convert_gene_file_to_v5(
     gene_in: &str,
     gene_out: &str,
     cell_lib: &[u64],
@@ -1246,41 +1476,50 @@ pub fn convert_gene_file_to_v4(
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
     let start = Instant::now();
-    let reader = ParallelSparseReader::new(gene_in)?;
-    require_v3(&reader)?;
+    let reader = ParallelSparseReader::open_any(gene_in)?;
+    require_pre_v5(&reader)?;
     if !reader.is_gene_based() {
         return Err(ScDataErrors::ReaderModeMismatch {
             actual: "cell-based",
             requested: "gene-based",
         });
     }
-    let header = reader.get_header();
+    let dims = reader.dims();
+    let from_v3 = reader.file_version() == SC_FILE_VERSION_V3;
     let target_size = reader.target_size().unwrap_or(0.0);
-    let order = chunk_order(&header)?;
+    let order = reader.chunk_order()?;
     let lib_f32: Vec<f32> = cell_lib.iter().map(|&l| l as f32).collect();
 
-    let mut writer = CellGeneSparseWriter::new(
+    let writer = CellGeneSparseWriter::new(
         gene_out,
         false,
-        header.total_cells,
-        header.total_genes,
+        dims.total_cells,
+        dims.total_genes,
         target_size,
     )?;
+    let mut writer = writer.with_codec(codec);
+    let format = writer.format();
 
     let mut stored_norm = 0usize;
     for batch in order.chunks(CONVERT_GENE_BATCH) {
         let genes = reader.read_gene_parallel(batch)?;
         let payloads = genes
-            .par_iter()
-            .map(|gene| {
-                Ok((
-                    gene.original_index,
-                    gene.to_v4_bytes(&lib_f32, target_size, codec)?,
-                ))
+            .into_par_iter()
+            .map(|mut gene| {
+                if from_v3 {
+                    let raw: Vec<u32> = gene.data_raw.iter().collect();
+                    // a cell outside the table yields NaN, which never matches,
+                    // and `to_v4_bytes` stores the layer
+                    snap_v3_norm(&mut gene.data_norm, |k| {
+                        let lib = lib_f32.get(gene.indices[k] as usize).copied();
+                        lib.map_or(f32::NAN, |l| norm_value(raw[k] as f32, l, target_size))
+                    });
+                }
+                Ok((gene.original_index, gene.to_v4_bytes(&lib_f32, &format)?))
             })
             .collect::<Result<Vec<_>, ScDataErrors>>()?;
         for (_, bytes) in &payloads {
-            stored_norm += (V4Header::parse(bytes)?.flags & FLAG_NORM_STORED != 0) as usize;
+            stored_norm += V4Header::parse(bytes)?.norm_stored() as usize;
         }
         writer.write_compressed_gene_chunks(&payloads)?;
     }
@@ -1289,8 +1528,8 @@ pub fn convert_gene_file_to_v4(
 
     if verbose {
         println!(
-            "  Converted {} genes to v4 ({} with stored norm) in {:.2?}.",
-            header.no_chunks.separate_with_underscores(),
+            "  Converted {} genes to v5 ({} with stored norm) in {:.2?}.",
+            order.len().separate_with_underscores(),
             stored_norm.separate_with_underscores(),
             start.elapsed()
         );
@@ -1299,23 +1538,24 @@ pub fn convert_gene_file_to_v4(
     Ok(())
 }
 
-/// Convert a v3 store to v4: the cell file, and the gene file when given.
+/// Convert a v3 or v4 store to v5: the cell file, and the gene file when
+/// given.
 ///
 /// Inputs are never modified. Neither output may equal an input path.
 ///
 /// ### Params
 ///
-/// * `cell_in` - Path to the v3 cell-based file
-/// * `gene_in` - Path to the v3 gene-based file, if any
-/// * `cell_out` - Path of the v4 cell file
-/// * `gene_out` - Path of the v4 gene file, required with `gene_in`
+/// * `cell_in` - Path to the cell-based file
+/// * `gene_in` - Path to the gene-based file, if any
+/// * `cell_out` - Path of the v5 cell file
+/// * `gene_out` - Path of the v5 gene file, required with `gene_in`
 /// * `codec` - Body codec of both outputs
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
 /// `Ok(())` once both outputs are finalised.
-pub fn convert_store_v3_to_v4(
+pub fn convert_store_to_v5(
     cell_in: &str,
     gene_in: Option<&str>,
     cell_out: &str,
@@ -1323,64 +1563,62 @@ pub fn convert_store_v3_to_v4(
     codec: ChunkCodec,
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
-    let lib = convert_cell_file_to_v4(cell_in, cell_out, codec, verbose)?;
+    let lib = convert_cell_file_to_v5(cell_in, cell_out, codec, verbose)?;
     if let (Some(gene_in), Some(gene_out)) = (gene_in, gene_out) {
-        convert_gene_file_to_v4(gene_in, gene_out, &lib, codec, verbose)?;
+        convert_gene_file_to_v5(gene_in, gene_out, &lib, codec, verbose)?;
     }
     Ok(())
 }
 
-/// Replace a v3 store by its v4 conversion, in place.
+/// Replace a v3 or v4 store by its v5 conversion, in place.
 ///
-/// Converts into `<path>.v4.tmp` next to each file first and only touches the
+/// Converts into `<path>.v5.tmp` next to each file first and only touches the
 /// originals once every conversion has succeeded, so a failure leaves the
-/// store as it was. Each original is then renamed to `<path>.v3.bak` when
-/// `keep_backup` is set, and deleted otherwise.
+/// store as it was. Each original is then renamed to `<path>.v<n>.bak` (`n`
+/// its version) when `keep_backup` is set, and deleted otherwise.
 ///
 /// ### Params
 ///
-/// * `cell_path` - Path to the v3 cell-based file
-/// * `gene_path` - Path to the v3 gene-based file, if any
+/// * `cell_path` - Path to the cell-based file
+/// * `gene_path` - Path to the gene-based file, if any
 /// * `codec` - Body codec of the converted files
-/// * `keep_backup` - Keep the v3 originals as `<path>.v3.bak`
+/// * `keep_backup` - Keep the originals as `<path>.v<n>.bak`
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
 /// `Ok(())` once the converted files are in place.
-pub fn upgrade_store_to_v4(
+pub fn upgrade_store_to_v5(
     cell_path: &str,
     gene_path: Option<&str>,
     codec: ChunkCodec,
     keep_backup: bool,
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
-    let tmp = |p: &str| format!("{p}.v4.tmp");
+    let tmp = |p: &str| format!("{p}.v5.tmp");
     let cleanup = |paths: &[Option<&str>]| {
         for p in paths.iter().flatten() {
             let _ = std::fs::remove_file(tmp(p));
         }
     };
 
+    let mut versions = Vec::new();
     let result = (|| {
         let cell_tmp = tmp(cell_path);
-        let lib = convert_cell_file_to_v4(cell_path, &cell_tmp, codec, verbose)?;
+        let lib = convert_cell_file_to_v5(cell_path, &cell_tmp, codec, verbose)?;
         if let Some(gene_path) = gene_path {
-            convert_gene_file_to_v4(gene_path, &tmp(gene_path), &lib, codec, verbose)?;
+            convert_gene_file_to_v5(gene_path, &tmp(gene_path), &lib, codec, verbose)?;
         }
         // the converted files must open and agree with the originals
         for p in std::iter::once(cell_path).chain(gene_path) {
-            let (old, new) = (
-                ParallelSparseReader::new(p)?.get_header(),
-                ParallelSparseReader::new(&tmp(p))?.get_header(),
-            );
-            if (old.total_cells, old.total_genes, old.no_chunks)
-                != (new.total_cells, new.total_genes, new.no_chunks)
-            {
+            let old = ParallelSparseReader::open_any(p)?;
+            let new = ParallelSparseReader::new(&tmp(p))?;
+            if (old.dims(), old.n_chunks()) != (new.dims(), new.n_chunks()) {
                 return Err(ScDataErrors::V4ChunkCorrupt(format!(
                     "converted {p} does not match the original"
                 )));
             }
+            versions.push(old.file_version());
         }
         Ok(())
     })();
@@ -1389,9 +1627,9 @@ pub fn upgrade_store_to_v4(
         return Err(e);
     }
 
-    for p in std::iter::once(cell_path).chain(gene_path) {
+    for (p, version) in std::iter::once(cell_path).chain(gene_path).zip(versions) {
         if keep_backup {
-            std::fs::rename(p, format!("{p}.v3.bak"))?;
+            std::fs::rename(p, format!("{p}.v{version}.bak"))?;
         }
         std::fs::rename(tmp(p), p)?;
     }
@@ -1528,24 +1766,49 @@ mod tests {
                 }
                 let mut chunk = CsrCellChunk::from_data(&counts, &genes, c, TARGET, true);
                 if c == 13 && !chunk.data_norm.is_empty() {
-                    chunk.data_norm[0] = F16::from_f32(chunk.data_norm[0].to_f32() + 0.5);
+                    chunk.data_norm[0] += 0.5;
                 }
                 chunk
             })
             .collect()
     }
 
-    fn write_v3_store(cell_path: &str, gene_path: &str, target: f32) {
-        let mut writer =
-            CellGeneSparseWriter::new_v3(cell_path, true, N_CELLS, N_GENES, target).unwrap();
+    /// Write the synthetic store in a legacy version: v3 or v4.
+    fn write_legacy_store(version: u32, cell_path: &str, gene_path: &str, target: f32) {
+        let ctor = if version == SC_FILE_VERSION_V3 {
+            CellGeneSparseWriter::new_v3
+        } else {
+            CellGeneSparseWriter::new_v4
+        };
+        let mut writer = ctor(cell_path, true, N_CELLS, N_GENES, target).unwrap();
         for chunk in synthetic_cells() {
             writer.write_cell_chunk(chunk).unwrap();
         }
         writer.finalise().unwrap();
-        crate::gene_file_io::write_gene_file_v3(cell_path, gene_path, Some(500), false).unwrap();
+        if version == SC_FILE_VERSION_V3 {
+            crate::gene_file_io::write_gene_file_v3(cell_path, gene_path, Some(500), false)
+                .unwrap();
+        } else {
+            crate::gene_file_io::write_gene_file(cell_path, gene_path, Some(500), false).unwrap();
+        }
     }
 
-    fn assert_cells_equal(a: &CsrCellChunk, b: &CsrCellChunk) {
+    /// The norm as compared across a conversion: at the f16 precision v3
+    /// holds, exactly from v4 (whose recompute and verbatim values both carry
+    /// over to v5 unchanged).
+    fn norm_bits(norm: &[f32], exact: bool) -> Vec<u32> {
+        norm.iter()
+            .map(|&v| {
+                if exact {
+                    v.to_bits()
+                } else {
+                    F16::from_f32(v).to_bits() as u32
+                }
+            })
+            .collect()
+    }
+
+    fn assert_cells_equal(a: &CsrCellChunk, b: &CsrCellChunk, exact: bool) {
         assert_eq!(a.original_index, b.original_index);
         assert_eq!(a.library_size, b.library_size);
         assert_eq!(a.to_keep, b.to_keep);
@@ -1554,41 +1817,49 @@ mod tests {
             a.data_raw.iter().collect::<Vec<_>>(),
             b.data_raw.iter().collect::<Vec<_>>()
         );
-        let bits = |c: &CsrCellChunk| c.data_norm.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-        assert_eq!(bits(a), bits(b));
+        assert_eq!(
+            norm_bits(&a.data_norm, exact),
+            norm_bits(&b.data_norm, exact)
+        );
     }
 
-    fn assert_genes_equal(a: &CscGeneChunk, b: &CscGeneChunk) {
+    fn assert_genes_equal(a: &CscGeneChunk, b: &CscGeneChunk, exact: bool) {
         assert_eq!(a.original_index, b.original_index);
         assert_eq!(a.nnz, b.nnz);
-        assert_eq!(a.avg_exp.to_bits(), b.avg_exp.to_bits());
         assert_eq!(a.indices, b.indices);
         assert_eq!(
             a.data_raw.iter().collect::<Vec<_>>(),
             b.data_raw.iter().collect::<Vec<_>>()
         );
-        let bits = |c: &CscGeneChunk| c.data_norm.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-        assert_eq!(bits(a), bits(b));
+        assert_eq!(
+            norm_bits(&a.data_norm, exact),
+            norm_bits(&b.data_norm, exact)
+        );
     }
 
     fn assert_sparse_equal(
         a: &CompressedSparseData2<f32, f32>,
         b: &CompressedSparseData2<f32, f32>,
+        exact: bool,
     ) {
         assert_eq!(a.shape, b.shape);
         assert_eq!(a.indptr, b.indptr);
         assert_eq!(a.indices, b.indices);
         assert_eq!(a.data, b.data);
-        assert_eq!(a.data_2, b.data_2);
+        assert_eq!(
+            a.data_2.as_deref().map(|n| norm_bits(n, exact)),
+            b.data_2.as_deref().map(|n| norm_bits(n, exact))
+        );
     }
 
-    /// Every read path of a converted store matches the v3 original, for each
-    /// codec and with a zero target size (norm always stored).
-    fn check_conversion(codec: ChunkCodec, target: f32) {
-        let tag = format!("{codec:?}_{}", target as u32);
+    /// Every read path of a converted store matches the v3 or v4 original, for
+    /// each codec and with a zero target size (norm always stored).
+    fn check_conversion(version: u32, codec: ChunkCodec, target: f32) {
+        let exact = version == SC_FILE_VERSION_V4;
+        let tag = format!("v{version}_{codec:?}_{}", target as u32);
         let s = Scratch::new(&tag, 4);
-        write_v3_store(s.path(0), s.path(1), target);
-        convert_store_v3_to_v4(
+        write_legacy_store(version, s.path(0), s.path(1), target);
+        convert_store_to_v5(
             s.path(0),
             Some(s.path(1)),
             s.path(2),
@@ -1598,36 +1869,36 @@ mod tests {
         )
         .unwrap();
 
-        let (cells3, cells4) = (
-            ParallelSparseReader::new(s.path(0)).unwrap(),
+        let (cells_old, cells_new) = (
+            ParallelSparseReader::open_any(s.path(0)).unwrap(),
             ParallelSparseReader::new(s.path(2)).unwrap(),
         );
-        let (genes3, genes4) = (
-            ParallelSparseReader::new(s.path(1)).unwrap(),
+        let (genes_old, genes_new) = (
+            ParallelSparseReader::open_any(s.path(1)).unwrap(),
             ParallelSparseReader::new(s.path(3)).unwrap(),
         );
-        assert_eq!(cells3.file_version(), SC_FILE_VERSION_V3);
-        assert_eq!(cells4.file_version(), SC_FILE_VERSION);
-        assert_eq!(genes4.file_version(), SC_FILE_VERSION);
-        assert_eq!(cells4.target_size(), cells3.target_size());
+        assert_eq!(cells_old.file_version(), version);
+        assert_eq!(cells_new.file_version(), SC_FILE_VERSION);
+        assert_eq!(genes_new.file_version(), SC_FILE_VERSION);
+        assert_eq!(cells_new.target_size(), cells_old.target_size());
 
         let all_cells: Vec<usize> = (0..N_CELLS).collect();
         let all_genes: Vec<usize> = (0..N_GENES).collect();
-        for (a, b) in cells3
+        for (a, b) in cells_old
             .read_cells_parallel(&all_cells)
             .unwrap()
             .iter()
-            .zip(&cells4.read_cells_parallel(&all_cells).unwrap())
+            .zip(&cells_new.read_cells_parallel(&all_cells).unwrap())
         {
-            assert_cells_equal(a, b);
+            assert_cells_equal(a, b, exact);
         }
-        for (a, b) in genes3
+        for (a, b) in genes_old
             .read_gene_parallel(&all_genes)
             .unwrap()
             .iter()
-            .zip(&genes4.read_gene_parallel(&all_genes).unwrap())
+            .zip(&genes_new.read_gene_parallel(&all_genes).unwrap())
         {
-            assert_genes_equal(a, b);
+            assert_genes_equal(a, b, exact);
         }
 
         let shuffled: Vec<usize> = (0..N_CELLS).rev().step_by(3).collect();
@@ -1638,72 +1909,81 @@ mod tests {
             DataLayerReturn::BothLayers,
         ] {
             assert_sparse_equal(
-                &cells3.read_cells_sparse::<f32>(&shuffled, &layer).unwrap(),
-                &cells4.read_cells_sparse::<f32>(&shuffled, &layer).unwrap(),
+                &cells_old
+                    .read_cells_sparse::<f32>(&shuffled, &layer)
+                    .unwrap(),
+                &cells_new
+                    .read_cells_sparse::<f32>(&shuffled, &layer)
+                    .unwrap(),
+                exact,
             );
             for subset in [None, Some(&keep)] {
                 assert_sparse_equal(
-                    &genes3
+                    &genes_old
                         .read_genes_sparse::<f32>(&all_genes, subset, &layer)
                         .unwrap(),
-                    &genes4
+                    &genes_new
                         .read_genes_sparse::<f32>(&all_genes, subset, &layer)
                         .unwrap(),
+                    exact,
                 );
             }
         }
 
-        for (a, b) in genes3
+        for (a, b) in genes_old
             .read_gene_parallel_filtered(&all_genes, &keep)
             .unwrap()
             .iter()
             .zip(
-                &genes4
+                &genes_new
                     .read_gene_parallel_filtered(&all_genes, &keep)
                     .unwrap(),
             )
         {
-            assert_genes_equal(a, b);
+            assert_genes_equal(a, b, exact);
         }
         assert_eq!(
-            cells3.read_cell_library_sizes(&all_cells).unwrap(),
-            cells4.read_cell_library_sizes(&all_cells).unwrap()
+            cells_old.read_cell_library_sizes(&all_cells).unwrap(),
+            cells_new.read_cell_library_sizes(&all_cells).unwrap()
         );
         assert_eq!(
-            genes3.read_gene_nnz(&all_genes).unwrap(),
-            genes4.read_gene_nnz(&all_genes).unwrap()
+            genes_old.read_gene_nnz(&all_genes).unwrap(),
+            genes_new.read_gene_nnz(&all_genes).unwrap()
         );
-        assert_eq!(
-            cells3.get_header().chunk_offsets.len(),
-            cells4.get_header().chunk_offsets.len()
-        );
+        assert_eq!(cells_old.n_chunks(), cells_new.n_chunks());
     }
 
     #[test]
-    fn test_v3_to_v4_round_trip_none() {
-        check_conversion(ChunkCodec::None, TARGET);
+    fn test_v3_to_v5_round_trip_none() {
+        check_conversion(SC_FILE_VERSION_V3, ChunkCodec::None, TARGET);
     }
 
     #[test]
-    fn test_v3_to_v4_round_trip_lz4() {
-        check_conversion(ChunkCodec::Lz4, TARGET);
+    fn test_v3_to_v5_round_trip_lz4() {
+        check_conversion(SC_FILE_VERSION_V3, ChunkCodec::Lz4, TARGET);
     }
 
     #[test]
-    fn test_v3_to_v4_round_trip_zstd() {
-        check_conversion(ChunkCodec::Zstd, TARGET);
+    fn test_v3_to_v5_round_trip_zstd() {
+        check_conversion(SC_FILE_VERSION_V3, ChunkCodec::Zstd, TARGET);
     }
 
     #[test]
-    fn test_v3_to_v4_round_trip_unknown_target_stores_norm() {
-        check_conversion(ChunkCodec::Lz4, 0.0);
+    fn test_v3_to_v5_round_trip_unknown_target_stores_norm() {
+        check_conversion(SC_FILE_VERSION_V3, ChunkCodec::Lz4, 0.0);
     }
 
     #[test]
-    fn test_v4_drops_norm_and_shrinks() {
+    fn test_v4_to_v5_round_trip_is_exact() {
+        check_conversion(SC_FILE_VERSION_V4, ChunkCodec::Lz4, TARGET);
+        check_conversion(SC_FILE_VERSION_V4, ChunkCodec::Zstd, 0.0);
+    }
+
+    #[test]
+    fn test_v5_drops_norm_and_shrinks() {
         let s = Scratch::new("shrink", 4);
-        write_v3_store(s.path(0), s.path(1), TARGET);
-        convert_store_v3_to_v4(
+        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        convert_store_to_v5(
             s.path(0),
             Some(s.path(1)),
             s.path(2),
@@ -1717,22 +1997,73 @@ mod tests {
         assert!(size(3) < size(1), "gene file {} vs {}", size(3), size(1));
     }
 
-    #[test]
-    fn test_v4_chunk_keeps_unsorted_and_duplicate_indices() {
-        let chunk = CsrCellChunk::from_data(&[3u32, 1, 2, 5], &[9u32, 2, 2, 400], 5, TARGET, true);
-        let bytes = chunk.to_v4_bytes(TARGET, ChunkCodec::Lz4).unwrap();
-        let ctx = V4Ctx {
+    /// The context a single-layer log-CPM cell chunk decodes with.
+    fn cell_ctx(norm_f32: bool) -> V4Ctx<'static> {
+        V4Ctx {
             target_size: TARGET,
             cell_lib: None,
             cell_norm: None,
             is_cell: true,
-        };
-        let back = v4_cell_chunk(&bytes, &ctx, &mut V4Decoded::default()).unwrap();
-        assert_cells_equal(&chunk, &back);
+            n_layers: 1,
+            layer: 0,
+            norm_f32,
+            norm_kind: NormKind::LogCpm,
+            weights: None,
+        }
+    }
+
+    /// The chunk format of a version.
+    fn format(version: u32) -> ChunkFormat {
+        ChunkFormat {
+            version,
+            codec: ChunkCodec::Lz4,
+            target_size: TARGET,
+        }
     }
 
     #[test]
-    fn test_default_writer_emits_v4_and_converter_refuses_it() {
+    fn test_v4_chunk_keeps_unsorted_and_duplicate_indices() {
+        let chunk = CsrCellChunk::from_data(&[3u32, 1, 2, 5], &[9u32, 2, 2, 400], 5, TARGET, true);
+        let bytes = chunk.to_v4_bytes(&format(SC_FILE_VERSION)).unwrap();
+        let back = v4_cell_chunk(&bytes, &cell_ctx(true), &mut V4Decoded::default()).unwrap();
+        assert_cells_equal(&chunk, &back, true);
+    }
+
+    /// With one layer and a derived norm a cell chunk is the same bytes in v4
+    /// and v5.
+    #[test]
+    fn test_single_layer_cell_chunk_is_byte_identical_in_v4_and_v5() {
+        for chunk in synthetic_cells().iter().filter(|c| c.original_index != 13) {
+            assert_eq!(
+                chunk.to_v4_bytes(&format(SC_FILE_VERSION_V4)).unwrap(),
+                chunk.to_v4_bytes(&format(SC_FILE_VERSION)).unwrap()
+            );
+        }
+    }
+
+    /// v5 keeps a verbatim norm at f32; v4 narrows it to f16.
+    #[test]
+    fn test_verbatim_norm_is_f32_in_v5_and_f16_in_v4() {
+        let mut chunk = CsrCellChunk::from_data(&[1u32, 2, 7], &[0u32, 4, 9], 0, TARGET, true);
+        chunk.data_norm[1] = 0.123_456_7;
+        let v5 = chunk.to_v4_bytes(&format(SC_FILE_VERSION)).unwrap();
+        let v4 = chunk.to_v4_bytes(&format(SC_FILE_VERSION_V4)).unwrap();
+        let mut s = V4Decoded::default();
+        let back5 = v4_cell_chunk(&v5, &cell_ctx(true), &mut s).unwrap();
+        let back4 = v4_cell_chunk(&v4, &cell_ctx(false), &mut s).unwrap();
+        assert_eq!(
+            norm_bits(&back5.data_norm, true),
+            norm_bits(&chunk.data_norm, true)
+        );
+        assert_ne!(back4.data_norm[1], chunk.data_norm[1]);
+        assert_eq!(
+            norm_bits(&back4.data_norm, false),
+            norm_bits(&chunk.data_norm, false)
+        );
+    }
+
+    #[test]
+    fn test_default_writer_emits_v5_and_converter_refuses_it() {
         let s = Scratch::new("guards", 2);
         let mut writer = CellGeneSparseWriter::new(s.path(0), true, 1, 3, TARGET).unwrap();
         writer
@@ -1741,84 +2072,112 @@ mod tests {
         writer.finalise().unwrap();
         assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION);
         assert!(matches!(
-            convert_cell_file_to_v4(s.path(0), s.path(1), ChunkCodec::Lz4, false),
+            convert_cell_file_to_v5(s.path(0), s.path(1), ChunkCodec::Lz4, false),
             Err(ScDataErrors::FileVersionMismatch { .. })
         ));
     }
 
     #[test]
-    fn test_peek_file_version_distinguishes_v3_and_v4() {
-        let s = Scratch::new("peek", 2);
+    fn test_peek_file_version_distinguishes_v3_v4_and_v5() {
+        let s = Scratch::new("peek", 3);
         let chunk = || CsrCellChunk::from_data(&[1u32, 2], &[0u32, 1], 0, TARGET, true);
-        let mut v3 = CellGeneSparseWriter::new_v3(s.path(0), true, 1, 3, TARGET).unwrap();
-        v3.write_cell_chunk(chunk()).unwrap();
-        v3.finalise().unwrap();
-        let mut v4 = CellGeneSparseWriter::new(s.path(1), true, 1, 3, TARGET).unwrap();
-        v4.write_cell_chunk(chunk()).unwrap();
-        v4.finalise().unwrap();
+        let ctors = [
+            CellGeneSparseWriter::new_v3,
+            CellGeneSparseWriter::new_v4,
+            CellGeneSparseWriter::new,
+        ];
+        for (i, ctor) in ctors.into_iter().enumerate() {
+            let mut w = ctor(s.path(i), true, 1, 3, TARGET).unwrap();
+            w.write_cell_chunk(chunk()).unwrap();
+            w.finalise().unwrap();
+        }
         assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION_V3);
-        assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION);
+        assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION_V4);
+        assert_eq!(peek_file_version(s.path(2)).unwrap(), SC_FILE_VERSION);
+        assert_eq!(
+            crate::data_io::peek_target_size(s.path(1)).unwrap(),
+            Some(TARGET)
+        );
+        assert_eq!(
+            crate::data_io::peek_target_size(s.path(2)).unwrap(),
+            Some(TARGET)
+        );
+    }
+
+    /// v3 opens for the converters only.
+    #[test]
+    fn test_reader_refuses_v3_with_the_converter_hint() {
+        let s = Scratch::new("v3refuse", 2);
+        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        assert!(matches!(
+            ParallelSparseReader::new(s.path(0)),
+            Err(ScDataErrors::V3NeedsConversion(_))
+        ));
+        assert!(ParallelSparseReader::open_any(s.path(0)).is_ok());
     }
 
     #[test]
-    fn test_default_gene_file_is_v4_and_matches_the_v3_one() {
-        let s = Scratch::new("genefile", 3);
-        write_v3_store(s.path(0), s.path(1), TARGET);
-        crate::gene_file_io::write_gene_file(s.path(0), s.path(2), Some(500), false).unwrap();
-        assert_eq!(peek_file_version(s.path(2)).unwrap(), SC_FILE_VERSION);
+    fn test_default_gene_file_is_v5_and_matches_the_v3_one() {
+        let s = Scratch::new("genefile", 4);
+        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
+        crate::gene_file_io::write_gene_file(s.path(2), s.path(3), Some(500), false).unwrap();
+        assert_eq!(peek_file_version(s.path(3)).unwrap(), SC_FILE_VERSION);
 
-        let (v3, v4) = (
-            ParallelSparseReader::new(s.path(1)).unwrap(),
-            ParallelSparseReader::new(s.path(2)).unwrap(),
+        let (v3, v5) = (
+            ParallelSparseReader::open_any(s.path(1)).unwrap(),
+            ParallelSparseReader::new(s.path(3)).unwrap(),
         );
         let all: Vec<usize> = (0..N_GENES).collect();
         for (a, b) in v3
             .read_gene_parallel(&all)
             .unwrap()
             .iter()
-            .zip(&v4.read_gene_parallel(&all).unwrap())
+            .zip(&v5.read_gene_parallel(&all).unwrap())
         {
-            assert_genes_equal(a, b);
+            assert_genes_equal(a, b, false);
         }
     }
 
     #[test]
     fn test_upgrade_store_replaces_files_and_keeps_backups() {
-        let s = Scratch::new("upgrade", 4);
-        write_v3_store(s.path(0), s.path(1), TARGET);
-        let cells_before = ParallelSparseReader::new(s.path(0))
-            .unwrap()
-            .get_all_cells()
-            .unwrap();
-        upgrade_store_to_v4(s.path(0), Some(s.path(1)), ChunkCodec::Lz4, true, false).unwrap();
-
-        assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION);
-        assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION);
-        let backup = format!("{}.v3.bak", s.path(0));
-        assert_eq!(peek_file_version(&backup).unwrap(), SC_FILE_VERSION_V3);
-        for (a, b) in cells_before.iter().zip(
-            &ParallelSparseReader::new(s.path(0))
+        for version in [SC_FILE_VERSION_V3, SC_FILE_VERSION_V4] {
+            let s = Scratch::new(&format!("upgrade{version}"), 2);
+            write_legacy_store(version, s.path(0), s.path(1), TARGET);
+            let cells_before = ParallelSparseReader::open_any(s.path(0))
                 .unwrap()
                 .get_all_cells()
-                .unwrap(),
-        ) {
-            assert_cells_equal(a, b);
-        }
-        for p in [backup, format!("{}.v3.bak", s.path(1))] {
-            let _ = std::fs::remove_file(p);
+                .unwrap();
+            upgrade_store_to_v5(s.path(0), Some(s.path(1)), ChunkCodec::Lz4, true, false).unwrap();
+
+            assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION);
+            assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION);
+            let backup = format!("{}.v{version}.bak", s.path(0));
+            assert_eq!(peek_file_version(&backup).unwrap(), version);
+            for (a, b) in cells_before.iter().zip(
+                &ParallelSparseReader::new(s.path(0))
+                    .unwrap()
+                    .get_all_cells()
+                    .unwrap(),
+            ) {
+                assert_cells_equal(a, b, version == SC_FILE_VERSION_V4);
+            }
+            for p in [backup, format!("{}.v{version}.bak", s.path(1))] {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 
     #[test]
-    fn test_archive_round_trips_a_v4_cell_file() {
+    fn test_archive_round_trips_a_v5_cell_file() {
         let s = Scratch::new("archive", 6);
-        write_v3_store(s.path(0), s.path(1), TARGET);
-        convert_cell_file_to_v4(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
+        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
         crate::archive_io::archive_cell_file(s.path(2), s.path(3), 3, false).unwrap();
         crate::archive_io::restore_archive(s.path(3), s.path(4), s.path(5), Some(500), false)
             .unwrap();
 
-        let original = ParallelSparseReader::new(s.path(0)).unwrap();
+        let original = ParallelSparseReader::new(s.path(2)).unwrap();
         let restored = ParallelSparseReader::new(s.path(4)).unwrap();
         let all: Vec<usize> = (0..N_CELLS).collect();
         for (a, b) in original
@@ -1827,7 +2186,318 @@ mod tests {
             .iter()
             .zip(&restored.read_cells_parallel(&all).unwrap())
         {
-            assert_cells_equal(a, b);
+            assert_cells_equal(a, b, false);
+        }
+    }
+
+    ////////
+    // v5 //
+    ////////
+
+    /// Dense `[cell][gene]` layers for the multi-layer tests: DP-like depth,
+    /// AD-like alt counts with zeros where depth is not, and a binarised
+    /// layer of ones.
+    fn allele_layers(n_cells: usize, n_genes: usize) -> [Vec<Vec<u32>>; 3] {
+        let mut state = 99u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let mut dp = vec![vec![0u32; n_genes]; n_cells];
+        let mut ad = vec![vec![0u32; n_genes]; n_cells];
+        let mut bin = vec![vec![0u32; n_genes]; n_cells];
+        for c in 0..n_cells {
+            for g in 0..n_genes {
+                if next() % 4 == 0 {
+                    dp[c][g] = 1 + next() % 30;
+                    ad[c][g] = next() % (dp[c][g] + 1);
+                    bin[c][g] = 1;
+                }
+            }
+        }
+        [dp, ad, bin]
+    }
+
+    /// Write `layers` as a v5 cell file, then its gene file.
+    fn write_layer_store(cell_path: &str, gene_path: &str, layers: &[Vec<Vec<u32>>]) {
+        let (n_cells, n_genes) = (layers[0].len(), layers[0][0].len());
+        let mut w = CellGeneSparseWriter::new(cell_path, true, n_cells, n_genes, 0.0)
+            .unwrap()
+            .with_kinds(crate::v5_io::FeatureKind::Snp, NormKind::None)
+            .unwrap()
+            .with_layers(layers.len())
+            .unwrap();
+        for c in 0..n_cells {
+            let idx: Vec<u32> = (0..n_genes as u32)
+                .filter(|&g| layers[0][c][g as usize] > 0)
+                .collect();
+            let vals: Vec<Vec<u32>> = layers
+                .iter()
+                .map(|l| idx.iter().map(|&g| l[c][g as usize]).collect())
+                .collect();
+            let refs: Vec<&[u32]> = vals.iter().map(Vec::as_slice).collect();
+            w.write_cell_layers(c, &idx, &refs, true).unwrap();
+        }
+        w.finalise().unwrap();
+        crate::gene_file_io::write_gene_file(cell_path, gene_path, Some(37), false).unwrap();
+    }
+
+    /// Every layer reads back from both orientations, the norm is refused and
+    /// the kinds carry over to the gene file.
+    #[test]
+    fn test_v5_layers_round_trip_both_orientations() {
+        let (n_cells, n_genes) = (57, 23);
+        let layers = allele_layers(n_cells, n_genes);
+        let s = Scratch::new("layers", 2);
+        write_layer_store(s.path(0), s.path(1), &layers);
+
+        let all_cells: Vec<usize> = (0..n_cells).collect();
+        let all_genes: Vec<usize> = (0..n_genes).collect();
+        for (l, dense) in layers.iter().enumerate() {
+            let cells = ParallelSparseReader::new(s.path(0))
+                .unwrap()
+                .with_layer(l)
+                .unwrap();
+            let genes = ParallelSparseReader::new(s.path(1))
+                .unwrap()
+                .with_layer(l)
+                .unwrap();
+            assert_eq!(genes.n_layers(), 3);
+            assert_eq!(genes.norm_kind(), NormKind::None);
+            assert_eq!(genes.feature_kind(), crate::v5_io::FeatureKind::Snp);
+
+            let csr = cells
+                .read_cells_sparse::<u32>(&all_cells, &DataLayerReturn::Raw)
+                .unwrap();
+            let csc = genes
+                .read_genes_sparse::<u32>(&all_genes, None, &DataLayerReturn::Raw)
+                .unwrap();
+            for c in 0..n_cells {
+                for k in csr.indptr[c] as usize..csr.indptr[c + 1] as usize {
+                    assert_eq!(csr.data[k], dense[c][csr.indices[k] as usize]);
+                }
+            }
+            for g in 0..n_genes {
+                for k in csc.indptr[g] as usize..csc.indptr[g + 1] as usize {
+                    assert_eq!(csc.data[k], dense[csc.indices[k] as usize][g]);
+                }
+            }
+            assert!(matches!(
+                cells.read_cells_sparse::<u32>(&all_cells, &DataLayerReturn::Norm),
+                Err(ScDataErrors::NormNotAvailable(_))
+            ));
+        }
+        assert!(matches!(
+            ParallelSparseReader::new(s.path(0)).unwrap().with_layer(3),
+            Err(ScDataErrors::LayerOutOfRange { .. })
+        ));
+    }
+
+    /// A binarised layer packs to one width byte per block of 128.
+    #[test]
+    fn test_binarised_layer_packs_to_width_zero() {
+        let idx: Vec<u32> = (0..1024).map(|i| i * 3).collect();
+        let ones = vec![1u32; idx.len()];
+        let fmt = ChunkFormat {
+            version: SC_FILE_VERSION,
+            codec: ChunkCodec::None,
+            target_size: 0.0,
+        };
+        let one = fmt.encode_layers(&idx, &[&ones], 0, true).unwrap();
+        let two = fmt.encode_layers(&idx, &[&ones, &ones], 0, true).unwrap();
+        assert_eq!(two.len() - one.len(), idx.len() / PACK_BLOCK);
+    }
+
+    /// Chunks written out of index order read back by original index through
+    /// the sorted lookup section, and in file order through `chunk_order`.
+    #[test]
+    fn test_v5_out_of_order_chunks_resolve_by_original_index() {
+        let s = Scratch::new("lookup", 1);
+        let order = [4usize, 0, 9, 2, 7];
+        let mut w = CellGeneSparseWriter::new(s.path(0), true, 10, 5, TARGET).unwrap();
+        for &o in &order {
+            let counts = [o as u32 + 1, 2];
+            w.write_cell_chunk(CsrCellChunk::from_data(
+                &counts,
+                &[0u32, 3],
+                o,
+                TARGET,
+                true,
+            ))
+            .unwrap();
+        }
+        w.finalise().unwrap();
+
+        let r = ParallelSparseReader::new(s.path(0)).unwrap();
+        assert_eq!(r.chunk_order().unwrap(), order.to_vec());
+        let back = r.read_cells_parallel(&[9, 0, 7]).unwrap();
+        for (cell, want) in back.iter().zip([9usize, 0, 7]) {
+            assert_eq!(cell.original_index, want);
+            assert_eq!(cell.data_raw.get(0), want as u32 + 1);
+        }
+        assert_eq!(r.read_cell_library_sizes(&[2, 4]).unwrap(), vec![5, 7]);
+        assert!(matches!(
+            r.read_cells_parallel(&[1]),
+            Err(ScDataErrors::ChunkIndexNotFound(1))
+        ));
+    }
+
+    /// Overwrite bytes of a finished file.
+    fn patch_bytes(path: &str, at: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.seek(SeekFrom::Start(at)).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    /// A small v5 cell file.
+    fn small_v5(path: &str) {
+        let mut w = CellGeneSparseWriter::new(path, true, 2, 4, TARGET).unwrap();
+        for c in 0..2 {
+            w.write_cell_chunk(CsrCellChunk::from_data(
+                &[1u32, 3],
+                &[0u32, 2],
+                c,
+                TARGET,
+                true,
+            ))
+            .unwrap();
+        }
+        w.finalise().unwrap();
+    }
+
+    /// Unknown incompat bits, unknown kinds and broken sections refuse the
+    /// file; an unknown optional section is skipped.
+    #[test]
+    fn test_v5_refuses_what_it_does_not_understand() {
+        let s = Scratch::new("refuse", 1);
+        let invalid = |p: &str| {
+            matches!(
+                ParallelSparseReader::new(p),
+                Err(ScDataErrors::V5HeaderInvalid(_))
+            )
+        };
+
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), 12, &1u32.to_le_bytes());
+        assert!(invalid(s.path(0)));
+
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), 18, &[9]);
+        assert!(invalid(s.path(0)));
+
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), 19, &[0]);
+        assert!(invalid(s.path(0)));
+
+        // the first directory entry is the offsets: make it an unknown kind
+        let dir = |p: &str| {
+            let b = std::fs::read(p).unwrap();
+            crate::v5_io::le_u64(&b, 48)
+        };
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), dir(s.path(0)), &99u32.to_le_bytes());
+        assert!(invalid(s.path(0)), "required unknown section");
+        patch_bytes(s.path(0), dir(s.path(0)) + 4, &0u32.to_le_bytes());
+        // optional now, so skipped, and the offsets are missing
+        assert!(invalid(s.path(0)), "offsets missing");
+
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), dir(s.path(0)) + 8, &u64::MAX.to_le_bytes());
+        assert!(invalid(s.path(0)), "section outside the file");
+
+        small_v5(s.path(0));
+        patch_bytes(s.path(0), 48, &u64::MAX.to_le_bytes());
+        assert!(invalid(s.path(0)), "directory outside the file");
+    }
+
+    /// The cell-ID hash is written, set after the fact and compared.
+    #[test]
+    fn test_v5_cell_ids_align_stores() {
+        let s = Scratch::new("cellids", 2);
+        let ids = ["AAAC-1", "AAAG-1"];
+        let mut w = CellGeneSparseWriter::new(s.path(0), true, 2, 4, TARGET).unwrap();
+        w.set_cell_ids(&ids).unwrap();
+        for c in 0..2 {
+            w.write_cell_chunk(CsrCellChunk::from_data(&[1u32], &[1u32], c, TARGET, true))
+                .unwrap();
+        }
+        w.finalise().unwrap();
+        small_v5(s.path(1));
+
+        let (a, b) = (
+            ParallelSparseReader::new(s.path(0)).unwrap(),
+            ParallelSparseReader::new(s.path(1)).unwrap(),
+        );
+        assert_eq!(a.cell_id_hash(), Some(crate::v5_io::cell_id_hash(&ids)));
+        assert_eq!(b.cell_id_hash(), None);
+        assert!(crate::v5_io::check_same_cells(&[&a, &b]).is_err());
+
+        crate::v5_io::set_cell_ids(&[s.path(1)], &ids).unwrap();
+        let b = ParallelSparseReader::new(s.path(1)).unwrap();
+        crate::v5_io::check_same_cells(&[&a, &b]).unwrap();
+        assert_eq!(b.read_cells_parallel(&[0, 1]).unwrap().len(), 2);
+        assert!(crate::v5_io::set_cell_ids(&[s.path(1)], &ids[..1]).is_err());
+    }
+
+    /// TF-IDF reads `ln1p(x / lib * scale * n / total_f)` in both orientations.
+    #[test]
+    fn test_v5_tf_idf_matches_the_formula() {
+        let s = Scratch::new("tfidf", 2);
+        let (n_cells, n_genes) = (40, 12);
+        let [dp, _, _] = allele_layers(n_cells, n_genes);
+        let mut w = CellGeneSparseWriter::new(s.path(0), true, n_cells, n_genes, 0.0)
+            .unwrap()
+            .with_kinds(crate::v5_io::FeatureKind::Peak, NormKind::LogCpm)
+            .unwrap();
+        for (c, row) in dp.iter().enumerate() {
+            let idx: Vec<u32> = (0..n_genes as u32)
+                .filter(|&g| row[g as usize] > 0)
+                .collect();
+            let vals: Vec<u32> = idx.iter().map(|&g| row[g as usize]).collect();
+            w.write_cell_layers(c, &idx, &[&vals], true).unwrap();
+        }
+        w.finalise().unwrap();
+        crate::gene_file_io::write_gene_file(s.path(0), s.path(1), None, false).unwrap();
+
+        let genes = ParallelSparseReader::new(s.path(1)).unwrap();
+        let idf = crate::v5_io::tf_idf_weights(&genes, None).unwrap();
+        crate::v5_io::set_tf_idf(&[s.path(0), s.path(1)], &idf, 1e4).unwrap();
+
+        let lib: Vec<f32> = dp.iter().map(|r| r.iter().sum::<u32>() as f32).collect();
+        let total: Vec<f64> = (0..n_genes)
+            .map(|g| dp.iter().map(|r| r[g] as f64).sum())
+            .collect();
+        let want = |c: usize, g: usize| {
+            let w = (n_cells as f64 / total[g]) as f32;
+            (dp[c][g] as f32 / lib[c] * (1e4 * w)).ln_1p()
+        };
+
+        let cells = ParallelSparseReader::new(s.path(0)).unwrap();
+        let genes = ParallelSparseReader::new(s.path(1)).unwrap();
+        assert_eq!(cells.norm_kind(), NormKind::TfIdf);
+        let all_cells: Vec<usize> = (0..n_cells).collect();
+        let all_genes: Vec<usize> = (0..n_genes).collect();
+        let csr = cells
+            .read_cells_sparse::<u32>(&all_cells, &DataLayerReturn::Norm)
+            .unwrap();
+        let csc = genes
+            .read_genes_sparse::<u32>(&all_genes, None, &DataLayerReturn::Norm)
+            .unwrap();
+        let (n1, n2) = (csr.data_2.unwrap(), csc.data_2.unwrap());
+        for c in 0..n_cells {
+            for k in csr.indptr[c] as usize..csr.indptr[c + 1] as usize {
+                let g = csr.indices[k] as usize;
+                assert_eq!(n1[k].to_bits(), want(c, g).to_bits(), "cell {c} gene {g}");
+            }
+        }
+        for g in 0..n_genes {
+            for k in csc.indptr[g] as usize..csc.indptr[g + 1] as usize {
+                let c = csc.indices[k] as usize;
+                assert_eq!(n2[k].to_bits(), want(c, g).to_bits(), "gene {g} cell {c}");
+            }
         }
     }
 }

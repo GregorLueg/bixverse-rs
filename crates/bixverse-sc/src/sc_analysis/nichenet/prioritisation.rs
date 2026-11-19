@@ -66,7 +66,7 @@ where
         .into());
     }
 
-    let n_cells = reader.get_header().total_cells;
+    let n_cells = reader.dims().total_cells;
     let n_genes = gene_indices.len();
     let n_clusters = clusters.len();
 
@@ -90,7 +90,7 @@ where
             let mut count = vec![0usize; n_clusters];
             for (i, &cell_idx) in chunk.indices.iter().enumerate() {
                 if let Some(cluster) = cell_to_cluster[cell_idx as usize] {
-                    let v = T::from_f32(chunk.data_norm[i].to_f32()).unwrap();
+                    let v = T::from_f32(chunk.data_norm[i]).unwrap();
                     sum[cluster as usize] += v;
                     count[cluster as usize] += 1;
                 }

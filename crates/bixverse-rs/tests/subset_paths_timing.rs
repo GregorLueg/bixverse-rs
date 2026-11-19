@@ -57,7 +57,7 @@ fn timing_subset_paths() {
 
     let genes = ParallelSparseReader::new(dir.join("counts_genes.bin").to_str().unwrap()).unwrap();
     let cells = ParallelSparseReader::new(dir.join("counts_cells.bin").to_str().unwrap()).unwrap();
-    let header = genes.get_header();
+    let header = genes.dims();
     let n_total = header.total_cells;
     let n_genes = header.total_genes;
     println!(

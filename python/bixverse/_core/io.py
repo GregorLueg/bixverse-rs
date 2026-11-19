@@ -124,10 +124,16 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
         _bixverse.restore_cells_archive(archive, cells, genes, None, False)
     if not genes.is_file():
         raise FileNotFoundError(f"{genes} does not exist")
-    if any(_bixverse.file_version(p) < 4 for p in (cells, genes)):
+    versions = [_bixverse.file_version(p) for p in (cells, genes)]
+    if min(versions) < 4:
+        raise RuntimeError(
+            f"{directory} uses the v3 file format, which no longer opens. "
+            f"Convert it with bv.io.upgrade_sc_store({str(directory)!r})."
+        )
+    if min(versions) < 5:
         warnings.warn(
-            "This store uses the old v3 file format. It still works, but the v4 "
-            "format is smaller and faster. Convert it with upgrade_sc_store().",
+            "This store uses the v4 file format. It still works; "
+            "upgrade_sc_store() converts it to v5.",
             stacklevel=2,
         )
     npz, js = directory / MEMORY_NPZ, directory / MEMORY_JSON
