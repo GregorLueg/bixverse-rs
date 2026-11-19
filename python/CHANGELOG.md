@@ -9,31 +9,68 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 
 **Breaking**
 
-- k-means defaults to e-means in Harmony, fast_cluster and SCENIC, in both
-  wheels. Results differ at the same seed. The new `k_means_algorithm` and
-  `e_means_epochs` keys are not in the generated parameters yet; they follow
-  once the R specs land and `dev/gen_params.py` is rerun.
+- Loaders write store format v5, which 0.3.x and R builds on crates 0.10.x
+  cannot read. A v4 store opens with a warning; a v3 store no longer opens.
+  `bv.io.upgrade_sc_store` converts either and takes a directory for v3.
+- `FastClusterDefault` and `KmeansDefaults` are gone from `bv.params`, and so
+  is `NmfConsensusParams.kmeans_iters`.
+- The parameter bundles are written in Python now, no longer generated from
+  the R specs. `bixverse.params._generated` is `bixverse.params._specs`.
 
 **Features**
 
-- `bv.atac`: an ATAC modality on `SingleCellsMultiModal` (10x peaks or
-  fragments, fragment QC, TF-IDF, top features, LSI).
-- `bv.atac.gene_activity` writes a gene activity `SingleCells`. Methods that
-  assume RNA counts refuse it (residuals, doublets, Bonsai, gene set
-  proportions) or warn (AUCell, ScType, NMF, Hotspot gene correlations,
-  SCENIC, CellPhoneDB).
-- `bv.atac.project_lsi` (Seurat's `lsiproject`), `bv.atac.run_rlsi` (rLSI
-  integration) and `bv.annotate.transfer_labels_seurat` (CCA anchors and
-  `TransferData`, RNA to RNA or RNA to gene activity).
+- `bv.atac`, single cell ATAC on `SingleCellsMultiModal`: 10x multiome peaks
+  or fragment files counted into peaks or tiles, fragment QC, AMULET
+  multiplets, peak calling per group (a MACS3 `callpeak` port), TF-IDF, top
+  features, LSI, LSI projection, rLSI integration and gene activity.
+- Methods that assume RNA counts refuse a gene activity store (residuals,
+  doublets, Bonsai, gene set proportions) or warn on it, in both wheels.
+- `modality="atac"` on `bv.graph`, `bv.embed`, `bv.integrate.harmony`, the
+  WNN (`modality_2="atac"`, `embd_to_use_2="lsi"`), the marker functions and
+  pseudobulk DE. Same for the GPU wheel's graph, embeddings and Harmony.
+- The marker functions take `method="lr"`, Seurat's logistic regression test
+  with the library size as covariate. `None`, the new default, picks `"lr"` on
+  ATAC and `"wilcox"` on RNA.
+- Harmony (v1, v2, the GPU twin and the pipeline steps) takes `embd_to_use`,
+  so it corrects the ATAC LSI as well as a PCA.
+- `bv.annotate.transfer_labels_seurat`: Seurat's CCA anchors and
+  `TransferData`, RNA to RNA or RNA to gene activity.
+- The h5ad loaders and readers take anndata Zarr stores (v2 and v3, Blosc
+  included); `bv.io.save_zarr` writes one.
+- `bv.io.download_pbmc_multiome`, and a joint RNA and ATAC vignette on it.
+- `node_order` on `find_clusters` and the fast clustering bundles; the
+  Harmony bundles take `k_means_algorithm` and `e_means_epochs`, fast
+  clustering `km_type="emeans"` and `e_means_epochs`.
 
-**Changes**
+**Changed results**
 
-- Harmony is faster on CPU and GPU. Its block order is now drawn once per run,
-  which changes results at the same seed.
-- rPCA and CCA integration cap each cell at `k_weight` anchor pairs, as
-  Seurat does. Results differ at the same seed.
+- e-means is the k-means default of Harmony v1 and v2, fast clustering (also
+  inside Boost and scDblFinder), SCENIC, DSB and NMF consensus, on CPU and
+  GPU. Results differ at the same seed; `km_type="standard"` or `k_means_algorithm="lloyd"`
+  gives Lloyd's back.
+- Leiden runs 2 iterations by default (was 5) and Louvain coloured local
+  moving, fast clustering included. Results differ at the same seed.
+- Harmony v2 follows harmony2: `HarmonyV2Params.block_size` is 0.05 (was
+  0.2), and the GPU twin estimates lambda per cluster and runs a fixed
+  iteration count under Lloyd's. Results differ at the same seed.
+- Harmony draws its block order once per run. Results differ at the same
+  seed.
+- rPCA and CCA integration search within-batch neighbours at `k + 1` and cap
+  each cell at `k_weight` anchor pairs, as Seurat does. Results differ at the
+  same seed.
 - The normalised layer is read at f32, also from v4 stores, which gave f16
   before. Values differ by up to about 2e-3.
+- Loading h5ad, 10x h5 and MTX and running Harmony are faster.
+
+**Fixes**
+
+- `csc_mem_gb` also bounds the transpose of a streamed CSC h5ad, which held it
+  whole before.
+
+**Notes**
+
+- The parity tests against R are gone; `tests/test_r_interop.py` only checks
+  that a store written on one side opens on the other.
 
 ## 0.3.3
 
