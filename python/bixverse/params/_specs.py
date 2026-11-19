@@ -1000,20 +1000,17 @@ class NmfConsensusParams:
         density_threshold: Components whose mean cosine distance to their neighbours
             exceeds this are dropped as unstable. Cosine distance cannot exceed 2,
             so any value `>= 2` disables the filter entirely.
-        kmeans_iters: Maximum k-means iterations.
         kmeans_n_init: Number of k-means restarts.
     """
 
     consensus_target: Literal["h", "w"] = "h"
     n_neighbours: int = 0
     density_threshold: float = 0.5
-    kmeans_iters: int = 100
     kmeans_n_init: int = 3
 
     def __post_init__(self) -> None:
         check_range("n_neighbours", self.n_neighbours, 0, None, False, True)
         check_range("density_threshold", self.density_threshold, 0, 2, False, False)
-        check_range("kmeans_iters", self.kmeans_iters, 1, None, False, True)
         check_range("kmeans_n_init", self.kmeans_n_init, 1, None, False, True)
         _extras.run(self)
 

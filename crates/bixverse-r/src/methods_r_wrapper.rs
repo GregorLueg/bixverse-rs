@@ -376,11 +376,6 @@ where
             None => defaults.density_threshold,
         };
 
-        let kmeans_iters = params
-            .get("kmeans_iters")
-            .and_then(robj_to_count)
-            .unwrap_or(defaults.kmeans_iters);
-
         let kmeans_n_init = params
             .get("kmeans_n_init")
             .and_then(robj_to_count)
@@ -396,7 +391,6 @@ where
             target,
             n_neighbours,
             density_threshold,
-            kmeans_iters,
             kmeans_n_init,
             seed,
         ))

@@ -14,7 +14,6 @@
 //! (if available) and a per-cell background mean estimated by a 2-component
 //! k-means on that cell's protein vector.
 
-use ann_search_rs::prelude::KMeansAlgorithm;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -130,9 +129,6 @@ pub struct DsbParams {
     /// Pseudocount added before log transform. DSB recommends 10 for the
     /// EmptyDroplets variant and 1 for ModelNegative.
     pub pseudocount: f64,
-    /// Lloyd iterations of the second step background k-means; ignored by the
-    /// e-means it runs.
-    pub kmeans_iters: usize,
     /// Optional quantile clipping per protein column: (low, high), both in
     /// [0, 1]. None disables clipping.
     pub quantile_clip: Option<(f64, f64)>,
@@ -150,7 +146,6 @@ impl Default for DsbParams {
             use_isotype_controls: true,
             isotype_indices: Vec::new(),
             pseudocount: 10.0,
-            kmeans_iters: 50,
             quantile_clip: None,
         }
     }
@@ -222,7 +217,6 @@ impl DsbParamsSpec {
             isotype_indices,
             pseudocount: self.pseudocount,
             quantile_clip,
-            ..DsbParams::default()
         })
     }
 }
@@ -307,13 +301,12 @@ fn col_sds(rows: &[Vec<f64>], means: &[f64]) -> Vec<f64> {
 /// ### Params
 ///
 /// * `values` - The 1D column on which to apply the two-component k-means
-/// * `n_iters` - Lloyd iterations, ignored by the e-means it runs
 /// * `seed` - The random seed for reproducibility
 ///
 /// ### Returns
 ///
 /// The lower k-means centroid
-fn lower_centroid_kmeans(values: &[f64], n_iters: usize, seed: usize) -> Result<f64, ScErrors> {
+fn lower_centroid_kmeans(values: &[f64], seed: usize) -> Result<f64, ScErrors> {
     let n = values.len();
     if n < 2 {
         return Ok(values.first().copied().unwrap_or(0.0));
@@ -321,8 +314,7 @@ fn lower_centroid_kmeans(values: &[f64], n_iters: usize, seed: usize) -> Result<
     // wrap as N x 1 f32 Mat for k_means_clusters
     let m = Mat::<f32>::from_fn(n, 1, |i, _| values[i] as f32);
 
-    let k_means_params =
-        KMeansParamsWrappers::new(n_iters, None, None).with_algorithm(KMeansAlgorithm::default());
+    let k_means_params = KMeansParamsWrappers::default();
 
     let (centroids, _assignments) = k_means_clusters(
         m.as_ref(),
@@ -376,21 +368,16 @@ fn col_quantile(rows: &[Vec<f64>], j: usize, q: f64) -> f64 {
 /// ### Params
 ///
 /// * `cells` - Cells x proteins after the first step of the algorithm.
-/// * `n_iters` - Lloyd iterations, ignored by the e-means it runs
 /// * `seed` - The random seed for reproducibility
 ///
 /// ### Returns
 ///
 /// The cell-wise background means
-fn cellwise_background_means(
-    cells: &[Vec<f64>],
-    n_iters: usize,
-    seed: usize,
-) -> Result<Vec<f64>, ScErrors> {
+fn cellwise_background_means(cells: &[Vec<f64>], seed: usize) -> Result<Vec<f64>, ScErrors> {
     cells
         .par_iter()
         .enumerate()
-        .map(|(i, row)| lower_centroid_kmeans(row, n_iters, seed.wrapping_add(i)))
+        .map(|(i, row)| lower_centroid_kmeans(row, seed.wrapping_add(i)))
         .collect()
 }
 
@@ -611,7 +598,7 @@ pub fn dsb_normalise(
                 .into_par_iter()
                 .map(|j| {
                     let col: Vec<f64> = cell_log.iter().map(|r| r[j]).collect();
-                    lower_centroid_kmeans(&col, params.kmeans_iters, seed.wrapping_add(j))
+                    lower_centroid_kmeans(&col, seed.wrapping_add(j))
                 })
                 .collect::<Result<Vec<f64>, _>>()?;
 
@@ -632,7 +619,7 @@ pub fn dsb_normalise(
         if verbosity.normal_verbosity() {
             println!("DSB: Step II - estimating per-cell background");
         }
-        let bg = cellwise_background_means(&cell_log, params.kmeans_iters, seed)?;
+        let bg = cellwise_background_means(&cell_log, seed)?;
 
         let noise_vec = if params.use_isotype_controls && !params.isotype_indices.is_empty() {
             let noise_rows = build_noise_matrix(&cell_log, &params.isotype_indices, &bg);
@@ -854,7 +841,7 @@ mod tests {
     #[test]
     fn lower_centroid_kmeans_picks_lower_mode() {
         let v = bimodal_values();
-        let lower = lower_centroid_kmeans(&v, 50, 42).unwrap();
+        let lower = lower_centroid_kmeans(&v, 42).unwrap();
         // lower mode is near 0
         assert!(lower < 1.0, "expected lower centroid near 0, got {lower}");
     }
@@ -863,17 +850,9 @@ mod tests {
     #[test]
     fn lower_centroid_kmeans_handles_short_input() {
         let v: Vec<f64> = vec![7.5];
-        assert!(approx_eq(
-            lower_centroid_kmeans(&v, 10, 0).unwrap(),
-            7.5,
-            EPS64
-        ));
+        assert!(approx_eq(lower_centroid_kmeans(&v, 0).unwrap(), 7.5, EPS64));
         let v: Vec<f64> = vec![];
-        assert!(approx_eq(
-            lower_centroid_kmeans(&v, 10, 0).unwrap(),
-            0.0,
-            EPS64
-        ));
+        assert!(approx_eq(lower_centroid_kmeans(&v, 0).unwrap(), 0.0, EPS64));
     }
 
     /// Every noise row is z-scored so isotypes and background enter the PC on one scale.
@@ -967,7 +946,6 @@ mod tests {
             use_isotype_controls: false,
             isotype_indices: vec![],
             pseudocount: 10.0,
-            kmeans_iters: 50,
             quantile_clip: None,
         };
 
@@ -1021,7 +999,6 @@ mod tests {
             use_isotype_controls: false,
             isotype_indices: vec![],
             pseudocount: 1.0,
-            kmeans_iters: 50,
             quantile_clip: None,
         };
         let res = dsb_normalise(
@@ -1049,7 +1026,6 @@ mod tests {
             use_isotype_controls: true,
             isotype_indices: vec![3, 4],
             pseudocount: 10.0,
-            kmeans_iters: 50,
             quantile_clip: None,
         };
         let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).unwrap();
@@ -1076,7 +1052,6 @@ mod tests {
             use_isotype_controls: false,
             isotype_indices: vec![],
             pseudocount: 10.0,
-            kmeans_iters: 50,
             quantile_clip: Some((0.1, 0.9)),
         };
 

@@ -12,7 +12,7 @@
 //!
 //! Kotliar et al., eLife, 2019
 
-use ann_search_rs::prelude::{AnnSearchFloat, KMeansAlgorithm};
+use ann_search_rs::prelude::AnnSearchFloat;
 use ann_search_rs::{build_exhaustive_index, query_exhaustive_self};
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
@@ -46,10 +46,6 @@ const DEFAULT_DENSITY_THRESHOLD: f64 = 0.5;
 /// k-means restarts kept per consensus step, lowest inertia winning. cNMF leans
 /// on scikit-learn's `n_init = 10` for the same purpose.
 const DEFAULT_KMEANS_N_INIT: usize = 3;
-
-/// Default Lloyd iterations per k-means restart. Unused while the restarts
-/// run e-means, which ignores it.
-const DEFAULT_KMEANS_ITERS: usize = 100;
 
 /// Norm below which a pooled component counts as collapsed and is dropped
 /// before anything else runs. A zero-norm row has no direction, so cosine
@@ -107,8 +103,6 @@ pub struct ConsensusParams<F: BixverseFloat> {
     /// Mean cosine distance to those neighbours above which a component is
     /// dropped. `None` disables filtering entirely.
     pub density_threshold: Option<F>,
-    /// Lloyd iterations per k-means restart; ignored by the e-means restarts.
-    pub kmeans_iters: usize,
     /// Number of k-means restarts; the lowest-inertia labelling wins.
     pub kmeans_n_init: usize,
     /// Seed for the k-means restarts.
@@ -125,8 +119,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
     ///   for the `0.3 * n_runs` heuristic.
     /// * `density_threshold` - Mean cosine distance cutoff. `None` disables the
     ///   filter.
-    /// * `kmeans_iters` - Lloyd iterations per k-means restart; ignored by the
-    ///   e-means restarts.
     /// * `kmeans_n_init` - Number of k-means restarts.
     /// * `seed` - Seed for the k-means restarts.
     ///
@@ -137,7 +129,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
         target: ConsensusTarget,
         n_neighbours: Option<usize>,
         density_threshold: Option<F>,
-        kmeans_iters: usize,
         kmeans_n_init: usize,
         seed: u64,
     ) -> Self {
@@ -145,7 +136,6 @@ impl<F: BixverseFloat> ConsensusParams<F> {
             target,
             n_neighbours,
             density_threshold,
-            kmeans_iters,
             kmeans_n_init,
             seed,
         }
@@ -163,7 +153,6 @@ impl<F: BixverseFloat> Default for ConsensusParams<F> {
             target: ConsensusTarget::default(),
             n_neighbours: None,
             density_threshold: Some(F::from_f64(DEFAULT_DENSITY_THRESHOLD).unwrap()),
-            kmeans_iters: DEFAULT_KMEANS_ITERS,
             kmeans_n_init: DEFAULT_KMEANS_N_INIT,
             seed: 42,
         }
@@ -186,8 +175,6 @@ pub struct ConsensusParamsSpec {
     pub n_neighbours: usize,
     /// Mean cosine distance cutoff; 2 or more disables the filter
     pub density_threshold: f64,
-    /// Lloyd iterations per k-means restart; ignored by the e-means restarts
-    pub kmeans_iters: usize,
     /// Number of k-means restarts
     pub kmeans_n_init: usize,
     /// Seed for the k-means restarts; `None` keeps the default
@@ -205,7 +192,6 @@ impl Default for ConsensusParamsSpec {
             consensus_target: "h".to_string(),
             n_neighbours: 0,
             density_threshold: DEFAULT_DENSITY_THRESHOLD,
-            kmeans_iters: DEFAULT_KMEANS_ITERS,
             kmeans_n_init: DEFAULT_KMEANS_N_INIT,
             consensus_seed: None,
         }
@@ -235,7 +221,6 @@ impl ConsensusParamsSpec {
             target,
             (self.n_neighbours > 0).then_some(self.n_neighbours),
             density_threshold,
-            self.kmeans_iters,
             self.kmeans_n_init,
             self.consensus_seed
                 .unwrap_or_else(|| ConsensusParams::<F>::default().seed),
@@ -553,8 +538,7 @@ where
 ///
 /// * `data` - Unit-L2 rows to cluster, shape `n x dim`.
 /// * `k` - Number of clusters.
-/// * `params` - Consensus options supplying the iteration count, restart count
-///   and seed.
+/// * `params` - Consensus options supplying the restart count and seed.
 ///
 /// ### Returns
 ///
@@ -567,10 +551,9 @@ fn cluster_best_of_n<F>(
 where
     F: BixverseFloat + AnnSearchFloat,
 {
-    // Both floored at one: a zero arriving from R would otherwise give an
-    // init-only clustering, or no clustering at all, rather than an error.
-    let kmeans_params = KMeansParamsWrappers::new(params.kmeans_iters.max(1), None, None)
-        .with_algorithm(KMeansAlgorithm::default());
+    // Floored at one: a zero arriving from R would otherwise run no clustering
+    // at all rather than error.
+    let kmeans_params = KMeansParamsWrappers::default();
     let n_init = params.kmeans_n_init.max(1);
 
     let mut best: Option<(F, Vec<usize>)> = None;
