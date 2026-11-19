@@ -11,7 +11,7 @@ It works on the store, not in memory, so it scales past what fits in RAM. On top
 sit a minibatch loader and a barebone scVI that train straight off that store,
 and a separate wheel with GPU twins of the expensive methods.
 
-Docs, API reference and 22 vignettes: <https://gregorlueg.github.io/bixverse-rs/>
+Docs, API reference and 23 vignettes: <https://gregorlueg.github.io/bixverse-rs/>
 
 ## Install
 
@@ -65,19 +65,20 @@ lines but not what Rust prints.
 
 | Module | Contents |
 | --- | --- |
-| `bv.io` | h5ad, 10x h5, MTX and in-memory loaders, saving, h5ad and Cell Ranger writers, archives, example data |
+| `bv.io` | h5ad, anndata Zarr, 10x h5, MTX and in-memory loaders, saving, h5ad, Zarr and Cell Ranger writers, store upgrades, archives, example data |
 | `bv.qc` | gene set proportions, MAD outlier calls, fixed thresholds |
 | `bv.pp` | HVGs, PCA, Pearson residuals and scTransform, MAGIC |
 | `bv.graph` | kNN (the `ann-search-rs` indices), neighbour graphs, Leiden and Louvain, fast clustering |
 | `bv.embed` | UMAP, t-SNE, PHATE, densMAP, den-SNE, ForceAtlas2 (`embed` extra) |
 | `bv.integrate` | fastMNN, Harmony v1 and v2, Seurat CCA and RPCA, BBKNN, kBET and friends |
 | `bv.doublets` | Scrublet, boosted doublet detection, scDblFinder, empty droplets, CellSweep |
-| `bv.de` | markers, pseudobulk with edgeR QL, NEBULA, Milo, MELD |
-| `bv.annotate` | scType, Symphony reference mapping |
+| `bv.de` | markers (Wilcoxon or logistic regression), pseudobulk with edgeR QL, NEBULA, Milo, MELD |
+| `bv.annotate` | scType, Symphony reference mapping, Seurat label transfer |
 | `bv.metacells` | SEACells, SuperCells, hdWGCNA-style and MetaCells2 meta cells |
 | `bv.traj`, `bv.trees` | Palantir, PAGA, gene trends; Bonsai cell trees |
 | `bv.pathways`, `bv.nmf` | module scores, AUCell, VISION, Hotspot, SCENIC, decoupler-style activities; consensus NMF |
 | `bv.mm` | ADT counts, DSB and CLR, WNN |
+| `bv.atac` | ATAC peaks or tiles from 10x h5 or fragments, fragment QC, AMULET, peak calling, TF-IDF, LSI, rLSI, gene activity |
 | `bv.lr`, `bv.dialogue` | CellPhoneDB, NicheNet-style ligand-receptor; DIALOGUE |
 | `bv.pl` | matplotlib plots (`plots` extra) and the `extract_*` frames behind them |
 | `bv.pipeline` | chained steps with `>>`, per-group pipelines |
@@ -187,7 +188,7 @@ copy is outdated; `--force` updates it.
 
 ## Vignettes
 
-22 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
+23 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
 `docs/vignettes/` with its executed `.ipynb` next to it, and the data sets download
 themselves on first use.
 
@@ -205,5 +206,6 @@ uv run maturin develop --release
 uv run pytest tests -q
 ```
 
-The `tests/*_r.py` parity tests run `dev/sc_*_fixtures.R` and skip without Rscript
-and bixverse 0.9.0 or later. The GPU wheel builds from `gpu/`.
+`tests/test_r_interop.py` checks that a store written by R opens in Python and
+the reverse; it skips without Rscript and the bixverse R package. The GPU wheel
+builds from `gpu/`.
