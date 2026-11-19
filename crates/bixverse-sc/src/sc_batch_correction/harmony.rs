@@ -13,10 +13,10 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 
 use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
-    HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
-    centroids_from_r, distances_and_base, kmeans_centroids, normalise_rows_into, objective,
-    observed_counts, r_to_mat, ridge_correction, row_major_to_mat, to_row_major,
-    update_assignments, window_converged,
+    CellOrder, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
+    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
+    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
+    window_converged,
 };
 
 ////////////
@@ -68,7 +68,9 @@ impl Default for HarmonyParams {
             epsilon_kmeans: 1e-3,
             epsilon_harmony: 1e-2,
             window_size: 3,
-            kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
+            kmeans_params: HarmonyKMeansSpec::default()
+                .try_into()
+                .expect("default k-means keys parse"),
         }
     }
 }
@@ -411,7 +413,12 @@ pub fn harmony_with_state(
 
     assert!(n_vars >= 1, "At least one batch variable required");
 
-    let batch_infos = create_batch_infos(batch_labels, n)?;
+    let cells = CellOrder::new(n, seed as u64);
+    // built in input order first, which checks the label lengths
+    let batch_infos = create_batch_infos(batch_labels, n)?
+        .iter()
+        .map(|info| create_batch_info(&cells.permute(&info.cell_to_level, 1), n))
+        .collect::<Result<Vec<_>, _>>()?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -443,15 +450,15 @@ pub fn harmony_with_state(
 
     let mut times = StageTimes::default();
 
-    let z_orig = to_row_major(pca);
+    let z_in = to_row_major(pca);
     let mut z_cos = vec![0.0f32; n * d];
-    normalise_rows_into(&z_orig, d, &mut z_cos);
-    let mut z_corr = z_orig.clone();
+    normalise_rows_into(&z_in, d, &mut z_cos);
 
     if verbosity.normal_verbosity() {
         println!("Running initial k-means...");
     }
 
+    // in input order, so the initial centroids do not depend on the shuffle
     let mut y = times.time("kmeans_init", || {
         kmeans_centroids(
             &z_cos,
@@ -462,6 +469,10 @@ pub fn harmony_with_state(
             verbosity.detailed_verbosity(),
         )
     })?;
+
+    let (z_orig, mut z_cos) = (cells.permute(&z_in, d), cells.permute(&z_cos, d));
+    drop(z_in);
+    let mut z_corr = z_orig.clone();
 
     let mut log_base = vec![0.0f32; n * k];
     let mut shift = vec![0.0f32; n];
@@ -593,8 +604,8 @@ pub fn harmony_with_state(
     }
 
     Ok(HarmonyResult {
-        z_corr: row_major_to_mat(&z_corr, d),
-        r: r_to_mat(&r, k),
+        z_corr: row_major_to_mat(&cells.restore(&z_corr, d), d),
+        r: r_to_mat(&cells.restore(&r, k), k),
     })
 }
 

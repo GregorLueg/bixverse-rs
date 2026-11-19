@@ -2923,7 +2923,7 @@ fn batch_genes_correlated<S: SingleCellReading>(
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
-    let k_means_params = KMeansParamsWrappers::new(50, None, None);
+    let k_means_params = KMeansParamsWrappers::default();
 
     let centroids = train_centroids(
         &gene_loadings,

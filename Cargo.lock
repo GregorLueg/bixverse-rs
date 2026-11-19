@@ -114,9 +114,9 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.12.2"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "277e1b1e1ae3aff1ad937410e8f43891d5efaea2075b733ad1793164233ff315"
+checksum = "85ec1c610b26928efaf241531f3a05b35be67c1462c2d1740a3a89ef6e99e2d2"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-core"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-gpu"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "bixverse-core",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-methods"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -523,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-mlx"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-r"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "bixverse-rs",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-data"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "approx",
  "bincode",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sc-gpu"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-sparse"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "approx",
  "bincode",
@@ -730,9 +730,9 @@ dependencies = [
 
 [[package]]
 name = "bonsai-rs"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db7663bbd438b78619fc428aec6213d2207738c77c4ae56f1b6d9ab933082f11"
+checksum = "46fdd7ae449ef53e3df7cc81a5800aebfd8facc9a784198e68fd61caf6cec39e"
 dependencies = [
  "ann-search-rs",
  "cubecl",

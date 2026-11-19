@@ -11,7 +11,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -28,7 +28,7 @@ bixverse-sc-gpu = { path = "../crates/bixverse-sc-gpu" }
 bixverse-mlx = { path = "../crates/bixverse-mlx" }
 # Semver-compatible with the copy bixverse-mlx pulls in: two copies would both
 # declare `links = "mlxc"`, which cargo rejects.
-ann-search-rs = { version = "0.12.2", default-features = false }
+ann-search-rs = { version = "0.13.1", default-features = false }
 crossbeam-channel = "0.5"
 cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
