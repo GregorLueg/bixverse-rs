@@ -75,6 +75,11 @@ pub struct BinariseParams {
 }
 
 impl Default for BinariseParams {
+    /// The default [`BinariseParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             bw_adjust: 1.0,

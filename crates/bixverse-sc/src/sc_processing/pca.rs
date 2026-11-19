@@ -196,8 +196,12 @@ impl SingleCellPcaParams {
     }
 }
 
-/// Default implementation for [SingleCellPcaParams]
 impl Default for SingleCellPcaParams {
+    /// The default [`SingleCellPcaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             mean_center: true,

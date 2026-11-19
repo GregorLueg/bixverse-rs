@@ -54,6 +54,11 @@ pub struct LogisticGbmConfig {
 }
 
 impl Default for LogisticGbmConfig {
+    /// The default [`LogisticGbmConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             max_rounds: 200,

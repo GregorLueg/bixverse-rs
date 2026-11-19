@@ -51,6 +51,11 @@ pub struct SeuratRpcaParams {
 }
 
 impl Default for SeuratRpcaParams {
+    /// The default [`SeuratRpcaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             dims: 30,

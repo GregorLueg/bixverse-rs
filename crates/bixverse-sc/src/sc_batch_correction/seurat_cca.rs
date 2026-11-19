@@ -67,8 +67,12 @@ pub struct SeuratCcaParams {
     pub pca_params: SingleCellPcaParams,
 }
 
-/// Defaults
 impl Default for SeuratCcaParams {
+    /// The default [`SeuratCcaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             num_cc: 30,

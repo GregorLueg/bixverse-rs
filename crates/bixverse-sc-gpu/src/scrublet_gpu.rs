@@ -126,8 +126,12 @@ impl ScrubletKnnBackend {
     }
 }
 
-/// Default implementation for ScrubletKnnBackend
 impl Default for ScrubletKnnBackend {
+    /// The default [`ScrubletKnnBackend`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::Gpu(KnnParamsGpu::new())
     }
@@ -162,8 +166,12 @@ impl ScrubletParamsGpu {
     }
 }
 
-/// Default implementation for ScrubletParamsGpu
 impl Default for ScrubletParamsGpu {
+    /// The default [`ScrubletParamsGpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -217,6 +225,11 @@ pub struct ScrubletGpuSpec {
 }
 
 impl Default for ScrubletGpuSpec {
+    /// The default [`ScrubletGpuSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = ScrubletParamsGpu::new();
         Self {

@@ -72,6 +72,10 @@ pub struct CellPhoneDbParams<T> {
 
 impl<T: BixverseFloat> Default for CellPhoneDbParams<T> {
     /// Defaults match CellPhoneDB: 1000 permutations, threshold 0.1.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_perm: 1000,

@@ -249,8 +249,12 @@ pub struct CellSweepParams {
     pub seed: u64,
 }
 
-/// Default implementation for [`CellSweepParams`].
 impl Default for CellSweepParams {
+    /// The default [`CellSweepParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             freeze_empties: true,

@@ -53,6 +53,11 @@ pub struct RlsiParams {
 }
 
 impl Default for RlsiParams {
+    /// The default [`RlsiParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             dims: (1..30).collect(),

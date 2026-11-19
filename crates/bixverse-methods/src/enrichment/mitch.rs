@@ -60,14 +60,11 @@ pub struct MitchResult<'a, T> {
 /////////////////
 
 /// Quantities of the ranked matrix that do not depend on the pathway
-///
-/// ### Fields
-///
-/// * `overall_mean` - Column means of the ranked matrix
-/// * `sscp_total` - Total sums of squares and cross products
 #[derive(Clone, Debug)]
 pub struct MitchTotals<T: BixverseFloat> {
+    /// Column means of the ranked matrix
     overall_mean: Vec<T>,
+    /// Total sums of squares and cross products
     sscp_total: Mat<T>,
 }
 

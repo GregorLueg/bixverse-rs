@@ -70,6 +70,11 @@ pub struct HarmonyParamsV2 {
 }
 
 impl Default for HarmonyParamsV2 {
+    /// The default [`HarmonyParamsV2`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -132,6 +137,11 @@ pub struct HarmonyParamsV2Spec {
 }
 
 impl Default for HarmonyParamsV2Spec {
+    /// The default [`HarmonyParamsV2Spec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParamsV2::default();
         Self {

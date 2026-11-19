@@ -72,6 +72,10 @@ pub struct GeneActivityParams {
 impl Default for GeneActivityParams {
     /// Signac's defaults: 2 kb upstream, nothing downstream, genes under
     /// 500 kb, protein coding only.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             upstream: 2000,

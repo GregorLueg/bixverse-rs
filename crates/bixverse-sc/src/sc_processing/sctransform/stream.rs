@@ -84,6 +84,11 @@ pub struct SctStreamOpts {
 }
 
 impl Default for SctStreamOpts {
+    /// The default [`SctStreamOpts`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             gene_batch_size: Some(SCT_GENE_BATCH_SIZE),
@@ -457,11 +462,18 @@ fn sweep_gene(gene: &CscGeneChunk, n_cells: usize, gmean_eps: f64, ln_table: &[f
 
 /// Histogram of raw count values, dense for small counts.
 struct CountHistogram {
+    /// Frequency of every count below `COUNT_TABLE_LEN`
     dense: Vec<u64>,
+    /// Frequency of the larger counts
     overflow: FxHashMap<u32, u64>,
 }
 
 impl CountHistogram {
+    /// An empty histogram.
+    ///
+    /// ### Returns
+    ///
+    /// The histogram.
     fn new() -> Self {
         Self {
             dense: vec![0; COUNT_TABLE_LEN],
@@ -469,6 +481,11 @@ impl CountHistogram {
         }
     }
 
+    /// Count one value.
+    ///
+    /// ### Params
+    ///
+    /// * `x` - The count
     #[inline]
     fn add(&mut self, x: u32) {
         match self.dense.get_mut(x as usize) {
@@ -477,6 +494,11 @@ impl CountHistogram {
         }
     }
 
+    /// Count every stored raw value of a gene.
+    ///
+    /// ### Params
+    ///
+    /// * `gene` - The gene
     fn add_gene(&mut self, gene: &CscGeneChunk) {
         match &gene.data_raw {
             RawCounts::U16(v) => v.iter().for_each(|&x| self.add(x as u32)),
@@ -484,6 +506,15 @@ impl CountHistogram {
         }
     }
 
+    /// Add another histogram.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - The other histogram
+    ///
+    /// ### Returns
+    ///
+    /// The sum.
     fn merge(mut self, other: Self) -> Self {
         self.dense
             .iter_mut()
@@ -495,6 +526,11 @@ impl CountHistogram {
         self
     }
 
+    /// Add the frequencies to a map.
+    ///
+    /// ### Params
+    ///
+    /// * `target` - Value to frequency
     fn drain_into(self, target: &mut FxHashMap<u32, u64>) {
         for (value, freq) in self.dense.into_iter().enumerate() {
             if freq > 0 {

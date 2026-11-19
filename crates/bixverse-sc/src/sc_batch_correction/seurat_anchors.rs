@@ -849,6 +849,17 @@ struct MergeGroup {
 }
 
 impl MergeGroup {
+    /// A group of one batch.
+    ///
+    /// ### Params
+    ///
+    /// * `batch_id` - The batch
+    /// * `embed` - Its embedding, one row per cell
+    /// * `union_indices` - Union cell index of every row
+    ///
+    /// ### Returns
+    ///
+    /// The group.
     fn new_leaf(batch_id: u16, embed: Mat<f32>, union_indices: &[usize]) -> Self {
         let n = embed.nrows();
         assert_eq!(
@@ -864,10 +875,20 @@ impl MergeGroup {
         }
     }
 
+    /// The original batches merged into this group.
+    ///
+    /// ### Returns
+    ///
+    /// The batch ids.
     fn active_batches(&self) -> FxHashSet<u16> {
         self.origin.iter().map(|&(b, _)| b).collect()
     }
 
+    /// Lookup from `(original batch, index in batch)` to the current row.
+    ///
+    /// ### Returns
+    ///
+    /// The map.
     fn origin_map(&self) -> FxHashMap<(u16, u32), u32> {
         self.origin
             .iter()

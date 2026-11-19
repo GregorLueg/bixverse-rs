@@ -101,9 +101,13 @@ pub struct BoostParams {
     pub fast_cluster_params: FastClusterParams,
 }
 
-/// The fallbacks of the R list conversion. `params_boost()` always sends
-/// every key, and its defaults differ from these.
 impl Default for BoostParams {
+    /// The fallbacks of the R list conversion. `params_boost()` always sends
+    /// every key, and its defaults differ from these.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: false,

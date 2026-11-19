@@ -232,6 +232,11 @@ impl ScranTrendParams {
 }
 
 impl Default for ScranTrendParams {
+    /// The default [`ScranTrendParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             mean_filter: true,
@@ -274,6 +279,11 @@ pub struct HvgParams {
 }
 
 impl Default for HvgParams {
+    /// The default [`HvgParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             method: HvgMethod::default(),
@@ -498,6 +508,10 @@ struct RawAccumulator {
 
 impl Default for RawAccumulator {
     /// Empty accumulator. `min` starts at the maximum so the first value wins.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             sum: 0.0,

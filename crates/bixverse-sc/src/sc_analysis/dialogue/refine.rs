@@ -86,8 +86,11 @@ pub struct DialogueResult {
 /// One gene's row in the per-cell-type meta-analysis.
 #[derive(Clone, Debug)]
 struct MetaRow {
+    /// Programme index
     programme: usize,
+    /// Gene index
     gene: usize,
+    /// Whether the gene entered from the up or the down side
     up: bool,
     /// Signed `-log10 p` per partner, `NaN` where that partner had no verdict.
     z: Vec<f64>,

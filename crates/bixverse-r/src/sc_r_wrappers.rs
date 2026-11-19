@@ -4945,6 +4945,7 @@ impl FromRList for AprGroupedFit {
 // Bonsai //
 ////////////
 
+/// The extendr conversions of the Sanity and Bonsai parameters and trees.
 #[cfg(feature = "bonsai")]
 mod bonsai_wrappers {
     use bonsai_rs::sanity_sc_rs::config::VarianceRule;

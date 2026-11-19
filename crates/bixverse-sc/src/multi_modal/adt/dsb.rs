@@ -138,8 +138,12 @@ pub struct DsbParams {
     pub quantile_clip: Option<(f64, f64)>,
 }
 
-/// Default implementation of [DsbParams]
 impl Default for DsbParams {
+    /// The default [`DsbParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             denoise_counts: true,
@@ -173,6 +177,11 @@ pub struct DsbParamsSpec {
 }
 
 impl Default for DsbParamsSpec {
+    /// The default [`DsbParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = DsbParams::default();
         Self {

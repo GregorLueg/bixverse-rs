@@ -221,6 +221,11 @@ impl MagicParams {
 }
 
 impl Default for MagicParams {
+    /// The default [`MagicParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_steps: 3,

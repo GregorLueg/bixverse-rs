@@ -68,8 +68,12 @@ pub struct SymphonyMapParams {
     pub lambda: f32,
 }
 
-/// Default implementation for [SymphonyMapParams].
 impl Default for SymphonyMapParams {
+    /// The default [`SymphonyMapParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             sigma: 0.1,

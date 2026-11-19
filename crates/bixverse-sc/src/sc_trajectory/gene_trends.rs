@@ -96,6 +96,11 @@ impl BranchSelectionParams {
 }
 
 impl Default for BranchSelectionParams {
+    /// The default [`BranchSelectionParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             q: 1e-2,
@@ -335,6 +340,11 @@ impl GeneTrendsParams {
 }
 
 impl Default for GeneTrendsParams {
+    /// The default [`GeneTrendsParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             resolution: PSEUDOTIME_RES,
@@ -367,6 +377,11 @@ pub struct GeneTrendsParamsSpec {
 }
 
 impl Default for GeneTrendsParamsSpec {
+    /// The default [`GeneTrendsParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = GeneTrendsParams::default();
         Self {

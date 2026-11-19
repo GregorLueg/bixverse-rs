@@ -51,6 +51,10 @@ pub struct FragmentQcParams {
 
 impl Default for FragmentQcParams {
     /// Signac's windows and bins.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             tss_centre: 500,

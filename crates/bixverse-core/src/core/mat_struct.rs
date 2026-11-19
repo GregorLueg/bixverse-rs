@@ -208,16 +208,13 @@ where
 /// Structure to help creating sub slices of a given matrix when needed.
 /// Due to memory structure, slicing creates deep copies, but this function
 /// avoids generating them until the last possible moment.
-///
-/// ### Fields
-///
-/// * `data` - The faer MatRef (original matrix)
-/// * `row_indices` - The row indices you want to slice out.
-/// * `col_indices` - The col indices you want to slice out.
 #[derive(Clone, Debug)]
 pub struct MatSliceView<'a, 'r, 'c, T> {
+    /// The faer MatRef (original matrix)
     data: MatRef<'a, T>,
+    /// The row indices you want to slice out.
     row_indices: &'r [usize],
+    /// The col indices you want to slice out.
     col_indices: &'c [usize],
 }
 

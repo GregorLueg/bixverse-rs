@@ -333,8 +333,12 @@ pub enum CentroidGraph {
     },
 }
 
-/// Default: 15-NN on the centroids with the default [`KnnSymmetrisation`]
 impl Default for CentroidGraph {
+    /// Default: 15-NN on the centroids with the default [`KnnSymmetrisation`]
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         CentroidGraph::Knn {
             k: 15,
@@ -425,6 +429,11 @@ pub struct FastClusterParamsSpec {
 }
 
 impl Default for FastClusterParamsSpec {
+    /// The default [`FastClusterParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = FastClusterParams::default();
         Self {

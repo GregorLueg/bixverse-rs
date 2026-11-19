@@ -82,6 +82,11 @@ pub struct HotSpotParams {
 }
 
 impl Default for HotSpotParams {
+    /// The default [`HotSpotParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             model: "danb".to_string(),
@@ -130,6 +135,11 @@ pub fn de_neighborhood_factor<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D:
 }
 
 impl Default for HotSpotGraphParams {
+    /// The default [`HotSpotGraphParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             weighted_graph: false,

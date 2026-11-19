@@ -16,13 +16,10 @@ use crate::prelude::*;
 /////////////
 
 /// Structure holding gene binning information
-///
-/// ### Fields
-///
-/// * `gene_to_bin` - HashMap that contains gene to bin mapping
-/// * `bins` - Bin to gene lookup
 struct GeneBins {
+    /// HashMap that contains gene to bin mapping
     gene_to_bin: FxHashMap<usize, usize>,
+    /// Bin to gene lookup
     bins: Vec<Vec<usize>>,
 }
 

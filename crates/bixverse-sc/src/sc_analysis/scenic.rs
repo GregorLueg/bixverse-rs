@@ -58,6 +58,11 @@ pub enum RegressionLearner {
 }
 
 impl Default for RegressionLearner {
+    /// The default [`RegressionLearner`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         RegressionLearner::GradientBoosting(GradientBoostingConfig::default())
     }
@@ -175,8 +180,12 @@ pub struct ExtraTreesConfig {
     pub subsample_frac: Option<f32>,
 }
 
-/// Default implementation for `ExtraTreesConfig`
 impl Default for ExtraTreesConfig {
+    /// The default [`ExtraTreesConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_trees: 500,
@@ -248,8 +257,12 @@ pub struct RandomForestConfig {
     pub subsample_frac: Option<f32>,
 }
 
-/// Default implementation for `RandomForestConfig`
 impl Default for RandomForestConfig {
+    /// The default [`RandomForestConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_trees: 250,
@@ -319,6 +332,11 @@ pub struct GradientBoostingConfig {
 }
 
 impl Default for GradientBoostingConfig {
+    /// The default [`GradientBoostingConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_trees_max: 1000,
@@ -3095,6 +3113,28 @@ fn importance_rows_to_mat(rows: &[Vec<f32>], n_genes: usize, n_tfs: usize) -> Ma
     MatRef::from_column_major_slice(&flat, n_genes, n_tfs).to_owned()
 }
 
+/// Feature importances from the multi-output tree learners (random forest,
+/// extra trees): targets are fitted in batches, one forest per batch.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based store
+/// * `cell_set` - The cells to fit on
+/// * `cell_indices` - The same cells, in order
+/// * `gene_indices` - Target genes
+/// * `tf_data` - Quantised TF expression of the cells
+/// * `n_cells` - Number of cells
+/// * `n_tfs` - Number of TFs
+/// * `n_genes` - Number of target genes
+/// * `scenic_params` - The SCENIC parameters
+/// * `seed` - Seed of the learners
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+/// * `start_total` - Start of the whole run, for the progress lines
+///
+/// ### Returns
+///
+/// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
+/// per-target feature importances.
 #[allow(clippy::too_many_arguments)]
 fn run_scenic_multi_output<S: SingleCellReading>(
     reader: &S,
@@ -3723,8 +3763,12 @@ pub struct ScenicParams {
     pub n_subsample: usize,
 }
 
-/// Default implementations of the Scenic parameters
 impl Default for ScenicParams {
+    /// Default implementations of the Scenic parameters
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_counts: 50,
@@ -3788,6 +3832,11 @@ pub struct ScenicParamsSpec {
 }
 
 impl Default for ScenicParamsSpec {
+    /// The default [`ScenicParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = ScenicParams::default();
         Self {

@@ -52,8 +52,12 @@ pub struct ScenicGpuParams {
     pub wave_byte_budget: usize,
 }
 
-/// Default implementation.
 impl Default for ScenicGpuParams {
+    /// The default [`ScenicGpuParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             wave_byte_budget: 4 * 1024 * 1024 * 1024,

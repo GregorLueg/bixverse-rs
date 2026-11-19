@@ -30,6 +30,10 @@ pub enum TopFeatureCutoff {
 
 impl Default for TopFeatureCutoff {
     /// Signac's default, `min.cutoff = "q5"`.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         TopFeatureCutoff::Quantile(0.05)
     }

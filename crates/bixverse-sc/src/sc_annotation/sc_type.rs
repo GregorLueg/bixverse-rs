@@ -169,6 +169,11 @@ pub struct ScTypeCellParams {
 }
 
 impl Default for ScTypeCellParams {
+    /// The default [`ScTypeCellParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             alpha: SMOOTH_ALPHA,

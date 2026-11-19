@@ -75,6 +75,10 @@ impl LsiParams {
 
 impl Default for LsiParams {
     /// Signac's `RunSVD` defaults: 50 components, scaled, no clip.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_comp: 50,

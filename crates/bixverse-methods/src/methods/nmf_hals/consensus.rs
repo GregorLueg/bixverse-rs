@@ -153,6 +153,11 @@ impl<F: BixverseFloat> ConsensusParams<F> {
 }
 
 impl<F: BixverseFloat> Default for ConsensusParams<F> {
+    /// The default [`ConsensusParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             target: ConsensusTarget::default(),
@@ -190,6 +195,11 @@ pub struct ConsensusParamsSpec {
 }
 
 impl Default for ConsensusParamsSpec {
+    /// The default [`ConsensusParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             consensus_target: "h".to_string(),

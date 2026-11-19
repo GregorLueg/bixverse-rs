@@ -108,6 +108,11 @@ pub struct LoadingLogNormal<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for LoadingLogNormal<T> {
+    /// The default [`LoadingLogNormal`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             mu: T::from_f64(DEFAULT_LOADING_LN_MU).unwrap(),
@@ -128,6 +133,11 @@ pub struct ModularConfig<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for ModularConfig<T> {
+    /// The default [`ModularConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             factor_std: T::from_f64(DEFAULT_NORMAL_FACTOR_STD).unwrap(),
@@ -149,6 +159,11 @@ pub struct HubModularConfig<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for HubModularConfig<T> {
+    /// The default [`HubModularConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             factor_std: T::from_f64(DEFAULT_NORMAL_FACTOR_STD).unwrap(),
@@ -175,6 +190,11 @@ pub struct NonNegativeFactorConfig<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for NonNegativeFactorConfig<T> {
+    /// The default [`NonNegativeFactorConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             factor_shape: T::from_f64(DEFAULT_GAMMA_FACTOR_SHAPE).unwrap(),
@@ -199,6 +219,11 @@ pub struct NonGaussianFactorConfig<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for NonGaussianFactorConfig<T> {
+    /// The default [`NonGaussianFactorConfig`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             factor_scale: T::from_f64(DEFAULT_LAPLACE_FACTOR_SCALE).unwrap(),
@@ -226,6 +251,11 @@ pub enum BulkDataGenerator<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for BulkDataGenerator<T> {
+    /// The default [`BulkDataGenerator`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         BulkDataGenerator::HubModular(HubModularConfig::default())
     }
@@ -352,6 +382,11 @@ pub struct SyntheticRnaSeqParams<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for SyntheticRnaSeqParams<T> {
+    /// The default [`SyntheticRnaSeqParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             num_samples: 100,
@@ -479,6 +514,11 @@ pub struct SparsityParams<T: BixverseFloat> {
 }
 
 impl<T: BixverseFloat> Default for SparsityParams<T> {
+    /// The default [`SparsityParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             strategy: DropoutStrategy::SequencingDepth,

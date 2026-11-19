@@ -1500,6 +1500,11 @@ pub struct ScDblSimParams {
 }
 
 impl Default for ScDblSimParams {
+    /// The default [`ScDblSimParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             resamp_frac: 0.25,
@@ -1853,6 +1858,11 @@ pub struct UnrecognisableFilterParams {
 }
 
 impl Default for UnrecognisableFilterParams {
+    /// The default [`UnrecognisableFilterParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_size: 5,

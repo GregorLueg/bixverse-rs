@@ -51,6 +51,11 @@ pub struct TransferAnchorParams {
 }
 
 impl Default for TransferAnchorParams {
+    /// The default [`TransferAnchorParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_cc: 30,
@@ -75,6 +80,11 @@ pub struct TransferDataParams {
 }
 
 impl Default for TransferDataParams {
+    /// The default [`TransferDataParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k_weight: 50,

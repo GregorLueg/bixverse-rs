@@ -128,8 +128,12 @@ pub struct HarmonyParamsV2Gpu {
     pub kmeans_params: Option<KMeansGpuParams>,
 }
 
-/// Default implementation
 impl Default for HarmonyParamsV2Gpu {
+    /// The default [`HarmonyParamsV2Gpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -230,6 +234,11 @@ pub struct HarmonyParamsV2GpuSpec {
 }
 
 impl Default for HarmonyParamsV2GpuSpec {
+    /// The default [`HarmonyParamsV2GpuSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParamsV2Gpu::default();
         Self {

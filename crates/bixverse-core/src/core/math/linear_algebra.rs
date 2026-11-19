@@ -423,6 +423,11 @@ impl<T: BixverseFloat> NnlsParams<T> {
 }
 
 impl<T: BixverseFloat> Default for NnlsParams<T> {
+    /// The default [`NnlsParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             max_iter_factor: 3,

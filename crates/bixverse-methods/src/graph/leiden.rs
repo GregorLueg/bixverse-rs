@@ -279,9 +279,13 @@ impl LeidenParams {
     }
 }
 
-/// Leiden defaults. Match `igraph::cluster_leiden(objective_function =
-/// "modularity")` except for the BFS node order.
 impl Default for LeidenParams {
+    /// Leiden defaults. Match `igraph::cluster_leiden(objective_function =
+    /// "modularity")` except for the BFS node order.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             resolution: 1.0,
@@ -321,6 +325,11 @@ pub struct LeidenParamsSpec {
 }
 
 impl Default for LeidenParamsSpec {
+    /// The default [`LeidenParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = LeidenParams::default();
         Self {
@@ -1309,26 +1318,23 @@ fn move_nodes_coloured<G: LevelGraph>(
 ////////////////
 
 /// Per-thread scratch for refining one cluster, indexed by local position.
-///
-/// ### Fields
-///
-/// * `cluster_w` - Summed node weight per refined sub-cluster
-/// * `ext` - Edge weight from a sub-cluster to the rest of its cluster
-/// * `w_to` - Edge weight from the current node to each sub-cluster
-/// * `added` - Membership flags for `cands`
-/// * `non_singleton` - Sub-cluster has already absorbed a node
-/// * `cands` - Candidate sub-clusters for the current node
-/// * `cum` - Cumulative sampling weights aligned with `cands`
-/// * `gains` - Gains aligned with `cands` (`NAN` when not eligible)
 #[derive(Default)]
 struct RefineScratch {
+    /// Summed node weight per refined sub-cluster
     cluster_w: Vec<f64>,
+    /// Edge weight from a sub-cluster to the rest of its cluster
     ext: Vec<f64>,
+    /// Edge weight from the current node to each sub-cluster
     w_to: Vec<f64>,
+    /// Membership flags for `cands`
     added: Vec<bool>,
+    /// Sub-cluster has already absorbed a node
     non_singleton: Vec<bool>,
+    /// Candidate sub-clusters for the current node
     cands: Vec<u32>,
+    /// Cumulative sampling weights aligned with `cands`
     cum: Vec<f64>,
+    /// Gains aligned with `cands` (`NAN` when not eligible)
     gains: Vec<f64>,
 }
 

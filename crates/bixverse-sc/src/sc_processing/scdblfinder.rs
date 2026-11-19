@@ -126,6 +126,11 @@ pub struct ScDblFinderParams {
 }
 
 impl Default for ScDblFinderParams {
+    /// The default [`ScDblFinderParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: true,
@@ -198,9 +203,14 @@ pub struct ScDblFinderResult {
 
 /// Per-cell kNN-derived intermediate values.
 struct CellKnnFeatures {
+    /// Share of simulated doublets among the neighbours, per k
     k_ratios: Vec<f32>,
+    /// Distance-weighted share of simulated doublets
     weighted: f32,
+    /// Distance to the nearest real neighbour
     dist_real: f32,
+    /// Most likely parent cluster pair; `None` without heterotypic
+    /// simulated neighbours
     origin: Option<(usize, usize)>,
 }
 

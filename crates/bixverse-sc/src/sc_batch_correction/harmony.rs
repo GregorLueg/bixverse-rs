@@ -54,8 +54,12 @@ pub struct HarmonyParams {
     pub kmeans_params: KMeansParamsWrappers,
 }
 
-/// Default implementation for HarmonyParams
 impl Default for HarmonyParams {
+    /// The default [`HarmonyParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -105,6 +109,11 @@ pub struct HarmonyParamsSpec {
 }
 
 impl Default for HarmonyParamsSpec {
+    /// The default [`HarmonyParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParams::default();
         Self {

@@ -113,6 +113,7 @@ trait Syrk: BixverseFloat {
     fn syrk_xtx(x: MatRef<Self>, c: &mut Mat<Self>);
 }
 
+/// [`Syrk`] for one float type through its cblas routine.
 macro_rules! impl_syrk {
     ($t:ty, $f:ident) => {
         impl Syrk for $t {
