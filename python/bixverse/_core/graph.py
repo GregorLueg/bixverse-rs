@@ -57,6 +57,7 @@ DEFAULT_COMMUNITY_ITERS: dict[str, int] = {"leiden": 2, "louvain": 2}
 
 ClusterAlgorithm = Literal["leiden", "louvain"]
 LocalMoving = Literal["queue", "coloured"]
+NodeOrder = Literal["bfs", "shuffle"]
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +170,16 @@ def _leiden(
     beta: float,
     n_iterations: int | None,
     min_gain: float,
-    local_moving: LocalMoving,
+    local_moving: LocalMoving | None,
+    node_order: NodeOrder | None,
     seed: int,
     run: Callable[..., np.ndarray] = _bixverse.leiden,
 ) -> np.ndarray:
     """Leiden or Louvain on a neighbour graph.
 
     `run` is the extension call, `leiden` of `bixverse._bixverse` or of its
-    GPU twin.
+    GPU twin. `local_moving` and `node_order` left at `None` take the
+    algorithm's defaults on the Rust side.
 
     Returns:
         `uint32` community per node, 0 the largest.
@@ -204,9 +207,12 @@ def _leiden(
         else n_iterations,
         "min_gain": min_gain,
         "refine": algorithm == "leiden",
-        "local_moving": local_moving,
         "seed": seed,
     }
+    if local_moving is not None:
+        params["local_moving"] = local_moving
+    if node_order is not None:
+        params["node_order"] = node_order
     return run(
         graph.data,
         graph.indices,
@@ -421,7 +427,8 @@ def find_clusters(
     beta: float = 0.01,
     n_iterations: int | None = None,
     min_gain: float = 0.0,
-    local_moving: LocalMoving = "queue",
+    local_moving: LocalMoving | None = None,
+    node_order: NodeOrder | None = None,
 ) -> None:
     """Leiden or Louvain on the neighbour graph.
 
@@ -442,7 +449,12 @@ def find_clusters(
         min_gain: With a negative `n_iterations`, also stop once an
             iteration gains no more than this.
         local_moving: `"queue"` (Traag's sequential queue) or `"coloured"`
-            (parallel colour classes on large levels).
+            (parallel colour classes on large levels). `None` is `"queue"` for
+            Leiden and `"coloured"` for Louvain.
+        node_order: Visit order of the queue, `"bfs"` (sweep in BFS order
+            from a random start, about half the work) or `"shuffle"` (as
+            igraph). `None` is `"bfs"` for Leiden and `"shuffle"` for
+            Louvain.
 
     Raises:
         ValueError: If the graph is stale or does not cover the kept cells.
@@ -466,6 +478,7 @@ def find_clusters(
         n_iterations=n_iterations,
         min_gain=min_gain,
         local_moving=local_moving,
+        node_order=node_order,
         run=_bixverse.leiden,
     )
 
@@ -482,7 +495,8 @@ def _find_clusters(
     beta: float,
     n_iterations: int | None,
     min_gain: float,
-    local_moving: LocalMoving,
+    local_moving: LocalMoving | None,
+    node_order: NodeOrder | None,
     run: Callable[..., np.ndarray],
 ) -> None:
     """The body of `find_clusters`, with the extension call `run` supplied,
@@ -509,6 +523,7 @@ def _find_clusters(
         n_iterations=n_iterations,
         min_gain=min_gain,
         local_moving=local_moving,
+        node_order=node_order,
         seed=seed,
         run=run,
     )

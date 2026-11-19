@@ -7,16 +7,17 @@
 //! one). Weights are read in `T`, but every node, cluster and edge total is
 //! held in `f64`, since the cluster totals are updated millions of times.
 //!
-//! Departure from igraph: the graph is relabelled into BFS order first, and
-//! Leiden's local moving visits nodes in that order from a seeded random
-//! start rather than in a full shuffle. On kNN graphs of unordered cells this
-//! keeps the neighbour scans cache-local and needs about half the node
-//! evaluations, at the same modularity. Louvain keeps the full shuffle, as the
-//! ordered sweep costs it modularity without a refinement to repair it.
+//! Departure from igraph: the graph is relabelled into BFS order first. With
+//! [`NodeOrder::Bfs`] the queue visits nodes in that order from a seeded
+//! random start rather than in a full shuffle, which keeps the neighbour scans
+//! cache-local and needs about half the node evaluations, at slightly lower
+//! modularity on graphs with many small clusters.
 //!
-//! Local moving defaults to the sequential queue. [`LocalMoving::Coloured`]
-//! parallelises it on large levels, see its docs; it stays independent of the
-//! thread count.
+//! Defaults differ per algorithm: Leiden runs the queue in BFS order,
+//! Louvain runs [`LocalMoving::Coloured`], which parallelises local moving on
+//! large levels and stays independent of the thread count. Louvain has no
+//! refinement to repair the snowballing of an ordered sweep, so it never
+//! defaults to BFS order.
 //!
 //! Determinism: the queue is sequential and seeded. Refinement
 //! runs in parallel over clusters, each cluster with its own RNG derived from
@@ -100,6 +101,34 @@ pub fn parse_local_moving(s: &str) -> Option<LocalMoving> {
     }
 }
 
+/// Node visit order of the queue local moving ([`LocalMoving::Queue`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum NodeOrder {
+    /// Node order from a seeded random start. Node order is BFS order at
+    /// level 0 and follows it at coarser levels.
+    #[default]
+    Bfs,
+    /// A seeded full shuffle, as igraph
+    Shuffle,
+}
+
+/// Parse a [`NodeOrder`] name.
+///
+/// ### Params
+///
+/// * `s` - `"bfs"` or `"shuffle"`, case-insensitive
+///
+/// ### Returns
+///
+/// The [`NodeOrder`], or `None` for an unknown name
+pub fn parse_node_order(s: &str) -> Option<NodeOrder> {
+    match s.to_lowercase().as_str() {
+        "bfs" => Some(NodeOrder::Bfs),
+        "shuffle" => Some(NodeOrder::Shuffle),
+        _ => None,
+    }
+}
+
 /// Parse a community detection algorithm name into the refinement flag.
 ///
 /// ### Params
@@ -156,6 +185,11 @@ pub fn parse_leiden_iterations(v: f64) -> Option<Option<usize>> {
 /// * `local_moving` - How local moving visits the nodes; the parallel modes
 ///   only run on levels of at least `LEIDEN_PAR_MIN_NODES` (4096) nodes,
 ///   smaller ones use the queue
+/// * `node_order` - Visit order of the queue, also on the small levels of a
+///   parallel mode; the colouring ignores it
+///
+/// Leiden defaults to the queue in BFS order, Louvain to coloured local
+/// moving with shuffled small levels, see [`LeidenParams::for_algorithm`].
 ///
 /// Deserialises from the keys of the R `leiden_params` list, see
 /// [`LeidenParamsSpec`].
@@ -176,10 +210,13 @@ pub struct LeidenParams {
     pub seed: u64,
     /// Local-moving strategy
     pub local_moving: LocalMoving,
+    /// Queue visit order
+    pub node_order: NodeOrder,
 }
 
 impl LeidenParams {
-    /// Generate new Leiden parameters.
+    /// Generate new parameters, local moving and node order at the defaults of
+    /// the algorithm `refine` picks.
     ///
     /// ### Params
     ///
@@ -203,17 +240,47 @@ impl LeidenParams {
             resolution,
             beta,
             n_iterations,
-            min_gain: 0.0,
-            refine,
             seed,
-            local_moving: LocalMoving::Queue,
+            ..Self::for_algorithm(refine)
+        }
+    }
+
+    /// Defaults of Leiden (`refine`) or Louvain: Leiden runs the queue in BFS
+    /// order, Louvain coloured local moving with shuffled small levels.
+    ///
+    /// ### Params
+    ///
+    /// * `refine` - Leiden (`true`) or Louvain (`false`)
+    ///
+    /// ### Returns
+    ///
+    /// The defaults
+    pub fn for_algorithm(refine: bool) -> Self {
+        if refine {
+            Self::default()
+        } else {
+            Self::louvain()
+        }
+    }
+
+    /// Louvain defaults: coloured local moving, shuffled small levels, two
+    /// iterations.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults
+    pub fn louvain() -> Self {
+        Self {
+            refine: false,
+            local_moving: LocalMoving::Coloured,
+            node_order: NodeOrder::Shuffle,
+            ..Self::default()
         }
     }
 }
 
-/// Defaults match `igraph::cluster_leiden(objective_function = "modularity")`,
-/// except 5 iterations rather than 2, as two leave Leiden short of converged
-/// on large graphs.
+/// Leiden defaults. Match `igraph::cluster_leiden(objective_function =
+/// "modularity")` except for the BFS node order.
 impl Default for LeidenParams {
     fn default() -> Self {
         Self {
@@ -224,12 +291,13 @@ impl Default for LeidenParams {
             refine: true,
             seed: 42,
             local_moving: LocalMoving::Queue,
+            node_order: NodeOrder::Bfs,
         }
     }
 }
 
 /// The keys a [`LeidenParams`] deserialises from; missing keys take
-/// [`LeidenParams::default`].
+/// [`LeidenParams::for_algorithm`] of `refine`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct LeidenParamsSpec {
@@ -246,8 +314,10 @@ pub struct LeidenParamsSpec {
     pub refine: bool,
     /// Random seed
     pub seed: u64,
-    /// `"queue"` or `"coloured"`
-    pub local_moving: String,
+    /// `"queue"` or `"coloured"`; `None` keeps the algorithm's default
+    pub local_moving: Option<String>,
+    /// `"bfs"` or `"shuffle"`; `None` keeps the algorithm's default
+    pub node_order: Option<String>,
 }
 
 impl Default for LeidenParamsSpec {
@@ -260,7 +330,8 @@ impl Default for LeidenParamsSpec {
             min_gain: d.min_gain,
             refine: d.refine,
             seed: d.seed,
-            local_moving: "queue".to_string(),
+            local_moving: None,
+            node_order: None,
         }
     }
 }
@@ -268,7 +339,7 @@ impl Default for LeidenParamsSpec {
 impl TryFrom<LeidenParamsSpec> for LeidenParams {
     type Error = String;
 
-    /// Check the iteration count and the local-moving name.
+    /// Check the iteration count and the local-moving and node-order names.
     ///
     /// ### Params
     ///
@@ -278,8 +349,9 @@ impl TryFrom<LeidenParamsSpec> for LeidenParams {
     ///
     /// The [`LeidenParams`], or an error naming the unusable value.
     fn try_from(spec: LeidenParamsSpec) -> Result<Self, String> {
+        let defaults = LeidenParams::for_algorithm(spec.refine);
         let n_iterations = match spec.n_iterations {
-            None => LeidenParams::default().n_iterations,
+            None => defaults.n_iterations,
             Some(v) => parse_leiden_iterations(v).ok_or_else(|| {
                 format!(
                     "n_iterations must be a positive whole number, or negative to iterate \
@@ -287,12 +359,16 @@ impl TryFrom<LeidenParamsSpec> for LeidenParams {
                 )
             })?,
         };
-        let local_moving = parse_local_moving(&spec.local_moving).ok_or_else(|| {
-            format!(
-                "local_moving must be 'queue' or 'coloured', got '{}'",
-                spec.local_moving
-            )
-        })?;
+        let local_moving = match spec.local_moving {
+            None => defaults.local_moving,
+            Some(s) => parse_local_moving(&s)
+                .ok_or_else(|| format!("local_moving must be 'queue' or 'coloured', got '{s}'"))?,
+        };
+        let node_order = match spec.node_order {
+            None => defaults.node_order,
+            Some(s) => parse_node_order(&s)
+                .ok_or_else(|| format!("node_order must be 'bfs' or 'shuffle', got '{s}'"))?,
+        };
         Ok(Self {
             resolution: spec.resolution,
             beta: spec.beta,
@@ -301,6 +377,7 @@ impl TryFrom<LeidenParamsSpec> for LeidenParams {
             refine: spec.refine,
             seed: spec.seed,
             local_moving,
+            node_order,
         })
     }
 }
@@ -610,9 +687,7 @@ fn move_nodes<G: LevelGraph>(
 
     // Without shuffling, nodes are visited in node order from a random start.
     // Node order is BFS order at level 0 and follows it at coarser levels, so
-    // the scans stay cache-local and need about half the evaluations. Leiden
-    // only: without refinement, the ordered sweep snowballs clusters and costs
-    // Louvain modularity.
+    // the scans stay cache-local and need about half the evaluations.
     let queue_order: Vec<u32> = if shuffle {
         let mut order: Vec<u32> = (0..n as u32).collect();
         order.shuffle(rng);
@@ -1752,7 +1827,7 @@ where
             &mut agg_memb,
             res,
             max_evals.saturating_mul(gn),
-            !params.refine,
+            params.node_order == NodeOrder::Shuffle,
             params.local_moving,
             &mut rng,
         );
@@ -2000,7 +2075,7 @@ pub fn community_detection<T>(
 where
     T: BixverseFloat + Send + Sync + std::iter::Sum,
 {
-    let (shuffle, mode) = (!params.refine, params.local_moving);
+    let (shuffle, mode) = (params.node_order == NodeOrder::Shuffle, params.local_moving);
     detect(
         graph,
         params,
@@ -2097,10 +2172,11 @@ where
 
 /// Louvain community detection on modularity.
 ///
-/// The Leiden engine with the refinement switched off. Multi-level runs two
-/// iterations, since the second still improves the partition and later ones
-/// rarely change it. Single-level runs one, the single local-moving phase of
-/// Phenograph and doubletdetection.
+/// The Leiden engine with the refinement switched off, at the Louvain
+/// defaults of [`LeidenParams::louvain`]. Multi-level runs two iterations,
+/// since the second still improves the partition and later ones rarely change
+/// it. Single-level runs one, the single local-moving phase of Phenograph and
+/// doubletdetection.
 ///
 /// ### Params
 ///
@@ -2358,9 +2434,61 @@ mod tests {
             n_iterations: Some(if refine { 2 } else { 1 }),
             seed,
             local_moving: mode,
-            ..Default::default()
+            ..LeidenParams::for_algorithm(refine)
         };
         community_detection(g, &p, usize::MAX, true).unwrap()
+    }
+
+    /// Missing keys take the algorithm's local moving and node order; given
+    /// ones are kept, unknown names refused.
+    #[test]
+    fn test_leiden_params_spec_algorithm_defaults() {
+        let parse = |refine: bool, lm: Option<&str>, order: Option<&str>| {
+            LeidenParams::try_from(LeidenParamsSpec {
+                refine,
+                local_moving: lm.map(str::to_string),
+                node_order: order.map(str::to_string),
+                ..Default::default()
+            })
+        };
+        let leiden = parse(true, None, None).unwrap();
+        assert_eq!(
+            (leiden.local_moving, leiden.node_order),
+            (LocalMoving::Queue, NodeOrder::Bfs)
+        );
+        let louvain = parse(false, None, None).unwrap();
+        assert_eq!(
+            (louvain.local_moving, louvain.node_order),
+            (LocalMoving::Coloured, NodeOrder::Shuffle)
+        );
+        assert_eq!(louvain.n_iterations, Some(2));
+        let set = parse(false, Some("queue"), Some("bfs")).unwrap();
+        assert_eq!(
+            (set.local_moving, set.node_order),
+            (LocalMoving::Queue, NodeOrder::Bfs)
+        );
+        assert!(parse(true, None, Some("random")).is_err());
+        let new = LeidenParams::new(1.0, 0.01, Some(2), false, 1);
+        assert_eq!(
+            (new.local_moving, new.node_order),
+            (LocalMoving::Coloured, NodeOrder::Shuffle)
+        );
+    }
+
+    /// The node order reaches the queue: one local-moving phase on karate in
+    /// BFS and in shuffled order gives different partitions.
+    #[test]
+    fn test_node_order_changes_queue_partition() {
+        let g = karate();
+        let run = |node_order| {
+            let p = LeidenParams {
+                node_order,
+                n_iterations: Some(1),
+                ..Default::default()
+            };
+            community_detection(&g, &p, usize::MAX, false).unwrap()
+        };
+        assert_ne!(run(NodeOrder::Bfs), run(NodeOrder::Shuffle));
     }
 
     /// Coloured gives the same partition at 1 and 4 threads, for Leiden and

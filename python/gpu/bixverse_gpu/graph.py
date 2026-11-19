@@ -22,6 +22,7 @@ from bixverse._core.graph import (
     ClusterAlgorithm,
     FastClusters,
     LocalMoving,
+    NodeOrder,
     _embedding,
     _fast_cluster,
     _find_clusters,
@@ -219,7 +220,8 @@ def find_clusters(
     beta: float = 0.01,
     n_iterations: int | None = None,
     min_gain: float = 0.0,
-    local_moving: LocalMoving = "queue",
+    local_moving: LocalMoving | None = None,
+    node_order: NodeOrder | None = None,
 ) -> None:
     """Leiden or Louvain on the neighbour graph, level-0 local moving on the
     GPU.
@@ -239,11 +241,14 @@ def find_clusters(
         seed: Seed.
         beta: Randomness of the Leiden refinement. Ignored by Louvain.
         n_iterations: Full iterations; negative iterates until stable.
-            `None` is 5 for Leiden and 2 for Louvain.
+            `None` is 2.
         min_gain: With a negative `n_iterations`, also stop once an
             iteration gains no more than this.
         local_moving: Local moving on the coarser levels, `"queue"` or
-            `"coloured"`.
+            `"coloured"`. `None` is `"queue"` for Leiden and `"coloured"` for
+            Louvain.
+        node_order: Visit order of the queue, `"bfs"` or `"shuffle"`.
+            `None` is `"bfs"` for Leiden and `"shuffle"` for Louvain.
 
     Raises:
         ValueError: If the graph is stale or does not cover the kept cells.
@@ -263,6 +268,7 @@ def find_clusters(
         n_iterations=n_iterations,
         min_gain=min_gain,
         local_moving=local_moving,
+        node_order=node_order,
         run=_bixverse_gpu.leiden,
     )
 

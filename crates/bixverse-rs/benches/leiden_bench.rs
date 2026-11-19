@@ -10,7 +10,8 @@
 //!   count: time, marginal time, modularity, cluster count, ARI against the
 //!   largest count and against the truth.
 //! * `stable` - Leiden until stable, with `min_gain` 0 and 1e-4.
-//! * `louvain` - Louvain at R's default of 2 iterations.
+//! * `louvain` - Louvain at its defaults ([`LeidenParams::louvain`]), with
+//!   the local-moving and node-order overrides applied.
 //!
 //! Every row prints an `FxHash` of its labels, so two builds of the engine can
 //! be checked for identical partitions.
@@ -28,7 +29,10 @@
 //! * `LEIDEN_BENCH_MAX_ITERS` - largest iteration count, default 5
 //! * `LEIDEN_BENCH_RES` - resolution, default 1
 //! * `LEIDEN_BENCH_SEED` - seed, default 42
-//! * `LEIDEN_BENCH_LOCAL_MOVING` - `queue` (default) or `coloured`
+//! * `LEIDEN_BENCH_LOCAL_MOVING` - `queue` or `coloured`; unset keeps each
+//!   algorithm's default
+//! * `LEIDEN_BENCH_NODE_ORDER` - `bfs` or `shuffle`; unset keeps each
+//!   algorithm's default
 //! * `LEIDEN_BENCH_ONLY` - comma-separated subset of
 //!   `level0,iters,stable,louvain`
 //! * `LEIDEN_BENCH_LABELS_DIR` - write each row's labels there, one file per
@@ -39,7 +43,9 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use bixverse_rs::graph::graph_structures::SparseGraph;
-use bixverse_rs::graph::leiden::{LeidenParams, LocalMoving, community_detection, modularity};
+use bixverse_rs::graph::leiden::{
+    LeidenParams, community_detection, modularity, parse_local_moving, parse_node_order,
+};
 use bixverse_rs::ml::clustering::clustering_metrics::adjusted_rand_index;
 use bixverse_rs::prelude::*;
 use rustc_hash::FxBuildHasher;
@@ -135,18 +141,23 @@ where
     let want = |s: &str| only.is_empty() || only.split(',').any(|o| o.trim() == s);
 
     let seed = env("LEIDEN_BENCH_SEED", 42) as u64;
-    let local_moving = match std::env::var("LEIDEN_BENCH_LOCAL_MOVING").as_deref() {
-        Ok("coloured") => LocalMoving::Coloured,
-        _ => LocalMoving::Queue,
-    };
-    let leiden = |iters: Option<usize>, min_gain: f64| LeidenParams {
+    let local_moving = std::env::var("LEIDEN_BENCH_LOCAL_MOVING")
+        .ok()
+        .map(|s| parse_local_moving(&s).expect("LEIDEN_BENCH_LOCAL_MOVING"));
+    let node_order = std::env::var("LEIDEN_BENCH_NODE_ORDER")
+        .ok()
+        .map(|s| parse_node_order(&s).expect("LEIDEN_BENCH_NODE_ORDER"));
+    let with = |base: LeidenParams, iters: Option<usize>, min_gain: f64| LeidenParams {
         resolution: res,
         seed,
-        local_moving,
+        local_moving: local_moving.unwrap_or(base.local_moving),
+        node_order: node_order.unwrap_or(base.node_order),
         n_iterations: iters,
         min_gain,
-        ..LeidenParams::default()
+        ..base
     };
+    let leiden =
+        |iters: Option<usize>, min_gain: f64| with(LeidenParams::default(), iters, min_gain);
 
     let mut configs = Vec::new();
     if want("level0") {
@@ -177,10 +188,7 @@ where
     if want("louvain") {
         configs.push(Config {
             name: "louvain it=2".into(),
-            params: LeidenParams {
-                refine: false,
-                ..leiden(Some(2), 0.0)
-            },
+            params: with(LeidenParams::louvain(), Some(2), 0.0),
             multi_level: true,
         });
     }

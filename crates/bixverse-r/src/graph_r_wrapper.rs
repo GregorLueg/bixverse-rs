@@ -8,7 +8,8 @@ use bixverse_rs::graph::knn_graph::{
     KnnSymmetrisation, SNN_PRUNE_DEFAULT, SnnSimilarity, parse_snn_similarity,
 };
 use bixverse_rs::graph::leiden::{
-    LeidenParams, LocalMoving, parse_leiden_iterations, parse_local_moving,
+    LeidenParams, LocalMoving, NodeOrder, parse_leiden_iterations, parse_local_moving,
+    parse_node_order,
 };
 
 //////////////////
@@ -18,10 +19,10 @@ use bixverse_rs::graph::leiden::{
 impl FromRList for LeidenParams {
     /// Parse the [LeidenParams] from an R list.
     ///
-    /// Missing keys fall back to [LeidenParams::default]. Recognised keys:
-    /// `resolution`, `beta`, `n_iterations` (negative: until stable),
-    /// `min_gain`, `refine`, `seed` and `local_moving` (`"queue"` or
-    /// `"coloured"`).
+    /// Missing keys fall back to [LeidenParams::for_algorithm] of `refine`.
+    /// Recognised keys: `resolution`, `beta`, `n_iterations` (negative: until
+    /// stable), `min_gain`, `refine`, `seed`, `local_moving` (`"queue"` or
+    /// `"coloured"`) and `node_order` (`"bfs"` or `"shuffle"`).
     ///
     /// ### Params
     ///
@@ -32,22 +33,44 @@ impl FromRList for LeidenParams {
     /// The [LeidenParams], or an error when a value is present but unusable.
     fn from_r_list(r_list: List) -> Result<Self> {
         let params = r_list_to_map(r_list)?;
-        let defaults = Self::default();
+        let refine = params
+            .get("refine")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(Self::default().refine);
+        let defaults = Self::for_algorithm(refine);
 
         Ok(Self {
             resolution: r_list_real(&params, "resolution")?.unwrap_or(defaults.resolution),
             beta: r_list_real(&params, "beta")?.unwrap_or(defaults.beta),
             n_iterations: r_leiden_iterations(&params)?.unwrap_or(defaults.n_iterations),
             min_gain: r_list_real(&params, "min_gain")?.unwrap_or(defaults.min_gain),
-            refine: params
-                .get("refine")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(defaults.refine),
+            refine,
             seed: r_list_count_allow_zero(&params, "seed")?
                 .map(|v| v as u64)
                 .unwrap_or(defaults.seed),
             local_moving: r_local_moving(&params)?.unwrap_or(defaults.local_moving),
+            node_order: r_node_order(&params)?.unwrap_or(defaults.node_order),
         })
+    }
+}
+
+/// Read the optional `node_order` key.
+///
+/// ### Params
+///
+/// * `params` - The flattened R list
+///
+/// ### Returns
+///
+/// The [NodeOrder] if the key is there, or an error for an unknown name
+pub fn r_node_order(params: &HashMap<&str, Robj>) -> Result<Option<NodeOrder>> {
+    match params.get("node_order").and_then(|v| v.as_str()) {
+        None => Ok(None),
+        Some(s) => parse_node_order(s).map(Some).ok_or_else(|| {
+            Error::Other(format!(
+                "Unknown node_order '{s}'; expected 'bfs' or 'shuffle'"
+            ))
+        }),
     }
 }
 

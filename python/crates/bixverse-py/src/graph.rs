@@ -226,7 +226,8 @@ pub fn knn_graph<'py>(
 /// * `indices` - `uint32` column indices
 /// * `indptr` - `uint32` row pointers, `n + 1` of them
 /// * `params` - Dict with the `LeidenParams` keys (`resolution`, `beta`,
-///   `n_iterations`, `min_gain`, `refine`, `seed`, `local_moving`)
+///   `n_iterations`, `min_gain`, `refine`, `seed`, `local_moving`,
+///   `node_order`); missing ones take the algorithm's defaults
 ///
 /// ### Returns
 ///

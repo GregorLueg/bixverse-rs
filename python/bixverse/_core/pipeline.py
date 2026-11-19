@@ -33,6 +33,7 @@ from beartype import beartype
 from bixverse._core.graph import (
     ClusterAlgorithm,
     LocalMoving,
+    NodeOrder,
     find_clusters,
     find_neighbours,
 )
@@ -542,7 +543,8 @@ def step_clusters(
     beta: float = 0.01,
     n_iterations: int | None = None,
     min_gain: float = 0.0,
-    local_moving: LocalMoving = "queue",
+    local_moving: LocalMoving | None = None,
+    node_order: NodeOrder | None = None,
 ) -> Step:
     """Pipeline step for `bixverse.graph.find_clusters`.
 
@@ -556,6 +558,7 @@ def step_clusters(
         n_iterations: Full iterations, forwarded.
         min_gain: Stopping gain with a negative `n_iterations`, forwarded.
         local_moving: `"queue"` or `"coloured"`, forwarded.
+        node_order: `"bfs"` or `"shuffle"`, forwarded.
     """
     return Step(
         "clusters",
@@ -570,6 +573,7 @@ def step_clusters(
             "n_iterations": n_iterations,
             "min_gain": min_gain,
             "local_moving": local_moving,
+            "node_order": node_order,
         },
         accepts=STEP_CLASSES,
     )

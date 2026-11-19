@@ -33,7 +33,7 @@ use bixverse_methods::graph::graph_structures::*;
 use bixverse_methods::graph::knn_graph::*;
 use bixverse_methods::graph::leiden::{
     LeidenParams, community_detection, parse_community_algorithm, parse_leiden_iterations,
-    parse_local_moving,
+    parse_local_moving, parse_node_order,
 };
 
 ///////////
@@ -380,11 +380,7 @@ impl Default for FastClusterParams {
             n_centroids: 1000,
             dist: "euclidean".to_string(),
             graph: CentroidGraph::default(),
-            community: LeidenParams {
-                n_iterations: Some(2),
-                refine: false,
-                ..LeidenParams::default()
-            },
+            community: LeidenParams::louvain(),
             multi_level: true,
             max_evals: 10,
         }
@@ -420,6 +416,8 @@ pub struct FastClusterParamsSpec {
     pub min_gain: Option<f64>,
     /// `"queue"` or `"coloured"`
     pub local_moving: Option<String>,
+    /// `"bfs"` or `"shuffle"`
+    pub node_order: Option<String>,
     /// Full multi-level run
     pub multi_level: bool,
     /// Cap on node evaluations per local-moving phase
@@ -444,6 +442,7 @@ impl Default for FastClusterParamsSpec {
             n_iterations: None,
             min_gain: None,
             local_moving: None,
+            node_order: None,
             multi_level: d.multi_level,
             max_evals: d.max_evals,
         }
@@ -477,8 +476,9 @@ impl TryFrom<FastClusterParamsSpec> for FastClusterParams {
 
         let mut community = defaults.community;
         if let Some(a) = spec.algorithm {
-            community.refine = parse_community_algorithm(&a)
+            let refine = parse_community_algorithm(&a)
                 .ok_or_else(|| format!("algorithm must be 'louvain' or 'leiden', got '{a}'"))?;
+            community = LeidenParams::for_algorithm(refine);
         }
         if let Some(v) = spec.n_iterations {
             community.n_iterations = parse_leiden_iterations(v).ok_or_else(|| {
@@ -491,6 +491,10 @@ impl TryFrom<FastClusterParamsSpec> for FastClusterParams {
         if let Some(s) = spec.local_moving {
             community.local_moving = parse_local_moving(&s)
                 .ok_or_else(|| format!("local_moving must be 'queue' or 'coloured', got '{s}'"))?;
+        }
+        if let Some(s) = spec.node_order {
+            community.node_order = parse_node_order(&s)
+                .ok_or_else(|| format!("node_order must be 'bfs' or 'shuffle', got '{s}'"))?;
         }
         community.beta = spec.beta.unwrap_or(community.beta);
         community.min_gain = spec.min_gain.unwrap_or(community.min_gain);
