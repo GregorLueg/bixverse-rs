@@ -719,7 +719,7 @@ pub(crate) fn csr_payload(buffer: &[u8]) -> Result<ChunkPayload<'_>, ScDataError
 
 /// Parse a CSC gene chunk down to its payload.
 ///
-/// The gene header fields (`avg_exp`, `nnz`, `original_index`, `to_keep`) are
+/// The gene header fields (`nnz`, `original_index`, `to_keep`) are
 /// not needed by the fused readers, so they are skipped rather than decoded.
 ///
 /// ### Params
@@ -1086,9 +1086,6 @@ pub struct CscGeneChunk {
     pub data_raw: RawCounts,
     /// Normalised counts per cell/spot for this gene.
     pub data_norm: Vec<f32>,
-    /// Sum of the normalised layer, f16 as stored in the v3 and v4 chunk
-    /// headers.
-    pub avg_exp: F16,
     /// Number of cells expressing this gene
     pub nnz: usize,
     /// Indices of the cells expressing this gene
@@ -1120,15 +1117,11 @@ impl CscGeneChunk {
         original_index: usize,
         to_keep: bool,
     ) -> Self {
-        // Accumulate in f32 and narrow once: summing in f16 biases the total
-        // upwards, and this value is written into the chunk header.
-        let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
         let nnz = data_raw.len();
 
         Self {
             data_raw,
             data_norm: data_norm.to_vec(),
-            avg_exp,
             nnz,
             indices: col_idx.iter().map(|x| *x as u32).collect::<Vec<u32>>(),
             original_index,
@@ -1144,8 +1137,7 @@ impl CscGeneChunk {
     /// [0..4)   data_raw_len    u32
     /// [4..8)   data_norm_len   u32
     /// [8..12)  indices_len     u32
-    /// [12..14) avg_exp         F16 (2 bytes)
-    /// [14..16) padding         2 bytes
+    /// [12..16) unused          4 bytes, zero (v3 kept a norm sum here)
     /// [16..24) nnz             u64
     /// [24..32) original_index  u64
     /// [32]     to_keep         u8
@@ -1161,9 +1153,7 @@ impl CscGeneChunk {
         writer.write_all(&(self.data_raw.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.data_norm.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.indices.len() as u32).to_le_bytes())?;
-        writer.write_all(&self.avg_exp.to_le_bytes())?;
-        // first padding
-        writer.write_all(&[0, 0])?;
+        writer.write_all(&[0; 4])?;
         writer.write_all(&(self.nnz as u64).to_le_bytes())?;
         writer.write_all(&(self.original_index as u64).to_le_bytes())?;
         writer.write_all(&[self.to_keep as u8, self.data_raw.elem_size(), 0, 0])?;
@@ -1216,7 +1206,6 @@ impl CscGeneChunk {
         Ok(Self {
             data_raw: payload.raw_counts()?,
             data_norm: payload.norm_iter().collect(),
-            avg_exp: F16::from_le_bytes([buffer[12], buffer[13]]),
             nnz: le_u64_at(buffer, 16) as usize,
             indices: payload.index_iter().collect(),
             original_index: le_u64_at(buffer, 24) as usize,
@@ -1600,7 +1589,7 @@ where
 impl CscGeneChunk {
     /// Convert the normalised counts from the `log1p(u * sf)` scale to the
     /// `log1p(u)` scale, enabling downstream use of the shifted CLR (PFlog1pPF)
-    /// transformation. Mutates `data_norm` in place and refreshes `avg_exp`.
+    /// transformation. Mutates `data_norm` in place.
     ///
     /// ### Params
     ///
@@ -1608,12 +1597,9 @@ impl CscGeneChunk {
     ///   (e.g. 1e4 for CP10k).
     pub fn transform_to_clr(&mut self, size_factor: f32) {
         let sf_inv = 1.0_f32 / size_factor;
-        let mut new_sum = 0.0_f32;
         for v in self.data_norm.iter_mut() {
             *v = (v.exp_m1() * sf_inv).ln_1p();
-            new_sum += *v;
         }
-        self.avg_exp = F16::from_f32(new_sum);
     }
 }
 
@@ -1780,7 +1766,6 @@ pub(crate) mod tests {
         CscGeneChunk {
             data_raw: RawCounts::from_u32_auto(raw),
             data_norm: raw.iter().map(|&v| v as f32).collect(),
-            avg_exp: F16::from_f32(1.0),
             nnz: raw.len(),
             indices: indices.to_vec(),
             original_index,
@@ -1850,7 +1835,7 @@ pub(crate) mod tests {
         assert_eq!(bits, want);
     }
 
-    /// Same pin for the CSC codec, which carries `nnz` and `avg_exp` too.
+    /// Same pin for the CSC codec, which carries `nnz` too.
     #[test]
     fn test_gene_chunk_round_trip_preserves_fields() {
         let raw = [2_u32, 0, 99, 70_000];
@@ -1865,7 +1850,6 @@ pub(crate) mod tests {
         assert_eq!(back.indices, indices.to_vec());
         assert_eq!(back.nnz, 4);
         assert_eq!(back.original_index, 3);
-        assert_eq!(back.avg_exp.to_bits(), chunk.avg_exp.to_bits());
     }
 
     /// Regression: the CSC guard used to check 32 bytes then slice 36.

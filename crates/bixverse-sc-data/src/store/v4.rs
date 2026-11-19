@@ -20,8 +20,8 @@
 //! ```text
 //! [0..4)   nnz            u32
 //! [4..8)   body_len       u32   decoded body length
-//! [8..16)  aux            u64   cell: library size; gene: v4 avg_exp f16
-//!                               bits, v5 sum of raw layer 0
+//! [8..16)  aux            u64   cell: library size; gene: v5 sum of raw
+//!                               layer 0, v4 unused (written as zero)
 //! [16..24) original_index u64
 //! [24]     to_keep        u8
 //! [25]     flags          u8    bit 0: norm stored, bit 1: layer 0 stored
@@ -359,8 +359,8 @@ pub(crate) struct V4Header {
     pub nnz: usize,
     /// Decoded body length in bytes.
     body_len: usize,
-    /// Cell chunks: library size. Gene chunks: f16 bits of the average
-    /// expression.
+    /// Cell chunks: library size. Gene chunks: sum of raw layer 0 on v5,
+    /// unused on v4.
     pub aux: u64,
     /// Original index of the cell or gene.
     pub original_index: usize,
@@ -647,7 +647,7 @@ impl CscGeneChunk {
                 indices: &self.indices,
                 layers: &[&raw],
                 norm: &self.data_norm,
-                aux: format.gene_aux(self.avg_exp, &raw),
+                aux: format.gene_aux(&raw),
                 original_index: self.original_index,
                 to_keep: self.to_keep,
                 norm_derivable,
@@ -1110,23 +1110,16 @@ pub(crate) fn v4_cell_chunk(
 /// ### Returns
 ///
 /// The gene, with the selected raw layer and the norm, or an empty norm on a
-/// store without one. v5 keeps the feature total in the header, so `avg_exp`
-/// is summed from the decoded norm there.
+/// store without one.
 pub(crate) fn v4_gene_chunk(
     chunk: &[u8],
     ctx: &V4Ctx,
     s: &mut V4Decoded,
 ) -> Result<CscGeneChunk, ScDataErrors> {
     let h = decode_v4(chunk, ctx, true, ctx.norm_available(), s)?;
-    let avg_exp = if ctx.norm_f32 {
-        F16::from_f32(s.norm.iter().sum::<f32>())
-    } else {
-        F16::from_bits(h.aux as u16)
-    };
     Ok(CscGeneChunk {
         data_raw: RawCounts::from_u32_auto(&s.raw),
         data_norm: s.norm.clone(),
-        avg_exp,
         nnz: h.nnz,
         indices: s.idx.clone(),
         original_index: h.original_index,
@@ -1177,17 +1170,17 @@ impl ChunkFormat {
     ///
     /// ### Params
     ///
-    /// * `avg_exp` - Sum of the normalised layer, what v4 stores
-    /// * `raw` - Raw layer 0, whose sum v5 stores
+    /// * `raw` - Raw layer 0
     ///
     /// ### Returns
     ///
-    /// The field.
-    pub(crate) fn gene_aux(&self, avg_exp: F16, raw: &[u32]) -> u64 {
+    /// The sum of `raw` on v5. Zero on v4, whose field held a norm sum
+    /// nothing reads.
+    pub(crate) fn gene_aux(&self, raw: &[u32]) -> u64 {
         if self.norm_f32() {
             raw.iter().map(|&x| x as u64).sum()
         } else {
-            avg_exp.to_bits() as u64
+            0
         }
     }
 
@@ -1332,14 +1325,13 @@ impl ChunkFormat {
     ///
     /// Same bytes as [`Self::encode_gene`] on a kept gene whose every entry
     /// passes the derivability check, without carrying or re-checking the
-    /// layer. The caller guarantees that, e.g. by deriving `avg_exp` from the
-    /// same [`norm_value`] the reader recomputes with.
+    /// layer. The caller guarantees that, e.g. because every cell chunk of
+    /// the input recomputes its norm.
     ///
     /// ### Params
     ///
     /// * `indices` - Cell indices, ascending
     /// * `raw` - Raw counts, same length
-    /// * `avg_exp` - Sum of the normalised layer, the header `aux`
     /// * `original_index` - Gene index
     ///
     /// ### Returns
@@ -1349,7 +1341,6 @@ impl ChunkFormat {
         &self,
         indices: &[u32],
         raw: &[u32],
-        avg_exp: F16,
         original_index: usize,
     ) -> Vec<u8> {
         debug_assert!(self.uses_v4_codec() && indices.len() == raw.len());
@@ -1358,7 +1349,7 @@ impl ChunkFormat {
                 indices,
                 layers: &[raw],
                 norm: &[],
-                aux: self.gene_aux(avg_exp, raw),
+                aux: self.gene_aux(raw),
                 original_index,
                 to_keep: true,
                 norm_derivable: true,

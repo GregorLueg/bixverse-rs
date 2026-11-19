@@ -829,12 +829,9 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
                     .into_par_iter()
                     .map(|g| {
                         let (a, b) = (gene_start[g - g0], gene_start[g - g0 + 1]);
-                        let data_norm = norm[a..b].to_vec();
-                        let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
                         let chunk = CscGeneChunk {
                             data_raw: RawCounts::from_u32_auto(&raw[a..b]),
-                            data_norm,
-                            avg_exp,
+                            data_norm: norm[a..b].to_vec(),
                             nnz: b - a,
                             indices: cell_idx[a..b].to_vec(),
                             original_index: g,

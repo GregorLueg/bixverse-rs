@@ -25,7 +25,6 @@ use num_traits::FromPrimitive;
 use rayon::prelude::*;
 
 use crate::prelude::*;
-use crate::sc_traits::F16;
 use crate::store::{
     chunk::{
         CscGeneChunk, CsrCellChunk, DataLayerReturn, RawCounts, RunSource, extend_raw_checked,
@@ -196,12 +195,10 @@ impl<'a> InMemorySparseReader<'a> {
 
         let data_raw = RawCounts::from_u32_auto(&self.matrix.data[lo..hi]);
         let data_norm = self.matrix.data_2.as_ref().expect("checked in `new`")[lo..hi].to_vec();
-        let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
 
         Ok(CscGeneChunk {
             data_raw,
             data_norm,
-            avg_exp,
             nnz: hi - lo,
             indices: self.matrix.indices[lo..hi].to_vec(),
             original_index: gene,

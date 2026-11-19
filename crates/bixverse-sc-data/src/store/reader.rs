@@ -2428,7 +2428,6 @@ impl SingleCellReading for ParallelSparseReader {
                 Ok(CscGeneChunk {
                     data_raw: RawCounts::from_u32_auto(&s.raw[..h.nnz]),
                     data_norm: Vec::new(),
-                    avg_exp: F16::from_bits(h.aux as u16),
                     nnz: h.nnz,
                     indices: std::mem::take(&mut s.idx),
                     original_index: h.original_index,

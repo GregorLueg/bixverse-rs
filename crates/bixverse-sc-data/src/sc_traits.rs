@@ -409,9 +409,8 @@ mod tests {
     /// x86 runner does not agree.
     ///
     /// So nothing that is stored or compared across machines may use this.
-    /// `store::chunk` and `store::in_memory` accumulate `avg_exp` in f32 and narrow once,
-    /// which is what `pca.rs` already did and what makes the two platforms
-    /// agree.
+    /// Accumulate in f32 and narrow once instead, which is what `pca.rs` does
+    /// and what makes the two platforms agree.
     #[test]
     fn f16_sum_is_not_portable_over_long_columns() {
         // Exact on both targets while the running total stays small.

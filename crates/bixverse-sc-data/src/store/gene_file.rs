@@ -7,19 +7,17 @@
 //! ascending order within a chunk and chunks are ordered, so every gene's run
 //! comes out sorted by cell without a sort.
 //!
-//! A v4 gene file drops its norm layer, so when every cell chunk recomputes
-//! its norm (none stores it verbatim) the norm is never decoded or carried:
-//! the count pass decodes indices only, the scatter raw counts and indices,
-//! and each gene's `avg_exp` is derived from the library-size table. Any
-//! other input (v3 on either side, or a cell with a stored norm) carries the
-//! norm through the scatter as before. Both give the same bytes.
+//! A v4 or v5 gene file drops its norm layer, so when every cell chunk
+//! recomputes its norm (none stores it verbatim) the norm is never decoded or
+//! carried: the count pass decodes indices only, the scatter raw counts and
+//! indices. Any other input (v3 on either side, or a cell with a stored norm)
+//! carries the norm through the scatter. Both give the same bytes.
 
 use rayon::prelude::*;
 use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::store::v4::{GENE_NORM_LUT_COUNTS, gene_norm_table};
 use crate::store::{chunk::*, writer::*};
 use bixverse_sparse::sparse::ScatterPtr;
 
@@ -46,8 +44,7 @@ pub const GENE_FILE_BYTES_PER_NNZ: usize = 8;
 /// Stored bytes per non-zero when the norm has to be carried: raw `u32`,
 /// norm `f32`, cell index `u32`. The phase budget is scaled down by
 /// `GENE_FILE_BYTES_PER_NNZ / GENE_FILE_BYTES_PER_NNZ_WITH_NORM` on that path
-/// so the caller's memory budget still holds. The norm is carried at f32 so
-/// `avg_exp` sums the same values the derived path recomputes.
+/// so the caller's memory budget still holds.
 const GENE_FILE_BYTES_PER_NNZ_WITH_NORM: usize = 12;
 
 /////////////
@@ -134,45 +131,6 @@ pub(crate) fn plan_phases(gene_nnz: &[usize], max_nnz: Option<usize>) -> Vec<(us
         phases.push((start, n_genes));
     }
     phases
-}
-
-/// Sum of a gene's normalised layer, as the reader would recompute it.
-///
-/// Matches `CscGeneChunk::avg_exp` built from the carried layer bit for bit:
-/// every value is the same [`norm_value`] (through the same per-cell table the
-/// reader uses for small counts), and the `f32` sum runs in the same order.
-///
-/// ### Params
-///
-/// * `cells` - Cell indices of the gene's run
-/// * `raw` - Raw counts of the run
-/// * `cell_lib` - Library size per cell as `f32`
-/// * `cell_norm` - [`gene_norm_table`] of `cell_lib`
-/// * `target_size` - Target size of the file
-///
-/// ### Returns
-///
-/// The `avg_exp` header value.
-fn derived_avg_exp(
-    cells: &[u32],
-    raw: &[u32],
-    cell_lib: &[f32],
-    cell_norm: &[f32],
-    target_size: f32,
-) -> F16 {
-    let sum = cells
-        .iter()
-        .zip(raw)
-        .map(|(&cell, &x)| {
-            let slot = (x as usize).wrapping_sub(1);
-            if slot < GENE_NORM_LUT_COUNTS {
-                cell_norm[cell as usize * GENE_NORM_LUT_COUNTS + slot]
-            } else {
-                norm_value(x as f32, cell_lib[cell as usize], target_size)
-            }
-        })
-        .sum::<f32>();
-    F16::from_f32(sum)
 }
 
 /////////////////
@@ -343,13 +301,6 @@ fn write_gene_file_impl(
         Vec::new()
     };
     let cell_lib: Vec<f32> = cell_lib_sizes.iter().map(|&l| l as f32).collect();
-    // only v4 stores the norm sum in the gene header, see `ChunkFormat::gene_aux`
-    let derive_avg_exp = skip_norm && !format.norm_f32();
-    let cell_norm = if derive_avg_exp {
-        gene_norm_table(&cell_lib, target_size)
-    } else {
-        Vec::new()
-    };
 
     let mut extra_raw = vec![vec![0u32; max_phase_nnz]; n_layers - 1];
     // single layer without the norm: count and cell scatter as one pair, so
@@ -496,20 +447,11 @@ fn write_gene_file_impl(
                         } else {
                             (&cell_idx[s..e], &raw[s..e])
                         };
-                        let avg_exp = if derive_avg_exp {
-                            derived_avg_exp(cells, counts, &cell_lib, &cell_norm, target_size)
-                        } else {
-                            F16::from_f32(0.0)
-                        };
-                        return Ok((g, format.encode_gene_derivable(cells, counts, avg_exp, g)));
+                        return Ok((g, format.encode_gene_derivable(cells, counts, g)));
                     }
-                    let data_norm = norm[s..e].to_vec();
-                    // accumulate in f32, see `CscGeneChunk::from_conversion`
-                    let avg_exp = F16::from_f32(data_norm.iter().sum::<f32>());
                     let chunk = CscGeneChunk {
                         data_raw: RawCounts::from_u32_auto(&raw[s..e]),
-                        data_norm,
-                        avg_exp,
+                        data_norm: norm[s..e].to_vec(),
                         nnz: e - s,
                         indices: cell_idx[s..e].to_vec(),
                         original_index: g,
@@ -693,21 +635,6 @@ mod tests {
         write_gene_file(cells.path(), genes.path(), None, false).unwrap();
 
         assert_eq!(read_genes(genes.path()), reference(cells.path()));
-    }
-
-    #[test]
-    fn test_write_gene_file_avg_exp_matches_norm_sum() {
-        let cells = TempBin::new("avg_cells");
-        let genes = TempBin::new("avg_genes");
-        write_cells(cells.path(), 57, 11);
-
-        write_gene_file(cells.path(), genes.path(), None, false).unwrap();
-
-        let reader = ParallelSparseReader::new(genes.path()).unwrap();
-        for gene in reader.get_all_genes().unwrap() {
-            let sum = gene.data_norm.iter().sum::<f32>();
-            assert_eq!(gene.avg_exp.to_bits(), F16::from_f32(sum).to_bits());
-        }
     }
 
     #[test]
