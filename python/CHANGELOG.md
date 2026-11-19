@@ -59,8 +59,7 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   each cell at `k_weight` anchor pairs, as Seurat does. Results differ at the
   same seed.
 - The normalised layer is read at f32, also from v4 stores, which gave f16
-  before. Values differ by up to about 2e-3.
-- Loading h5ad, 10x h5 and MTX and running Harmony are faster.
+  before. Values differ slightly.
 
 **Fixes**
 

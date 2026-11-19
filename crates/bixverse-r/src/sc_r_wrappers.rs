@@ -585,7 +585,7 @@ impl FromRList for BoostParams {
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
-        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "emeans")?;
 
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
@@ -750,7 +750,7 @@ impl FromRList for ScDblFinderParams {
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
-        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "emeans")?;
         let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 

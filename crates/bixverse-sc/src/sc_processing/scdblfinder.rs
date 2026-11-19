@@ -73,7 +73,7 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// The k-means for the fast clustering path, standard or mini-batch
+    /// The k-means for the fast clustering path (e-means by default, Lloyd or mini-batch)
     #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
@@ -147,11 +147,7 @@ impl Default for ScDblFinderParams {
             cluster_iters: 10,
             fast_cluster: false,
             fast_cluster_kmeans: CpuKMeans::new(
-                CpuKMeansKind::MiniBatch {
-                    batch_size: 4096,
-                    drift_threshold: 1e-4,
-                    lr_alpha: 1.0,
-                },
+                CpuKMeansKind::Standard,
                 KMeansParamsWrappers::default(),
             ),
             fast_cluster_params: FastClusterParams::default(),

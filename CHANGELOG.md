@@ -58,8 +58,9 @@
 ### Changed results
 
 - e-means is the k-means default everywhere: `KMeansParamsWrappers::default()`,
-  fast clustering (`km_type = "emeans"`), Harmony v1 and v2 on every backend,
-  SCENIC, DSB and NMF consensus. Results differ at the same seed;
+  fast clustering (`km_type = "emeans"`, also inside Boost and scDblFinder,
+  which used mini-batch), Harmony v1 and v2 on every backend, SCENIC, DSB and
+  NMF consensus. Results differ at the same seed;
   `km_type = "standard"` or `k_means_algorithm = "lloyd"` gives Lloyd's back.
 - Leiden runs 2 iterations by default (was 5), as igraph. Louvain defaults to
   coloured local moving in shuffled order. Results differ at the same seed.
@@ -70,8 +71,7 @@
   cell at `k_weight` anchor pairs, as Seurat does. Results differ at the same
   seed.
 - The normalised layer is recomputed in f32, also for v4 stores, which read it
-  at f16 before. Values differ by up to about 2e-3.
-- h5ad, 10x h5 and MTX ingest and Harmony are faster.
+  at f16 before. Values differ slightly.
 
 ### Fixes
 
