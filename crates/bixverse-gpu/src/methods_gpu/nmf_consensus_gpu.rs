@@ -812,7 +812,7 @@ mod tests {
         }
         let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
         let v = rank_k_input(m, n, k);
-        let params = ConsensusParams::<f32>::new(ConsensusTarget::WColumns, None, None, 100, 3, 42);
+        let params = ConsensusParams::<f32>::new(ConsensusTarget::WColumns, None, None, 3, 42);
 
         let res = nmf_consensus_run_gpu(
             v.as_ref(),
