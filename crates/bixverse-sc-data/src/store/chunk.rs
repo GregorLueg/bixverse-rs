@@ -889,16 +889,15 @@ impl CsrCellChunk {
         buffer
     }
 
-    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    /// Serialise and lz4-compress the chunk into a v3 payload.
     ///
-    /// Pure with respect to the writer, so callers can build many payloads in
-    /// parallel and hand them to
-    /// [`CellGeneSparseWriter::write_compressed_cell_chunks`] in order.
+    /// Only a v3 writer takes this; v4 and v5 writers take
+    /// [`crate::store::v4::ChunkFormat::encode_cell`], which dispatches here for v3.
     ///
     /// ### Returns
     ///
-    /// The compressed payload, size-prepended as the reader expects.
-    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+    /// The compressed payload, size-prepended as the v3 reader expects.
+    pub(crate) fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
         Ok(compress_prepend_size(&self.to_bytes()))
     }
 
@@ -1176,16 +1175,15 @@ impl CscGeneChunk {
         Ok(())
     }
 
-    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    /// Serialise and lz4-compress the chunk into a v3 payload.
     ///
-    /// Pure with respect to the writer, so callers can build many payloads in
-    /// parallel and hand them to
-    /// [`CellGeneSparseWriter::write_compressed_gene_chunks`] in order.
+    /// Only a v3 writer takes this; v4 and v5 writers take
+    /// [`crate::store::v4::ChunkFormat::encode_gene`], which dispatches here for v3.
     ///
     /// ### Returns
     ///
-    /// The compressed payload, size-prepended as the reader expects.
-    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+    /// The compressed payload, size-prepended as the v3 reader expects.
+    pub(crate) fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
         let mut buffer = Vec::new();
         self.write_to_bytes(&mut buffer)?;
         Ok(compress_prepend_size(&buffer))

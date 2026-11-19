@@ -149,7 +149,7 @@ fn scan_gene_nnz_csc(
 /// ### Returns
 ///
 /// Number of NNZ per given task/feature
-pub fn scan_gene_nnz_dense_row(
+fn scan_gene_nnz_dense_row(
     task: &H5adFileTask,
     universe_size: usize,
 ) -> Result<Vec<usize>, ScDataErrors> {
@@ -339,7 +339,7 @@ fn scan_cell_stats_csc(
 /// ### Returns
 ///
 /// Vector of (unique_genes, library_size) per cell
-pub fn scan_cell_stats_dense_row(
+fn scan_cell_stats_dense_row(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, ScDataErrors> {
@@ -575,7 +575,7 @@ fn write_h5_csc_cells(
 /// ### Returns
 ///
 /// An H5FileQcResult
-pub fn write_h5_dense_row_cells(
+fn write_h5_dense_row_cells(
     task: &H5adFileTask,
     cells_to_keep: &[usize],
     gene_mapping: &[Option<usize>],

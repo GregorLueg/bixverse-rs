@@ -893,7 +893,8 @@ pub fn set_feature_kind(paths: &[&str], kind: FeatureKind) -> Result<(), ScDataE
 ///
 /// `Ok(())` when every store carries the same cell-ID hash, an error when one
 /// lacks a hash or they differ.
-pub fn check_same_cells(readers: &[&ParallelSparseReader]) -> Result<(), ScDataErrors> {
+#[cfg(test)]
+pub(crate) fn check_same_cells(readers: &[&ParallelSparseReader]) -> Result<(), ScDataErrors> {
     let mut hashes = readers.iter().map(|r| r.cell_id_hash());
     let Some(first) = hashes.next() else {
         return Ok(());

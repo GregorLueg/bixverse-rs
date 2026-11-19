@@ -609,7 +609,8 @@ impl H5ChunkedReader {
     /// ### Returns
     ///
     /// `true` if the dataset passed every eligibility check.
-    pub fn is_direct(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_direct(&self) -> bool {
         self.direct.is_some()
     }
 
