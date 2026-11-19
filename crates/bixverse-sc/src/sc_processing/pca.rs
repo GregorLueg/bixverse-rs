@@ -275,9 +275,7 @@ pub(crate) fn solve_dense_pca(
 // Helpers //
 /////////////
 
-/// [`CscGeneChunk::transform_to_clr`] over a flat buffer, in parallel. The
-/// chunk method also refreshes the chunk's `avg_exp`, which a flat buffer has
-/// no slot for.
+/// [`CscGeneChunk::transform_to_clr`] over a flat buffer, in parallel.
 ///
 /// ### Params
 ///

@@ -79,7 +79,7 @@ fn test_tenx_peaks_to_store_follows_the_requested_cells() {
     let (cells, genes) = (cells.to_str().unwrap(), genes.to_str().unwrap());
 
     let barcodes: Vec<String> = ["CCC-1", "AAA-1", "DDD-1"].map(String::from).to_vec();
-    let res = tenx_peaks_to_store(&h5, cells, genes, &barcodes, None, false).expect("ingest");
+    let res = tenx_peaks_to_store(&h5, cells, genes, &barcodes, None, 0).expect("ingest");
 
     assert_eq!(
         res.peak_names,
