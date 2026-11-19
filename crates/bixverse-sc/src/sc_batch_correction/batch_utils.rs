@@ -179,7 +179,7 @@ pub fn batch_knn_search(
     verbose: usize,
 ) -> ScKnnResults {
     // The index builds and queries only print at detailed verbosity here.
-    let ann_verbosity = verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity());
+    let ann_verbosity = nested_verbosity(verbose);
     let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
 
     let (indices, dist) = match knn_method {

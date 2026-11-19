@@ -169,7 +169,7 @@ struct LrStore {
     indptr: Vec<usize>,
     /// Position of the cell within the included cells.
     cells: Vec<u32>,
-    /// Normalised value, upcast from the stored F16.
+    /// Normalised value.
     vals: Vec<f32>,
 }
 

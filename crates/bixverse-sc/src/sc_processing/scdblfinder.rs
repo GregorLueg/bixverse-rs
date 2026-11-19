@@ -204,28 +204,6 @@ struct CellKnnFeatures {
     origin: Option<(usize, usize)>,
 }
 
-/// Per-cell intermediate scores for diagnostics and comparison
-/// against R's scDblFinder output.
-///
-/// All vectors are length `n_obs` (observed cells only).
-#[derive(Clone, Debug)]
-pub struct ScDblFinderDiagnostics {
-    /// Distance-weighted kNN doublet proportion.
-    pub weighted: Vec<f32>,
-    /// Raw kNN ratio at the largest k value.
-    pub ratio: Vec<f32>,
-    /// Co-expression doublet score.
-    pub cxds_score: Vec<f32>,
-    /// Distance to the nearest real neighbour.
-    pub dist_to_real: Vec<f32>,
-    /// Identification difficulty (1 - mean class-weighted score for this cell's
-    /// most likely doublet origin; 1.0 if no origin assigned).
-    pub difficulty: Vec<f32>,
-    /// Most likely parent cluster pair (canonical ordering); None for cells
-    /// with no heterotypic sim neighbours.
-    pub most_likely_origin: Vec<Option<(usize, usize)>>,
-}
-
 /// Classifier features for the observed samples.
 #[derive(Clone, Debug)]
 pub struct FeatureTable {

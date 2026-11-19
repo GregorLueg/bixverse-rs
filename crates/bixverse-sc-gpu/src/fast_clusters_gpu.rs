@@ -122,7 +122,7 @@ impl Coarsener for GpuKMeans {
             self.params,
             seed,
             self.device.clone(),
-            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+            nested_verbosity(verbose),
         )?;
         Ok((
             centroids,

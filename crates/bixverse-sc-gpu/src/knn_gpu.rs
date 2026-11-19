@@ -189,7 +189,7 @@ fn self_query_gpu(
     return_dist: bool,
 ) -> GpuKnnQueryResult {
     // The index builds and queries only print at detailed verbosity here.
-    let ann_verbosity = verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity());
+    let ann_verbosity = nested_verbosity(verbose);
 
     let method = parse_knn_method_gpu(&params.knn_method).unwrap_or_else(|| {
         println!(

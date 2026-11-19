@@ -149,6 +149,14 @@ struct ScanScratch {
 /////////////
 
 /// R's logit inverse link with its clamp, `binomial()$linkinv`
+///
+/// ### Params
+///
+/// * `eta` - Linear predictor
+///
+/// ### Returns
+///
+/// The fitted probability, clamped away from 0 and 1.
 #[inline]
 fn link_inv(eta: f64) -> f64 {
     let t = if eta < -LOGIT_THRESH {
@@ -162,6 +170,14 @@ fn link_inv(eta: f64) -> f64 {
 }
 
 /// R's `binomial()$mu.eta`, `dmu / deta` with the same clamp
+///
+/// ### Params
+///
+/// * `eta` - Linear predictor
+///
+/// ### Returns
+///
+/// The derivative of the mean with respect to `eta`.
 #[inline]
 fn mu_eta(eta: f64) -> f64 {
     if eta.abs() > LOGIT_THRESH {
@@ -173,6 +189,15 @@ fn mu_eta(eta: f64) -> f64 {
 }
 
 /// Binomial unit deviance of a 0/1 response, R's `binomial()$dev.resids`
+///
+/// ### Params
+///
+/// * `y` - Response, 0 or 1
+/// * `mu` - Fitted probability
+///
+/// ### Returns
+///
+/// The unit deviance.
 #[inline]
 fn unit_deviance(y: f64, mu: f64) -> f64 {
     if y > 0.5 {
@@ -396,11 +421,7 @@ pub fn logistic_lr_test(y: &[bool], x: &[f64], latent: &[f64]) -> LrTest {
     let mut x = x.to_vec();
     let mut latent = latent.to_vec();
     let mut eta = Vec::with_capacity(y.len());
-    let null_dev = if standardise(&mut latent) {
-        irls_logistic(&y, &[&latent], &mut eta).0
-    } else {
-        irls_logistic(&y, &[], &mut eta).0
-    };
+    let null_dev = null_deviance(&y, &mut latent, &mut eta);
     lr_against_null(&y, &mut x, &latent, null_dev, &mut eta)
 }
 
@@ -429,6 +450,27 @@ pub fn lr_p_value(test: &LrTest, alternative: &TestAlternative) -> f64 {
     }
 }
 
+/// Deviance of the null model `y ~ latent`, standardising `latent` in place
+///
+/// A constant latent covariate drops out and the null is the intercept only.
+///
+/// ### Params
+///
+/// * `y` - The 0/1 response
+/// * `latent` - The latent covariate, standardised in place
+/// * `eta` - Scratch for the linear predictor
+///
+/// ### Returns
+///
+/// The null deviance.
+fn null_deviance(y: &[f64], latent: &mut [f64], eta: &mut Vec<f64>) -> f64 {
+    if standardise(latent) {
+        irls_logistic(y, &[latent], eta).0
+    } else {
+        irls_logistic(y, &[], eta).0
+    }
+}
+
 /// Build one arm and fit its null model
 ///
 /// ### Params
@@ -453,11 +495,7 @@ fn build_arm(one: Vec<usize>, zero: Vec<usize>, groups: &[Vec<usize>], latent: &
         .collect();
     let mut lat: Vec<f64> = cells.iter().map(|&c| latent[c]).collect();
     let mut eta = Vec::with_capacity(cells.len());
-    let null_dev = if standardise(&mut lat) {
-        irls_logistic(&y, &[&lat], &mut eta).0
-    } else {
-        irls_logistic(&y, &[], &mut eta).0
-    };
+    let null_dev = null_deviance(&y, &mut lat, &mut eta);
     LrArm {
         one,
         zero,

@@ -271,8 +271,9 @@ pub(crate) fn solve_dense_pca(
 // Helpers //
 /////////////
 
-/// [`CscGeneChunk::transform_to_clr`] over an `f32` layer, without the F16
-/// round trip.
+/// [`CscGeneChunk::transform_to_clr`] over a flat buffer, in parallel. The
+/// chunk method also refreshes the chunk's `avg_exp`, which a flat buffer has
+/// no slot for.
 ///
 /// ### Params
 ///
@@ -1017,56 +1018,6 @@ pub fn pca_on_sc<S: SingleCellReading>(
     Ok((scores, loadings, s, scaled_f32))
 }
 
-/// Calculate the PCs for single cell data (with stats)
-///
-/// This uses a dense path under the hood that can be faster than the implicit
-/// centering, scaling via matrix algebra. Additionally, it returns the
-/// feature means and standard deviations for downstream consumption.
-///
-/// ### Params
-///
-/// * `reader` - Reader over the gene-based count store.
-/// * `cell_indices` - Slice of indices for the cells.
-/// * `gene_indices` - Slice of indices for the genes.
-/// * `no_pcs` - Number of principal components to calculate
-/// * `params_pca` - The parameters for this single cell PCA run, see
-///   [SingleCellPcaParams].
-/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
-/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
-///   transformation here.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Return
-///
-/// The [SingleCellPcaResScaled]
-#[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_stats<S: SingleCellReading>(
-    reader: &S,
-    cell_indices: &[usize],
-    gene_indices: &[usize],
-    no_pcs: usize,
-    params_pca: &SingleCellPcaParams,
-    clr_offsets: Option<&[f64]>,
-    seed: usize,
-    verbose: usize,
-) -> SingleCellPcaResStats {
-    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
-        reader,
-        cell_indices,
-        gene_indices,
-        no_pcs,
-        params_pca,
-        PcaColumnSource::Normalised { clr_offsets },
-        seed,
-        false,
-        verbose,
-    )?;
-
-    Ok((scores, loadings, s, feature_means, feature_sds))
-}
-
 //////////////////
 // Residual PCA //
 //////////////////
@@ -1126,53 +1077,6 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
     )?;
 
     Ok((scores, loadings, s, scaled_f32))
-}
-
-/// PCA on scTransform Pearson residuals, with the feature statistics.
-///
-/// As [`pca_on_sc_residuals`], but returns the per-gene residual mean and
-/// standard deviation rather than the residual matrix. The means are the
-/// centring applied, which a projection of new cells onto these components
-/// needs.
-///
-/// ### Params
-///
-/// * `reader` - Reader over the gene-based count store.
-/// * `cell_indices` - Slice of indices for the cells.
-/// * `gene_indices` - Slice of indices for the genes.
-/// * `no_pcs` - Number of principal components to calculate.
-/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
-/// * `source` - The fitted residual source, scTransform or analytic Pearson.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - `0` silent, `1` normal, `2` detailed.
-///
-/// ### Return
-///
-/// The [SingleCellPcaResStats].
-#[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
-    reader: &S,
-    cell_indices: &[usize],
-    gene_indices: &[usize],
-    no_pcs: usize,
-    params_pca: &SingleCellPcaParams,
-    source: &dyn ResidualSource,
-    seed: usize,
-    verbose: usize,
-) -> SingleCellPcaResStats {
-    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
-        reader,
-        cell_indices,
-        gene_indices,
-        no_pcs,
-        params_pca,
-        PcaColumnSource::Residual { source },
-        seed,
-        false,
-        verbose,
-    )?;
-
-    Ok((scores, loadings, s, feature_means, feature_sds))
 }
 
 ///////////////////////

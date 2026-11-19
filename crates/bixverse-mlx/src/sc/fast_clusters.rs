@@ -63,7 +63,7 @@ impl Coarsener for MlxKMeans {
             n_centroids,
             self.params,
             seed,
-            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+            nested_verbosity(verbose),
         )?;
         Ok((
             centroids,
