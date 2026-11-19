@@ -10,7 +10,9 @@ they pin: `crates/bixverse-atac/tests/fixtures/pbmc3k_chr22/README.md`.
 `bixverse-atac` (Rust) and `bv.atac` (Python), paired RNA plus ATAC on a
 `SingleCellsMultiModal`. Peaks and tiles are ordinary v5 stores
 (`FeatureKind::Peak` / `Tile`, TF-IDF as the norm, interval index), so every
-store-level tool reads them.
+store-level tool reads them. Blacklists enter as AMULET's restriction
+regions; there is no separate blacklist filter. Every public function that
+prints takes `verbose: usize` (`0` silent, `1` normal, `2` detailed).
 
 | Module | Contents | Checked against |
 |---|---|---|
@@ -19,12 +21,13 @@ store-level tool reads them.
 | `io::tenx_peaks` | 10x multiome `Peaks` into a peak store | Cell Ranger ARC h5 |
 | `peaks::regions` | BED, genome tiles, region union | Signac, SnapATAC2 tiles |
 | `peaks::calling` | MACS3 `callpeak` port, per cell group | MACS3 3.1.0, exact incl. 10k PBMC |
-| `processing::qc` | fragments, nucleosome signal, TSS enrichment, FRiP, blacklist | Signac 1.17.1 (fast TSSe) |
+| `processing::qc` | fragments, nucleosome signal, TSS enrichment | Signac 1.17.1 (fast TSSe) |
 | `processing::amulet` | AMULET multiplets, clean room from the paper | reference as a black box: exact on chr22, 14 of 11,898 calls differ on 10k |
 | `processing::counting` | peak / tile / gene activity counts into a store | Signac, SnapATAC2 (all three modes), Cell Ranger `Peaks` |
-| `processing::features` | top features (`FindTopFeatures`) | Signac |
+| `processing::features` | top features (`FindTopFeatures`), selected in Rust for Python too | Signac |
 | `processing::lsi` | TF-IDF, LSI, depth correlation, LSI projection | Signac, muon, Seurat `ProjectSVD` |
-| `integration::rlsi` | rLSI anchors and integration | Seurat `IntegrateEmbeddings` |
+| `integration::rlsi` | rLSI anchors and integration, through the shared Seurat anchor search of `bixverse-sc` | Seurat `IntegrateEmbeddings` |
+| `bv.atac` (Python only) | FRiP from the peak counts and the fragment totals | Signac `FRiP` |
 
 Downstream of the LSI the regular single cell suite takes over: kNN,
 clustering, UMAP, Harmony, WNN. Label transfer from RNA uses gene activity
@@ -50,6 +53,13 @@ anchors.
 7. AMULET is GPL-3.0: built from the paper, the reference run only as a black
    box. The 10k residual (dense repeat clusters) is accepted.
 8. Python first, R through a handover; no R parity tests in `python/`.
+9. The anchor search (`FindNN` with the within-batch search at `k + 1`,
+   `FindAnchorPairs`, `ScoreAnchors`) and the pairwise `IntegrateEmbeddings`
+   live once in `bixverse-sc`'s `seurat_anchors`, shared by rLSI, rPCA, CCA
+   and label transfer.
+10. `RegionIndex` stays next to the store's `GenomeIntervals`: the fragment
+    sweeps resolve the chromosome once per run and visit overlaps without
+    allocating.
 
 ## Not in, for a later release
 
