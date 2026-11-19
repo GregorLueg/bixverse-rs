@@ -552,7 +552,7 @@ mod tests {
 
             assert_eq!(peek_file_version(&s[0]).unwrap(), SC_FILE_VERSION);
             assert_eq!(peek_file_version(&s[1]).unwrap(), SC_FILE_VERSION);
-            let backup = format!("{}.v{version}.bak", &s[0]);
+            let backup = format!("{}.v{version}.bak", s[0]);
             assert_eq!(peek_file_version(&backup).unwrap(), version);
             for (a, b) in cells_before.iter().zip(
                 &ParallelSparseReader::new(&s[0])

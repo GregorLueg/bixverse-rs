@@ -521,8 +521,7 @@ mod tests {
         assert_eq!(res.per_file[1].lib_size, vec![15, 6]);
         assert_eq!(res.per_file[2].lib_size, vec![2]);
 
-        let reader =
-            ParallelSparseReader::new(&bin.to_str().unwrap().to_string()).expect("reader opens");
+        let reader = ParallelSparseReader::new(bin.to_str().unwrap()).expect("reader opens");
         let cells: Vec<(Vec<u32>, Vec<u32>)> = reader
             .read_cells_parallel(&[3, 4, 5])
             .expect("cells read back")

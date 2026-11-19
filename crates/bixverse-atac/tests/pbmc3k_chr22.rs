@@ -330,7 +330,7 @@ fn signac_peak_store(dir: &TempDir) -> (String, String) {
     let peaks = read_bed(&fixtures().join("peaks.bed")).unwrap();
     let barcodes = cells();
     let c = count_fragments(&fragments(), &barcodes, &peaks, CountMode::Fragment).unwrap();
-    let (cf, gf) = (file_in(&dir, "cells.bin"), file_in(&dir, "genes.bin"));
+    let (cf, gf) = (file_in(dir, "cells.bin"), file_in(dir, "genes.bin"));
     write_counts_store(
         &c,
         &peaks,
@@ -638,8 +638,8 @@ fn triplet_store(dir: &TempDir, tag: &str, rel: &str, n_features: usize, target:
         per_cell[c as usize].0.push(f);
         per_cell[c as usize].1.push(v);
     }
-    let cf = file_in(&dir, &format!("{tag}_cells.bin"));
-    let gf = file_in(&dir, &format!("{tag}_genes.bin"));
+    let cf = file_in(dir, &format!("{tag}_cells.bin"));
+    let gf = file_in(dir, &format!("{tag}_genes.bin"));
     let mut w = CellGeneSparseWriter::new(&cf, true, n_cells, n_features, target).unwrap();
     for (c, (idx, raw)) in per_cell.iter().enumerate() {
         w.write_cell_chunk(CsrCellChunk::from_data(raw, idx, c, target, true))
