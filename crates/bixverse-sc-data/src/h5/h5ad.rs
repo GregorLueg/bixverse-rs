@@ -16,10 +16,10 @@ use crate::h5::H5_CELL_SLICE_SIZE;
 use crate::h5::ann_store::{AnnFile, NodeKind};
 use crate::h5::filters::{check_h5_filters, check_h5ad_filters};
 use crate::prelude::*;
+use crate::store::chunk::{dense_index_map, remap};
 use crate::store::gene_file::plan_phases;
 use crate::store::writer::{
-    INDEX_DROPPED, compress_cell_row, dense_index_map, write_cell_chunks_built, write_cell_rows,
-    write_cell_rows_flat,
+    compress_cell_row, write_cell_chunks_built, write_cell_rows, write_cell_rows_flat,
 };
 use crate::store::{quality::CellOnFileQuality, writer::CellGeneSparseWriter};
 
@@ -867,8 +867,7 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_cell_idx != INDEX_DROPPED {
+                if let Some(new_cell_idx) = remap(&cell_map, old_cell_idx) {
                     cell_lib_sizes[new_cell_idx as usize] += chunk_data[local_idx] as u32;
                 }
             }
@@ -963,8 +962,7 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_cell_idx != INDEX_DROPPED {
+                if let Some(new_cell_idx) = remap(&cell_map, old_cell_idx) {
                     new_data.push(chunk_data[local_idx] as u32);
                     new_indices.push(new_cell_idx as usize);
                 }
@@ -1086,11 +1084,10 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
                 let new_gene_idx = (chunk_idx * GENE_CHUNK_SIZE + k) as u32;
                 for idx in indptr_raw[gene_idx]..indptr_raw[gene_idx + 1] {
                     let local_idx = idx - start_pos;
-                    let new_cell = cell_map
-                        .get(chunk_indices[local_idx] as usize)
-                        .copied()
-                        .unwrap_or(INDEX_DROPPED) as usize;
-                    if (c0..c1).contains(&new_cell) {
+                    if let Some(new_cell) = remap(&cell_map, chunk_indices[local_idx] as usize)
+                        .map(|c| c as usize)
+                        .filter(|c| (c0..c1).contains(c))
+                    {
                         let slot = &mut cursor[new_cell - c0];
                         entries[*slot] = (new_gene_idx, chunk_data[local_idx] as u32);
                         *slot += 1;
@@ -1496,8 +1493,7 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_gene_idx = chunk_indices[local_idx] as usize;
 
-                let new_gene_idx = gene_map.get(old_gene_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_gene_idx != INDEX_DROPPED {
+                if let Some(new_gene_idx) = remap(&gene_map, old_gene_idx) {
                     cell_data.push((new_gene_idx as usize, chunk_data[local_idx] as u32));
                 }
             }
@@ -1650,11 +1646,7 @@ pub(crate) fn write_h5_cell_major_cells(
                 .map_init(Vec::<(u32, u32)>::new, |buf, (k, &old)| {
                     buf.clear();
                     for idx in indptr[old] - start..indptr[old + 1] - start {
-                        let new = gene_map
-                            .get(indices[idx] as usize)
-                            .copied()
-                            .unwrap_or(INDEX_DROPPED);
-                        if new != INDEX_DROPPED {
+                        if let Some(new) = remap(gene_map, indices[idx] as usize) {
                             buf.push((new, data[idx] as u32));
                         }
                     }
@@ -2078,8 +2070,7 @@ pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
                 if val == 0.0 {
                     continue;
                 }
-                let new_gene_idx = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_gene_idx != INDEX_DROPPED {
+                if let Some(new_gene_idx) = remap(&gene_map, gene_idx) {
                     new_data.push(val as u32);
                     new_indices.push(new_gene_idx as usize);
                 }
@@ -2213,8 +2204,9 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
                 buf.clear();
                 let row = block.row(old_cell_idx - row_start);
                 for (gene_idx, &val) in row.iter().enumerate() {
-                    let new_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
-                    if val != 0.0 && new_gene != INDEX_DROPPED {
+                    if val != 0.0
+                        && let Some(new_gene) = remap(&gene_map, gene_idx)
+                    {
                         buf.push((new_gene, val as u32));
                     }
                 }
@@ -2577,8 +2569,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
                     let local_idx = idx - start_pos;
                     let old_gene_idx = chunk_indices[local_idx] as usize;
 
-                    let new_gene_idx = gene_map.get(old_gene_idx).copied().unwrap_or(INDEX_DROPPED);
-                    if new_gene_idx != INDEX_DROPPED {
+                    if let Some(new_gene_idx) = remap(&gene_map, old_gene_idx) {
                         let raw_count =
                             reconstruct_raw_count(chunk_data[local_idx], lib_size, target_size);
                         if raw_count > 0 {
@@ -2690,8 +2681,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
-                if new_cell_idx != INDEX_DROPPED {
+                if let Some(new_cell_idx) = remap(&cell_map, old_cell_idx) {
                     let norm_val = chunk_data[local_idx];
                     let lib_size = lib_sizes[old_cell_idx];
                     let raw_count = reconstruct_raw_count(norm_val, lib_size, target_size);

@@ -12,6 +12,7 @@ use thousands::Separable;
 use crate::h5::filters::check_h5ad_filters;
 use crate::h5::h5ad::*;
 use crate::prelude::*;
+use crate::store::chunk::{dense_gene_map_from_options, dense_index_map, remap};
 use crate::store::{quality::*, writer::*};
 
 //////////////////
@@ -543,8 +544,7 @@ fn write_h5_csc_cells(
 
             for idx in gene_start..gene_end {
                 let old_cell = chunk_indices[idx] as usize;
-                let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
-                if new_cell != INDEX_DROPPED {
+                if let Some(new_cell) = remap(&cell_map, old_cell) {
                     cell_data[new_cell as usize].push((final_gene as u32, chunk_data[idx] as u32));
                 }
             }
@@ -623,8 +623,9 @@ pub fn write_h5_dense_row_cells(
                 buf.clear();
                 let row = block.row(old_cell - row_start);
                 for (gene_idx, &val) in row.iter().enumerate() {
-                    let final_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
-                    if val != 0.0 && final_gene != INDEX_DROPPED {
+                    if val != 0.0
+                        && let Some(final_gene) = remap(&gene_map, gene_idx)
+                    {
                         buf.push((final_gene, val as u32));
                     }
                 }

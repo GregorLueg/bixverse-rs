@@ -12,6 +12,7 @@ use thousands::Separable;
 
 use crate::mtx::{MtxSource, parse_block};
 use crate::prelude::*;
+use crate::store::chunk::{dense_gene_map_from_options, dense_index_map, remap};
 use crate::store::{quality::*, writer::*};
 
 ////////////////
@@ -240,9 +241,9 @@ fn write_mtx_file_cells(
             let Some((cell, gene)) = cell_gene(row, col, task.cells_as_rows) else {
                 return;
             };
-            let new_cell = cell_map.get(cell).copied().unwrap_or(INDEX_DROPPED);
-            let final_gene = gene_map.get(gene).copied().unwrap_or(INDEX_DROPPED);
-            if new_cell != INDEX_DROPPED && final_gene != INDEX_DROPPED {
+            if let (Some(new_cell), Some(final_gene)) =
+                (remap(&cell_map, cell), remap(&gene_map, gene))
+            {
                 cell_data[new_cell as usize].push((final_gene, value));
             }
         })

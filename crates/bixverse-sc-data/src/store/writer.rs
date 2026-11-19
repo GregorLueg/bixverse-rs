@@ -2,7 +2,6 @@
 //! the parallel cell write path.
 
 use bincode::{config, serde::encode_to_vec};
-use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::{
     fs::File,
@@ -941,64 +940,11 @@ impl CellGeneSparseWriter {
 // Parallel cell write //
 /////////////////////////
 
-/// Marker in a dense index map for a cell or gene that is dropped.
-pub const INDEX_DROPPED: u32 = u32::MAX;
-
 /// Cells built and compressed per parallel batch in [`write_cell_rows`].
 ///
 /// Large enough to amortise the rayon fan-out, small enough that the
 /// compressed payloads held before the append stay a few MB.
 const CELL_WRITE_BATCH: usize = 4_096;
-
-/// Dense old-to-new map from the kept cell or gene indices.
-///
-/// Replaces a hash lookup per stored value with an index.
-///
-/// ### Params
-///
-/// * `kept` - Old indices to keep, in new-index order
-///
-/// ### Returns
-///
-/// `map[old] = new`, [`INDEX_DROPPED`] for indices not kept. Sized to the
-/// largest kept index, so callers treat out-of-range as dropped.
-pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
-    let mut map = vec![INDEX_DROPPED; kept.iter().max().map_or(0, |&g| g + 1)];
-    for (new, &old) in kept.iter().enumerate() {
-        map[old] = new as u32;
-    }
-    map
-}
-
-/// [`dense_index_map`] over a keep set, rows in the set's iteration order.
-///
-/// ### Params
-///
-/// * `cells_to_keep` - Cells to keep, in output order
-///
-/// ### Returns
-///
-/// `map[cell] = row`, [`INDEX_DROPPED`] for cells not kept.
-pub fn keep_set_index_map(cells_to_keep: &IndexSet<u32>) -> Vec<u32> {
-    let kept: Vec<usize> = cells_to_keep.iter().map(|&c| c as usize).collect();
-    dense_index_map(&kept)
-}
-
-/// Dense gene map from a per-file `local -> final` mapping.
-///
-/// ### Params
-///
-/// * `mapping` - `Some(final)` for kept local genes, `None` otherwise
-///
-/// ### Returns
-///
-/// `map[local] = final`, [`INDEX_DROPPED`] for dropped genes.
-pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
-    mapping
-        .iter()
-        .map(|g| g.map_or(INDEX_DROPPED, |g| g as u32))
-        .collect()
-}
 
 /// Build one cell chunk from `(gene, count)` pairs and compress it.
 ///

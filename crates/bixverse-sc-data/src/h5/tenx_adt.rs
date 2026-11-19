@@ -9,6 +9,7 @@ use crate::h5::chunked::H5ChunkedReader;
 use crate::h5::filters::check_tenx_filters;
 use crate::h5::tenx::*;
 use crate::prelude::*;
+use crate::store::chunk::{dense_index_map, remap};
 
 /////////////
 // Structs //
@@ -85,10 +86,7 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
     let n_features = adt_full_idx.len();
     let n_cells = barcodes.len();
 
-    let mut full_to_dense = vec![usize::MAX; feature_types.len()];
-    for (dense, &full) in adt_full_idx.iter().enumerate() {
-        full_to_dense[full] = dense;
-    }
+    let full_to_dense = dense_index_map(&adt_full_idx);
     let features: Vec<String> = adt_full_idx
         .iter()
         .map(|&i| feature_names[i].clone())
@@ -116,10 +114,9 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
             let s = indptr[cell] - data_start;
             let e = indptr[cell + 1] - data_start;
             for k in s..e {
-                let dense_col = full_to_dense[chunk_indices[k]];
-                if dense_col != usize::MAX {
+                if let Some(dense_col) = remap(&full_to_dense, chunk_indices[k]) {
                     // column-major: feature-major blocks of n_cells
-                    counts[dense_col * n_cells + cell] = chunk_data[k] as f64;
+                    counts[dense_col as usize * n_cells + cell] = chunk_data[k] as f64;
                 }
             }
         }

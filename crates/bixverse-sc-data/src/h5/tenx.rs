@@ -17,6 +17,7 @@ use crate::h5::chunked::H5ChunkedReader;
 use crate::h5::filters::check_tenx_filters;
 use crate::h5::h5ad::{CsrQualityStats, csr_quality_stats, write_h5_cell_major_cells};
 use crate::prelude::*;
+use crate::store::chunk::dense_index_map;
 use crate::store::quality::CellOnFileQuality;
 use crate::store::{quality::*, writer::*};
 

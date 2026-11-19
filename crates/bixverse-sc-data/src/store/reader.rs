@@ -15,7 +15,7 @@ use std::{fs::File, marker::Sync, path::Path, sync::Arc};
 use crate::prelude::*;
 use crate::store::chunk::{
     FILE_MAGIC, FileHeader, RunSource, SparseDataHeader, csc_payload, csr_payload,
-    extend_raw_checked, le_u64_at, raw_to,
+    extend_raw_checked, keep_set_index_map, le_u64_at, raw_to, remap,
 };
 use crate::store::interval_index::GenomeIntervals;
 use crate::store::v4::{
@@ -26,7 +26,6 @@ use crate::store::v5::{
     FeatureKind, NormKind, SectionKind, V5_HEADER_LEN, V5FileHeader, expect_len, find_section,
     parse_sections,
 };
-use crate::store::writer::{INDEX_DROPPED, keep_set_index_map};
 
 ///////////////////////
 // SingleCellReading //
@@ -1939,10 +1938,8 @@ impl<T: BixverseNumeric + FromPrimitive> SparseFragment<T> {
 
         self.kept.clear();
         self.kept.extend(
-            (0..run.nnz()).filter_map(|i| match map.get(run.index_at(i) as usize) {
-                Some(&row) if row != INDEX_DROPPED => Some((row, i as u32)),
-                _ => None,
-            }),
+            (0..run.nnz())
+                .filter_map(|i| remap(map, run.index_at(i) as usize).map(|row| (row, i as u32))),
         );
         if !self.kept.is_sorted_by_key(|&(row, _)| row) {
             self.kept.sort_unstable_by_key(|&(row, _)| row);

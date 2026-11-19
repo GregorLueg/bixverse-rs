@@ -14,7 +14,81 @@ use serde::{Deserialize, Serialize};
 use std::{io::Write, marker::Sync};
 
 use crate::prelude::*;
-use crate::store::writer::INDEX_DROPPED;
+
+//////////////////////
+// Dense index maps //
+//////////////////////
+
+/// Marker in a dense index map for a cell or gene that is dropped.
+pub const INDEX_DROPPED: u32 = u32::MAX;
+
+/// Dense old-to-new map from the kept cell or gene indices.
+///
+/// Replaces a hash lookup per stored value with an index.
+///
+/// ### Params
+///
+/// * `kept` - Old indices to keep, in new-index order
+///
+/// ### Returns
+///
+/// `map[old] = new`, [`INDEX_DROPPED`] for indices not kept. Sized to the
+/// largest kept index, so callers treat out-of-range as dropped.
+pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
+    let mut map = vec![INDEX_DROPPED; kept.iter().max().map_or(0, |&g| g + 1)];
+    for (new, &old) in kept.iter().enumerate() {
+        map[old] = new as u32;
+    }
+    map
+}
+
+/// [`dense_index_map`] over a keep set, rows in the set's iteration order.
+///
+/// ### Params
+///
+/// * `cells_to_keep` - Cells to keep, in output order
+///
+/// ### Returns
+///
+/// `map[cell] = row`, [`INDEX_DROPPED`] for cells not kept.
+pub fn keep_set_index_map(cells_to_keep: &IndexSet<u32>) -> Vec<u32> {
+    let kept: Vec<usize> = cells_to_keep.iter().map(|&c| c as usize).collect();
+    dense_index_map(&kept)
+}
+
+/// Dense gene map from a per-file `local -> final` mapping.
+///
+/// ### Params
+///
+/// * `mapping` - `Some(final)` for kept local genes, `None` otherwise
+///
+/// ### Returns
+///
+/// `map[local] = final`, [`INDEX_DROPPED`] for dropped genes.
+pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
+    mapping
+        .iter()
+        .map(|g| g.map_or(INDEX_DROPPED, |g| g as u32))
+        .collect()
+}
+
+/// Look up an index in a dense index map.
+///
+/// ### Params
+///
+/// * `map` - Dense map from [`dense_index_map`] or a sibling
+/// * `i` - Old index
+///
+/// ### Returns
+///
+/// The new index, or `None` if `i` is dropped or past the end of the map.
+#[inline]
+pub fn remap(map: &[u32], i: usize) -> Option<u32> {
+    match map.get(i) {
+        Some(&m) if m != INDEX_DROPPED => Some(m),
+        _ => None,
+    }
+}
 
 ///////////////////
 // Count wrapper //
@@ -886,11 +960,7 @@ impl CsrCellChunk {
             .filter(|&i| no_cells_exp_gene[i] >= cell_qc.min_cells)
             .collect();
 
-        // create index mapping: old gene index -> new gene index
-        let mut gene_index_map = vec![None; n_genes];
-        for (new_idx, &old_idx) in genes_to_keep.iter().enumerate() {
-            gene_index_map[old_idx] = Some(new_idx);
-        }
+        let gene_map = dense_index_map(&genes_to_keep);
 
         // Process cells
         let results: Vec<_> = (0..n_cells)
@@ -903,8 +973,8 @@ impl CsrCellChunk {
                 let mut filtered_indices = Vec::new();
 
                 for idx in start_i..end_i {
-                    let old_gene_idx = sparse_data.indices[idx] as usize;
-                    if let Some(new_gene_idx) = gene_index_map[old_gene_idx] {
+                    if let Some(new_gene_idx) = remap(&gene_map, sparse_data.indices[idx] as usize)
+                    {
                         filtered_data.push(sparse_data.data[idx].clone().into());
                         filtered_indices.push(new_gene_idx);
                     }
@@ -971,21 +1041,17 @@ impl CsrCellChunk {
     ///
     /// * `genes_to_keep` - Keep only the genes within this boolean vectors.
     pub fn filter_genes(&mut self, genes_to_keep: &[bool]) {
-        let mut index_map = vec![None; genes_to_keep.len()];
-        let mut new_idx = 0;
-        for (old_idx, &keep) in genes_to_keep.iter().enumerate() {
-            if keep {
-                index_map[old_idx] = Some(new_idx);
-                new_idx += 1;
-            }
-        }
+        let kept: Vec<usize> = (0..genes_to_keep.len())
+            .filter(|&i| genes_to_keep[i])
+            .collect();
+        let gene_map = dense_index_map(&kept);
 
         let mut new_indices = Vec::new();
         let mut new_norm = Vec::new();
         let mut keep_positions = Vec::new();
 
         for (i, &gene_idx) in self.indices.iter().enumerate() {
-            if let Some(new_gene_idx) = index_map[gene_idx as usize] {
+            if let Some(new_gene_idx) = remap(&gene_map, gene_idx as usize) {
                 new_indices.push(new_gene_idx);
                 new_norm.push(self.data_norm[i]);
                 keep_positions.push(i);
@@ -1181,10 +1247,7 @@ impl CscGeneChunk {
     /// * `cell_map` - `cell_map[cell] = output row`, [`INDEX_DROPPED`] or out
     ///   of range for cells not kept.
     pub fn filter_selected_cells_dense(&mut self, cell_map: &[u32]) {
-        self.filter_cells_by(|cell| match cell_map.get(cell as usize) {
-            Some(&row) if row != INDEX_DROPPED => Some(row),
-            _ => None,
-        });
+        self.filter_cells_by(|cell| remap(cell_map, cell as usize));
     }
 
     /// Keep the entries whose cell maps to an output row, renumbered to it.
@@ -1678,7 +1741,6 @@ impl CsrCellChunk {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::store::writer::keep_set_index_map;
     use bincode::{config, decode_from_slice, serde::encode_to_vec};
 
     /// Build a cell chunk from raw counts and gene indices.

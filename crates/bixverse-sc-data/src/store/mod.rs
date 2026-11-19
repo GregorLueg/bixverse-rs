@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod chunk;
+pub mod convert;
 pub mod gene_file;
 pub mod in_memory;
 pub mod interval_index;
@@ -27,5 +28,5 @@ pub const SC_FILE_VERSION: u32 = 5;
 pub const SC_FILE_VERSION_V4: u32 = 4;
 
 /// v3: absolute `u32` indices, normalised layer stored. Only the converters
-/// read it; [`v4::upgrade_store_to_v5`] converts it.
+/// read it; [`convert::upgrade_store_to_v5`] converts it.
 pub const SC_FILE_VERSION_V3: u32 = 3;

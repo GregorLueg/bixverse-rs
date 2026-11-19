@@ -27,9 +27,10 @@ use bixverse_sc_data::obs_var::{
 use bixverse_sc_data::prelude::CompressedSparseData2;
 use bixverse_sc_data::r_obj::write_r_counts;
 use bixverse_sc_data::store::archive::{archive_cell_file, restore_archive};
+use bixverse_sc_data::store::convert::upgrade_store_to_v5;
 use bixverse_sc_data::store::gene_file::{GENE_FILE_BYTES_PER_NNZ, write_gene_file};
 use bixverse_sc_data::store::merge::{BinMergeTask, merge_sc_bin_files};
-use bixverse_sc_data::store::v4::{parse_chunk_codec, upgrade_store_to_v5};
+use bixverse_sc_data::store::v4::parse_chunk_codec;
 use bixverse_sc_data::store::v5::set_cell_ids as v5_set_cell_ids;
 use bixverse_sc_data::store::{
     quality::{CellQuality, MinCellQuality},

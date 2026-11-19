@@ -31,8 +31,9 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::store::{
+    chunk::{dense_index_map, remap},
     quality::CellOnFileQuality,
-    writer::{CellGeneSparseWriter, INDEX_DROPPED, compress_cell_row, dense_index_map},
+    writer::{CellGeneSparseWriter, compress_cell_row},
 };
 
 ///////////////
@@ -1496,9 +1497,6 @@ impl MtxReader {
 
         let cell_map = dense_index_map(kept);
         let gene_map = dense_index_map(&quality.genes_to_keep);
-        let lookup = |map: &[u32], i: u32| -> Option<u32> {
-            map.get(i as usize).copied().filter(|&m| m != INDEX_DROPPED)
-        };
 
         let mut writer =
             CellGeneSparseWriter::new(bin_path, true, n_kept_cells, n_kept_genes, target_size)?;
@@ -1550,7 +1548,7 @@ impl MtxReader {
                         row.clear();
                         for r in run_start(kept[k])..run_start(kept[k] + 1) {
                             let at = r * BUCKET_RECORD_LEN;
-                            if let Some(g) = lookup(&gene_map, word(at + 4)) {
+                            if let Some(g) = remap(&gene_map, word(at + 4) as usize) {
                                 row.push((g, word(at + 8)));
                             }
                         }
@@ -1564,8 +1562,8 @@ impl MtxReader {
                         let word =
                             |k: usize| u32::from_le_bytes(r[k..k + 4].try_into().expect("4 bytes"));
                         Some((
-                            lookup(&cell_map, word(0))?,
-                            lookup(&gene_map, word(4))?,
+                            remap(&cell_map, word(0) as usize)?,
+                            remap(&gene_map, word(4) as usize)?,
                             word(8),
                         ))
                     })
@@ -2106,10 +2104,7 @@ mod tests {
 
         let mut stats = vec![(0usize, 0u64); n_cells];
         for &(c, g, v) in entries {
-            if gene_map
-                .get(g as usize)
-                .is_some_and(|&m| m != INDEX_DROPPED)
-            {
+            if remap(&gene_map, g as usize).is_some() {
                 stats[c as usize].0 += 1;
                 stats[c as usize].1 += v as u64;
             }
@@ -2123,11 +2118,9 @@ mod tests {
 
         let mut rows: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells.len()];
         for &(c, g, v) in entries {
-            let (Some(&nc), Some(&ng)) = (cell_map.get(c as usize), gene_map.get(g as usize))
-            else {
-                continue;
-            };
-            if nc != INDEX_DROPPED && ng != INDEX_DROPPED {
+            if let (Some(nc), Some(ng)) =
+                (remap(&cell_map, c as usize), remap(&gene_map, g as usize))
+            {
                 rows[nc as usize].push((ng, v));
             }
         }

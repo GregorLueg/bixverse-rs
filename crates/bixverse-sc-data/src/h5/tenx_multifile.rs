@@ -26,6 +26,7 @@ use crate::h5::filters::check_tenx_filters;
 use crate::h5::h5ad::write_h5_cell_major_cells;
 use crate::h5::tenx::{TenxVersion, de_tenx_version, validate_feature_types_tenx};
 use crate::prelude::*;
+use crate::store::chunk::dense_gene_map_from_options;
 use crate::store::{quality::*, writer::*};
 
 ////////////////
