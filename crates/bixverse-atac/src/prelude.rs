@@ -25,6 +25,7 @@ pub use crate::processing::counting::{
 pub use crate::processing::features::{
     FeatureTotals, TopFeatureCutoff, feature_total_stats, select_top_features,
 };
+pub use crate::processing::links::{LinkParams, PeakGeneLink, peak_to_gene_links};
 pub use crate::processing::lsi::{
     LsiParams, LsiResult, TF_IDF_SCALE, lsi_on_matrix, lsi_on_store, project_lsi, read_tf_idf,
     set_tf_idf_on_store,

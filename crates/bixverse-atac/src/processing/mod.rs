@@ -5,6 +5,7 @@
 pub mod amulet;
 pub mod counting;
 pub mod features;
+pub mod links;
 pub mod lsi;
 pub mod profiles;
 pub mod qc;
