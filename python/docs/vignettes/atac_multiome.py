@@ -2,13 +2,13 @@
 # # Joint RNA and ATAC analysis with bixverse
 #
 # *Follows Signac's
-# [10x multiome vignette](https://stuartlab.org/signac/articles/pbmc_multiomic)
-# on the same data.*
+# [10x multiome vignette](https://stuartlab.org/signac/articles/pbmc_multiomic),
+# on the smaller 3k sibling of its data set.*
 #
 # ## Intro
 #
 # 10x multiome measures gene expression and chromatin accessibility in the
-# same nuclei. This vignette takes the 10k PBMC granulocyte-sorted data set
+# same nuclei. This vignette takes the unsorted 3k PBMC data set
 # (Cell Ranger ARC 2.0.0) through the steps of the Signac vignette: fragment
 # QC, multiplet calls, peak calling per cluster, TF-IDF and LSI, the weighted
 # nearest neighbour graph over both modalities, gene activity and label
@@ -35,15 +35,15 @@ import bixverse.embed
 # %% [markdown]
 # ## The data
 #
-# Four files from the 10x data set page: the filtered feature barcode matrix
-# (RNA and Cell Ranger's peak counts in one h5), the fragment file with its
-# tabix index, and the GENCODE v32 annotation Cell Ranger ARC's GRCh38
-# reference was built from.
+# `download_pbmc_multiome` fetches the files from the 10x data set page: the
+# filtered feature barcode matrix (RNA and Cell Ranger's peak counts in one
+# h5), the fragment file with its tabix index, Cell Ranger's peaks and the
+# GENCODE v32 annotation Cell Ranger ARC's GRCh38 reference was built from.
 
 # %%
-data_dir = Path.home() / "data" / "bixverse" / "atac"
-h5_path = data_dir / "pbmc_granulocyte_sorted_10k_filtered_feature_bc_matrix.h5"
-fragments = data_dir / "pbmc_granulocyte_sorted_10k_atac_fragments.tsv.gz"
+data_dir = bv.io.download_pbmc_multiome()
+h5_path = data_dir / "pbmc_unsorted_3k_filtered_feature_bc_matrix.h5"
+fragments = data_dir / "pbmc_unsorted_3k_atac_fragments.tsv.gz"
 gtf = data_dir / "gencode.v32.primary_assembly.annotation.gtf.gz"
 
 tempdir = tempfile.TemporaryDirectory()
@@ -104,7 +104,7 @@ print(f"{amulet['amulet_multiplet'].sum()} of {amulet.height} cells called multi
 # %% [markdown]
 # ### Thresholds
 #
-# Signac's thresholds for this data set on the ATAC side: `1800 < nCount <
+# Signac's thresholds for the 10k sibling on the ATAC side: `1800 < nCount <
 # 1e5` peak counts, nucleosome signal under 2, TSS enrichment over 1. On the
 # RNA side we flag MAD outliers on library size and genes, and cells above
 # 3 MADs of mitochondrial share.
