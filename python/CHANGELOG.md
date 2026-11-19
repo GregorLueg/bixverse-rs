@@ -67,6 +67,9 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 
 - `csc_mem_gb` also bounds the transpose of a streamed CSC h5ad, which held it
   whole before.
+- `scrublet`, `boost`, `scdblfinder` and the GPU `scrublet` read a small cell
+  selection, such as one `group_by` group, from the cell-based store instead
+  of sweeping the gene-based one (#134). Same results at the same seed.
 
 **Notes**
 

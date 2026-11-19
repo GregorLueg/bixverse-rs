@@ -54,6 +54,10 @@
   defaults.
 - `KMeansSpec` takes `k_means_algorithm` (`"emeans"` or `"lloyd"`) and
   `e_means_epochs`; `parse_kmeans_algorithm()` parses the first.
+- `run_scrublet_on_store()`, `run_boost_on_store()`,
+  `run_scdblfinder_on_store()` and `run_scrublet_gpu_on_store()` take the
+  store paths and read a small cell selection from the cell-based store
+  instead of sweeping the gene-based one (#134). Same results at the same seed.
 
 ### Changed results
 
