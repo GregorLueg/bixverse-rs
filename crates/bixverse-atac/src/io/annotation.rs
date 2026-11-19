@@ -6,14 +6,14 @@
 //! the gene span is used as is. GTF coordinates are 1-based closed and are
 //! converted to BED on reading.
 
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::Path;
 
-use flate2::read::MultiGzDecoder;
 use rustc_hash::FxHashMap;
 
 use bixverse_sc_data::store::interval_index::{Arm, FeatureInterval};
 
+use crate::io::open_text;
 use crate::prelude::*;
 
 ///////////
@@ -108,22 +108,15 @@ fn gtf_attribute<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
 ///
 /// ### Params
 ///
-/// * `path` - The GTF (`.gz` is inflated)
+/// * `path` - The GTF, plain or gzip (by magic bytes)
 ///
 /// ### Returns
 ///
 /// One [`GeneRecord`] per `gene` row in file order, or an error for a
 /// malformed gene row or a file without gene rows.
 pub fn read_gtf_genes(path: &Path) -> Result<Vec<GeneRecord>, AtacErrors> {
-    let file = std::fs::File::open(path)?;
-    let gz = path.extension().is_some_and(|e| e == "gz");
-    let reader: Box<dyn BufRead> = if gz {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
     let mut genes = Vec::new();
-    for line in reader.lines() {
+    for line in open_text(path)?.lines() {
         let line = line?;
         if line.starts_with('#') {
             continue;

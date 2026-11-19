@@ -45,7 +45,7 @@ use bixverse_sc_data::store::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::io::fragments::{FragmentBatch, fold_batch, plan_batches};
+use crate::io::fragments::{ChromAcc, FragmentBatch, extend_larger, fold_batch, plan_batches};
 use crate::prelude::*;
 
 mod pileup;
@@ -309,7 +309,7 @@ impl NarrowPeak {
     }
 }
 
-/// First fragments of one read, as `(start, length)`, at most
+/// First fragments of one batch read, as `(start, length)`, at most
 /// [`TAG_SIZE_SAMPLE`] per group and chromosome.
 type FirstFragments = Vec<FxHashMap<String, Vec<(u32, u32)>>>;
 

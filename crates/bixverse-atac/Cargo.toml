@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-atac"
-description = "Single cell ATAC-seq for bixverse: fragment ingest, QC, peak and tile counting, TF-IDF, LSI and gene activity."
+description = "Single cell ATAC-seq for bixverse: fragment and 10x peak ingest, QC, AMULET multiplets, peak calling, peak and tile counting, gene activity, TF-IDF, LSI and rLSI integration."
 keywords = ["bioinformatics", "single-cell", "atac-seq", "chromatin"]
 version.workspace = true
 edition.workspace = true

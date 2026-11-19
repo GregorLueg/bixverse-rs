@@ -6,68 +6,46 @@ use super::*;
 // Reading //
 /////////////
 
-/// One worker's tags while reading: per chromosome seen, per group.
-///
-/// Chromosomes are resolved once per run of fragments, never per fragment.
-#[derive(Default)]
-pub(super) struct ReadAcc {
-    /// Chromosomes seen, in the order first met.
-    pub(super) chroms: Vec<String>,
-    /// Tags, indexed `[chromosome][group]`.
-    pub(super) tags: Vec<Vec<Vec<u32>>>,
-    /// First fragments as `(start, length)`, indexed like `tags`; only
-    /// filled when the tag size is needed.
-    pub(super) first: Vec<Vec<Vec<(u32, u32)>>>,
+/// One chromosome's tags of one worker, per group.
+#[derive(Clone)]
+pub(super) struct GroupTags {
+    /// Tags per group.
+    pub(super) tags: Vec<Vec<u32>>,
+    /// First fragments as `(start, length)` per group; only filled when the
+    /// tag size is needed.
+    pub(super) first: Vec<Vec<(u32, u32)>>,
 }
 
-impl ReadAcc {
-    /// Index of a chromosome, adding it when new.
+impl GroupTags {
+    /// No tags yet.
     ///
     /// ### Params
     ///
-    /// * `chrom` - Chromosome
     /// * `n_groups` - Number of groups
     ///
     /// ### Returns
     ///
-    /// The index.
-    pub(super) fn chrom_index(&mut self, chrom: &str, n_groups: usize) -> usize {
-        match self.chroms.iter().position(|c| c == chrom) {
-            Some(i) => i,
-            None => {
-                self.chroms.push(chrom.to_string());
-                self.tags.push(vec![Vec::new(); n_groups]);
-                self.first.push(vec![Vec::new(); n_groups]);
-                self.chroms.len() - 1
-            }
+    /// Empty lists for every group.
+    pub(super) fn new(n_groups: usize) -> Self {
+        Self {
+            tags: vec![Vec::new(); n_groups],
+            first: vec![Vec::new(); n_groups],
         }
     }
 
-    /// Add another worker's tags.
+    /// Add another worker's tags of the same chromosome.
     ///
     /// ### Params
     ///
-    /// * `other` - The other accumulator
-    /// * `n_groups` - Number of groups
-    ///
-    /// ### Returns
-    ///
-    /// The union.
-    pub(super) fn merge(mut self, other: ReadAcc, n_groups: usize) -> ReadAcc {
-        for ((chrom, tags), first) in other.chroms.iter().zip(other.tags).zip(other.first) {
-            let i = self.chrom_index(chrom, n_groups);
-            for (a, mut b) in self.tags[i].iter_mut().zip(tags) {
-                if a.len() < b.len() {
-                    std::mem::swap(a, &mut b);
-                }
-                a.extend_from_slice(&b);
-            }
-            for (a, b) in self.first[i].iter_mut().zip(first) {
-                a.extend(b);
-                keep_first_fragments(a);
-            }
+    /// * `other` - The other worker's tags
+    pub(super) fn merge(&mut self, other: GroupTags) {
+        for (a, b) in self.tags.iter_mut().zip(other.tags) {
+            extend_larger(a, b);
         }
-        self
+        for (a, b) in self.first.iter_mut().zip(other.first) {
+            a.extend(b);
+            keep_first_fragments(a);
+        }
     }
 }
 
@@ -106,9 +84,9 @@ pub(super) fn read_tags(
     source: TagSource,
     track_first: bool,
 ) -> Result<(Vec<TagJob>, FirstFragments), AtacErrors> {
-    let fold = |acc: &mut ReadAcc, chrom: &str, frags: &[Fragment]| {
-        let ci = acc.chrom_index(chrom, n_groups);
-        let tags = &mut acc.tags[ci];
+    let fold = |acc: &mut ChromAcc<GroupTags>, chrom: &str, frags: &[Fragment]| {
+        let chrom_tags = acc.entry(chrom, || GroupTags::new(n_groups));
+        let tags = &mut chrom_tags.tags;
         for f in frags {
             let g = groups[f.cell as usize] as usize;
             tags[g].push(f.start);
@@ -117,7 +95,7 @@ pub(super) fn read_tags(
             }
         }
         if track_first {
-            let first = &mut acc.first[ci];
+            let first = &mut chrom_tags.first;
             for f in frags {
                 // runs reach a worker in any order, so keep the smallest
                 // starts seen, not the first ones
@@ -129,12 +107,15 @@ pub(super) fn read_tags(
             }
         }
     };
-    let reduce = |a: ReadAcc, b: ReadAcc| a.merge(b, n_groups);
-    let acc = fold_batch(path, batch, index, ReadAcc::default, fold, reduce)?;
+    let reduce = |mut a: ChromAcc<GroupTags>, b: ChromAcc<GroupTags>| {
+        a.merge(b, GroupTags::merge);
+        a
+    };
+    let acc = fold_batch(path, batch, index, ChromAcc::default, fold, reduce)?;
 
     let mut firsts: FirstFragments = vec![FxHashMap::default(); n_groups];
     let mut jobs = Vec::new();
-    for ((chrom, tags), first) in acc.chroms.into_iter().zip(acc.tags).zip(acc.first) {
+    for (chrom, GroupTags { tags, first }) in acc.chroms.into_iter().zip(acc.values) {
         for (g, mut f) in first.into_iter().enumerate() {
             if !f.is_empty() {
                 keep_first_fragments(&mut f);

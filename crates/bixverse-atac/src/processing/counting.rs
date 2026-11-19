@@ -18,7 +18,7 @@ use bixverse_sc_data::store::interval_index::{
 use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
 use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
-use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
+use crate::io::fragments::{BarcodeIndex, Fragment, extend_larger, fold_fragments};
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 
@@ -48,7 +48,8 @@ pub enum CountMode {
 ///
 /// ### Params
 ///
-/// * `s` - `"insertion"`, `"paired-insertion"` or `"fragment"`
+/// * `s` - `"insertion"`, `"paired-insertion"` or `"fragment"`; any case,
+///   `_` or `-`
 ///
 /// ### Returns
 ///
@@ -143,11 +144,8 @@ pub fn count_fragments(
             }
         },
         |mut a, b| {
-            for (x, mut y) in a.iter_mut().zip(b) {
-                if x.len() < y.len() {
-                    std::mem::swap(x, &mut y);
-                }
-                x.extend_from_slice(&y);
+            for (x, y) in a.iter_mut().zip(b) {
+                extend_larger(x, y);
             }
             a
         },
@@ -188,14 +186,14 @@ pub fn count_fragments(
 /// * `counts` - From [`count_fragments`]
 /// * `features` - The features the counts refer to, store order
 /// * `barcodes` - Cell IDs, store order
-/// * `kind` - [`FeatureKind::Peak`] or [`FeatureKind::Tile`] (or `Gene` for
-///   gene activity)
+/// * `kind` - [`FeatureKind::Peak`], [`FeatureKind::Tile`] or
+///   [`FeatureKind::GeneActivity`]
 /// * `target_size` - Target size of the log-CPM norm the store starts
 ///   with; irrelevant once TF-IDF is set
 /// * `cell_path` - Cell-based file to write
 /// * `gene_path` - Gene-based file to write
 /// * `max_nnz_in_memory` - Non-zeros per phase of the gene file conversion
-/// * `verbose` - Controls verbosity
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
 ///
 /// ### Returns
 ///
@@ -210,7 +208,7 @@ pub fn write_counts_store(
     cell_path: &str,
     gene_path: &str,
     max_nnz_in_memory: Option<usize>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<u64>, AtacErrors> {
     if counts.indices.len() != barcodes.len() || counts.n_features != features.len() {
         return Err(AtacErrors::InvalidArgument(format!(
@@ -229,13 +227,51 @@ pub fn write_counts_store(
         writer.write_cell_chunk(CsrCellChunk::from_data(cnt, idx, cell, target_size, true))?;
     }
     writer.finalise()?;
-    write_gene_file(cell_path, gene_path, max_nnz_in_memory, verbose)?;
+    finish_feature_store(
+        cell_path,
+        gene_path,
+        kind,
+        features,
+        barcodes,
+        max_nnz_in_memory,
+        verbose,
+    )?;
+    Ok(lib)
+}
 
+/// Turn a written cell file into a feature store: the gene file converted
+/// from it, then the feature kind, the interval index and the cell IDs in
+/// both headers.
+///
+/// ### Params
+///
+/// * `cell_path` - Cell-based file, already written
+/// * `gene_path` - Gene-based file to write
+/// * `kind` - Feature kind of the store
+/// * `features` - The features, store order
+/// * `barcodes` - Cell IDs, store order
+/// * `max_nnz_in_memory` - Non-zeros per phase of the gene file conversion
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `Ok(())`, or a write error.
+pub(crate) fn finish_feature_store(
+    cell_path: &str,
+    gene_path: &str,
+    kind: FeatureKind,
+    features: &[FeatureInterval],
+    barcodes: &[String],
+    max_nnz_in_memory: Option<usize>,
+    verbose: usize,
+) -> Result<(), AtacErrors> {
+    let verbose = parse_verbosity_level(verbose).normal_verbosity();
+    write_gene_file(cell_path, gene_path, max_nnz_in_memory, verbose)?;
     let paths = [cell_path, gene_path];
     set_feature_kind(&paths, kind)?;
     attach_interval_index(&paths, &GenomeIntervals::new(features)?)?;
     set_cell_ids(&paths, barcodes)?;
-    Ok(lib)
+    Ok(())
 }
 
 ///////////

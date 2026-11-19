@@ -142,7 +142,7 @@ fn main() {
         &cf,
         &gf,
         None,
-        false,
+        0,
     )
     .expect("write");
     report("write", t, "");

@@ -340,7 +340,7 @@ fn signac_peak_store(dir: &TempDir) -> (String, String) {
         &cf,
         &gf,
         None,
-        false,
+        0,
     )
     .unwrap();
     (cf, gf)

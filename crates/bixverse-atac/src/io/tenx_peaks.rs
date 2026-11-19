@@ -15,14 +15,13 @@ use bixverse_sc_data::h5::ann_store::AnnFile;
 use bixverse_sc_data::h5::tenx::{
     TenxVersion, resolve_tenx_version, validate_feature_types_tenx, write_h5_tenx_streaming,
 };
-use bixverse_sc_data::store::gene_file::write_gene_file;
-use bixverse_sc_data::store::interval_index::{
-    Arm, FeatureInterval, GenomeIntervals, attach_interval_index,
-};
+use bixverse_sc_data::store::interval_index::FeatureInterval;
 use bixverse_sc_data::store::quality::{CellOnFileQuality, MinCellQuality};
-use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
+use bixverse_sc_data::store::v5::FeatureKind;
 
+use crate::peaks::regions::region;
 use crate::prelude::*;
+use crate::processing::counting::finish_feature_store;
 use crate::processing::lsi::TF_IDF_SCALE;
 
 /// Feature type of the ATAC modality in a Cell Ranger ARC h5.
@@ -64,7 +63,7 @@ pub struct TenxPeakIngest {
 /// ### Returns
 ///
 /// `(chrom, start, end)` as written, or [`AtacErrors::IntervalParse`].
-pub fn parse_interval(s: &str) -> Result<(String, u32, u32), AtacErrors> {
+pub(crate) fn parse_interval(s: &str) -> Result<(String, u32, u32), AtacErrors> {
     let err = || AtacErrors::IntervalParse {
         interval: s.to_string(),
     };
@@ -122,7 +121,7 @@ fn barcode_columns(h5_barcodes: &[String], barcodes: &[String]) -> Result<Vec<us
 ///   the RNA store of the same experiment
 /// * `max_nnz_in_memory` - Non-zeros held per phase of the gene file
 ///   conversion, `None` for one phase
-/// * `verbose` - Controls verbosity
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
 ///
 /// ### Returns
 ///
@@ -134,7 +133,7 @@ pub fn tenx_peaks_to_store<P: AsRef<Path>>(
     gene_path: &str,
     barcodes: &[String],
     max_nnz_in_memory: Option<usize>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<TenxPeakIngest, AtacErrors> {
     let h5_path = h5_path.as_ref();
     let version = resolve_tenx_version(h5_path, None)?;
@@ -155,13 +154,7 @@ pub fn tenx_peaks_to_store<P: AsRef<Path>>(
         .iter()
         .map(|&r| {
             let (chrom, start, end) = parse_interval(all_intervals[r].trim())?;
-            Ok(FeatureInterval {
-                chrom,
-                start,
-                end,
-                strand: 0,
-                arm: Arm::Unknown,
-            })
+            Ok(region(&chrom, start, end))
         })
         .collect::<Result<Vec<_>, AtacErrors>>()?;
     drop(file);
@@ -180,14 +173,17 @@ pub fn tenx_peaks_to_store<P: AsRef<Path>>(
         version,
         &quality,
         cell_qc,
+        parse_verbosity_level(verbose).normal_verbosity(),
+    )?;
+    finish_feature_store(
+        cell_path,
+        gene_path,
+        FeatureKind::Peak,
+        &intervals,
+        barcodes,
+        max_nnz_in_memory,
         verbose,
     )?;
-    write_gene_file(cell_path, gene_path, max_nnz_in_memory, verbose)?;
-
-    let paths = [cell_path, gene_path];
-    set_feature_kind(&paths, FeatureKind::Peak)?;
-    attach_interval_index(&paths, &GenomeIntervals::new(&intervals)?)?;
-    set_cell_ids(&paths, barcodes)?;
 
     Ok(TenxPeakIngest {
         peak_names,

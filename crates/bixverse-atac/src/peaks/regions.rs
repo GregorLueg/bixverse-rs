@@ -5,14 +5,14 @@
 //! answers "which regions overlap `[s, e)`" without allocating, which the
 //! counting pass asks once or twice per fragment.
 
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::Path;
 
-use flate2::read::MultiGzDecoder;
 use rustc_hash::FxHashMap;
 
 use bixverse_sc_data::store::interval_index::{Arm, FeatureInterval};
 
+use crate::io::open_text;
 use crate::prelude::*;
 
 ///////////
@@ -40,7 +40,8 @@ pub fn region(chrom: &str, start: u32, end: u32) -> FeatureInterval {
     }
 }
 
-/// Read the first three columns of a BED file (plain or gzip).
+/// Read the first three columns of a BED file (plain, gzip or BGZF, by
+/// magic bytes).
 ///
 /// `#`, `track` and `browser` lines are skipped.
 ///
@@ -52,15 +53,8 @@ pub fn region(chrom: &str, start: u32, end: u32) -> FeatureInterval {
 ///
 /// The regions in file order, or an error for a malformed line.
 pub fn read_bed(path: &Path) -> Result<Vec<FeatureInterval>, AtacErrors> {
-    let file = std::fs::File::open(path)?;
-    let gz = path.extension().is_some_and(|e| e == "gz");
-    let reader: Box<dyn BufRead> = if gz {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
     let mut out = Vec::new();
-    for line in reader.lines() {
+    for line in open_text(path)?.lines() {
         let line = line?;
         let line = line.trim_end();
         if line.is_empty()
@@ -195,12 +189,16 @@ impl ChromRegions {
 }
 
 /// Overlap index over a feature set, by chromosome name.
+///
+/// Kept apart from the store's `GenomeIntervals`, which answers the same
+/// question: the fragment sweeps resolve the chromosome once per run of
+/// fragments here (a hash lookup) and then visit overlaps through a callback
+/// without allocating, where `GenomeIntervals` looks the chromosome up by a
+/// linear scan and returns a `Vec` on every query.
 #[derive(Clone, Debug, Default)]
 pub struct RegionIndex {
     /// Regions per chromosome.
     chroms: FxHashMap<String, ChromRegions>,
-    /// Number of features indexed.
-    n_features: usize,
 }
 
 impl RegionIndex {
@@ -234,10 +232,7 @@ impl RegionIndex {
                 (name, cr)
             })
             .collect();
-        Self {
-            chroms,
-            n_features: regions.len(),
-        }
+        Self { chroms }
     }
 
     /// Regions of one chromosome.
@@ -252,15 +247,6 @@ impl RegionIndex {
     #[inline]
     pub fn chrom(&self, chrom: &str) -> Option<&ChromRegions> {
         self.chroms.get(chrom)
-    }
-
-    /// Number of features indexed.
-    ///
-    /// ### Returns
-    ///
-    /// The count.
-    pub fn n_features(&self) -> usize {
-        self.n_features
     }
 }
 

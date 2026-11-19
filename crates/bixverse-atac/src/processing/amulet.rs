@@ -1,5 +1,6 @@
 //! Multiplet detection from fragment overlaps, after AMULET (Thibodeau et
-//! al., Genome Biology, 2021). Implemented from the paper only.
+//! al., Genome Biology, 2021). Clean room from the paper; behaviour the paper
+//! leaves open matches the reference implementation run as a black box.
 //!
 //! A diploid nucleus holds at most two copies of a locus, so it should never
 //! yield more than two overlapping fragments at one position. Per cell, the
@@ -21,7 +22,7 @@ use bixverse_sc_data::store::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use statrs::distribution::{DiscreteCDF, Poisson};
 
-use crate::io::fragments::{fold_batch, plan_batches};
+use crate::io::fragments::{ChromAcc, extend_larger, fold_batch, plan_batches};
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 
@@ -151,35 +152,13 @@ type CellSite = (u32, u32, u32);
 /// The fragments of one read, per chromosome, and per-cell valid counts.
 #[derive(Default)]
 struct OverlapAcc {
-    /// Chromosomes seen, in the order first met.
-    chroms: Vec<String>,
     /// Valid fragments as `(cell, start, end)`, per chromosome.
-    frags: Vec<Vec<(u32, u32, u32)>>,
+    frags: ChromAcc<Vec<(u32, u32, u32)>>,
     /// Valid fragments per cell; empty until the first one.
     n_valid: Vec<u32>,
 }
 
 impl OverlapAcc {
-    /// Index of a chromosome, adding it when new.
-    ///
-    /// ### Params
-    ///
-    /// * `chrom` - Chromosome
-    ///
-    /// ### Returns
-    ///
-    /// The index.
-    fn chrom_index(&mut self, chrom: &str) -> usize {
-        match self.chroms.iter().position(|c| c == chrom) {
-            Some(i) => i,
-            None => {
-                self.chroms.push(chrom.to_string());
-                self.frags.push(Vec::new());
-                self.chroms.len() - 1
-            }
-        }
-    }
-
     /// Add another worker's fragments.
     ///
     /// ### Params
@@ -190,13 +169,7 @@ impl OverlapAcc {
     ///
     /// The union.
     fn merge(mut self, other: OverlapAcc) -> OverlapAcc {
-        for (chrom, mut f) in other.chroms.iter().zip(other.frags) {
-            let i = self.chrom_index(chrom);
-            if self.frags[i].len() < f.len() {
-                std::mem::swap(&mut self.frags[i], &mut f);
-            }
-            self.frags[i].extend_from_slice(&f);
-        }
+        self.frags.merge(other.frags, extend_larger);
         if self.n_valid.len() < other.n_valid.len() {
             self.n_valid.resize(other.n_valid.len(), 0);
         }
@@ -365,9 +338,9 @@ fn merge_sites(mut loci: Vec<CellSite>) -> Vec<Vec<u32>> {
     sites
 }
 
-////////////
-// Tests  //
-////////////
+////////////////
+// Statistics //
+////////////////
 
 /// Poisson upper tails `P(X > x)` at the mean of `counts`, and their
 /// Benjamini-Hochberg q-values.
@@ -441,9 +414,9 @@ pub fn amulet(
                 if acc.n_valid.is_empty() {
                     acc.n_valid = vec![0; n_cells];
                 }
-                let i = acc.chrom_index(chrom);
+                let chrom_frags = acc.frags.entry(chrom, Vec::new);
                 for f in frags.iter().filter(|f| f.len() <= params.max_fragment_len) {
-                    acc.frags[i].push((f.cell, f.start, f.end));
+                    chrom_frags.push((f.cell, f.start, f.end));
                     acc.n_valid[f.cell as usize] += 1;
                 }
             },
@@ -452,7 +425,7 @@ pub fn amulet(
         for (a, b) in n_fragments.iter_mut().zip(&acc.n_valid) {
             *a += b;
         }
-        for (chrom, frags) in acc.chroms.into_iter().zip(acc.frags) {
+        for (chrom, frags) in acc.frags.chroms.into_iter().zip(acc.frags.values) {
             let drop_trailing =
                 !params.count_trailing_loci && last_used.as_deref() == Some(chrom.as_str());
             let loci = chromosome_overlaps(

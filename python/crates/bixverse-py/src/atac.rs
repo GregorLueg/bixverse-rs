@@ -18,7 +18,9 @@ use bixverse_atac::peaks::calling::{
 use bixverse_atac::peaks::regions::{genome_tiles, read_bed, reduce_regions, region};
 use bixverse_atac::processing::amulet::{AmuletParams, amulet};
 use bixverse_atac::processing::counting::{count_fragments, parse_count_mode, write_counts_store};
-use bixverse_atac::processing::features::feature_total_stats;
+use bixverse_atac::processing::features::{
+    TopFeatureCutoff, feature_total_stats, parse_top_feature_cutoff, select_top_features,
+};
 use bixverse_atac::processing::lsi::{
     LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
 };
@@ -366,7 +368,7 @@ pub fn atac_gene_activity_regions<'py>(
 /// * `f_path_genes` - Gene-based file to write
 /// * `barcodes` - Cells in store order
 /// * `max_mem_gb` - Budget of the gene file conversion
-/// * `verbose` - Controls verbosity
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
 ///
 /// ### Returns
 ///
@@ -392,7 +394,7 @@ pub fn atac_tenx_peaks_to_store<'py>(
                 genes,
                 &barcodes,
                 max_nnz(max_mem_gb),
-                verbose > 0,
+                verbose,
             )
         })
         .map_err(atac_err)?;
@@ -415,10 +417,10 @@ pub fn atac_tenx_peaks_to_store<'py>(
 /// * `start` - Feature starts
 /// * `end` - Feature ends
 /// * `mode` - `"insertion"`, `"paired-insertion"` or `"fragment"`
-/// * `kind` - `"peak"`, `"tile"` or `"gene"`
+/// * `kind` - `"peak"`, `"tile"` or `"gene_activity"`
 /// * `target_size` - Target size of the initial log-CPM norm
 /// * `max_mem_gb` - Budget of the gene file conversion
-/// * `verbose` - Controls verbosity
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
 ///
 /// ### Returns
 ///
@@ -466,7 +468,7 @@ pub fn atac_fragments_to_store<'py>(
                 cells,
                 genes,
                 max_nnz(max_mem_gb),
-                verbose > 0,
+                verbose,
             )?;
             Ok::<_, AtacErrors>((lib, nnz))
         })
@@ -738,23 +740,35 @@ pub fn atac_set_tf_idf<'py>(
     Ok(f64_array(py, &idf))
 }
 
-/// Total raw counts per feature and their empirical percentiles.
+/// Total raw counts per feature, their empirical percentiles and the top
+/// features (Signac `FindTopFeatures`).
 ///
 /// ### Params
 ///
 /// * `f_path_genes` - Gene-based file
 /// * `cells` - Cells to sum over, `None` for all
+/// * `min_cutoff` - `"q<N>"` keeps features above the N-th percentile, a
+///   number those with more counts, `None` or `"all"` every feature
 ///
 /// ### Returns
 ///
-/// Dict of `count` and `percentile` (`float64`).
+/// Dict of `count` and `percentile` (`float64`) and `top_feature` (`bool`).
 #[pyfunction]
-#[pyo3(signature = (f_path_genes, cells))]
+#[pyo3(signature = (f_path_genes, cells, min_cutoff = None))]
 pub fn atac_feature_totals<'py>(
     py: Python<'py>,
     f_path_genes: PathBuf,
     cells: Option<PyReadonlyArray1<'py, u32>>,
+    min_cutoff: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    let cutoff = match min_cutoff {
+        None => TopFeatureCutoff::All,
+        Some(s) => parse_top_feature_cutoff(s).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "min_cutoff must be 'qN' with N in [0, 100], a number or 'all', got '{s}'"
+            ))
+        })?,
+    };
     let cells = cells.map(|c| index_vec(&c)).transpose()?;
     let gf = path_str(&f_path_genes)?;
     let totals = py
@@ -763,9 +777,14 @@ pub fn atac_feature_totals<'py>(
             feature_total_stats(&reader, cells.as_deref())
         })
         .map_err(atac_err)?;
+    let mut top = vec![false; totals.count.len()];
+    for i in select_top_features(&totals, cutoff) {
+        top[i] = true;
+    }
     let out = PyDict::new(py);
     out.set_item("count", totals.count.into_pyarray(py))?;
     out.set_item("percentile", totals.percentile.into_pyarray(py))?;
+    out.set_item("top_feature", top.into_pyarray(py))?;
     Ok(out)
 }
 

@@ -17,7 +17,7 @@
 //! is dropped while parsing.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, Read};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -26,6 +26,7 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::io::open_text;
 use crate::prelude::*;
 
 /// BGZF blocks inflated per parallel task. Blocks hold up to 64 KiB of text,
@@ -115,24 +116,6 @@ impl<'a> BarcodeIndex<'a> {
             }
         }
         Ok(Self { map })
-    }
-
-    /// Number of barcodes.
-    ///
-    /// ### Returns
-    ///
-    /// The count.
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    /// Whether no barcode is indexed.
-    ///
-    /// ### Returns
-    ///
-    /// `true` for an empty index.
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     /// Position of a barcode.
@@ -463,9 +446,9 @@ const TABIX_META_BIN: u32 = 37450;
 
 /// Where one chromosome lies in a BGZF fragment file, from its tabix index.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChromSpan {
+pub(crate) struct ChromSpan {
     /// Chromosome name.
-    pub name: String,
+    pub(crate) name: String,
     /// Virtual offset of its first record.
     beg: u64,
     /// Virtual offset just past its last record.
@@ -478,7 +461,7 @@ impl ChromSpan {
     /// ### Returns
     ///
     /// The byte count.
-    pub fn compressed_bytes(&self) -> u64 {
+    pub(crate) fn compressed_bytes(&self) -> u64 {
         (self.end >> 16).saturating_sub(self.beg >> 16)
     }
 }
@@ -614,7 +597,7 @@ fn parse_tabix(raw: &[u8]) -> Result<Vec<ChromSpan>, AtacErrors> {
 ///
 /// The spans in file order; `None` when the file is not BGZF or has no
 /// index next to it. An error for an unreadable or malformed index.
-pub fn chrom_spans(path: &Path) -> Result<Option<Vec<ChromSpan>>, AtacErrors> {
+pub(crate) fn chrom_spans(path: &Path) -> Result<Option<Vec<ChromSpan>>, AtacErrors> {
     let mut tbi = path.as_os_str().to_owned();
     tbi.push(".tbi");
     let tbi = Path::new(&tbi);
@@ -645,7 +628,7 @@ pub fn chrom_spans(path: &Path) -> Result<Option<Vec<ChromSpan>>, AtacErrors> {
 ///
 /// The combined accumulator, or an I/O or parse error, or an error for an
 /// index that does not match the file.
-pub fn fold_fragment_spans<A, I, F, R>(
+pub(crate) fn fold_fragment_spans<A, I, F, R>(
     path: &Path,
     spans: &[ChromSpan],
     barcodes: &BarcodeIndex,
@@ -700,6 +683,86 @@ where
         });
     }
     fold_bgzf_segments(bytes, &blocks, &segments, barcodes, &init, &fold, &reduce)
+}
+
+/// Append `b` to `a`, keeping the larger of the two allocations: the merge
+/// step of the per-worker accumulators.
+///
+/// ### Params
+///
+/// * `a` - The vector to extend
+/// * `b` - The vector to append
+pub(crate) fn extend_larger<T: Copy>(a: &mut Vec<T>, mut b: Vec<T>) {
+    if a.len() < b.len() {
+        std::mem::swap(a, &mut b);
+    }
+    a.extend_from_slice(&b);
+}
+
+/// Per-chromosome values of one fold worker, chromosomes in the order first
+/// met. Runs of fragments resolve their chromosome once, by a linear scan:
+/// a worker sees few chromosomes.
+pub(crate) struct ChromAcc<T> {
+    /// Chromosomes seen.
+    pub(crate) chroms: Vec<String>,
+    /// One value per chromosome, parallel to `chroms`.
+    pub(crate) values: Vec<T>,
+}
+
+impl<T> Default for ChromAcc<T> {
+    /// No chromosomes.
+    ///
+    /// ### Returns
+    ///
+    /// The empty accumulator.
+    fn default() -> Self {
+        Self {
+            chroms: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+}
+
+impl<T> ChromAcc<T> {
+    /// The value of a chromosome, created with `new` when it is new.
+    ///
+    /// ### Params
+    ///
+    /// * `chrom` - Chromosome
+    /// * `new` - Value of a new chromosome
+    ///
+    /// ### Returns
+    ///
+    /// The chromosome's value.
+    pub(crate) fn entry(&mut self, chrom: &str, new: impl FnOnce() -> T) -> &mut T {
+        let i = match self.chroms.iter().position(|c| c == chrom) {
+            Some(i) => i,
+            None => {
+                self.chroms.push(chrom.to_string());
+                self.values.push(new());
+                self.values.len() - 1
+            }
+        };
+        &mut self.values[i]
+    }
+
+    /// Merge another worker's chromosomes in.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - The other accumulator
+    /// * `combine` - Merge of two values of one chromosome into the first
+    pub(crate) fn merge(&mut self, other: ChromAcc<T>, mut combine: impl FnMut(&mut T, T)) {
+        for (chrom, v) in other.chroms.into_iter().zip(other.values) {
+            match self.chroms.iter().position(|c| *c == chrom) {
+                Some(i) => combine(&mut self.values[i], v),
+                None => {
+                    self.chroms.push(chrom);
+                    self.values.push(v);
+                }
+            }
+        }
+    }
 }
 
 /// One read of a multi-pass method: some chromosomes through the index, or
@@ -796,16 +859,7 @@ where
 /// The chromosome, `None` for a file without fragment lines, or an I/O
 /// error.
 pub(crate) fn first_chromosome(path: &Path) -> Result<Option<String>, AtacErrors> {
-    let mut file = File::open(path)?;
-    let mut magic = [0u8; 2];
-    let gz = file.read(&mut magic)? == 2 && magic == [0x1f, 0x8b];
-    file.seek(SeekFrom::Start(0))?;
-    let reader: Box<dyn BufRead> = if gz {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
-    } else {
-        Box::new(BufReader::new(file))
-    };
-    for line in reader.lines() {
+    for line in open_text(path)?.lines() {
         let line = line?;
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -962,6 +1016,46 @@ where
     Ok(reduce(acc, rest))
 }
 
+/// Parse chunks of whole lines in parallel into one accumulator.
+///
+/// ### Params
+///
+/// * `chunks` - Text chunks, each cut at a line boundary
+/// * `barcodes` - Cells to keep
+/// * `init` - New accumulator
+/// * `fold` - Consumer
+/// * `reduce` - Merge
+///
+/// ### Returns
+///
+/// The combined accumulator, or a parse error.
+fn par_parse<C, A, I, F, R>(
+    chunks: &[C],
+    barcodes: &BarcodeIndex,
+    init: &I,
+    fold: &F,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    C: AsRef<[u8]> + Sync,
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    chunks
+        .par_iter()
+        .try_fold(
+            || (init(), Vec::new()),
+            |(mut acc, mut buf), chunk| {
+                parse_lines(chunk.as_ref(), barcodes, &mut acc, fold, &mut buf)?;
+                Ok::<_, AtacErrors>((acc, buf))
+            },
+        )
+        .map(|r| r.map(|(acc, _)| acc))
+        .try_reduce(init, |a, b| Ok(reduce(a, b)))
+}
+
 /// [`fold_fragments`] on an uncompressed file.
 ///
 /// ### Params
@@ -998,17 +1092,7 @@ where
         chunks.push(&bytes[start..end]);
         start = end;
     }
-    chunks
-        .par_iter()
-        .try_fold(
-            || (init(), Vec::new()),
-            |(mut acc, mut buf), chunk| {
-                parse_lines(chunk, barcodes, &mut acc, fold, &mut buf)?;
-                Ok::<_, AtacErrors>((acc, buf))
-            },
-        )
-        .map(|r| r.map(|(acc, _)| acc))
-        .try_reduce(init, |a, b| Ok(reduce(a, b)))
+    par_parse(&chunks, barcodes, init, fold, reduce)
 }
 
 /// [`fold_fragments`] on a plain gzip file: one inflating thread, parallel
@@ -1071,17 +1155,7 @@ where
                 break;
             }
         }
-        let part = chunks
-            .par_iter()
-            .try_fold(
-                || (init(), Vec::new()),
-                |(mut acc, mut buf), chunk| {
-                    parse_lines(chunk, barcodes, &mut acc, fold, &mut buf)?;
-                    Ok::<_, AtacErrors>((acc, buf))
-                },
-            )
-            .map(|r| r.map(|(acc, _)| acc))
-            .try_reduce(init, |a, b| Ok(reduce(a, b)))?;
+        let part = par_parse(&chunks, barcodes, init, fold, reduce)?;
         acc = reduce(acc, part);
         chunks.clear();
     }
