@@ -220,6 +220,18 @@ def test_rna_methods_refuse_or_warn_on_gene_activity(exp):
     check_rna_counts(exp, "scrublet", refuse=True)
 
 
+def test_frip_counts_insertions_in_insertion_mode(exp):
+    atac.add_atac_fragments(exp, FIX / "fragments.tsv.gz", peaks=FIX / "peaks.bed")
+    assert exp.atac is not None and exp.atac.count_mode == "insertion"
+    qc = atac.atac_fragment_qc(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
+    lib = exp.obs(cols=["atac_lib_size"])["atac_lib_size"].to_numpy()
+    n = qc["atac_n_fragments"].to_numpy()
+    frip = qc["atac_frip"].to_numpy()
+    ok = n > 0
+    np.testing.assert_allclose(frip[ok], lib[ok] / (2.0 * n[ok]), rtol=1e-12)
+    assert frip[ok].max() <= 1.0
+
+
 def test_differential_accessibility_reads_the_peaks(exp):
     with pytest.raises(ValueError, match="No ATAC"):
         bv.de.find_markers(exp, [0], [1], modality="atac")
