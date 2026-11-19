@@ -233,24 +233,6 @@ impl NormKind {
     }
 }
 
-/// Parse a norm kind name.
-///
-/// ### Params
-///
-/// * `s` - One of `"none"`, `"log_cpm"` or `"tf_idf"`
-///
-/// ### Returns
-///
-/// The [`NormKind`], or `None` for anything else.
-pub fn parse_norm_kind(s: &str) -> Option<NormKind> {
-    match s {
-        "none" => Some(NormKind::None),
-        "log_cpm" => Some(NormKind::LogCpm),
-        "tf_idf" => Some(NormKind::TfIdf),
-        _ => None,
-    }
-}
-
 /// What a tail section holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SectionKind {

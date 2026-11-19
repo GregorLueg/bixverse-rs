@@ -36,7 +36,8 @@ pub struct TenxDenseModality {
 /// Extract one modality (e.g. "Antibody Capture") as a dense matrix.
 ///
 /// ADT-style modalities are small and near-dense, so the streaming binary
-/// path is unnecessary.
+/// path is unnecessary. The R package calls this; there is no caller in the
+/// workspace.
 ///
 /// ### Params
 ///

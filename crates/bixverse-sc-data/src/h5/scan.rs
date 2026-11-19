@@ -10,17 +10,6 @@ use crate::h5::ann_store::{AnnFile, NodeKind};
 use crate::h5::h5ad::{H5ADFormat, RawDataSlot};
 use crate::prelude::*;
 
-////////////
-// Consts //
-////////////
-
-/// Values sampled per slot by [detect_raw_count_slot] in the R package.
-pub const RAW_SLOT_N_SAMPLE: usize = 10_000;
-
-/// Fraction of sampled non-zeros that must be whole numbers for a slot to
-/// count as raw, as in the R package.
-pub const RAW_SLOT_THRESHOLD: f64 = 0.99;
-
 ////////////////
 // Structures //
 ////////////////

@@ -1293,25 +1293,6 @@ impl CscGeneChunk {
 
         (self.original_index, avg)
     }
-
-    /// Transform the chunk to a sparse Axis of CSC type
-    ///
-    /// ### Params
-    ///
-    /// * `n_cells` - Number of cells represented in the data
-    ///
-    /// ### Returns
-    ///
-    /// `SparseAxis` with u32 in the main slot and f32 in the data_2 layer.
-    pub fn to_sparse_axis(&self, n_cells: usize) -> SparseAxis<u32, f32> {
-        let raw_u32: Vec<u32> = self.data_raw.iter().collect();
-        SparseAxis::new_csc(
-            self.indices.iter().map(|x| *x as usize).collect(),
-            raw_u32,
-            Some(self.data_norm.clone()),
-            n_cells,
-        )
-    }
 }
 
 /// SparseDataHeader

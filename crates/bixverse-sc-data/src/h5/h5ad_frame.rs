@@ -392,6 +392,9 @@ pub fn read_h5ad_frame<P: AsRef<Path>>(h5_path: P, group: &str) -> Result<H5adFr
 
 /// Read one 1-D dataset or encoded column (categorical, nullable) at any path
 ///
+/// The R package uses it in place of rhdf5; there is no caller in the
+/// workspace.
+///
 /// Scalars are read from HDF5 only.
 ///
 /// ### Params
@@ -420,6 +423,8 @@ pub fn read_h5_column<P: AsRef<Path>>(
 }
 
 /// One member of an HDF5 group
+///
+/// Part of the API the R package uses in place of rhdf5.
 #[derive(Clone, Debug)]
 pub struct H5Member {
     /// Member name
@@ -431,6 +436,9 @@ pub struct H5Member {
 }
 
 /// List the groups and datasets directly inside a group
+///
+/// The R package uses it in place of rhdf5; there is no caller in the
+/// workspace.
 ///
 /// ### Params
 ///
@@ -470,6 +478,9 @@ pub fn list_h5_group<P: AsRef<Path>>(
 
 /// Read every attribute of a group or dataset
 ///
+/// The R package uses it in place of rhdf5; there is no caller in the
+/// workspace.
+///
 /// Scalar attributes come back as length-one columns. Attributes of an
 /// unsupported dtype are left out.
 ///
@@ -506,6 +517,9 @@ pub fn read_h5_attrs<P: AsRef<Path>>(
 
 /// Read a 2-D numeric dataset as `f64`
 ///
+/// The R package uses it in place of rhdf5; there is no caller in the
+/// workspace.
+///
 /// ### Params
 ///
 /// * `h5_path` - The HDF5 file
@@ -535,6 +549,8 @@ pub fn read_h5_matrix<P: AsRef<Path>>(
 ////////////
 
 /// The `X` matrix for [`write_h5ad_plain`]
+///
+/// Part of the API the R package uses in place of rhdf5.
 pub enum PlainX<'a> {
     /// Cell-major sparse: `indptr` over cells, `indices` are genes
     Csr {
@@ -614,6 +630,9 @@ fn write_column(g: &Group, name: &str, col: &ColumnData) -> Result<(), ScDataErr
 }
 
 /// Write a minimal h5ad file: `X` plus `obs` / `var` as plain datasets
+///
+/// The R package uses it in place of rhdf5; there is no caller in the
+/// workspace.
 ///
 /// No anndata encoding attributes are written; this is the bare layout older
 /// tools produce, used for test fixtures. The first column of `obs` and `var`

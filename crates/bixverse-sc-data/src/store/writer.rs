@@ -278,7 +278,8 @@ impl CellGeneSparseWriter {
     ///
     /// * `feature_kind` - What the features are
     /// * `norm_kind` - How the norm derives from the raw counts. TF-IDF needs
-    ///   [`Self::set_idf`] before the norm can be read.
+    ///   its IDF ([`crate::store::v5::set_tf_idf`]) before the norm can be
+    ///   read.
     ///
     /// ### Returns
     ///
@@ -297,7 +298,8 @@ impl CellGeneSparseWriter {
     /// Set the number of raw layers per chunk (v5).
     ///
     /// A store with more than one layer is written with
-    /// [`Self::write_cell_layers`] / [`Self::write_gene_layers`].
+    /// [`Self::write_cell_layers`]; [`crate::store::gene_file::write_gene_file`]
+    /// carries every layer into the gene file.
     ///
     /// ### Params
     ///
@@ -333,29 +335,6 @@ impl CellGeneSparseWriter {
     pub fn set_cell_ids<S: AsRef<str>>(&mut self, ids: &[S]) -> Result<(), ScDataErrors> {
         self.require_v5()?;
         self.cell_id_hash = cell_id_hash(ids);
-        Ok(())
-    }
-
-    /// Set the per-feature IDF of a TF-IDF store (v5).
-    ///
-    /// ### Params
-    ///
-    /// * `idf` - One value per feature
-    ///
-    /// ### Returns
-    ///
-    /// `Ok(())`, or an error unless the writer writes v5 or for a length
-    /// other than the feature count.
-    pub fn set_idf(&mut self, idf: Vec<f32>) -> Result<(), ScDataErrors> {
-        self.require_v5()?;
-        if idf.len() != self.total_genes {
-            return Err(ScDataErrors::InvalidArgument(format!(
-                "IDF has {} values for {} features",
-                idf.len(),
-                self.total_genes
-            )));
-        }
-        self.idf = Some(idf);
         Ok(())
     }
 
@@ -587,32 +566,6 @@ impl CellGeneSparseWriter {
             .encode_layers(indices, layers, original_index, to_keep)?;
         let library_size = layers[0].iter().map(|&x| x as usize).sum();
         self.append_cell(&bytes, original_index, library_size)
-    }
-
-    /// Write a gene (feature) with all its raw layers (v5).
-    ///
-    /// ### Params
-    ///
-    /// * `original_index` - Index of the gene
-    /// * `indices` - Cell indices, ascending
-    /// * `layers` - The store's raw layers, each as long as `indices`
-    ///
-    /// ### Returns
-    ///
-    /// `Ok(())`, or an error for a cell-based writer or a layer count other
-    /// than the store's.
-    pub fn write_gene_layers(
-        &mut self,
-        original_index: usize,
-        indices: &[u32],
-        layers: &[&[u32]],
-    ) -> Result<(), ScDataErrors> {
-        self.check_mode(false)?;
-        self.check_layer_count(layers.len())?;
-        let bytes = self
-            .format()
-            .encode_layers(indices, layers, original_index, true)?;
-        self.append_compressed(&bytes, original_index)
     }
 
     /// Error unless the store has one raw layer, which the chunk-struct
