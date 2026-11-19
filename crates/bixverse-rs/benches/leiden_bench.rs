@@ -31,6 +31,8 @@
 //! * `LEIDEN_BENCH_LOCAL_MOVING` - `queue` (default) or `coloured`
 //! * `LEIDEN_BENCH_ONLY` - comma-separated subset of
 //!   `level0,iters,stable,louvain`
+//! * `LEIDEN_BENCH_LABELS_DIR` - write each row's labels there, one file per
+//!   row, for comparing partitions across runs
 
 use std::hash::BuildHasher;
 use std::hint::black_box;
@@ -207,8 +209,14 @@ where
         "{:<26} {:>9} {:>9} {:>10} {:>6} {:>9} {:>9} {:>17}",
         "config", "median s", "marg s", "modularity", "k", "ARI ref", "ARI truth", "labels hash"
     );
+    let labels_dir = std::env::var("LEIDEN_BENCH_LABELS_DIR").ok();
     let mut prev_iter_time = 0.0;
     for (i, c) in configs.iter().enumerate() {
+        if let Some(dir) = &labels_dir {
+            let body: String = labels[i].iter().map(|l| format!("{l}\n")).collect();
+            let file = format!("{dir}/{}.txt", c.name.replace([' ', '='], "_"));
+            std::fs::write(file, body).expect("write labels");
+        }
         let t = median(&times[i]);
         let marg = if c.name.starts_with("leiden it=") {
             let m = t - prev_iter_time;
