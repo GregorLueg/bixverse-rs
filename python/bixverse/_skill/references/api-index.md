@@ -24,7 +24,7 @@ Single-cell streaming for Python, in Rust.
 - `ScCache`: Analysis results held in memory.
 - `ScMap`: Ids and index sets of an experiment.
 - `SingleCells`: A single cell experiment on disk.
-- `SingleCellsMultiModal`: A single cell experiment with RNA and ADT.
+- `SingleCellsMultiModal`: A single cell experiment with RNA plus ADT and / or ATAC.
 - `SingleCellsSubset`: The cells of one level of an obs column.
 - `SparseFileError`: A sparse store is missing, truncated, corrupt, or of the wrong format version or layout.
 - `Stamp`: Provenance of one cached artefact.
@@ -223,7 +223,7 @@ Marker genes, donor-aware differential expression and differential abundance.
 
 ## bv.annotate
 
-Cell type annotation with ScType and reference mapping with Symphony.
+Cell type annotation with ScType, reference mapping with Symphony and Seurat.
 
 - `CellMarkers`: The marker genes of one cell type, one entry of the
 - `ScTypeCellResults`: Per-cell ScType calls.
@@ -243,6 +243,7 @@ Cell type annotation with ScType and reference mapping with Symphony.
 - `prepare_cell_markers`: Marker genes per cell type.
 - `save_symphony_ref`: Write a reference to one `.npz`, readable without pickling.
 - `score_clusters`: One ScType call per cluster.
+- `transfer_labels_seurat`: Seurat label transfer: CCA anchors, then `TransferData`.
 - `transfer_labels_symphony`: kNN majority vote of reference labels onto a mapped query.
 
 ## bv.pathways
@@ -380,6 +381,24 @@ Multi-modal single cell: ADT counts, their PCA and the WNN graph.
 - `get_wnn_weights`: The per-cell modality weights of the WNN integration.
 - `new_adt_counts_clr`: CLR-normalised ADT counts.
 - `new_adt_counts_dsb`: DSB-normalised ADT counts.
+
+## bv.atac
+
+Single cell ATAC: peak or tile counts next to the RNA, QC, TF-IDF and LSI.
+
+- `AtacInfo`: What the ATAC store holds and how far it was processed.
+- `add_atac_fragments`: Count a fragment file into peaks or genome tiles as the ATAC store.
+- `add_atac_tenx`: Add the `Peaks` of a 10x multiome h5 as the ATAC store.
+- `amulet`: Flag multiplets from fragment overlaps (AMULET), written to obs.
+- `atac_fragment_qc`: Per-cell QC from the fragment file, written to obs.
+- `calculate_lsi`: LSI over the TF-IDF of the kept cells (Signac `RunSVD`).
+- `call_peaks`: Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
+- `find_top_features`: The most accessible features (Signac `FindTopFeatures`).
+- `gene_activity`: Count fragments over gene body plus promoter into a gene activity store.
+- `get_lsi_depth_cor`: Correlation of each LSI component with the library size.
+- `project_lsi`: Project the query's kept cells onto the reference LSI.
+- `run_rlsi`: rLSI integration (Signac's `FindIntegrationAnchors(reduction = "rlsi")`
+- `run_tfidf`: Switch the ATAC store to TF-IDF over the kept cells (Signac method 1).
 
 ## bv.pipeline
 
