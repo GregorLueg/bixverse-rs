@@ -9,6 +9,7 @@
 use std::io::BufRead;
 use std::path::Path;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use bixverse_sc_data::store::interval_index::{Arm, FeatureInterval};
@@ -305,6 +306,108 @@ pub fn tss_sites(
         .collect())
 }
 
+/// The gene closest to a region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosestGene {
+    /// Index of the gene in the gene list, `None` on a chromosome without
+    /// genes.
+    pub gene: Option<usize>,
+    /// Bases between the region and the gene body, 0 when they overlap or
+    /// touch.
+    pub distance: u32,
+    /// Signed distance from the region's centre to the gene's TSS, positive
+    /// downstream of the TSS on the gene's strand.
+    pub tss_distance: i64,
+}
+
+/// The closest gene body to every region (Signac `ClosestFeature`, on gene
+/// bodies).
+///
+/// Overlapping genes are at distance 0; among several, the first in the
+/// gene list wins, as among equally distant ones.
+///
+/// ### Params
+///
+/// * `regions` - The regions, e.g. peaks
+/// * `genes` - From [`read_gtf_genes`], already filtered as wanted
+///
+/// ### Returns
+///
+/// One [`ClosestGene`] per region, in region order.
+pub fn closest_genes(regions: &[FeatureInterval], genes: &[GeneRecord]) -> Vec<ClosestGene> {
+    // per chromosome: genes sorted by start, by end, and the longest gene
+    let mut by_chrom: FxHashMap<&str, (Vec<usize>, Vec<usize>, u32)> = FxHashMap::default();
+    for (i, g) in genes.iter().enumerate() {
+        let e = by_chrom.entry(g.chrom.as_str()).or_default();
+        e.0.push(i);
+        e.1.push(i);
+        e.2 = e.2.max(g.end - g.start);
+    }
+    for (by_start, by_end, _) in by_chrom.values_mut() {
+        by_start.sort_by_key(|&i| (genes[i].start, i));
+        by_end.sort_by_key(|&i| (genes[i].end, i));
+    }
+    regions
+        .par_iter()
+        .map(|r| {
+            let Some((by_start, by_end, max_len)) = by_chrom.get(r.chrom.as_str()) else {
+                return ClosestGene {
+                    gene: None,
+                    distance: 0,
+                    tss_distance: 0,
+                };
+            };
+            // the nearest gene ending at or before the region start, the
+            // nearest starting at or after its end, and any that overlap
+            let mut best: Option<(u32, usize)> = None;
+            let mut take = |d: u32, i: usize| {
+                if best.is_none_or(|(bd, bi)| (d, i) < (bd, bi)) {
+                    best = Some((d, i));
+                }
+            };
+            let k = by_end.partition_point(|&i| genes[i].end <= r.start);
+            if let Some(&i) = k.checked_sub(1).map(|k| &by_end[k]) {
+                let end = genes[i].end;
+                // every gene with this end is equally near
+                for &j in by_end[..k]
+                    .iter()
+                    .rev()
+                    .take_while(|&&j| genes[j].end == end)
+                {
+                    take(r.start - end, j);
+                }
+            }
+            let k = by_start.partition_point(|&i| genes[i].start < r.end);
+            if let Some(&i) = by_start.get(k) {
+                let start = genes[i].start;
+                for &j in by_start[k..]
+                    .iter()
+                    .take_while(|&&j| genes[j].start == start)
+                {
+                    take(start - r.end, j);
+                }
+            }
+            // only genes starting within the longest gene of the region can reach it
+            let lo =
+                by_start.partition_point(|&i| genes[i].start < r.start.saturating_sub(*max_len));
+            for &j in &by_start[lo..k] {
+                if genes[j].end > r.start {
+                    take(0, j);
+                }
+            }
+            let (distance, i) = best.expect("a chromosome entry holds at least one gene");
+            let g = &genes[i];
+            let centre = (r.start as i64 + r.end as i64) / 2;
+            let offset = centre - g.tss() as i64;
+            ClosestGene {
+                gene: Some(i),
+                distance,
+                tss_distance: if g.strand < 0 { -offset } else { offset },
+            }
+        })
+        .collect()
+}
+
 /// R's `make.unique`: later duplicates get `.1`, `.2`, ...
 ///
 /// ### Params
@@ -463,5 +566,36 @@ mod tests {
         // R: make.unique(c("a", "a", "b", "a", "a.1"))
         let names: Vec<String> = ["a", "a", "b", "a", "a.1"].map(String::from).to_vec();
         assert_eq!(make_unique(&names), vec!["a", "a.2", "b", "a.3", "a.1"]);
+    }
+
+    #[test]
+    fn test_closest_genes() {
+        let genes = vec![
+            gene("A", 100, 200, 1, ""),
+            gene("B", 500, 900, -1, ""),
+            gene("C", 520, 530, 1, ""),
+        ];
+        let r = |s, e| crate::peaks::regions::region("chr1", s, e);
+        let got = closest_genes(
+            &[r(150, 160), r(300, 320), r(440, 480), r(525, 527)],
+            &genes,
+        );
+        // inside A: 0 bases, centre 155 is 55 downstream of A's TSS at 100
+        assert_eq!(
+            (got[0].gene, got[0].distance, got[0].tss_distance),
+            (Some(0), 0, 55)
+        );
+        // 100 after A ends, 180 before B starts
+        assert_eq!((got[1].gene, got[1].distance), (Some(0), 100));
+        // 20 before B; B reads right to left from its TSS at 899, so centre 460
+        // lies 439 downstream
+        assert_eq!(
+            (got[2].gene, got[2].distance, got[2].tss_distance),
+            (Some(1), 20, 439)
+        );
+        // inside both B and C: the first in the list wins
+        assert_eq!((got[3].gene, got[3].distance), (Some(1), 0));
+        let other = crate::peaks::regions::region("chr9", 0, 10);
+        assert_eq!(closest_genes(&[other], &genes)[0].gene, None);
     }
 }

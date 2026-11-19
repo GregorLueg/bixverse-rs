@@ -10,7 +10,9 @@ pub use crate::integration::rlsi::{
 pub use crate::io::annotation::{
     GeneActivityParams, GeneRecord, gene_activity_regions, read_gtf_genes, tss_positions,
 };
-pub use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
+pub use crate::io::fragments::{
+    BarcodeIndex, Coverage, Fragment, barcode_fragment_counts, fold_fragments,
+};
 #[cfg(feature = "h5")]
 pub use crate::io::tenx_peaks::{TenxPeakIngest, tenx_peaks_to_store};
 pub use crate::peaks::calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};

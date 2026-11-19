@@ -254,6 +254,30 @@ impl RegionIndex {
     }
 }
 
+/// Whether each region overlaps any of another set, e.g. a blacklist.
+///
+/// ### Params
+///
+/// * `regions` - The regions to test
+/// * `other` - The set to test against
+///
+/// ### Returns
+///
+/// One flag per region, in region order.
+pub fn overlaps_any(regions: &[FeatureInterval], other: &[FeatureInterval]) -> Vec<bool> {
+    let index = RegionIndex::new(other);
+    regions
+        .iter()
+        .map(|r| {
+            let mut hit = false;
+            if let Some(c) = index.chrom(&r.chrom) {
+                c.for_each_overlap(r.start, r.end, |_| hit = true);
+            }
+            hit
+        })
+        .collect()
+}
+
 ///////////
 // Tests //
 ///////////
@@ -261,6 +285,18 @@ impl RegionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_overlaps_any() {
+        let black = vec![region("chr1", 100, 200), region("chr2", 0, 50)];
+        let peaks = vec![
+            region("chr1", 50, 101),
+            region("chr1", 200, 300),
+            region("chr2", 10, 20),
+            region("chr3", 0, 10),
+        ];
+        assert_eq!(overlaps_any(&peaks, &black), vec![true, false, true, false]);
+    }
 
     #[test]
     fn test_read_bed_takes_spaces_and_skips_empty_records() {
