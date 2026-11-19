@@ -107,6 +107,7 @@ rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+tempfile.workspace = true
 wide.workspace = true
 
 ###########

@@ -800,6 +800,7 @@ pub fn write_tenx_h5<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     /// The one-pass QC keeps exactly the cells and genes of the two-pass
     /// rule: genes of the asked modality in at least `min_cells` cells, then
@@ -863,7 +864,7 @@ mod tests {
             names: &names,
             feature_types: Some(&types),
         };
-        let path = std::env::temp_dir().join(format!("bixverse_tenx_qc_{}.h5", std::process::id()));
+        let path = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         write_tenx_h5(&path, TenxVersion::V3, &counts, &barcodes, &features).unwrap();
 
         let qc = MinCellQuality {
@@ -881,7 +882,6 @@ mod tests {
             false,
         )
         .unwrap();
-        let _ = std::fs::remove_file(&path);
 
         let genes: Vec<usize> = (0..30)
             .filter(|&g| dense.iter().filter(|r| r[g] > 0).count() >= qc.min_cells)
@@ -911,10 +911,7 @@ mod tests {
             feature_types: None,
         };
         for version in [TenxVersion::V3, TenxVersion::V2] {
-            let path = std::env::temp_dir().join(format!(
-                "bixverse_tenx_writer_{}_{version:?}.h5",
-                std::process::id()
-            ));
+            let path = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
             write_tenx_h5(&path, version, &counts, &s(&["c1", "c2"]), &features).unwrap();
 
             assert_eq!(detect_tenx_version(&path).unwrap(), version);
@@ -933,7 +930,6 @@ mod tests {
                 let types = read_string_dataset(&file.dataset(ft).unwrap()).unwrap();
                 assert!(types.iter().all(|t| t == "Gene Expression"));
             }
-            let _ = std::fs::remove_file(path);
         }
     }
 }

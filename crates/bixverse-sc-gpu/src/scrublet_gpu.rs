@@ -1026,8 +1026,12 @@ mod tests {
     fn test_run_scrublet_gpu_matches_cpu() {
         let Some(device) = try_device() else { return };
 
-        let gene_path = std::env::temp_dir().join("bixverse_scrublet_gpu_genes.bin");
-        let cell_path = std::env::temp_dir().join("bixverse_scrublet_gpu_cells.bin");
+        let gene_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let cell_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
         let gene_str = gene_path.to_str().expect("utf8 path");
         let cell_str = cell_path.to_str().expect("utf8 path");
 
@@ -1118,9 +1122,6 @@ mod tests {
                 r
             );
         }
-
-        let _ = std::fs::remove_file(&gene_path);
-        let _ = std::fs::remove_file(&cell_path);
     }
 
     /// A zero-variance HVG column must reach the GPU SVD carrying the
@@ -1138,8 +1139,12 @@ mod tests {
     fn test_pca_observed_gpu_survives_zero_variance_gene() {
         let Some(device) = try_device() else { return };
 
-        let gene_path = std::env::temp_dir().join("bixverse_scrublet_gpu_constant.bin");
-        let cell_path = std::env::temp_dir().join("bixverse_scrublet_gpu_constant_cells.bin");
+        let gene_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let cell_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
         let gene_str = gene_path.to_str().expect("utf8 path");
         let cell_str = cell_path.to_str().expect("utf8 path");
 
@@ -1185,8 +1190,5 @@ mod tests {
             (0..scores.nrows()).all(|i| (0..scores.ncols()).all(|j| scores[(i, j)].is_finite())),
             "zero-variance gene produced non-finite PC scores"
         );
-
-        let _ = std::fs::remove_file(&gene_path);
-        let _ = std::fs::remove_file(&cell_path);
     }
 }

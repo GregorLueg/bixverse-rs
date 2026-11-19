@@ -43,6 +43,7 @@ use bixverse_rs::single_cell::sc_processing::sctransform::residuals::SctResidual
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
+use tempfile::NamedTempFile;
 
 ///////////////
 // Constants //
@@ -99,40 +100,6 @@ fn gene_count() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(N_GENES)
-}
-
-/// Removes the scratch stores when the sweep ends.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Scratch path in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Suffix that keeps concurrent stores apart
-    ///
-    /// ### Returns
-    ///
-    /// The guard. Nothing is created on disk until something writes to it.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_sct_scale_{name}.bin")))
-    }
-
-    /// The path as a string, which is what the store writers take.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-
-    /// Size of the store on disk in MB, or zero if it does not exist.
-    fn size_mb(&self) -> f64 {
-        std::fs::metadata(&self.0).map(|m| m.len()).unwrap_or(0) as f64 / 1e6
-    }
 }
 
 /// Writes a synthetic gene-major store without ever holding the matrix.
@@ -213,15 +180,15 @@ fn test_sctransform_scaling_sweep() {
     let n_genes = gene_count();
 
     for &n_cells in cell_counts().iter() {
-        let store = TempStore::new(&format!("in_{n_cells}"));
-        let corrected = TempStore::new(&format!("corr_{n_cells}"));
-        let cell_major = TempStore::new(&format!("cells_{n_cells}"));
+        let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let corrected = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cell_major = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
         let t = Instant::now();
-        let library_sizes = write_synthetic_store(store.path(), n_genes, n_cells);
+        let library_sizes = write_synthetic_store(store.to_str().unwrap(), n_genes, n_cells);
         let write_s = t.elapsed().as_secs_f64();
 
-        let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("reader opens");
         let cells: Vec<usize> = (0..n_cells).collect();
         let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.max(1.0).log10()).collect();
         let params = SctParams::default();
@@ -254,7 +221,7 @@ fn test_sctransform_scaling_sweep() {
             &reader,
             &SctResiduals::single(&model, ctx).expect("residual source"),
             &cells,
-            corrected.path(),
+            corrected.to_str().unwrap(),
             opts,
         )
         .expect("corrected counts");
@@ -262,8 +229,8 @@ fn test_sctransform_scaling_sweep() {
 
         let t = Instant::now();
         gene_store_to_cell_store(
-            corrected.path(),
-            cell_major.path(),
+            corrected.to_str().unwrap(),
+            cell_major.to_str().unwrap(),
             CELLS_PER_PHASE,
             GENE_BATCH_SIZE,
             0,
@@ -274,7 +241,7 @@ fn test_sctransform_scaling_sweep() {
         println!(
             "{:>9} {:>10.1} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
             n_cells,
-            store.size_mb(),
+            std::fs::metadata(&store).map_or(0, |m| m.len()) as f64 / 1e6,
             write_s,
             fit_s,
             resvar_s,

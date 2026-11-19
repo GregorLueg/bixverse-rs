@@ -79,6 +79,9 @@ xxhash-rust.workspace = true
 zarrs = { workspace = true, optional = true }
 zstd.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 

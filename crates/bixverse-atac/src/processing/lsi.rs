@@ -411,51 +411,21 @@ mod tests {
     use approx::assert_relative_eq;
     use bixverse_sc_data::store::gene_file::write_gene_file;
     use bixverse_sc_data::store::writer::CellGeneSparseWriter;
+    use tempfile::TempDir;
 
     use crate::processing::features::{TopFeatureCutoff, feature_total_stats, select_top_features};
 
-    /// Scratch files that remove themselves on drop.
-    struct TempFiles(Vec<std::path::PathBuf>);
-
-    impl TempFiles {
-        /// Two paths (cell file, gene file) unique to the test.
-        ///
-        /// ### Params
-        ///
-        /// * `tag` - Test name
-        ///
-        /// ### Returns
-        ///
-        /// The guard.
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir();
-            let pid = std::process::id();
-            Self(vec![
-                dir.join(format!("bv_atac_{tag}_{pid}_cells.bin")),
-                dir.join(format!("bv_atac_{tag}_{pid}_genes.bin")),
-            ])
-        }
-
-        /// Path as `&str`.
-        ///
-        /// ### Params
-        ///
-        /// * `i` - 0 cell file, 1 gene file
-        ///
-        /// ### Returns
-        ///
-        /// The path.
-        fn path(&self, i: usize) -> &str {
-            self.0[i].to_str().expect("temp path is valid UTF-8")
-        }
-    }
-
-    impl Drop for TempFiles {
-        fn drop(&mut self) {
-            for p in &self.0 {
-                let _ = std::fs::remove_file(p);
-            }
-        }
+    /// Cell and gene file paths in a fresh scratch directory.
+    ///
+    /// ### Returns
+    ///
+    /// The directory, removed with everything in it on drop, and the two
+    /// paths.
+    fn store_paths() -> (TempDir, [String; 2]) {
+        let dir = TempDir::new().unwrap();
+        let paths =
+            ["cells.bin", "genes.bin"].map(|f| dir.path().join(f).to_str().unwrap().to_string());
+        (dir, paths)
     }
 
     /// Two groups of cells with different accessible feature blocks, plus a
@@ -494,9 +464,9 @@ mod tests {
     ///
     /// * `files` - Where to write
     /// * `dense` - `dense[cell][feature]` counts
-    fn write_store(files: &TempFiles, dense: &[Vec<u32>]) {
+    fn write_store(files: &[String; 2], dense: &[Vec<u32>]) {
         let mut writer =
-            CellGeneSparseWriter::new(files.path(0), true, dense.len(), dense[0].len(), 1e4)
+            CellGeneSparseWriter::new(&files[0], true, dense.len(), dense[0].len(), 1e4)
                 .expect("writer opens");
         for (cell_idx, cell) in dense.iter().enumerate() {
             let (raw, indices): (Vec<u32>, Vec<u32>) = cell
@@ -510,7 +480,7 @@ mod tests {
                 .expect("write cell chunk");
         }
         writer.finalise().expect("finalise");
-        write_gene_file(files.path(0), files.path(1), None, false).expect("gene file");
+        write_gene_file(&files[0], &files[1], None, false).expect("gene file");
     }
 
     /// Z-score one column (n - 1).
@@ -533,28 +503,19 @@ mod tests {
     fn test_lsi_matches_dense_tfidf_svd() {
         let dense = two_group_counts();
         let (n_cells, n_features) = (dense.len(), dense[0].len());
-        let files = TempFiles::new("lsi_dense");
+        let (_dir, files) = store_paths();
         write_store(&files, &dense);
 
         let cells: Vec<usize> = (0..n_cells).collect();
-        let idf =
-            set_tf_idf_on_store(files.path(0), files.path(1), None, TF_IDF_SCALE).expect("tf-idf");
+        let idf = set_tf_idf_on_store(&files[0], &files[1], None, TF_IDF_SCALE).expect("tf-idf");
         let totals =
-            feature_total_stats(&ParallelSparseReader::new(files.path(1)).unwrap(), None).unwrap();
+            feature_total_stats(&ParallelSparseReader::new(&files[1]).unwrap(), None).unwrap();
         let features = select_top_features(&totals, TopFeatureCutoff::All);
 
         let n_comp = 4;
         let params = LsiParams::new(n_comp, PcaSolver::Exact, true, None);
-        let res = lsi_on_store(
-            files.path(0),
-            files.path(1),
-            &cells,
-            &features,
-            &params,
-            42,
-            0,
-        )
-        .expect("lsi");
+        let res =
+            lsi_on_store(&files[0], &files[1], &cells, &features, &params, 42, 0).expect("lsi");
 
         // dense reference: Signac RunTFIDF method 1, then a full SVD
         let lib: Vec<f64> = dense
@@ -590,12 +551,12 @@ mod tests {
     #[test]
     fn test_lsi_refuses_a_log_cpm_store() {
         let dense = two_group_counts();
-        let files = TempFiles::new("lsi_logcpm");
+        let (_dir, files) = store_paths();
         write_store(&files, &dense);
         let cells: Vec<usize> = (0..dense.len()).collect();
         let err = lsi_on_store(
-            files.path(0),
-            files.path(1),
+            &files[0],
+            &files[1],
             &cells,
             &[0, 1, 2],
             &LsiParams::default(),

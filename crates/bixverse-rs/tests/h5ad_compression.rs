@@ -14,6 +14,7 @@ use hdf5::filters::Filter;
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::h5::filters::unsupported_filters;
 use bixverse_rs::single_cell::sc_data::h5::h5ad::{RawDataSlot, stream_h5_counts, write_h5_counts};
+use tempfile::NamedTempFile;
 
 ///////////////
 // Constants //
@@ -76,35 +77,6 @@ impl Compression {
             #[cfg(feature = "hdf5-filters")]
             Self::Blosc => "blosc",
         }
-    }
-}
-
-/// RAII guard that removes a test's temp files even if an assert fails.
-struct TempPath(std::path::PathBuf);
-
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempPath {
-    /// Scratch path in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - File name suffix, unique per test and mode
-    ///
-    /// ### Returns
-    ///
-    /// The guard. Nothing is created on disk until something writes to it.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_h5ad_compression_{name}")))
-    }
-
-    /// The path as a string, which is what the h5ad readers take.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
     }
 }
 
@@ -243,16 +215,18 @@ fn expected_cells() -> Vec<(Vec<u32>, Vec<u32>)> {
 ///
 /// * `compression` - Filter pipeline the fixture is written with
 fn assert_round_trip(compression: Compression) {
-    let h5 = TempPath::new(&format!("{}.h5ad", compression.label()));
-    write_fixture(h5.path(), compression);
+    let h5 = NamedTempFile::with_suffix(".h5ad")
+        .unwrap()
+        .into_temp_path();
+    write_fixture(h5.to_str().unwrap(), compression);
 
     for mode in ["write", "stream"] {
-        let bin = TempPath::new(&format!("{}_{mode}.bin", compression.label()));
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
         let res = if mode == "write" {
             write_h5_counts(
-                h5.path(),
-                bin.path(),
+                h5.to_str().unwrap(),
+                bin.to_str().unwrap(),
                 "csr",
                 NO_CELLS,
                 NO_GENES,
@@ -262,8 +236,8 @@ fn assert_round_trip(compression: Compression) {
             )
         } else {
             stream_h5_counts(
-                h5.path(),
-                bin.path(),
+                h5.to_str().unwrap(),
+                bin.to_str().unwrap(),
                 "csr",
                 NO_CELLS,
                 NO_GENES,
@@ -280,7 +254,7 @@ fn assert_round_trip(compression: Compression) {
         assert_eq!(cells, NO_CELLS, "{mode} / {}", compression.label());
         assert_eq!(genes, NO_GENES, "{mode} / {}", compression.label());
         assert_eq!(
-            read_back(bin.path()),
+            read_back(bin.to_str().unwrap()),
             expected_cells(),
             "{mode} / {}",
             compression.label()

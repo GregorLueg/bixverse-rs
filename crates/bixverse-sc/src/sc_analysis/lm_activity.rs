@@ -115,15 +115,7 @@ mod tests {
     use approx::assert_relative_eq;
     use bixverse_methods::enrichment::lm_activity::{LmMethod, LmStat, lm_activity};
     use bixverse_sc_data::store::writer::CellGeneSparseWriter;
-
-    /// Scratch store that removes itself on drop.
-    struct TempStore(std::path::PathBuf);
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Write a cell-based store and open a reader over it.
     ///
@@ -135,8 +127,8 @@ mod tests {
     /// ### Returns
     ///
     /// The reader.
-    fn reader_for(temp: &TempStore, dense: &[Vec<u32>]) -> ParallelSparseReader {
-        let path = temp.0.to_str().expect("temp path is valid UTF-8");
+    fn reader_for(temp: &TempPath, dense: &[Vec<u32>]) -> ParallelSparseReader {
+        let path = temp.to_str().expect("temp path is valid UTF-8");
         let mut writer = CellGeneSparseWriter::new(path, true, dense.len(), dense[0].len(), 1e4)
             .expect("writer opens");
         for (cell_idx, cell) in dense.iter().enumerate() {
@@ -170,7 +162,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        let temp = TempStore(std::env::temp_dir().join("bixverse_lm_activity_sc.bin"));
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -215,7 +207,7 @@ mod tests {
     #[test]
     fn test_lm_activity_sc_rejects_gene_mismatch() {
         let dense = vec![vec![1_u32, 0, 2, 0, 3, 0, 1, 1]];
-        let temp = TempStore(std::env::temp_dir().join("bixverse_lm_activity_sc_mismatch.bin"));
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense);
         let net = FeatureSetWeights::new::<f64>(&[vec![0, 1, 2]], None, 9).unwrap();
         assert!(matches!(

@@ -615,13 +615,8 @@ mod tests {
     use hdf5::types::{FixedAscii, VarLenUnicode};
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::Field;
-    use std::path::PathBuf;
     use std::str::FromStr;
-
-    /// Unique temp path for a test file
-    fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bixverse_obs_var_{}_{}", std::process::id(), name))
-    }
+    use tempfile::NamedTempFile;
 
     /// Variable-length UTF-8 strings
     fn vlen(xs: &[&str]) -> Vec<VarLenUnicode> {
@@ -760,14 +755,16 @@ mod tests {
 
     #[test]
     fn test_h5ad_obs_all_encodings() {
-        let h5 = tmp("obs_all.h5ad");
-        let pq = tmp("obs_all.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         write_obs_fixture(&h5);
 
         let info = h5ad_frame_to_parquet(&h5, FrameKind::Obs, None, None, &pq).unwrap();
         let (names, rows) = read_back(&pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
 
         assert_eq!(
             names,
@@ -857,14 +854,16 @@ mod tests {
 
     #[test]
     fn test_h5ad_obs_filter_reindexes() {
-        let h5 = tmp("obs_filter.h5ad");
-        let pq = tmp("obs_filter.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         write_obs_fixture(&h5);
 
         let info = h5ad_frame_to_parquet(&h5, FrameKind::Obs, Some(&[3, 0]), None, &pq).unwrap();
         let (names, rows) = read_back(&pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
 
         assert_eq!(info.n_rows, 2);
         assert_eq!(
@@ -883,19 +882,25 @@ mod tests {
 
     #[test]
     fn test_h5ad_filter_out_of_range() {
-        let h5 = tmp("obs_oob.h5ad");
-        let pq = tmp("obs_oob.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         write_obs_fixture(&h5);
         let res = h5ad_frame_to_parquet(&h5, FrameKind::Obs, Some(&[4]), None, &pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
         assert!(matches!(res, Err(ScDataErrors::InvalidArgument(_))));
     }
 
     #[test]
     fn test_h5ad_var_old_index_dataset() {
-        let h5 = tmp("var_old.h5ad");
-        let pq = tmp("var_old.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         {
             let file = File::create(&h5).unwrap();
             let var = file.create_group("var").unwrap();
@@ -904,8 +909,6 @@ mod tests {
         }
         let info = h5ad_frame_to_parquet(&h5, FrameKind::Var, Some(&[2, 1]), None, &pq).unwrap();
         let (names, rows) = read_back(&pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
 
         assert_eq!(names, ["gene_idx", "gene_id", "gene_symbol"]);
         assert!(info.skipped.is_empty());
@@ -915,8 +918,12 @@ mod tests {
 
     #[test]
     fn test_h5ad_no_index_id_col_and_first_column() {
-        let h5 = tmp("obs_noidx.h5ad");
-        let pq = tmp("obs_noidx.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         {
             let file = File::create(&h5).unwrap();
             let obs = file.create_group("obs").unwrap();
@@ -935,15 +942,17 @@ mod tests {
         assert_eq!(column(&names, &rows, "cell_id"), [s("x"), s("y")]);
 
         let missing = h5ad_frame_to_parquet(&h5, FrameKind::Obs, None, Some("nope"), &pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
         assert!(matches!(missing, Err(ScDataErrors::InvalidArgument(_))));
     }
 
     #[test]
     fn test_h5ad_duplicate_snake_case_errors() {
-        let h5 = tmp("obs_dup.h5ad");
-        let pq = tmp("obs_dup.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         {
             let file = File::create(&h5).unwrap();
             let obs = file.create_group("obs").unwrap();
@@ -952,15 +961,15 @@ mod tests {
             write_strings(&obs, "sample_id", &["s"]);
         }
         let res = h5ad_frame_to_parquet(&h5, FrameKind::Obs, None, None, &pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
         assert!(matches!(res, Err(ScDataErrors::DuplicateColumnName(n)) if n == "sample_id"));
     }
 
     #[test]
     fn test_tenx_v3_and_v2() {
-        let h5 = tmp("tenx_v3.h5");
-        let pq = tmp("tenx_v3.parquet");
+        let h5 = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
+        let pq = NamedTempFile::with_suffix(".parquet")
+            .unwrap()
+            .into_temp_path();
         {
             let file = File::create(&h5).unwrap();
             let m = file.create_group("matrix").unwrap();
@@ -988,9 +997,8 @@ mod tests {
             rows,
             [vec![Field::Int(1), s("E2"), s("n2"), s("Gene Expression")]]
         );
-        let _ = std::fs::remove_file(&h5);
 
-        let h5 = tmp("tenx_v2.h5");
+        let h5 = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         {
             let file = File::create(&h5).unwrap();
             let fixed = |xs: &[&str]| -> Vec<FixedAscii<18>> {
@@ -1009,8 +1017,6 @@ mod tests {
         }
         tenx_frame_to_parquet(&h5, TenxVersion::V2, FrameKind::Var, None, &pq).unwrap();
         let (names, rows) = read_back(&pq);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&pq);
         assert_eq!(names, ["gene_idx", "gene_id", "gene_name"]);
         assert_eq!(column(&names, &rows, "gene_id"), [s("E1"), s("E2")]);
     }

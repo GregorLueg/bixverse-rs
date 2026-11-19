@@ -1098,6 +1098,7 @@ mod tests {
     use flate2::Compression as GzLevel;
     use flate2::write::GzEncoder;
     use std::io::Write;
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Synthetic fragment file text: three chromosomes, four barcodes, one
     /// header line.
@@ -1180,29 +1181,19 @@ mod tests {
         v
     }
 
-    /// Scratch file removed on drop.
-    struct TempPath(std::path::PathBuf);
-
-    impl Drop for TempPath {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
     /// Write bytes to a scratch file.
     ///
     /// ### Params
     ///
-    /// * `tag` - Unique name part
     /// * `bytes` - Content
     ///
     /// ### Returns
     ///
     /// The guard.
-    fn temp_file(tag: &str, bytes: &[u8]) -> TempPath {
-        let p = std::env::temp_dir().join(format!("bv_atac_frag_{tag}_{}", std::process::id()));
+    fn temp_file(bytes: &[u8]) -> TempPath {
+        let p = NamedTempFile::new().unwrap().into_temp_path();
         std::fs::write(&p, bytes).unwrap();
-        TempPath(p)
+        p
     }
 
     #[test]
@@ -1235,26 +1226,26 @@ mod tests {
         let text = synthetic_text(3000);
         let cells: Vec<String> = ["CCCG-1", "TTTA-1", "AAAC-1"].map(String::from).to_vec();
 
-        let plain = temp_file("plain", text.as_bytes());
+        let plain = temp_file(text.as_bytes());
         let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
         gz.write_all(text.as_bytes()).unwrap();
-        let gzip = temp_file("gzip", &gz.finish().unwrap());
+        let gzip = temp_file(&gz.finish().unwrap());
         // small blocks so lines straddle block and group boundaries
-        let bgzf = temp_file("bgzf", &bgzf_bytes(text.as_bytes(), 997));
+        let bgzf = temp_file(&bgzf_bytes(text.as_bytes(), 997));
 
-        let reference = collect(&plain.0, &cells);
+        let reference = collect(&plain, &cells);
         assert_eq!(reference.len(), 3 * 3000 * 3 / 4);
-        assert_eq!(collect(&gzip.0, &cells), reference);
-        assert_eq!(collect(&bgzf.0, &cells), reference);
+        assert_eq!(collect(&gzip, &cells), reference);
+        assert_eq!(collect(&bgzf, &cells), reference);
         assert!(reference.iter().all(|(_, f)| f.cell < 3 && f.count >= 1));
     }
 
     #[test]
     fn test_malformed_line_is_an_error() {
-        let f = temp_file("bad", b"chr1\t10\t5\tAAAC-1\t1\n");
+        let f = temp_file(b"chr1\t10\t5\tAAAC-1\t1\n");
         let cells = vec!["AAAC-1".to_string()];
         let idx = BarcodeIndex::new(&cells).unwrap();
-        let r = fold_fragments(&f.0, &idx, || 0usize, |a, _, f| *a += f.len(), |a, b| a + b);
+        let r = fold_fragments(&f, &idx, || 0usize, |a, _, f| *a += f.len(), |a, b| a + b);
         assert!(r.is_err());
     }
 
@@ -1313,22 +1304,22 @@ mod tests {
         let cells: Vec<String> = ["CCCG-1", "TTTA-1", "AAAC-1"].map(String::from).to_vec();
         // small blocks so chromosome boundaries fall inside blocks
         let bgzf = bgzf_bytes(text.as_bytes(), 997);
-        let file = temp_file("spans", &bgzf);
-        let mut tbi = file.0.clone().into_os_string();
+        let file = temp_file(&bgzf);
+        let mut tbi = file.to_path_buf().into_os_string();
         tbi.push(".tbi");
-        let tbi = TempPath(tbi.into());
-        std::fs::write(&tbi.0, tabix_bytes(&text, &bgzf, 997)).unwrap();
+        let tbi = TempPath::try_from_path(tbi).unwrap();
+        std::fs::write(&tbi, tabix_bytes(&text, &bgzf, 997)).unwrap();
 
-        let spans = chrom_spans(&file.0).unwrap().unwrap();
+        let spans = chrom_spans(&file).unwrap().unwrap();
         let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["chr1", "chr2", "chrX"]);
 
-        let all = collect(&file.0, &cells);
+        let all = collect(&file, &cells);
         let idx = BarcodeIndex::new(&cells).unwrap();
         for pick in [vec![1], vec![0, 2], vec![0, 1, 2]] {
             let chosen: Vec<ChromSpan> = pick.iter().map(|&i| spans[i].clone()).collect();
             let mut got = fold_fragment_spans(
-                &file.0,
+                &file,
                 &chosen,
                 &idx,
                 Vec::new,
@@ -1353,8 +1344,8 @@ mod tests {
 
     #[test]
     fn test_no_index_means_no_spans() {
-        let f = temp_file("noidx", &bgzf_bytes(synthetic_text(10).as_bytes(), 997));
-        assert!(chrom_spans(&f.0).unwrap().is_none());
+        let f = temp_file(&bgzf_bytes(synthetic_text(10).as_bytes(), 997));
+        assert!(chrom_spans(&f).unwrap().is_none());
     }
 
     #[test]

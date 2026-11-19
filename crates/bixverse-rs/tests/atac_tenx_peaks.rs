@@ -10,15 +10,6 @@ use bixverse_rs::single_cell::sc_data::store::reader::ParallelSparseReader;
 use bixverse_rs::single_cell::sc_data::store::v5::{FeatureKind, NormKind, cell_id_hash};
 use hdf5::types::VarLenUnicode;
 
-/// Scratch directory removed on drop.
-struct TempDir(std::path::PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// Write a multiome-shaped h5: two genes, three peaks, four cells, with
 /// `features/interval` as Cell Ranger ARC writes it.
 ///
@@ -80,12 +71,11 @@ fn write_multiome_h5(path: &std::path::Path) {
 
 #[test]
 fn test_tenx_peaks_to_store_follows_the_requested_cells() {
-    let dir = TempDir(std::env::temp_dir().join(format!("bv_atac_tenx_{}", std::process::id())));
-    std::fs::create_dir_all(&dir.0).unwrap();
-    let h5 = dir.0.join("multiome.h5");
+    let dir = tempfile::tempdir().unwrap();
+    let h5 = dir.path().join("multiome.h5");
     write_multiome_h5(&h5);
-    let cells = dir.0.join("cells.bin");
-    let genes = dir.0.join("genes.bin");
+    let cells = dir.path().join("cells.bin");
+    let genes = dir.path().join("genes.bin");
     let (cells, genes) = (cells.to_str().unwrap(), genes.to_str().unwrap());
 
     let barcodes: Vec<String> = ["CCC-1", "AAA-1", "DDD-1"].map(String::from).to_vec();

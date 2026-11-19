@@ -2869,8 +2869,10 @@ mod tests {
             })
             .collect();
 
-        let path = std::env::temp_dir().join("bixverse_pca_observed_solvers.bin");
-        let path = path.to_str().expect("utf8 path");
+        let temp = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let path = temp.to_str().expect("utf8 path");
         let mut writer =
             CellGeneSparseWriter::new(path, false, n_cells, n_genes, 1e4).expect("writer");
         for gene in 0..n_genes {

@@ -26,3 +26,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 bixverse-sc-data = { workspace = true, features = ["zarr"] }
+tempfile.workspace = true

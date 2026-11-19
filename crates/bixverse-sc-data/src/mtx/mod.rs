@@ -1633,6 +1633,7 @@ impl MtxReader {
 mod tests {
     use super::*;
     use crate::store::writer::write_cell_rows;
+    use tempfile::{NamedTempFile, TempPath};
 
     ///////////////
     // Fixtures //
@@ -1675,35 +1676,10 @@ mod tests {
         ]
     }
 
-    /// RAII guard that removes a test's scratch file even if an assert fails.
-    struct TempPath(PathBuf);
-
-    /// Drop implementation for [`TempPath`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempPath {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempPath {
-        /// Reserve a scratch file named after the calling test. The test name
-        /// is the uniqueness guarantee: `cargo test` runs the whole module in
-        /// one process, so a PID alone would collide across threads.
-        fn new(name: &str, ext: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_mtx_io_{name}.{ext}")))
-        }
-
-        /// Path of the guarded file as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
-
     /// Write `body` to a scratch `.mtx` file and hand back its guard.
-    fn write_mtx(name: &str, body: &str) -> TempPath {
-        let temp = TempPath::new(name, "mtx");
-        std::fs::write(&temp.0, body).expect("mtx file written");
+    fn write_mtx(body: &str) -> TempPath {
+        let temp = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
+        std::fs::write(&temp, body).expect("mtx file written");
         temp
     }
 
@@ -1765,15 +1741,17 @@ mod tests {
     /// three numbers have to be pinned.
     #[test]
     fn mtx_header_shape_line_is_read_per_orientation() {
-        let mtx = write_mtx("header_shape", CELLS_AS_ROWS_MTX);
+        let mtx = write_mtx(CELLS_AS_ROWS_MTX);
 
-        let cells_as_rows = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let cells_as_rows =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         assert_eq!(cells_as_rows.header.total_cells, 3);
         assert_eq!(cells_as_rows.header.total_genes, 4);
         assert_eq!(cells_as_rows.header.total_entries, 5);
 
         // Same file read the other way round: the first two fields swap roles.
-        let genes_as_rows = MtxReader::new(mtx.path(), keep_all_qc(), false).expect("reader opens");
+        let genes_as_rows =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), false).expect("reader opens");
         assert_eq!(genes_as_rows.header.total_cells, 4);
         assert_eq!(genes_as_rows.header.total_genes, 3);
         assert_eq!(genes_as_rows.header.total_entries, 5);
@@ -1783,13 +1761,10 @@ mod tests {
     /// rather than index past the end of the split.
     #[test]
     fn mtx_header_with_wrong_field_count_is_rejected() {
-        let mtx = write_mtx(
-            "header_two_fields",
-            "%%MatrixMarket matrix coordinate integer general\n3 4\n1 1 5\n",
-        );
+        let mtx = write_mtx("%%MatrixMarket matrix coordinate integer general\n3 4\n1 1 5\n");
 
         assert!(matches!(
-            MtxReader::new(mtx.path(), keep_all_qc(), true),
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true),
             Err(ScDataErrors::MtxHeaderInvalid(_))
         ));
     }
@@ -1798,30 +1773,24 @@ mod tests {
     /// on the orientation because the first two fields swap.
     #[test]
     fn mtx_header_parse_error_names_the_failing_field() {
-        let bad_second = write_mtx(
-            "header_bad_second",
-            "%%MatrixMarket matrix coordinate integer general\n3 x 5\n",
-        );
+        let bad_second = write_mtx("%%MatrixMarket matrix coordinate integer general\n3 x 5\n");
         assert!(matches!(
-            MtxReader::new(bad_second.path(), keep_all_qc(), true),
+            MtxReader::new(bad_second.to_str().unwrap(), keep_all_qc(), true),
             Err(ScDataErrors::MtxParseError {
                 field: "gene count"
             })
         ));
         // Cells are the columns now, so the same broken field is the cell count.
         assert!(matches!(
-            MtxReader::new(bad_second.path(), keep_all_qc(), false),
+            MtxReader::new(bad_second.to_str().unwrap(), keep_all_qc(), false),
             Err(ScDataErrors::MtxParseError {
                 field: "cell count"
             })
         ));
 
-        let bad_third = write_mtx(
-            "header_bad_third",
-            "%%MatrixMarket matrix coordinate integer general\n3 4 x\n",
-        );
+        let bad_third = write_mtx("%%MatrixMarket matrix coordinate integer general\n3 4 x\n");
         assert!(matches!(
-            MtxReader::new(bad_third.path(), keep_all_qc(), true),
+            MtxReader::new(bad_third.to_str().unwrap(), keep_all_qc(), true),
             Err(ScDataErrors::MtxParseError {
                 field: "entry count"
             })
@@ -1846,10 +1815,11 @@ mod tests {
     /// gene-then-cell filter order and the old-to-new maps it builds.
     #[test]
     fn parse_mtx_quality_filters_genes_then_cells() {
-        let mtx = write_mtx("quality_filters", CELLS_AS_ROWS_MTX);
+        let mtx = write_mtx(CELLS_AS_ROWS_MTX);
 
         // Everything permissive: nothing is dropped and the maps are identities.
-        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         assert_eq!(quality.cells_to_keep, vec![0, 1, 2]);
         assert_eq!(quality.genes_to_keep, vec![0, 1, 2, 3]);
@@ -1862,7 +1832,7 @@ mod tests {
             min_cells: 2,
             target_size: 1e4,
         };
-        let mut reader = MtxReader::new(mtx.path(), qc, true).expect("reader opens");
+        let mut reader = MtxReader::new(mtx.to_str().unwrap(), qc, true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         assert_eq!(quality.genes_to_keep, vec![0]);
         assert_eq!(quality.cells_to_keep, vec![0, 2]);
@@ -1879,13 +1849,14 @@ mod tests {
     /// have to survive the conversion untouched.
     #[test]
     fn mtx_round_trip_preserves_counts_and_indices() {
-        let mtx = write_mtx("round_trip", CELLS_AS_ROWS_MTX);
-        let bin = TempPath::new("round_trip", "bin");
+        let mtx = write_mtx(CELLS_AS_ROWS_MTX);
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         let final_data = reader
-            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .process_mtx_and_write_bin(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
 
         assert_eq!(final_data.no_cells, 3);
@@ -1894,30 +1865,29 @@ mod tests {
         assert_eq!(final_data.cell_qc.lib_size, vec![12, 3, 11]);
         assert_eq!(final_data.cell_qc.nnz, vec![2, 1, 2]);
 
-        assert_eq!(read_back(bin.path(), 3), expected_cells());
+        assert_eq!(read_back(bin.to_str().unwrap(), 3), expected_cells());
     }
 
     /// Matrix Market is base-1. The lowest legal index has to land on 0 and the
     /// highest on `n - 1`, with nothing shifted in between.
     #[test]
     fn mtx_indices_shift_from_base_one_to_base_zero() {
-        let mtx = write_mtx(
-            "base_one",
-            "%%MatrixMarket matrix coordinate integer general\n2 3 2\n1 1 42\n2 3 7\n",
-        );
-        let bin = TempPath::new("base_one", "bin");
+        let mtx =
+            write_mtx("%%MatrixMarket matrix coordinate integer general\n2 3 2\n1 1 42\n2 3 7\n");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         reader
-            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .process_mtx_and_write_bin(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
 
         // Only genes 1 and 3 (base-1) carry counts, so the kept genes are the
         // old 0 and 2, renumbered to 0 and 1.
         assert_eq!(quality.genes_to_keep, vec![0, 2]);
         assert_eq!(
-            read_back(bin.path(), 2),
+            read_back(bin.to_str().unwrap(), 2),
             vec![(vec![0], vec![42]), (vec![1], vec![7])]
         );
     }
@@ -1926,38 +1896,41 @@ mod tests {
     /// store, which is the only cross-check on the row/column swap.
     #[test]
     fn mtx_gene_as_rows_matches_cell_as_rows() {
-        let mtx = write_mtx("orientation", GENES_AS_ROWS_MTX);
-        let bin = TempPath::new("orientation", "bin");
+        let mtx = write_mtx(GENES_AS_ROWS_MTX);
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), false).expect("reader opens");
+        let mut reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), false).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         let final_data = reader
-            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .process_mtx_and_write_bin(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
 
         assert_eq!(final_data.no_cells, 3);
         assert_eq!(final_data.no_genes, 4);
         assert_eq!(final_data.cell_qc.lib_size, vec![12, 3, 11]);
-        assert_eq!(read_back(bin.path(), 3), expected_cells());
+        assert_eq!(read_back(bin.to_str().unwrap(), 3), expected_cells());
     }
 
     /// The streaming writer buckets to temp files and re-sorts; it must land on
     /// exactly the same store as the in-memory writer.
     #[test]
     fn mtx_streaming_matches_non_streaming() {
-        let mtx = write_mtx("streaming", CELLS_AS_ROWS_MTX);
-        let bin_plain = TempPath::new("streaming_plain", "bin");
-        let bin_stream = TempPath::new("streaming_stream", "bin");
+        let mtx = write_mtx(CELLS_AS_ROWS_MTX);
+        let bin_plain = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let bin_stream = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         let plain = reader
-            .process_mtx_and_write_bin(bin_plain.path(), &quality, false)
+            .process_mtx_and_write_bin(bin_plain.to_str().unwrap(), &quality, false)
             .expect("conversion");
 
-        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let streamed = reader
-            .process_mtx_and_write_bin_streaming(bin_stream.path(), &quality, false)
+            .process_mtx_and_write_bin_streaming(bin_stream.to_str().unwrap(), &quality, false)
             .expect("streaming conversion");
 
         assert_eq!(streamed.no_cells, plain.no_cells);
@@ -1965,8 +1938,8 @@ mod tests {
         assert_eq!(streamed.cell_qc.lib_size, plain.cell_qc.lib_size);
         assert_eq!(streamed.cell_qc.nnz, plain.cell_qc.nnz);
         assert_eq!(
-            read_back(bin_stream.path(), 3),
-            read_back(bin_plain.path(), 3)
+            read_back(bin_stream.to_str().unwrap(), 3),
+            read_back(bin_plain.to_str().unwrap(), 3)
         );
     }
 
@@ -2147,13 +2120,14 @@ mod tests {
         let (n_cells, n_genes) = (400, 1_500);
         let entries = random_counts(n_cells, n_genes, 42);
         let qc = dropping_qc();
-        let reference = TempPath::new("reference_store", "bin");
-        let (cells, genes) = reference_store(&entries, n_cells, n_genes, &qc, reference.path());
+        let reference = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (cells, genes) =
+            reference_store(&entries, n_cells, n_genes, &qc, reference.to_str().unwrap());
         assert!(
             cells.len() < n_cells && genes.len() < n_genes,
             "QC drops both"
         );
-        let expected = std::fs::read(&reference.0).expect("reference store");
+        let expected = std::fs::read(&reference).expect("reference store");
 
         for cells_as_rows in [true, false] {
             for order in [
@@ -2167,14 +2141,15 @@ mod tests {
                 for (gz, block_bytes) in [(false, MTX_BLOCK_BYTES), (false, 101), (true, 101)] {
                     let name = format!("layout_{cells_as_rows}_{order:?}_{gz}_{block_bytes}");
                     let mtx = if gz {
-                        write_gz(&name, &body, 40)
+                        write_gz(&body, 40)
                     } else {
-                        write_mtx(&name, &body)
+                        write_mtx(&body)
                     };
-                    let bin = TempPath::new(&name, "bin");
+                    let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-                    let mut reader = MtxReader::new(mtx.path(), qc.clone(), cells_as_rows)
-                        .expect("reader opens");
+                    let mut reader =
+                        MtxReader::new(mtx.to_str().unwrap(), qc.clone(), cells_as_rows)
+                            .expect("reader opens");
                     reader.source.block_bytes = block_bytes;
                     let quality = reader.parse_mtx_quality(false).expect("quality pass");
                     assert_eq!(quality.cells_to_keep, cells, "{name}: kept cells");
@@ -2186,9 +2161,9 @@ mod tests {
                         "{name}: order detection"
                     );
                     reader
-                        .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+                        .process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
                         .expect("conversion");
-                    let got = std::fs::read(&bin.0).expect("store");
+                    let got = std::fs::read(&bin).expect("store");
                     assert!(got == expected, "{name}: store differs from the reference");
                 }
             }
@@ -2201,10 +2176,12 @@ mod tests {
 
     /// Write `body` as a gzip of `members` concatenated members, as bgzip or
     /// `cat a.gz b.gz` produce.
-    fn write_gz(name: &str, body: &str, members: usize) -> TempPath {
+    fn write_gz(body: &str, members: usize) -> TempPath {
         use flate2::Compression;
         use flate2::write::GzEncoder;
-        let temp = TempPath::new(name, "mtx.gz");
+        let temp = NamedTempFile::with_suffix(".mtx.gz")
+            .unwrap()
+            .into_temp_path();
         let bytes = body.as_bytes();
         let step = bytes.len().div_ceil(members.max(1)).max(1);
         let mut out = Vec::new();
@@ -2213,7 +2190,7 @@ mod tests {
             enc.write_all(part).expect("gzip member");
             out.extend(enc.finish().expect("gzip member"));
         }
-        std::fs::write(&temp.0, out).expect("gz file written");
+        std::fs::write(&temp, out).expect("gz file written");
         temp
     }
 
@@ -2223,9 +2200,9 @@ mod tests {
         let body: String = (0..20_000)
             .map(|i| format!("{} {} {}\n", i % 97 + 1, i, i * 7))
             .collect();
-        let gz = write_gz("par_members", &body, 137);
+        let gz = write_gz(&body, 137);
         let mut out = String::new();
-        ParGzMembers::open(&gz.0)
+        ParGzMembers::open(&gz)
             .expect("open")
             .read_to_string(&mut out)
             .expect("read");
@@ -2317,38 +2294,23 @@ mod tests {
     #[test]
     fn mtx_banner_field_and_symmetry() {
         let shape = "3 4 5\n1 1 5\n";
-        let open = |name: &str, banner: &str| {
-            let mtx = write_mtx(name, &format!("{banner}\n{shape}"));
-            MtxReader::new(mtx.path(), keep_all_qc(), true).map(|r| r.header.field)
+        let open = |banner: &str| {
+            let mtx = write_mtx(&format!("{banner}\n{shape}"));
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).map(|r| r.header.field)
         };
         assert_eq!(
-            open(
-                "banner_int",
-                "%%MatrixMarket matrix coordinate integer general"
-            )
-            .unwrap(),
+            open("%%MatrixMarket matrix coordinate integer general").unwrap(),
             MtxField::Integer
         );
         assert_eq!(
-            open(
-                "banner_real",
-                "%%MatrixMarket Matrix Coordinate Real General"
-            )
-            .unwrap(),
+            open("%%MatrixMarket Matrix Coordinate Real General").unwrap(),
             MtxField::Real
         );
         assert_eq!(
-            open(
-                "banner_pattern",
-                "%%MatrixMarket matrix coordinate pattern general"
-            )
-            .unwrap(),
+            open("%%MatrixMarket matrix coordinate pattern general").unwrap(),
             MtxField::Pattern
         );
-        assert_eq!(
-            open("banner_none", "% no banner").unwrap(),
-            MtxField::Integer
-        );
+        assert_eq!(open("% no banner").unwrap(), MtxField::Integer);
         for (name, banner) in [
             (
                 "banner_complex",
@@ -2364,7 +2326,7 @@ mod tests {
             ),
         ] {
             assert!(
-                matches!(open(name, banner), Err(ScDataErrors::MtxUnsupported(_))),
+                matches!(open(banner), Err(ScDataErrors::MtxUnsupported(_))),
                 "{name}"
             );
         }
@@ -2375,42 +2337,39 @@ mod tests {
     #[test]
     fn mtx_real_and_pattern_files_round_trip() {
         let real = write_mtx(
-            "real_file",
             "%%MatrixMarket matrix coordinate real general\n2 3 3\n1 1 5.0\n1 3 1.2e+01\n2 2 3\n",
         );
-        let bin = TempPath::new("real_file", "bin");
-        let mut reader = MtxReader::new(real.path(), keep_all_qc(), true).expect("reader opens");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut reader =
+            MtxReader::new(real.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         let data = reader
-            .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            .process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
         assert_eq!(data.cell_qc.lib_size, vec![17, 3]);
         assert_eq!(
-            read_back(bin.path(), 2),
+            read_back(bin.to_str().unwrap(), 2),
             vec![(vec![0, 2], vec![5, 12]), (vec![1], vec![3])]
         );
 
-        let pattern = write_mtx(
-            "pattern_file",
-            "%%MatrixMarket matrix coordinate pattern general\n2 3 3\n1 1\n1 3\n2 2\n",
-        );
-        let bin = TempPath::new("pattern_file", "bin");
-        let mut reader = MtxReader::new(pattern.path(), keep_all_qc(), true).expect("reader opens");
+        let pattern =
+            write_mtx("%%MatrixMarket matrix coordinate pattern general\n2 3 3\n1 1\n1 3\n2 2\n");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut reader =
+            MtxReader::new(pattern.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         reader
-            .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            .process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
         assert_eq!(
-            read_back(bin.path(), 2),
+            read_back(bin.to_str().unwrap(), 2),
             vec![(vec![0, 2], vec![1, 1]), (vec![1], vec![1])]
         );
 
-        let fraction = write_mtx(
-            "real_fraction",
-            "%%MatrixMarket matrix coordinate real general\n2 3 2\n1 1 5.0\n2 2 0.25\n",
-        );
+        let fraction =
+            write_mtx("%%MatrixMarket matrix coordinate real general\n2 3 2\n1 1 5.0\n2 2 0.25\n");
         let mut reader =
-            MtxReader::new(fraction.path(), keep_all_qc(), true).expect("reader opens");
+            MtxReader::new(fraction.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         assert!(matches!(
             reader.parse_mtx_quality(false),
             Err(ScDataErrors::MtxNotACount { .. })
@@ -2420,39 +2379,41 @@ mod tests {
     /// A gzipped file is recognised by its magic bytes whatever its name.
     #[test]
     fn mtx_gzip_is_detected_by_magic_bytes() {
-        let gz = write_gz("gz_magic", CELLS_AS_ROWS_MTX, 1);
-        let renamed = TempPath::new("gz_magic_renamed", "mtx");
-        std::fs::copy(&gz.0, &renamed.0).expect("copy");
-        let bin = TempPath::new("gz_magic", "bin");
-        let mut reader = MtxReader::new(renamed.path(), keep_all_qc(), true).expect("reader opens");
+        let gz = write_gz(CELLS_AS_ROWS_MTX, 1);
+        let renamed = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
+        std::fs::copy(&gz, &renamed).expect("copy");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut reader =
+            MtxReader::new(renamed.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         assert!(reader.source.gz);
         let quality = reader.parse_mtx_quality(false).expect("quality pass");
         reader
-            .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            .process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
             .expect("conversion");
-        assert_eq!(read_back(bin.path(), 3), expected_cells());
+        assert_eq!(read_back(bin.to_str().unwrap(), 3), expected_cells());
     }
 
     /// An empty input has no cells to keep; the streaming path short-circuits
     /// there and still has to leave a readable, empty store behind.
     #[test]
     fn mtx_streaming_writes_a_readable_store_when_nothing_is_kept() {
-        let bin = TempPath::new("streaming_empty", "bin");
-        let mtx = write_mtx("streaming_empty", CELLS_AS_ROWS_MTX);
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mtx = write_mtx(CELLS_AS_ROWS_MTX);
 
-        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let reader =
+            MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
         let mut quality = CellOnFileQuality::new(vec![], vec![0, 1, 2, 3]);
         quality.generate_maps_sets();
 
         let final_data = reader
-            .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            .process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
             .expect("streaming conversion");
 
         assert_eq!(final_data.no_cells, 0);
         assert_eq!(final_data.no_genes, 4);
         assert!(final_data.cell_qc.lib_size.is_empty());
 
-        let reader = ParallelSparseReader::new(bin.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(bin.to_str().unwrap()).expect("reader opens");
         assert!(reader.is_cell_based());
         assert_eq!(reader.dims().total_cells, 0);
     }
@@ -2462,19 +2423,19 @@ mod tests {
     #[test]
     fn mtx_kept_cell_without_entries_is_written_empty() {
         for streaming in [false, true] {
-            let name = format!("empty_cell_{streaming}");
-            let mtx = write_mtx(&name, CELLS_AS_ROWS_MTX);
-            let bin = TempPath::new(&name, "bin");
+            let mtx = write_mtx(CELLS_AS_ROWS_MTX);
+            let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
             // Keep every cell but only gene 0, which cell 1 does not express.
-            let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+            let reader =
+                MtxReader::new(mtx.to_str().unwrap(), keep_all_qc(), true).expect("reader opens");
             let mut quality = CellOnFileQuality::new(vec![0, 1, 2], vec![0]);
             quality.generate_maps_sets();
 
             let final_data = if streaming {
-                reader.process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+                reader.process_mtx_and_write_bin_streaming(bin.to_str().unwrap(), &quality, false)
             } else {
-                reader.process_mtx_and_write_bin(bin.path(), &quality, false)
+                reader.process_mtx_and_write_bin(bin.to_str().unwrap(), &quality, false)
             }
             .expect("conversion");
 
@@ -2482,7 +2443,7 @@ mod tests {
             assert_eq!(final_data.cell_qc.lib_size, vec![5, 0, 2]);
             assert_eq!(final_data.cell_qc.nnz, vec![1, 0, 1]);
 
-            let store = ParallelSparseReader::new(bin.path()).expect("reader opens");
+            let store = ParallelSparseReader::new(bin.to_str().unwrap()).expect("reader opens");
             let cell = store
                 .read_cells_parallel(&[1])
                 .expect("empty cell is on disk");

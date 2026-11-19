@@ -14,8 +14,6 @@
 mod meta_cells2_dac_fixtures;
 mod meta_cells2_rare_dac_fixtures;
 
-use std::path::PathBuf;
-
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::metacells2::{
     DacMetacellsResult, DacParams, MC2KnnParams, MetacellsParams, RareParams, compute_dac_metacells,
@@ -23,6 +21,7 @@ use bixverse_rs::single_cell::mc_generation::metacells2::{
 use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use meta_cells2_dac_fixtures as fx;
 use meta_cells2_rare_dac_fixtures as rfx;
+use tempfile::{NamedTempFile, TempPath};
 
 ///////////////
 // Constants //
@@ -41,38 +40,19 @@ const TARGET_SIZE: f32 = 1e4;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Removes the scratch store when the test ends, pass or panic.
-struct TempStore(PathBuf);
-
-impl Drop for TempStore {
-    /// Removes the file, ignoring a missing one.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// The store path as the writer and reader take it.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// Write the generator's counts as a cell-major store, for the first
 /// `n_clusters` clusters.
 ///
 /// ### Params
 ///
-/// * `name` - Distinguishes the scratch file.
 /// * `n_clusters` - Clusters to write; [`fx::N_CLUSTERS`] for the reference.
 ///
 /// ### Returns
 ///
 /// The store guard.
-fn build_store(name: &str, n_clusters: usize) -> TempStore {
-    let store = TempStore(std::env::temp_dir().join(format!("bixverse_mc2_dac_{name}.bin")));
+fn build_store(n_clusters: usize) -> TempPath {
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let mut x = fx::LCG_SEED;
     let mut next = || {
         x = (1_664_525 * x + 1_013_904_223) % (1 << 32);
@@ -80,8 +60,9 @@ fn build_store(name: &str, n_clusters: usize) -> TempStore {
     };
 
     let n_cells = n_clusters * fx::CELLS_PER_CLUSTER;
-    let mut writer = CellGeneSparseWriter::new(store.path(), true, n_cells, N_GENES, TARGET_SIZE)
-        .expect("writer opens");
+    let mut writer =
+        CellGeneSparseWriter::new(store.to_str().unwrap(), true, n_cells, N_GENES, TARGET_SIZE)
+            .expect("writer opens");
     for i in 0..n_cells {
         let cluster = i / fx::CELLS_PER_CLUSTER;
         let mut indices = Vec::new();
@@ -203,8 +184,8 @@ fn assert_structure(result: &DacMetacellsResult) {
 #[test]
 fn test_dac_structure_and_reproducibility() {
     let n_clusters = 2;
-    let store = build_store("small", n_clusters);
-    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let store = build_store(n_clusters);
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("store opens");
     let cells: Vec<usize> = (0..n_clusters * fx::CELLS_PER_CLUSTER).collect();
     let (params, mut dac) = params();
     dac.min_target_pile_size = 250;
@@ -228,8 +209,8 @@ fn test_dac_structure_and_reproducibility() {
 // 3200 cells, six divide-and-conquer runs
 #[cfg(feature = "large-test")]
 fn test_dac_matches_upstream_statistics() {
-    let store = build_store("band", fx::N_CLUSTERS);
-    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let store = build_store(fx::N_CLUSTERS);
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("store opens");
     let cells: Vec<usize> = (0..N_CELLS).collect();
     let (params, dac) = params();
 
@@ -301,15 +282,14 @@ fn rare_population(i: usize, n_common: usize) -> (usize, Option<usize>) {
 ///
 /// ### Params
 ///
-/// * `name` - Distinguishes the scratch file.
 /// * `n_clusters` - Planted clusters; [`rfx::N_CLUSTERS`] for the reference.
 ///   Must exceed every host cluster.
 ///
 /// ### Returns
 ///
 /// The store guard and the cell count.
-fn build_rare_store(name: &str, n_clusters: usize) -> (TempStore, usize) {
-    let store = TempStore(std::env::temp_dir().join(format!("bixverse_mc2_rare_{name}.bin")));
+fn build_rare_store(n_clusters: usize) -> (TempPath, usize) {
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let n_genes = rfx::N_CLUSTERS * rfx::MARKERS
         + rfx::NOISE_GENES
         + rfx::RARE_SIZES.len() * rfx::RARE_MARKERS;
@@ -322,8 +302,9 @@ fn build_rare_store(name: &str, n_clusters: usize) -> (TempStore, usize) {
         x >> 16
     };
 
-    let mut writer = CellGeneSparseWriter::new(store.path(), true, n_cells, n_genes, TARGET_SIZE)
-        .expect("writer opens");
+    let mut writer =
+        CellGeneSparseWriter::new(store.to_str().unwrap(), true, n_cells, n_genes, TARGET_SIZE)
+            .expect("writer opens");
     for i in 0..n_cells {
         let (cluster, population) = rare_population(i, n_common);
         let mut indices = Vec::new();
@@ -473,8 +454,8 @@ fn rare_params(pile_size: usize, max_gene_cell_fraction: f64) -> (MetacellsParam
 fn test_dac_rare_modules_small() {
     let n_clusters = 4;
     let n_common = n_clusters * rfx::CELLS_PER_CLUSTER;
-    let (store, n_cells) = build_rare_store("small", n_clusters);
-    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let (store, n_cells) = build_rare_store(n_clusters);
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("store opens");
     let cells: Vec<usize> = (0..n_cells).collect();
     // 48 of 1664 cells is above the 0.02 the reference uses on 3264 cells
     let (params, dac) = rare_params(400, 0.03);
@@ -504,8 +485,8 @@ fn test_dac_rare_modules_small() {
 #[cfg(feature = "large-test")]
 fn test_dac_rare_recovery_matches_upstream() {
     let n_common = rfx::N_CLUSTERS * rfx::CELLS_PER_CLUSTER;
-    let (store, n_cells) = build_rare_store("band", rfx::N_CLUSTERS);
-    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let (store, n_cells) = build_rare_store(rfx::N_CLUSTERS);
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("store opens");
     let cells: Vec<usize> = (0..n_cells).collect();
     let (params, dac) = rare_params(rfx::PILE_SIZE, 0.02);
 

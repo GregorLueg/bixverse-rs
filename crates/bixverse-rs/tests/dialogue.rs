@@ -11,8 +11,6 @@
 #![allow(clippy::needless_range_loop)]
 #![cfg(feature = "single-cell")]
 
-use std::path::PathBuf;
-
 use faer::{Mat, MatRef};
 
 use bixverse_rs::core::math::vector_helpers::pearson_correlation;
@@ -25,6 +23,7 @@ use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_data::synthetic::{
     DialogueSyntheticData, DialogueSyntheticParams, create_dialogue_synthetic_data,
 };
+use tempfile::NamedTempFile;
 
 ///////////////
 // Constants //
@@ -220,43 +219,6 @@ fn sample_means(
         .zip(counts.iter())
         .map(|(s, c)| if *c > 0.0 { s / c } else { 0.0 })
         .collect()
-}
-
-/// A scratch store that cleans up after itself.
-struct TempStore(PathBuf);
-
-impl Drop for TempStore {
-    /// Removes the file, ignoring a missing one.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Reserves a uniquely named store in the system temp directory.
-    ///
-    /// The process id is part of the name: two `cargo test` invocations on one
-    /// machine, which the CI feature matrix does routinely, would otherwise
-    /// collide on the same file and read a half-written store.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Test-unique suffix
-    ///
-    /// ### Returns
-    ///
-    /// The guard; the path is available via [`Self::path`].
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "bixverse_dialogue_{name}_{}.bin",
-            std::process::id()
-        )))
-    }
-
-    /// Path as a `&str`.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
 }
 
 /// Writes the synthetic matrix out as a gene-major bixverse store.
@@ -505,8 +467,8 @@ fn test_dialogue_is_deterministic() {
 #[test]
 fn test_dialogue_in_memory_matches_the_streamed_store() {
     let data = build(SEED);
-    let store = TempStore::new("equivalence");
-    write_store(store.path(), &data);
+    let store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    write_store(store.to_str().unwrap(), &data);
 
     let feature_refs: Vec<MatRef<f64>> = data.features.iter().map(|m| m.as_ref()).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
@@ -514,7 +476,7 @@ fn test_dialogue_in_memory_matches_the_streamed_store() {
 
     let in_memory = run(&data, N_PERMUTATIONS_CHEAP);
 
-    let reader = ParallelSparseReader::new(store.path()).expect("store opens");
+    let reader = ParallelSparseReader::new(store.to_str().unwrap()).expect("store opens");
     let streamed = dialogue_run(
         &reader,
         &data.cell_type_indices,

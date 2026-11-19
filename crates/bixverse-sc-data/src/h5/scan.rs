@@ -265,11 +265,7 @@ mod tests {
     use super::*;
     use hdf5::File;
     use hdf5::types::VarLenUnicode;
-    use std::path::PathBuf;
-
-    fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bixverse_h5_scan_{}_{name}", std::process::id()))
-    }
+    use tempfile::NamedTempFile;
 
     fn strings(xs: &[&str]) -> Vec<VarLenUnicode> {
         xs.iter().map(|x| x.parse().unwrap()).collect()
@@ -296,7 +292,9 @@ mod tests {
 
     #[test]
     fn test_h5ad_dimensions_sparse_dense_and_raw_slot() {
-        let csr = tmp("csr.h5ad");
+        let csr = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
         write_h5ad(&csr, |f| {
             let x = f.create_group("X").unwrap();
             x.new_dataset_builder()
@@ -324,7 +322,9 @@ mod tests {
         let found = detect_raw_count_slot(&csr, &slots, 10, 0.99).unwrap();
         assert!(matches!(found, Some(RawDataSlot::DataX)));
 
-        let dense = tmp("dense.h5ad");
+        let dense = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
         write_h5ad(&dense, |f| {
             f.new_dataset_builder()
                 .with_data(&ndarray::arr2(&[[0.5f32, 1.0], [2.0, 0.0], [1.5, 3.0]]))
@@ -340,8 +340,5 @@ mod tests {
                 .is_none()
         );
         assert_eq!(read_h5_strings(&dense, "var/_index").unwrap(), ["g1", "g2"]);
-
-        let _ = std::fs::remove_file(csr);
-        let _ = std::fs::remove_file(dense);
     }
 }

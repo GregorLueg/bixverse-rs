@@ -37,6 +37,7 @@ use bixverse_sc_data::store::{
 };
 use faer::Mat;
 use rustc_hash::{FxHashMap, FxHashSet};
+use tempfile::TempDir;
 
 /// chr22 length in hg38, as in `chrom_sizes.tsv`.
 const CHR22_LEN: u32 = 50_818_468;
@@ -195,43 +196,18 @@ fn feature_file(rel: &str) -> (Vec<FeatureInterval>, Vec<String>) {
     (iv, names)
 }
 
-/// Scratch directory removed on drop.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    /// A fresh directory.
-    ///
-    /// ### Params
-    ///
-    /// * `tag` - Unique name part
-    ///
-    /// ### Returns
-    ///
-    /// The guard.
-    fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!("bv_atac_it_{tag}_{}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-
-    /// A file path inside, as `String`.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - File name
-    ///
-    /// ### Returns
-    ///
-    /// The path.
-    fn file(&self, name: &str) -> String {
-        self.0.join(name).to_str().unwrap().to_string()
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+/// A file path inside a scratch directory, as `String`.
+///
+/// ### Params
+///
+/// * `dir` - The directory
+/// * `name` - File name
+///
+/// ### Returns
+///
+/// The path.
+fn file_in(dir: &TempDir, name: &str) -> String {
+    dir.path().join(name).to_str().unwrap().to_string()
 }
 
 /// Assert two values agree, treating two `NaN`s as equal.
@@ -354,7 +330,7 @@ fn signac_peak_store(dir: &TempDir) -> (String, String) {
     let peaks = read_bed(&fixtures().join("peaks.bed")).unwrap();
     let barcodes = cells();
     let c = count_fragments(&fragments(), &barcodes, &peaks, CountMode::Fragment).unwrap();
-    let (cf, gf) = (dir.file("cells.bin"), dir.file("genes.bin"));
+    let (cf, gf) = (file_in(&dir, "cells.bin"), file_in(&dir, "genes.bin"));
     write_counts_store(
         &c,
         &peaks,
@@ -372,7 +348,7 @@ fn signac_peak_store(dir: &TempDir) -> (String, String) {
 
 #[test]
 fn test_top_features_match_signac() {
-    let dir = TempDir::new("top");
+    let dir = TempDir::new().unwrap();
     let (_, gf) = signac_peak_store(&dir);
     let totals = feature_total_stats(&ParallelSparseReader::new(&gf).unwrap(), None).unwrap();
     let f = "signac/top_features.tsv";
@@ -394,7 +370,7 @@ fn test_top_features_match_signac() {
 
 #[test]
 fn test_lsi_matches_signac_run_svd() {
-    let dir = TempDir::new("lsi");
+    let dir = TempDir::new().unwrap();
     let (cf, gf) = signac_peak_store(&dir);
     let n_cells = cells().len();
     set_tf_idf_on_store(&cf, &gf, None, TF_IDF_SCALE).unwrap();
@@ -570,7 +546,7 @@ fn fixture_rlsi_params() -> RlsiParams {
 
 #[test]
 fn test_lsi_projection_matches_seurat_project_svd() {
-    let dir = TempDir::new("project");
+    let dir = TempDir::new().unwrap();
     let (cf, gf) = signac_peak_store(&dir);
     let ref_lsi = seurat_batch_lsi(&cf, &gf, 0);
     let query = seurat_batch_lsi(&cf, &gf, 1);
@@ -587,7 +563,7 @@ fn test_lsi_projection_matches_seurat_project_svd() {
 
 #[test]
 fn test_rlsi_anchors_match_seurat() {
-    let dir = TempDir::new("rlsi_anchors");
+    let dir = TempDir::new().unwrap();
     let (cf, gf) = signac_peak_store(&dir);
     let (a, b) = (seurat_batch_lsi(&cf, &gf, 0), seurat_batch_lsi(&cf, &gf, 1));
     let (pairs, scores) = rlsi_anchors(&a, &b, &fixture_rlsi_params(), 42, 0).unwrap();
@@ -615,7 +591,7 @@ fn test_rlsi_anchors_match_seurat() {
 
 #[test]
 fn test_rlsi_integration_matches_seurat() {
-    let dir = TempDir::new("rlsi_int");
+    let dir = TempDir::new().unwrap();
     let (cf, gf) = signac_peak_store(&dir);
     let (batch, features) = seurat_design();
     let combined = dense("seurat/combined_lsi_embeddings.tsv.gz").1;
@@ -662,8 +638,8 @@ fn triplet_store(dir: &TempDir, tag: &str, rel: &str, n_features: usize, target:
         per_cell[c as usize].0.push(f);
         per_cell[c as usize].1.push(v);
     }
-    let cf = dir.file(&format!("{tag}_cells.bin"));
-    let gf = dir.file(&format!("{tag}_genes.bin"));
+    let cf = file_in(&dir, &format!("{tag}_cells.bin"));
+    let gf = file_in(&dir, &format!("{tag}_genes.bin"));
     let mut w = CellGeneSparseWriter::new(&cf, true, n_cells, n_features, target).unwrap();
     for (c, (idx, raw)) in per_cell.iter().enumerate() {
         w.write_cell_chunk(CsrCellChunk::from_data(raw, idx, c, target, true))
@@ -691,7 +667,7 @@ fn seurat_transfer_anchors() -> Vec<(u32, u32, f64)> {
 
 #[test]
 fn test_transfer_anchors_match_seurat() {
-    let dir = TempDir::new("transfer_anchors");
+    let dir = TempDir::new().unwrap();
     let n_genes = lines("signac/gene_activity/genes.tsv").len() - 1;
     let target: f32 = lines("seurat/transfer_ga_target.txt")[0].parse().unwrap();
     let rna_rel = "seurat/rna/matrix.tsv.gz";
@@ -932,8 +908,8 @@ fn test_peak_calls_match_macs3_signac_mode() {
 /// without one the whole file is read at once.
 #[test]
 fn test_peak_calls_without_index_match_macs3() {
-    let dir = TempDir::new("noindex");
-    let copy = PathBuf::from(dir.file("fragments.tsv.gz"));
+    let dir = TempDir::new().unwrap();
+    let copy = PathBuf::from(file_in(&dir, "fragments.tsv.gz"));
     std::fs::copy(fragments(), &copy).unwrap();
     for source in [
         (TagSource::Insertion, "insertion"),

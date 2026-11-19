@@ -22,7 +22,6 @@
 #![cfg(feature = "single-cell")]
 
 use std::ops::Range;
-use std::path::PathBuf;
 
 use approx::assert_relative_eq;
 
@@ -34,6 +33,7 @@ use bixverse_rs::single_cell::sc_processing::cellsweep::{
 
 mod cellsweep_fixtures;
 use cellsweep_fixtures as fx;
+use tempfile::{NamedTempFile, TempPath};
 
 ///////////////
 // Constants //
@@ -180,41 +180,10 @@ fn round_half_even(x: f64) -> u32 {
     }
 }
 
-/// RAII guard that removes a test's temp file even if an assert fails.
-struct TempBin(PathBuf);
-
-impl Drop for TempBin {
-    /// Removes the file, ignoring a missing one.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempBin {
-    /// Reserve a uniquely named scratch file in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Test-unique suffix.
-    ///
-    /// ### Returns
-    ///
-    /// The guard; the path is available via [`Self::path`].
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_cellsweep_parity_{name}.bin")))
-    }
-
-    /// Path of the guarded file as a `&str`.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
-
 /// Run CellSweep over the fixture and hand back the fit and the output store.
 ///
 /// ### Params
 ///
-/// * `name` - Test-unique suffix for the scratch files.
 /// * `params` - Model parameters to run with.
 ///
 /// ### Returns
@@ -222,16 +191,20 @@ impl TempBin {
 /// The fit, plus a reader over the denoised store. The temp guards are
 /// returned alongside so the files outlive the reader.
 fn run_fixture(
-    name: &str,
     params: CellSweepParams,
-) -> (CellSweepFit, ParallelSparseReader, TempBin, TempBin) {
+) -> (CellSweepFit, ParallelSparseReader, TempPath, TempPath) {
     let (rows, labels) = build_counts();
-    let raw = TempBin::new(&format!("{name}_raw"));
-    let out = TempBin::new(&format!("{name}_out"));
+    let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-    let mut writer =
-        CellGeneSparseWriter::new(raw.path(), true, rows.len(), fx::N_GENES, TARGET_SIZE)
-            .expect("writer opens");
+    let mut writer = CellGeneSparseWriter::new(
+        raw.to_str().unwrap(),
+        true,
+        rows.len(),
+        fx::N_GENES,
+        TARGET_SIZE,
+    )
+    .expect("writer opens");
     for (i, row) in rows.iter().enumerate() {
         let indices: Vec<u32> = (0..fx::N_GENES as u32)
             .filter(|&g| row[g as usize] > 0)
@@ -249,7 +222,7 @@ fn run_fixture(
     }
     writer.finalise().expect("store finalises");
 
-    let reader = ParallelSparseReader::new(raw.path()).expect("store opens");
+    let reader = ParallelSparseReader::new(raw.to_str().unwrap()).expect("store opens");
     let sample = CellSweepSample {
         sample_id: "fixture".to_string(),
         real_cells: (0..fx::N_REAL).collect(),
@@ -258,9 +231,16 @@ fn run_fixture(
         n_celltypes: fx::N_CELLTYPES,
     };
 
-    let mut run = run_cellsweep(&reader, &[sample], params, out.path(), TARGET_SIZE, 0)
-        .expect("cellsweep runs");
-    let denoised = ParallelSparseReader::new(out.path()).expect("output opens");
+    let mut run = run_cellsweep(
+        &reader,
+        &[sample],
+        params,
+        out.to_str().unwrap(),
+        TARGET_SIZE,
+        0,
+    )
+    .expect("cellsweep runs");
+    let denoised = ParallelSparseReader::new(out.to_str().unwrap()).expect("output opens");
 
     (run.fits.remove(0), denoised, raw, out)
 }
@@ -375,7 +355,7 @@ fn test_cellsweep_matches_the_reference_at_the_fixed_point() {
         tol_f: want::TOL_F,
         ..Default::default()
     };
-    let (fit, denoised, _raw, _out) = run_fixture("tight", params);
+    let (fit, denoised, _raw, _out) = run_fixture(params);
 
     assert_relative_eq!(
         fit.log_likelihood,
@@ -464,7 +444,7 @@ fn test_cellsweep_matches_the_reference_at_the_default_stopping_rule() {
         max_iter: want::MAX_ITER,
         ..Default::default()
     };
-    let (fit, denoised, _raw, _out) = run_fixture("default", params);
+    let (fit, denoised, _raw, _out) = run_fixture(params);
 
     assert_relative_eq!(
         fit.log_likelihood,

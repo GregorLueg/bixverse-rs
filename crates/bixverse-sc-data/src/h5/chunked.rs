@@ -640,6 +640,7 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Whether the linked HDF5 can report chunk locations at all.
     const CAN_INDEX: bool = cfg!(any(hdf5_chunk_info, hdf5_chunk_iter));
@@ -696,17 +697,13 @@ mod tests {
         assert_eq!(reader.read::<T>(0..len).unwrap(), all);
     }
 
-    /// Create a scratch HDF5 file.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Unique suffix
+    /// Create a scratch HDF5 file, removed when the returned path drops.
     ///
     /// ### Returns
     ///
-    /// The path, for removal, and the open file.
-    fn temp_file(name: &str) -> (std::path::PathBuf, hdf5::File) {
-        let path = std::env::temp_dir().join(format!("bixverse_h5_chunked_{name}.h5"));
+    /// The path guard and the open file.
+    fn temp_file() -> (TempPath, hdf5::File) {
+        let path = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         let file = hdf5::File::create(&path).unwrap();
         (path, file)
     }
@@ -715,7 +712,7 @@ mod tests {
     /// that never line up with the requested ranges.
     #[test]
     fn test_direct_pipelines_match_h5dread() {
-        let (path, file) = temp_file("direct");
+        let (path, file) = temp_file();
         let mut rng = StdRng::seed_from_u64(7);
         let len = 10_007;
         let ints: Vec<i64> = (0..len).map(|_| rng.random_range(0..40_000)).collect();
@@ -761,14 +758,13 @@ mod tests {
             assert_matches_h5dread::<f32>(ds, 50, &mut rng);
         }
         drop(file);
-        let _ = std::fs::remove_file(path);
     }
 
     /// Contiguous, unfiltered, other filters and partially written datasets
     /// take the `H5Dread` path and still read correctly.
     #[test]
     fn test_ineligible_datasets_fall_back() {
-        let (path, file) = temp_file("fallback");
+        let (_path, file) = temp_file();
         let mut rng = StdRng::seed_from_u64(11);
         let len = 5_003;
         let ints: Vec<i64> = (0..len).map(|_| rng.random_range(0..40_000)).collect();
@@ -797,7 +793,6 @@ mod tests {
         assert_matches_h5dread::<u32>(ds, 1_000, &mut rng);
 
         drop(file);
-        let _ = std::fs::remove_file(path);
     }
 
     /// Unshuffle inverts shuffle, including trailing bytes.

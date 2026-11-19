@@ -1385,7 +1385,9 @@ fn scenic_params_for_roundtrip() -> ScenicParams {
 fn test_run_scenic_grn_gpu_roundtrip() {
     let Some(device) = try_device() else { return };
 
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_roundtrip.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1427,8 +1429,6 @@ fn test_run_scenic_grn_gpu_roundtrip() {
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Same gate for the streaming path, which chunks genes off disk.
@@ -1438,7 +1438,9 @@ fn test_run_scenic_grn_gpu_roundtrip() {
 fn test_run_scenic_grn_streaming_gpu_roundtrip() {
     let Some(device) = try_device() else { return };
 
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_streaming_roundtrip.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1480,8 +1482,6 @@ fn test_run_scenic_grn_streaming_gpu_roundtrip() {
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Small in-memory CSC for the metacell round trip. Same design as the disk
@@ -1613,7 +1613,9 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
 
     // The file has to exist: the learner check happens inside
     // `run_scenic_grn_gpu`, so a real reader has to be built first.
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_gbm_reject.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1646,6 +1648,4 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
-
-    let _ = std::fs::remove_file(&path);
 }

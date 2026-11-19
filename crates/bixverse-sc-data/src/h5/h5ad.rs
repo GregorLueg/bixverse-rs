@@ -2794,10 +2794,11 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use hdf5::File;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_read_indptr_past_u32() {
-        let path = std::env::temp_dir().join("bixverse_h5ad_io_indptr.h5");
+        let path = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         let big = [0i64, 5_000_000_000, 5_000_000_007];
         {
             let file = File::create(&path).unwrap();
@@ -2807,13 +2808,12 @@ mod tests {
                 .unwrap();
         }
         let got = AnnFile::open(&path).unwrap().indptr("indptr");
-        let _ = std::fs::remove_file(&path);
         assert_eq!(got.unwrap(), vec![0, 5_000_000_000, 5_000_000_007]);
     }
 
     #[test]
     fn test_raw_check_fewer_values_than_n_check() {
-        let path = std::env::temp_dir().join("bixverse_h5ad_io_small_raw.h5");
+        let path = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         {
             let file = File::create(&path).unwrap();
             let x = file.create_group("X").unwrap();
@@ -2824,7 +2824,6 @@ mod tests {
         }
         let file = AnnFile::open(&path).unwrap();
         let res = check_h5ad_is_raw(&file, &RawDataSlot::DataX, None);
-        let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());
     }
 
@@ -2902,10 +2901,19 @@ mod tests {
 
     /// Stream the dense matrix through `stream_h5_counts` and return the
     /// cell file's bytes.
-    fn ingest_bytes(name: &str, csc: bool, max_nnz: Option<usize>) -> Vec<u8> {
-        let dir = std::env::temp_dir();
-        let h5 = dir.join(format!("bixverse_h5ad_io_{name}.h5ad"));
-        let bin = dir.join(format!("bixverse_h5ad_io_{name}.bin"));
+    ///
+    /// ### Params
+    ///
+    /// * `csc` - Write the h5ad as CSC rather than CSR
+    /// * `max_nnz` - Budget of the CSC transpose
+    ///
+    /// ### Returns
+    ///
+    /// The bytes of the written cell file.
+    fn ingest_bytes(csc: bool, max_nnz: Option<usize>) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let h5 = dir.path().join("counts.h5ad");
+        let bin = dir.path().join("counts.bin");
         write_sparse_h5ad(&h5, &csc_test_dense(), csc);
         let res = stream_h5_counts(
             &h5,
@@ -2918,17 +2926,16 @@ mod tests {
             max_nnz,
             false,
         );
-        let bytes = std::fs::read(&bin);
-        let _ = std::fs::remove_file(&h5);
-        let _ = std::fs::remove_file(&bin);
         res.unwrap();
-        bytes.unwrap()
+        std::fs::read(&bin).unwrap()
     }
 
     #[test]
     fn test_csc_transpose_phases_byte_identical() {
         let budget = 300;
-        let h5 = std::env::temp_dir().join("bixverse_h5ad_io_csc_plan.h5ad");
+        let h5 = NamedTempFile::with_suffix(".h5ad")
+            .unwrap()
+            .into_temp_path();
         write_sparse_h5ad(&h5, &csc_test_dense(), true);
         let quality = parse_h5_csc_quality(
             &h5,
@@ -2937,15 +2944,14 @@ mod tests {
             &csc_test_qc(),
             false,
         );
-        let _ = std::fs::remove_file(&h5);
         let quality = quality.unwrap();
         assert!(quality.cells_to_keep.len() < CSC_TEST_CELLS);
         assert!(quality.genes_to_keep.len() < CSC_TEST_GENES);
         assert!(plan_phases(&quality.cell_nnz, Some(budget)).len() >= 3);
 
-        let single = ingest_bytes("csc_single", true, None);
-        let phased = ingest_bytes("csc_phased", true, Some(budget));
-        let csr = ingest_bytes("csr_ref", false, None);
+        let single = ingest_bytes(true, None);
+        let phased = ingest_bytes(true, Some(budget));
+        let csr = ingest_bytes(false, None);
         assert_eq!(single, phased);
         assert_eq!(single, csr);
     }

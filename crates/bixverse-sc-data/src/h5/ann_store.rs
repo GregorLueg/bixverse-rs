@@ -624,8 +624,7 @@ mod tests {
         assert!(obs.skipped.is_empty(), "{zarr}: {:?}", obs.skipped);
         assert_eq!(obs.cols.len(), 7, "{zarr}");
 
-        let dir = std::env::temp_dir().join(format!("bixverse_zarr_{}_{zarr}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let qc = MinCellQuality {
             min_unique_genes: 0,
             min_lib_size: 0,
@@ -634,7 +633,7 @@ mod tests {
         };
         let mut bytes = Vec::new();
         for (src, out) in [(&z, "zarr.bin"), (&h, "h5ad.bin")] {
-            let out = dir.join(out);
+            let out = dir.path().join(out);
             write_h5_counts(
                 src.as_path(),
                 out.as_path(),
@@ -649,7 +648,6 @@ mod tests {
             bytes.push(std::fs::read(&out).unwrap());
         }
         assert_eq!(bytes[0], bytes[1], "{zarr}: cell file differs");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

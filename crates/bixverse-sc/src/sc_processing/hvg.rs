@@ -2592,29 +2592,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use bixverse_sc_data::store::writer::CellGeneSparseWriter;
-
-    /// RAII guard that removes a test's temp store even if an assert fails.
-    struct TempStore(std::path::PathBuf);
-
-    /// Drop implementation for [`TempStore`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        /// Reserve a uniquely named scratch store in the system temp directory.
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_hvg_{name}.bin")))
-        }
-
-        /// Path of the guarded store as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::{NamedTempFile, TempPath};
 
     /// The stored `data_norm` value for a raw count, computed
     /// exactly as the writer does so the dense reference and the driver see
@@ -2766,9 +2744,9 @@ mod tests {
     }
 
     /// Open a reader over a freshly written synthetic store.
-    fn reader_for(temp: &TempStore, dense: &[Vec<u32>], n_cells: usize) -> ParallelSparseReader {
-        write_store(temp.path(), dense, n_cells);
-        ParallelSparseReader::new(temp.path()).expect("reader opens")
+    fn reader_for(temp: &TempPath, dense: &[Vec<u32>], n_cells: usize) -> ParallelSparseReader {
+        write_store(temp.to_str().unwrap(), dense, n_cells);
+        ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens")
     }
 
     /// The summary-based VST kernels must match a dense pass over every selected cell.
@@ -2776,7 +2754,7 @@ mod tests {
     fn test_vst_matches_dense_reference() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("vst_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         // deliberately a non-contiguous, descending subset
@@ -2798,7 +2776,7 @@ mod tests {
     fn test_dispersion_matches_dense_reference() {
         let (n_genes, n_cells) = (30, 90);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("disp_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).filter(|c| c % 2 == 0).collect();
@@ -2823,7 +2801,7 @@ mod tests {
     fn test_batch_aware_single_batch_matches_plain() {
         let (n_genes, n_cells) = (25, 80);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("single_batch");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2846,7 +2824,7 @@ mod tests {
     fn test_batch_aware_matches_per_batch_runs() {
         let (n_genes, n_cells) = (25, 90);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("batch_split");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2875,7 +2853,7 @@ mod tests {
     fn test_gene_batch_size_invariant() {
         let (n_genes, n_cells) = (37, 60);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("batch_size");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2916,7 +2894,7 @@ mod tests {
     fn test_gene_without_selected_counts_gives_zero_var_std() {
         // gene 1 is only expressed in cells that are not selected
         let dense = vec![vec![3, 1, 4, 2], vec![0, 5, 0, 7], vec![2, 2, 2, 2]];
-        let temp = TempStore::new("empty_gene");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, 4);
 
         let cells = vec![0usize, 2];
@@ -2942,7 +2920,7 @@ mod tests {
             (1..=n_cells as u32).collect::<Vec<u32>>(),
         ];
 
-        let temp = TempStore::new("wide_range");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2965,7 +2943,7 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6, 7, 8],
         ];
 
-        let temp = TempStore::new("u32_counts");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2989,7 +2967,7 @@ mod tests {
         gene[0] = 50_000;
         let dense = vec![gene, vec![2u32; n_cells]];
 
-        let temp = TempStore::new("clip_max");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3119,7 +3097,7 @@ mod tests {
     fn test_drivers_reject_bad_parameters() {
         let n_cells = 8;
         let dense = synthetic_counts(4, n_cells);
-        let temp = TempStore::new("bad_params");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3154,7 +3132,7 @@ mod tests {
     fn diagnostic_hvg_scaling_sweep() {
         let (n_genes, n_cells) = (3_000, 6_000);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scaling_sweep");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3469,7 +3447,7 @@ mod tests {
     fn test_scran_matches_dense_reference() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).rev().filter(|c| c % 3 != 0).collect();
@@ -3491,7 +3469,7 @@ mod tests {
     fn test_scran_streaming_matches_non_streaming() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_streaming");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3507,7 +3485,7 @@ mod tests {
     fn test_scran_batch_aware_matches_per_batch_runs() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_batches");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();

@@ -28,6 +28,7 @@ use bixverse_rs::single_cell::sc_processing::sctransform::stream::SctStreamOpts;
 
 mod analytic_pearson_fixtures;
 use analytic_pearson_fixtures as fx;
+use tempfile::{NamedTempFile, TempPath};
 
 ///////////////
 // Constants //
@@ -42,36 +43,6 @@ const N_HVG: usize = 30;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Removes the scratch stores when the test ends, pass or panic.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Scratch path in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Suffix that keeps concurrent tests apart
-    ///
-    /// ### Returns
-    ///
-    /// The guard. Nothing is created on disk until something writes to it.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_apr_{name}.bin")))
-    }
-
-    /// The path as a string, which is what the store writers take.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// Rebuilds the count matrix `dev/gen_analytic_pearson_fixtures.py` generated.
 ///
@@ -153,28 +124,27 @@ fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
 /// A gene-major store plus its cell-major twin, both cleaned up on drop.
 struct Stores {
     /// Gene-major store, what the gene pass and the residuals read.
-    gene: TempStore,
+    gene: TempPath,
     /// Cell-major twin, what the cell totals read.
-    cell: TempStore,
+    cell: TempPath,
 }
 
 /// Writes the counts gene-major and transposes them to cell-major.
 ///
 /// ### Params
 ///
-/// * `name` - Suffix that keeps concurrent tests apart
 /// * `counts` - Counts as `counts[gene][cell]`
 ///
 /// ### Returns
 ///
 /// Both stores, removed when dropped.
-fn build_stores(name: &str, counts: &[Vec<u32>]) -> Stores {
-    let gene = TempStore::new(&format!("{name}_gene"));
-    let cell = TempStore::new(&format!("{name}_cell"));
-    write_store(gene.path(), counts, fx::N_CELLS);
+fn build_stores(counts: &[Vec<u32>]) -> Stores {
+    let gene = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let cell = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    write_store(gene.to_str().unwrap(), counts, fx::N_CELLS);
     gene_store_to_cell_store(
-        gene.path(),
-        cell.path(),
+        gene.to_str().unwrap(),
+        cell.to_str().unwrap(),
         CELLS_PER_PHASE,
         GENE_BATCH_SIZE,
         0,
@@ -213,9 +183,11 @@ fn test_fixture_counts_round_trip() {
 #[test]
 fn test_model_marginals_match_scanpy() {
     let counts = fixture_counts();
-    let stores = build_stores("marginals", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     let pass = apr_gene_pass(&gene_reader, &cells, &params(), SctStreamOpts::default())
@@ -247,9 +219,11 @@ fn test_model_marginals_match_scanpy() {
 #[test]
 fn test_residuals_match_scanpy() {
     let counts = fixture_counts();
-    let stores = build_stores("residuals", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     let pass = apr_gene_pass(&gene_reader, &cells, &params(), SctStreamOpts::default())
@@ -285,9 +259,11 @@ fn test_residuals_match_scanpy() {
 #[test]
 fn test_residual_variance_matches_scanpy() {
     let counts = fixture_counts();
-    let stores = build_stores("variance", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let opts = SctStreamOpts::default();
 
@@ -343,9 +319,11 @@ fn test_shared_clip_changes_the_per_sample_variance() {
 #[test]
 fn test_grouped_fit_matches_scanpy_per_sample() {
     let counts = fixture_counts();
-    let stores = build_stores("grouped", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let groups: Vec<u32> = (0..fx::N_CELLS)
         .map(|c| if c < fx::SPLIT { 0 } else { 1 })
@@ -387,9 +365,11 @@ fn test_grouped_fit_matches_scanpy_per_sample() {
 #[test]
 fn test_grouped_residual_variance_matches_scanpy_per_sample() {
     let counts = fixture_counts();
-    let stores = build_stores("grouped_var", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let groups: Vec<u32> = (0..fx::N_CELLS)
         .map(|c| if c < fx::SPLIT { 0 } else { 1 })
@@ -435,9 +415,11 @@ fn test_grouped_residual_variance_matches_scanpy_per_sample() {
 #[test]
 fn test_grouped_hvg_unions_the_per_sample_tops() {
     let counts = fixture_counts();
-    let stores = build_stores("grouped_hvg", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let groups: Vec<u32> = (0..fx::N_CELLS)
         .map(|c| if c < fx::SPLIT { 0 } else { 1 })
@@ -484,9 +466,11 @@ fn test_grouped_hvg_unions_the_per_sample_tops() {
 #[test]
 fn test_readers_are_checked_for_orientation() {
     let counts = fixture_counts();
-    let stores = build_stores("orientation", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     assert!(matches!(
@@ -504,9 +488,11 @@ fn test_readers_are_checked_for_orientation() {
 #[test]
 fn test_grouped_fit_preserves_the_mle_invariant() {
     let counts = fixture_counts();
-    let stores = build_stores("mle_invariant", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let groups: Vec<u32> = (0..fx::N_CELLS)
         .map(|c| if c < fx::SPLIT { 0 } else { 1 })
@@ -539,9 +525,11 @@ fn test_grouped_fit_preserves_the_mle_invariant() {
 #[test]
 fn test_duplicate_cells_are_rejected() {
     let counts = fixture_counts();
-    let stores = build_stores("duplicates", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
 
     let mut cells: Vec<usize> = (0..fx::N_CELLS).collect();
     cells[1] = 0;
@@ -580,9 +568,11 @@ fn test_invalid_clip_range_is_rejected() {
 
     // And the fit refuses it rather than reaching a worker.
     let counts = fixture_counts();
-    let stores = build_stores("bad_clip", &counts);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&counts);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
 
     assert!(matches!(

@@ -663,27 +663,7 @@ pub fn restore_archive(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// RAII guard that removes a test's temp file even if an assert fails.
-    struct TempBin(std::path::PathBuf);
-
-    /// Errors are ignored: the file may already be gone, and this runs
-    /// during unwind.
-    impl Drop for TempBin {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempBin {
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_archive_io_{name}.bin")))
-        }
-
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::NamedTempFile;
 
     /// Cell `i` expresses gene `g` when `(i * 7 + g * 3) % 5 == 0`, count
     /// `1 + (i + g) % 4`; cell 2 is empty. Cells in `odd_norm` get a norm that
@@ -738,24 +718,24 @@ mod tests {
     /// answers match the chunk headers.
     #[test]
     fn test_restored_cell_file_has_a_matching_library_index() {
-        let cells = TempBin::new("lib_index_cells");
-        let archive = TempBin::new("lib_index_archive");
-        let cells_out = TempBin::new("lib_index_cells_out");
-        let genes_out = TempBin::new("lib_index_genes_out");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let archive = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cells_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
         let n_cells = ARCHIVE_BLOCK_CELLS + 3;
-        write_cells(cells.path(), n_cells, 11, 1e4, &[]);
-        archive_cell_file(cells.path(), archive.path(), 3, false).unwrap();
+        write_cells(cells.to_str().unwrap(), n_cells, 11, 1e4, &[]);
+        archive_cell_file(cells.to_str().unwrap(), archive.to_str().unwrap(), 3, false).unwrap();
         restore_archive(
-            archive.path(),
-            cells_out.path(),
-            genes_out.path(),
+            archive.to_str().unwrap(),
+            cells_out.to_str().unwrap(),
+            genes_out.to_str().unwrap(),
             None,
             false,
         )
         .unwrap();
 
-        let reader = ParallelSparseReader::new(cells_out.path()).unwrap();
+        let reader = ParallelSparseReader::new(cells_out.to_str().unwrap()).unwrap();
         assert!(reader.has_library_index());
         let all: Vec<usize> = (0..n_cells).collect();
         let from_chunks: Vec<usize> = reader
@@ -777,101 +757,115 @@ mod tests {
 
     #[test]
     fn test_archive_round_trip_across_blocks() {
-        let cells = TempBin::new("rt_cells");
-        let genes = TempBin::new("rt_genes");
-        let archive = TempBin::new("rt_archive");
-        let cells_out = TempBin::new("rt_cells_out");
-        let genes_out = TempBin::new("rt_genes_out");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let archive = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cells_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
         let n_cells = 2 * ARCHIVE_BLOCK_CELLS + 5;
         write_cells(
-            cells.path(),
+            cells.to_str().unwrap(),
             n_cells,
             11,
             1e4,
             &[7, ARCHIVE_BLOCK_CELLS + 1],
         );
-        write_gene_file(cells.path(), genes.path(), None, false).unwrap();
-
-        let stats = archive_cell_file(cells.path(), archive.path(), 3, false).unwrap();
-        assert_eq!(stats.n_cells, n_cells);
-        assert_eq!(stats.n_norm_stored, 2);
-
-        restore_archive(
-            archive.path(),
-            cells_out.path(),
-            genes_out.path(),
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
             None,
             false,
         )
         .unwrap();
 
-        assert_eq!(read_cells(cells_out.path()), read_cells(cells.path()));
+        let stats = archive_cell_file(cells.to_str().unwrap(), archive.to_str().unwrap(), 3, false)
+            .unwrap();
+        assert_eq!(stats.n_cells, n_cells);
+        assert_eq!(stats.n_norm_stored, 2);
+
+        restore_archive(
+            archive.to_str().unwrap(),
+            cells_out.to_str().unwrap(),
+            genes_out.to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+
         assert_eq!(
-            std::fs::read(cells_out.path()).unwrap(),
-            std::fs::read(cells.path()).unwrap()
+            read_cells(cells_out.to_str().unwrap()),
+            read_cells(cells.to_str().unwrap())
         );
         assert_eq!(
-            std::fs::read(genes_out.path()).unwrap(),
-            std::fs::read(genes.path()).unwrap()
+            std::fs::read(cells_out.to_str().unwrap()).unwrap(),
+            std::fs::read(cells.to_str().unwrap()).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(genes_out.to_str().unwrap()).unwrap(),
+            std::fs::read(genes.to_str().unwrap()).unwrap()
         );
     }
 
     #[test]
     fn test_archive_unknown_target_size_stores_norm() {
-        let cells = TempBin::new("raw_cells");
-        let archive = TempBin::new("raw_archive");
-        let cells_out = TempBin::new("raw_cells_out");
-        let genes_out = TempBin::new("raw_genes_out");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let archive = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cells_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        write_cells(cells.path(), 40, 9, 0.0, &[]);
+        write_cells(cells.to_str().unwrap(), 40, 9, 0.0, &[]);
 
-        let stats = archive_cell_file(cells.path(), archive.path(), 3, false).unwrap();
+        let stats = archive_cell_file(cells.to_str().unwrap(), archive.to_str().unwrap(), 3, false)
+            .unwrap();
         assert_eq!(stats.n_norm_stored, 40);
 
         restore_archive(
-            archive.path(),
-            cells_out.path(),
-            genes_out.path(),
+            archive.to_str().unwrap(),
+            cells_out.to_str().unwrap(),
+            genes_out.to_str().unwrap(),
             None,
             false,
         )
         .unwrap();
-        assert_eq!(read_cells(cells_out.path()), read_cells(cells.path()));
+        assert_eq!(
+            read_cells(cells_out.to_str().unwrap()),
+            read_cells(cells.to_str().unwrap())
+        );
     }
 
     #[test]
     fn test_restore_rejects_corrupt_archive() {
-        let cells = TempBin::new("bad_cells");
-        let archive = TempBin::new("bad_archive");
-        let cells_out = TempBin::new("bad_cells_out");
-        let genes_out = TempBin::new("bad_genes_out");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let archive = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cells_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes_out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        write_cells(cells.path(), 40, 9, 1e4, &[]);
-        archive_cell_file(cells.path(), archive.path(), 3, false).unwrap();
-        let bytes = std::fs::read(archive.path()).unwrap();
+        write_cells(cells.to_str().unwrap(), 40, 9, 1e4, &[]);
+        archive_cell_file(cells.to_str().unwrap(), archive.to_str().unwrap(), 3, false).unwrap();
+        let bytes = std::fs::read(archive.to_str().unwrap()).unwrap();
         let restore = || {
             restore_archive(
-                archive.path(),
-                cells_out.path(),
-                genes_out.path(),
+                archive.to_str().unwrap(),
+                cells_out.to_str().unwrap(),
+                genes_out.to_str().unwrap(),
                 None,
                 false,
             )
         };
 
-        std::fs::write(archive.path(), &bytes[..bytes.len() - 3]).unwrap();
+        std::fs::write(archive.to_str().unwrap(), &bytes[..bytes.len() - 3]).unwrap();
         assert!(matches!(restore(), Err(ScDataErrors::ArchiveCorrupt(_))));
 
         let mut flipped = bytes.clone();
         let mid = ARCHIVE_HEADER_LEN + 8 + (bytes.len() - ARCHIVE_HEADER_LEN - 8) / 2;
         flipped[mid] ^= 0xff;
-        std::fs::write(archive.path(), &flipped).unwrap();
+        std::fs::write(archive.to_str().unwrap(), &flipped).unwrap();
         assert!(restore().is_err());
 
         let mut wrong = bytes.clone();
         wrong[0] = b'X';
-        std::fs::write(archive.path(), &wrong).unwrap();
+        std::fs::write(archive.to_str().unwrap(), &wrong).unwrap();
         assert!(matches!(restore(), Err(ScDataErrors::ArchiveMagicMismatch)));
     }
 }

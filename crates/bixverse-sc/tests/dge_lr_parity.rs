@@ -12,6 +12,7 @@ use bixverse_sc_data::prelude::*;
 use bixverse_sc_data::store::gene_file::write_gene_file;
 use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 use dge_lr_fixtures::*;
+use tempfile::{NamedTempFile, TempPath};
 
 /// Relative tolerance on the p-values with the feature in f64, as R has it.
 /// Both sides run the same IRLS iterates to the same stopping rule, so what
@@ -29,27 +30,6 @@ const P_TOL_STORE: f64 = 1e-5;
 /// even its p-value matches (observed: 2e-14 relative), but it is the
 /// deviance of an arbitrary stopping point.
 const SEPARATED: usize = N_FEAT - 1;
-
-/// Removes the scratch store on drop.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    fn new(name: &str) -> Self {
-        Self(
-            std::env::temp_dir().join(format!("bixverse_dge_lr_{name}_{}.bin", std::process::id())),
-        )
-    }
-
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// The fixture counts, `counts[feature][cell]`, rebuilt from the LCG exactly
 /// as the R script draws them.
@@ -96,9 +76,9 @@ fn assert_p_close(ours: f64, theirs: f64, tol: f64, feature: usize) {
 }
 
 /// Write the fixture as a cell store and its gene store.
-fn gene_reader(cells: &TempStore, genes: &TempStore, counts: &[Vec<u32>]) -> ParallelSparseReader {
-    let mut writer =
-        CellGeneSparseWriter::new(cells.path(), true, N_CELLS, N_FEAT, 1e4).expect("writer opens");
+fn gene_reader(cells: &TempPath, genes: &TempPath, counts: &[Vec<u32>]) -> ParallelSparseReader {
+    let mut writer = CellGeneSparseWriter::new(cells.to_str().unwrap(), true, N_CELLS, N_FEAT, 1e4)
+        .expect("writer opens");
     for c in 0..N_CELLS {
         let mut raw = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -113,8 +93,14 @@ fn gene_reader(cells: &TempStore, genes: &TempStore, counts: &[Vec<u32>]) -> Par
             .expect("write cell chunk");
     }
     writer.finalise().expect("finalise");
-    write_gene_file(cells.path(), genes.path(), None, false).expect("gene file");
-    ParallelSparseReader::new(genes.path()).expect("reader opens")
+    write_gene_file(
+        cells.to_str().unwrap(),
+        genes.to_str().unwrap(),
+        None,
+        false,
+    )
+    .expect("gene file");
+    ParallelSparseReader::new(genes.to_str().unwrap()).expect("reader opens")
 }
 
 /// The single-feature test on the f64 layer R sees.
@@ -148,8 +134,8 @@ fn test_lr_matches_seurat() {
 fn test_lr_store_matches_seurat() {
     let counts = fixture_counts();
     let lib = library_sizes(&counts);
-    let cells = TempStore::new("parity_cells");
-    let genes = TempStore::new("parity_genes");
+    let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let reader = gene_reader(&cells, &genes, &counts);
 
     let grp_1: Vec<usize> = (0..N_GRP_1).collect();

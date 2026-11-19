@@ -161,21 +161,7 @@ pub fn check_tenx_filters(file: &File, version: &TenxVersion) -> Result<(), ScDa
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// RAII guard that removes a test's temp file even if an assert fails.
-    struct TempH5(std::path::PathBuf);
-
-    impl Drop for TempH5 {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempH5 {
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_h5_filters_{name}.h5")))
-        }
-    }
+    use tempfile::NamedTempFile;
 
     /// An unregistered id is flagged. `Filter::User` is the only way to build a
     /// pipeline entry for a filter this build does not have, since the dataset
@@ -208,9 +194,9 @@ mod tests {
     /// check.
     #[test]
     fn test_check_h5_filters_accepts_gzip() {
-        let temp = TempH5::new("gzip");
+        let temp = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         {
-            let file = File::create(&temp.0).expect("create");
+            let file = File::create(&temp).expect("create");
             file.new_dataset_builder()
                 .shuffle()
                 .deflate(4)
@@ -220,23 +206,23 @@ mod tests {
                 .expect("write dataset");
         }
 
-        let file = File::open(&temp.0).expect("open");
+        let file = File::open(&temp).expect("open");
         assert!(check_h5_filters(&file, &["X"]).is_ok());
     }
 
     /// A path that is not in the file is left to the reader behind us.
     #[test]
     fn test_check_h5_filters_skips_missing_datasets() {
-        let temp = TempH5::new("missing");
+        let temp = NamedTempFile::with_suffix(".h5").unwrap().into_temp_path();
         {
-            let file = File::create(&temp.0).expect("create");
+            let file = File::create(&temp).expect("create");
             file.new_dataset_builder()
                 .with_data(&[1_i32, 2, 3])
                 .create("X")
                 .expect("write dataset");
         }
 
-        let file = File::open(&temp.0).expect("open");
+        let file = File::open(&temp).expect("open");
         assert!(check_h5_filters(&file, &["layers/counts/data"]).is_ok());
     }
 }

@@ -446,30 +446,7 @@ pub fn multi_mtx_to_file<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::path::PathBuf;
-
-    /// Removes a test's scratch file even if an assert fails.
-    struct TempPath(PathBuf);
-
-    /// Drop implementation for [`TempPath`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempPath {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempPath {
-        /// Scratch file named after the calling test.
-        fn new(name: &str, ext: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_mtx_multi_{name}.{ext}")))
-        }
-
-        /// Path as a `String`.
-        fn string(&self) -> String {
-            self.0.to_str().expect("utf-8 temp path").to_string()
-        }
-    }
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Three cells x four genes as integer counts, cells as rows.
     const INTEGER_CELLS_AS_ROWS: &str = "%%MatrixMarket matrix coordinate integer general\n\
@@ -487,7 +464,7 @@ mod tests {
     fn task(name: &str, path: &TempPath, cells_as_rows: bool) -> MtxFileTask {
         MtxFileTask {
             exp_id: name.to_string(),
-            mtx_path: path.string(),
+            mtx_path: path.to_str().unwrap().to_string(),
             gene_local_to_universe: (0..4).map(Some).collect(),
             cells_as_rows,
         }
@@ -507,28 +484,31 @@ mod tests {
     /// values each field type implies.
     #[test]
     fn multi_mtx_reads_every_field_type_and_gzip() {
-        let integer = TempPath::new("integer", "mtx");
-        std::fs::write(&integer.0, INTEGER_CELLS_AS_ROWS).expect("written");
-        let real = TempPath::new("real", "mtx.gz");
+        let integer = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
+        std::fs::write(&integer, INTEGER_CELLS_AS_ROWS).expect("written");
+        let real = NamedTempFile::with_suffix(".mtx.gz")
+            .unwrap()
+            .into_temp_path();
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(REAL_GENES_AS_ROWS.as_bytes())
             .expect("gzipped");
-        std::fs::write(&real.0, enc.finish().expect("gzipped")).expect("written");
-        let pattern = TempPath::new("pattern", "mtx");
-        std::fs::write(&pattern.0, PATTERN_CELLS_AS_ROWS).expect("written");
-        let bin = TempPath::new("store", "bin");
+        std::fs::write(&real, enc.finish().expect("gzipped")).expect("written");
+        let pattern = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
+        std::fs::write(&pattern, PATTERN_CELLS_AS_ROWS).expect("written");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
         let tasks = [
             task("integer", &integer, true),
             task("real", &real, false),
             task("pattern", &pattern, true),
         ];
-        let res = multi_mtx_to_file(&tasks, &bin.0, 4, &keep_all(), false).expect("loaded");
+        let res = multi_mtx_to_file(&tasks, &bin, 4, &keep_all(), false).expect("loaded");
         assert_eq!(res.total_cells, 6);
         assert_eq!(res.per_file[1].lib_size, vec![15, 6]);
         assert_eq!(res.per_file[2].lib_size, vec![2]);
 
-        let reader = ParallelSparseReader::new(&bin.string()).expect("reader opens");
+        let reader =
+            ParallelSparseReader::new(&bin.to_str().unwrap().to_string()).expect("reader opens");
         let cells: Vec<(Vec<u32>, Vec<u32>)> = reader
             .read_cells_parallel(&[3, 4, 5])
             .expect("cells read back")
@@ -548,17 +528,17 @@ mod tests {
     /// A fractional value fails the load rather than truncating.
     #[test]
     fn multi_mtx_rejects_a_fractional_real() {
-        let real = TempPath::new("fraction", "mtx");
+        let real = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
         std::fs::write(
-            &real.0,
+            &real,
             "%%MatrixMarket matrix coordinate real general\n1 4 1\n1 1 2.5\n",
         )
         .expect("written");
-        let bin = TempPath::new("fraction_store", "bin");
+        let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         assert!(matches!(
             multi_mtx_to_file(
                 &[task("fraction", &real, true)],
-                &bin.0,
+                &bin,
                 4,
                 &keep_all(),
                 false

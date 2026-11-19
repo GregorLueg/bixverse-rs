@@ -669,7 +669,9 @@ mod tests {
         };
 
         let f = features();
-        let path = std::env::temp_dir().join(format!("bx_intervals_{}.bin", std::process::id()));
+        let path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
         let p = path.to_str().unwrap();
         let mut w = CellGeneSparseWriter::new(p, true, 3, f.len(), 1e4).unwrap();
         for c in 0..3 {
@@ -705,6 +707,5 @@ mod tests {
 
         let short = GenomeIntervals::new(&f[..10]).unwrap();
         assert!(attach_interval_index(&[p], &short).is_err());
-        let _ = std::fs::remove_file(&path);
     }
 }

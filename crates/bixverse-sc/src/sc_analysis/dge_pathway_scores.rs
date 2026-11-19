@@ -1726,39 +1726,7 @@ mod tests {
     use approx::assert_relative_eq;
     use bixverse_sc_data::store::gene_file::write_gene_file;
     use bixverse_sc_data::store::writer::CellGeneSparseWriter;
-
-    /// Scratch store that removes itself on drop.
-    struct TempStore(std::path::PathBuf);
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        /// Reserve a uniquely named scratch store in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix
-        ///
-        /// ### Returns
-        ///
-        /// The guard; the path is available via [`Self::path`].
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_dge_{name}.bin")))
-        }
-
-        /// Path of the guarded store as a `&str`.
-        ///
-        /// ### Returns
-        ///
-        /// The path.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Open a reader over a freshly written cell-based store.
     ///
@@ -1770,11 +1738,12 @@ mod tests {
     /// ### Returns
     ///
     /// The reader.
-    fn reader_for(temp: &TempStore, dense: &[Vec<u32>]) -> ParallelSparseReader {
+    fn reader_for(temp: &TempPath, dense: &[Vec<u32>]) -> ParallelSparseReader {
         let n_cells = dense.len();
         let n_genes = dense[0].len();
-        let mut writer = CellGeneSparseWriter::new(temp.path(), true, n_cells, n_genes, 1e4)
-            .expect("writer opens");
+        let mut writer =
+            CellGeneSparseWriter::new(temp.to_str().unwrap(), true, n_cells, n_genes, 1e4)
+                .expect("writer opens");
 
         for (cell_idx, cell) in dense.iter().enumerate() {
             let mut raw = Vec::new();
@@ -1792,7 +1761,7 @@ mod tests {
         }
 
         writer.finalise().expect("finalise");
-        ParallelSparseReader::new(temp.path()).expect("reader opens")
+        ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens")
     }
 
     /// Identity ascending ranks: gene index `i` has ascending rank `i + 1`,
@@ -2114,8 +2083,8 @@ mod tests {
     /// by construction.
     #[test]
     fn test_one_vs_many_auroc_end_to_end() {
-        let cells = TempStore::new("one_vs_many_cells");
-        let genes = TempStore::new("one_vs_many_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         let res =
@@ -2174,13 +2143,19 @@ mod tests {
     ///
     /// `(cell reader, gene reader)`.
     fn readers_for(
-        cells: &TempStore,
-        genes: &TempStore,
+        cells: &TempPath,
+        genes: &TempPath,
         dense: &[Vec<u32>],
     ) -> (ParallelSparseReader, ParallelSparseReader) {
         let cell_reader = reader_for(cells, dense);
-        write_gene_file(cells.path(), genes.path(), None, false).expect("gene file");
-        let gene_reader = ParallelSparseReader::new(genes.path()).expect("reader opens");
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("gene file");
+        let gene_reader = ParallelSparseReader::new(genes.to_str().unwrap()).expect("reader opens");
         (cell_reader, gene_reader)
     }
 
@@ -2189,8 +2164,8 @@ mod tests {
     /// kernel.
     #[test]
     fn test_one_vs_many_matches_pairwise() {
-        let cells = TempStore::new("vs_pairwise_cells");
-        let genes = TempStore::new("vs_pairwise_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
         let groups = three_groups();
 
@@ -2222,8 +2197,8 @@ mod tests {
     /// swapping the roles mirrors the AUROC.
     #[test]
     fn test_one_vs_many_all_references() {
-        let cells = TempStore::new("all_refs_cells");
-        let genes = TempStore::new("all_refs_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
         let groups = three_groups();
 
@@ -2263,8 +2238,8 @@ mod tests {
     /// panic.
     #[test]
     fn test_one_vs_many_all_genes_filtered() {
-        let cells = TempStore::new("all_filtered_cells");
-        let genes = TempStore::new("all_filtered_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         // Nothing clears a proportion above 1.0
@@ -2282,8 +2257,8 @@ mod tests {
     /// An out-of-range reference arm is an error, not a panic.
     #[test]
     fn test_one_vs_many_reference_out_of_range() {
-        let cells = TempStore::new("bad_ref_cells");
-        let genes = TempStore::new("bad_ref_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         assert!(matches!(
@@ -2300,8 +2275,8 @@ mod tests {
     /// group are ignored on both sides.
     #[test]
     fn test_one_vs_rest_matches_pairwise() {
-        let cells = TempStore::new("vs_rest_cells");
-        let genes = TempStore::new("vs_rest_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         // cell 3 and cell 11 sit in no group
@@ -2338,7 +2313,7 @@ mod tests {
     /// The scans need the gene store, so a cell store is a mode error.
     #[test]
     fn test_one_vs_rest_rejects_cell_store() {
-        let cells = TempStore::new("wrong_mode_cells");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&cells, &one_vs_many_counts());
 
         assert!(matches!(

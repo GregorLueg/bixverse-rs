@@ -498,37 +498,7 @@ fn write_gene_file_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// RAII guard that removes a test's temp file even if an assert fails.
-    struct TempBin(std::path::PathBuf);
-
-    /// Drop implementation for [`TempBin`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempBin {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempBin {
-        /// Reserve a uniquely named scratch file in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix.
-        ///
-        /// ### Returns
-        ///
-        /// The guard.
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_gene_file_io_{name}.bin")))
-        }
-
-        /// Path of the guarded file as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::NamedTempFile;
 
     /// Write a deterministic cell file. Cell `i` expresses every gene `g` with
     /// `(i * 7 + g * 3) % 5 == 0`, count `1 + (i + g) % 4`; gene 3 is left
@@ -628,22 +598,32 @@ mod tests {
 
     #[test]
     fn test_write_gene_file_matches_transpose() {
-        let cells = TempBin::new("match_cells");
-        let genes = TempBin::new("match_genes");
-        write_cells(cells.path(), 57, 11);
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_cells(cells.to_str().unwrap(), 57, 11);
 
-        write_gene_file(cells.path(), genes.path(), None, false).unwrap();
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(read_genes(genes.path()), reference(cells.path()));
+        assert_eq!(
+            read_genes(genes.to_str().unwrap()),
+            reference(cells.to_str().unwrap())
+        );
     }
 
     #[test]
     fn test_write_gene_file_stored_norm_cell_carries_norm() {
-        let cells = TempBin::new("stored_cells");
-        let genes = TempBin::new("stored_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (n_cells, n_genes) = (23, 7);
         let mut writer =
-            CellGeneSparseWriter::new(cells.path(), true, n_cells, n_genes, 1e4).unwrap();
+            CellGeneSparseWriter::new(cells.to_str().unwrap(), true, n_cells, n_genes, 1e4)
+                .unwrap();
         for i in 0..n_cells {
             let idx: Vec<u32> = (0..n_genes as u32)
                 .filter(|g| !(i as u32 + g).is_multiple_of(3))
@@ -657,44 +637,74 @@ mod tests {
                 .unwrap();
         }
         writer.finalise().unwrap();
-        let cell_reader = ParallelSparseReader::new(cells.path()).unwrap();
+        let cell_reader = ParallelSparseReader::new(cells.to_str().unwrap()).unwrap();
         assert_eq!(cell_reader.count_norm_stored_chunks().unwrap(), 1);
 
-        write_gene_file(cells.path(), genes.path(), Some(20), false).unwrap();
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
+            Some(20),
+            false,
+        )
+        .unwrap();
 
         // a gene touching cell 4 stores its whole layer verbatim, at f32 in
         // v5, so both views agree exactly
-        assert_eq!(read_genes(genes.path()), reference(cells.path()));
+        assert_eq!(
+            read_genes(genes.to_str().unwrap()),
+            reference(cells.to_str().unwrap())
+        );
     }
 
     #[test]
     fn test_write_gene_file_multi_phase_identical() {
-        let cells = TempBin::new("phase_cells");
-        let single = TempBin::new("phase_single");
-        let multi = TempBin::new("phase_multi");
-        write_cells(cells.path(), 57, 11);
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let single = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let multi = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_cells(cells.to_str().unwrap(), 57, 11);
 
-        write_gene_file(cells.path(), single.path(), None, false).unwrap();
+        write_gene_file(
+            cells.to_str().unwrap(),
+            single.to_str().unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
         // budget below the largest gene forces one phase per gene
-        write_gene_file(cells.path(), multi.path(), Some(1), false).unwrap();
+        write_gene_file(
+            cells.to_str().unwrap(),
+            multi.to_str().unwrap(),
+            Some(1),
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(read_genes(single.path()), read_genes(multi.path()));
+        assert_eq!(
+            read_genes(single.to_str().unwrap()),
+            read_genes(multi.to_str().unwrap())
+        );
     }
 
     #[test]
     fn test_write_gene_file_empty_gene_and_header() {
-        let cells = TempBin::new("empty_cells");
-        let genes = TempBin::new("empty_genes");
-        write_cells(cells.path(), 20, 6);
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_cells(cells.to_str().unwrap(), 20, 6);
 
-        write_gene_file(cells.path(), genes.path(), Some(15), false).unwrap();
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
+            Some(15),
+            false,
+        )
+        .unwrap();
 
-        let reader = ParallelSparseReader::new(genes.path()).unwrap();
+        let reader = ParallelSparseReader::new(genes.to_str().unwrap()).unwrap();
         assert!(!reader.is_cell_based());
         assert_eq!(reader.dims().total_cells, 20);
         assert_eq!(reader.dims().total_genes, 6);
         assert_eq!(reader.target_size(), Some(1e4));
-        let g3 = &read_genes(genes.path())[3];
+        let g3 = &read_genes(genes.to_str().unwrap())[3];
         assert!(g3.0.is_empty() && g3.2.is_empty());
     }
 

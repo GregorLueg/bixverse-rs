@@ -43,5 +43,8 @@ thiserror.workspace = true
 thousands.workspace = true
 wide.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [package.metadata.docs.rs]
 features = ["multi-modal"]

@@ -332,7 +332,7 @@ mod tests {
     use super::*;
     use crate::store::reader::peek_file_version;
     use crate::store::v4::tests::{
-        N_CELLS, N_GENES, Scratch, TARGET, assert_cells_equal, assert_genes_equal, norm_bits,
+        N_CELLS, N_GENES, TARGET, assert_cells_equal, assert_genes_equal, norm_bits, scratch,
         write_legacy_store,
     };
     use indexmap::IndexSet;
@@ -356,26 +356,17 @@ mod tests {
     /// each codec and with a zero target size (norm always stored).
     fn check_conversion(version: u32, codec: ChunkCodec, target: f32) {
         let exact = version == SC_FILE_VERSION_V4;
-        let tag = format!("v{version}_{codec:?}_{}", target as u32);
-        let s = Scratch::new(&tag, 4);
-        write_legacy_store(version, s.path(0), s.path(1), target);
-        convert_store_to_v5(
-            s.path(0),
-            Some(s.path(1)),
-            s.path(2),
-            Some(s.path(3)),
-            codec,
-            false,
-        )
-        .unwrap();
+        let (_dir, s) = scratch(4);
+        write_legacy_store(version, &s[0], &s[1], target);
+        convert_store_to_v5(&s[0], Some(&s[1]), &s[2], Some(&s[3]), codec, false).unwrap();
 
         let (cells_old, cells_new) = (
-            ParallelSparseReader::open_any(s.path(0)).unwrap(),
-            ParallelSparseReader::new(s.path(2)).unwrap(),
+            ParallelSparseReader::open_any(&s[0]).unwrap(),
+            ParallelSparseReader::new(&s[2]).unwrap(),
         );
         let (genes_old, genes_new) = (
-            ParallelSparseReader::open_any(s.path(1)).unwrap(),
-            ParallelSparseReader::new(s.path(3)).unwrap(),
+            ParallelSparseReader::open_any(&s[1]).unwrap(),
+            ParallelSparseReader::new(&s[3]).unwrap(),
         );
         assert_eq!(cells_old.file_version(), version);
         assert_eq!(cells_new.file_version(), SC_FILE_VERSION);
@@ -481,48 +472,48 @@ mod tests {
 
     #[test]
     fn test_v5_drops_norm_and_shrinks() {
-        let s = Scratch::new("shrink", 4);
-        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        let (_dir, s) = scratch(4);
+        write_legacy_store(SC_FILE_VERSION_V3, &s[0], &s[1], TARGET);
         convert_store_to_v5(
-            s.path(0),
-            Some(s.path(1)),
-            s.path(2),
-            Some(s.path(3)),
+            &s[0],
+            Some(&s[1]),
+            &s[2],
+            Some(&s[3]),
             ChunkCodec::Lz4,
             false,
         )
         .unwrap();
-        let size = |i: usize| std::fs::metadata(s.path(i)).unwrap().len();
+        let size = |i: usize| std::fs::metadata(&s[i]).unwrap().len();
         assert!(size(2) < size(0), "cell file {} vs {}", size(2), size(0));
         assert!(size(3) < size(1), "gene file {} vs {}", size(3), size(1));
     }
 
     #[test]
     fn test_default_writer_emits_v5_and_converter_refuses_it() {
-        let s = Scratch::new("guards", 2);
-        let mut writer = CellGeneSparseWriter::new(s.path(0), true, 1, 3, TARGET).unwrap();
+        let (_dir, s) = scratch(2);
+        let mut writer = CellGeneSparseWriter::new(&s[0], true, 1, 3, TARGET).unwrap();
         writer
             .write_cell_chunk(CsrCellChunk::from_data(&[1u32], &[0u32], 0, TARGET, true))
             .unwrap();
         writer.finalise().unwrap();
-        assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION);
+        assert_eq!(peek_file_version(&s[0]).unwrap(), SC_FILE_VERSION);
         assert!(matches!(
-            convert_cell_file_to_v5(s.path(0), s.path(1), ChunkCodec::Lz4, false),
+            convert_cell_file_to_v5(&s[0], &s[1], ChunkCodec::Lz4, false),
             Err(ScDataErrors::FileVersionMismatch { .. })
         ));
     }
 
     #[test]
     fn test_default_gene_file_is_v5_and_matches_the_v3_one() {
-        let s = Scratch::new("genefile", 4);
-        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
-        convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
-        crate::store::gene_file::write_gene_file(s.path(2), s.path(3), Some(500), false).unwrap();
-        assert_eq!(peek_file_version(s.path(3)).unwrap(), SC_FILE_VERSION);
+        let (_dir, s) = scratch(4);
+        write_legacy_store(SC_FILE_VERSION_V3, &s[0], &s[1], TARGET);
+        convert_cell_file_to_v5(&s[0], &s[2], ChunkCodec::Lz4, false).unwrap();
+        crate::store::gene_file::write_gene_file(&s[2], &s[3], Some(500), false).unwrap();
+        assert_eq!(peek_file_version(&s[3]).unwrap(), SC_FILE_VERSION);
 
         let (v3, v5) = (
-            ParallelSparseReader::open_any(s.path(1)).unwrap(),
-            ParallelSparseReader::new(s.path(3)).unwrap(),
+            ParallelSparseReader::open_any(&s[1]).unwrap(),
+            ParallelSparseReader::new(&s[3]).unwrap(),
         );
         let all: Vec<usize> = (0..N_GENES).collect();
         for (a, b) in v3
@@ -538,43 +529,39 @@ mod tests {
     #[test]
     fn test_upgrade_store_replaces_files_and_keeps_backups() {
         for version in [SC_FILE_VERSION_V3, SC_FILE_VERSION_V4] {
-            let s = Scratch::new(&format!("upgrade{version}"), 2);
-            write_legacy_store(version, s.path(0), s.path(1), TARGET);
-            let cells_before = ParallelSparseReader::open_any(s.path(0))
+            let (_dir, s) = scratch(2);
+            write_legacy_store(version, &s[0], &s[1], TARGET);
+            let cells_before = ParallelSparseReader::open_any(&s[0])
                 .unwrap()
                 .get_all_cells()
                 .unwrap();
-            upgrade_store_to_v5(s.path(0), Some(s.path(1)), ChunkCodec::Lz4, true, false).unwrap();
+            upgrade_store_to_v5(&s[0], Some(&s[1]), ChunkCodec::Lz4, true, false).unwrap();
 
-            assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION);
-            assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION);
-            let backup = format!("{}.v{version}.bak", s.path(0));
+            assert_eq!(peek_file_version(&s[0]).unwrap(), SC_FILE_VERSION);
+            assert_eq!(peek_file_version(&s[1]).unwrap(), SC_FILE_VERSION);
+            let backup = format!("{}.v{version}.bak", &s[0]);
             assert_eq!(peek_file_version(&backup).unwrap(), version);
             for (a, b) in cells_before.iter().zip(
-                &ParallelSparseReader::new(s.path(0))
+                &ParallelSparseReader::new(&s[0])
                     .unwrap()
                     .get_all_cells()
                     .unwrap(),
             ) {
                 assert_cells_equal(a, b, version == SC_FILE_VERSION_V4);
             }
-            for p in [backup, format!("{}.v{version}.bak", s.path(1))] {
-                let _ = std::fs::remove_file(p);
-            }
         }
     }
 
     #[test]
     fn test_archive_round_trips_a_v5_cell_file() {
-        let s = Scratch::new("archive", 6);
-        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
-        convert_cell_file_to_v5(s.path(0), s.path(2), ChunkCodec::Lz4, false).unwrap();
-        crate::store::archive::archive_cell_file(s.path(2), s.path(3), 3, false).unwrap();
-        crate::store::archive::restore_archive(s.path(3), s.path(4), s.path(5), Some(500), false)
-            .unwrap();
+        let (_dir, s) = scratch(6);
+        write_legacy_store(SC_FILE_VERSION_V3, &s[0], &s[1], TARGET);
+        convert_cell_file_to_v5(&s[0], &s[2], ChunkCodec::Lz4, false).unwrap();
+        crate::store::archive::archive_cell_file(&s[2], &s[3], 3, false).unwrap();
+        crate::store::archive::restore_archive(&s[3], &s[4], &s[5], Some(500), false).unwrap();
 
-        let original = ParallelSparseReader::new(s.path(2)).unwrap();
-        let restored = ParallelSparseReader::new(s.path(4)).unwrap();
+        let original = ParallelSparseReader::new(&s[2]).unwrap();
+        let restored = ParallelSparseReader::new(&s[4]).unwrap();
         let all: Vec<usize> = (0..N_CELLS).collect();
         for (a, b) in original
             .read_cells_parallel(&all)

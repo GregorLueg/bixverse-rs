@@ -1364,6 +1364,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::store::reader::peek_file_version;
     use crate::store::writer::CellGeneSparseWriter;
+    use tempfile::TempDir;
 
     #[test]
     fn test_pack_unpack_round_trip_widths() {
@@ -1423,30 +1424,27 @@ pub(crate) mod tests {
         assert!(unpack(&[33], 1, &mut out).is_err());
     }
 
-    /// Removes the files of a test on drop.
-    pub(crate) struct Scratch(Vec<std::path::PathBuf>);
-
-    impl Scratch {
-        pub(crate) fn new(tag: &str, n: usize) -> Self {
-            let dir = std::env::temp_dir();
-            Self(
-                (0..n)
-                    .map(|i| dir.join(format!("bx_v4_{tag}_{}_{i}.bin", std::process::id())))
-                    .collect(),
-            )
-        }
-
-        pub(crate) fn path(&self, i: usize) -> &str {
-            self.0[i].to_str().unwrap()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            for p in &self.0 {
-                let _ = std::fs::remove_file(p);
-            }
-        }
+    /// `n` scratch file paths in a fresh temporary directory.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of paths
+    ///
+    /// ### Returns
+    ///
+    /// The directory, which removes everything in it on drop, and the paths.
+    pub(crate) fn scratch(n: usize) -> (TempDir, Vec<String>) {
+        let dir = TempDir::new().unwrap();
+        let paths = (0..n)
+            .map(|i| {
+                dir.path()
+                    .join(format!("{i}.bin"))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        (dir, paths)
     }
 
     pub(crate) const N_CELLS: usize = 300;
@@ -1625,7 +1623,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_peek_file_version_distinguishes_v3_v4_and_v5() {
-        let s = Scratch::new("peek", 3);
+        let (_dir, s) = scratch(3);
         let chunk = || CsrCellChunk::from_data(&[1u32, 2], &[0u32, 1], 0, TARGET, true);
         let ctors = [
             CellGeneSparseWriter::new_v3,
@@ -1633,19 +1631,19 @@ pub(crate) mod tests {
             CellGeneSparseWriter::new,
         ];
         for (i, ctor) in ctors.into_iter().enumerate() {
-            let mut w = ctor(s.path(i), true, 1, 3, TARGET).unwrap();
+            let mut w = ctor(&s[i], true, 1, 3, TARGET).unwrap();
             w.write_cell_chunk(chunk()).unwrap();
             w.finalise().unwrap();
         }
-        assert_eq!(peek_file_version(s.path(0)).unwrap(), SC_FILE_VERSION_V3);
-        assert_eq!(peek_file_version(s.path(1)).unwrap(), SC_FILE_VERSION_V4);
-        assert_eq!(peek_file_version(s.path(2)).unwrap(), SC_FILE_VERSION);
+        assert_eq!(peek_file_version(&s[0]).unwrap(), SC_FILE_VERSION_V3);
+        assert_eq!(peek_file_version(&s[1]).unwrap(), SC_FILE_VERSION_V4);
+        assert_eq!(peek_file_version(&s[2]).unwrap(), SC_FILE_VERSION);
         assert_eq!(
-            crate::store::reader::peek_target_size(s.path(1)).unwrap(),
+            crate::store::reader::peek_target_size(&s[1]).unwrap(),
             Some(TARGET)
         );
         assert_eq!(
-            crate::store::reader::peek_target_size(s.path(2)).unwrap(),
+            crate::store::reader::peek_target_size(&s[2]).unwrap(),
             Some(TARGET)
         );
     }
@@ -1653,13 +1651,13 @@ pub(crate) mod tests {
     /// v3 opens for the converters only.
     #[test]
     fn test_reader_refuses_v3_with_the_converter_hint() {
-        let s = Scratch::new("v3refuse", 2);
-        write_legacy_store(SC_FILE_VERSION_V3, s.path(0), s.path(1), TARGET);
+        let (_dir, s) = scratch(2);
+        write_legacy_store(SC_FILE_VERSION_V3, &s[0], &s[1], TARGET);
         assert!(matches!(
-            ParallelSparseReader::new(s.path(0)),
+            ParallelSparseReader::new(&s[0]),
             Err(ScDataErrors::V3NeedsConversion(_))
         ));
-        assert!(ParallelSparseReader::open_any(s.path(0)).is_ok());
+        assert!(ParallelSparseReader::open_any(&s[0]).is_ok());
     }
 
     ////////
@@ -1722,17 +1720,17 @@ pub(crate) mod tests {
     fn test_v5_layers_round_trip_both_orientations() {
         let (n_cells, n_genes) = (57, 23);
         let layers = allele_layers(n_cells, n_genes);
-        let s = Scratch::new("layers", 2);
-        write_layer_store(s.path(0), s.path(1), &layers);
+        let (_dir, s) = scratch(2);
+        write_layer_store(&s[0], &s[1], &layers);
 
         let all_cells: Vec<usize> = (0..n_cells).collect();
         let all_genes: Vec<usize> = (0..n_genes).collect();
         for (l, dense) in layers.iter().enumerate() {
-            let cells = ParallelSparseReader::new(s.path(0))
+            let cells = ParallelSparseReader::new(&s[0])
                 .unwrap()
                 .with_layer(l)
                 .unwrap();
-            let genes = ParallelSparseReader::new(s.path(1))
+            let genes = ParallelSparseReader::new(&s[1])
                 .unwrap()
                 .with_layer(l)
                 .unwrap();
@@ -1762,7 +1760,7 @@ pub(crate) mod tests {
             ));
         }
         assert!(matches!(
-            ParallelSparseReader::new(s.path(0)).unwrap().with_layer(3),
+            ParallelSparseReader::new(&s[0]).unwrap().with_layer(3),
             Err(ScDataErrors::LayerOutOfRange { .. })
         ));
     }
@@ -1786,9 +1784,9 @@ pub(crate) mod tests {
     /// the sorted lookup section, and in file order through `chunk_order`.
     #[test]
     fn test_v5_out_of_order_chunks_resolve_by_original_index() {
-        let s = Scratch::new("lookup", 1);
+        let (_dir, s) = scratch(1);
         let order = [4usize, 0, 9, 2, 7];
-        let mut w = CellGeneSparseWriter::new(s.path(0), true, 10, 5, TARGET).unwrap();
+        let mut w = CellGeneSparseWriter::new(&s[0], true, 10, 5, TARGET).unwrap();
         for &o in &order {
             let counts = [o as u32 + 1, 2];
             w.write_cell_chunk(CsrCellChunk::from_data(
@@ -1802,7 +1800,7 @@ pub(crate) mod tests {
         }
         w.finalise().unwrap();
 
-        let r = ParallelSparseReader::new(s.path(0)).unwrap();
+        let r = ParallelSparseReader::new(&s[0]).unwrap();
         assert_eq!(r.chunk_order().unwrap(), order.to_vec());
         let back = r.read_cells_parallel(&[9, 0, 7]).unwrap();
         for (cell, want) in back.iter().zip([9usize, 0, 7]) {
@@ -1844,7 +1842,7 @@ pub(crate) mod tests {
     /// file; an unknown optional section is skipped.
     #[test]
     fn test_v5_refuses_what_it_does_not_understand() {
-        let s = Scratch::new("refuse", 1);
+        let (_dir, s) = scratch(1);
         let invalid = |p: &str| {
             matches!(
                 ParallelSparseReader::new(p),
@@ -1852,75 +1850,75 @@ pub(crate) mod tests {
             )
         };
 
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), 12, &1u32.to_le_bytes());
-        assert!(invalid(s.path(0)));
+        small_v5(&s[0]);
+        patch_bytes(&s[0], 12, &1u32.to_le_bytes());
+        assert!(invalid(&s[0]));
 
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), 18, &[9]);
-        assert!(invalid(s.path(0)));
+        small_v5(&s[0]);
+        patch_bytes(&s[0], 18, &[9]);
+        assert!(invalid(&s[0]));
 
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), 19, &[0]);
-        assert!(invalid(s.path(0)));
+        small_v5(&s[0]);
+        patch_bytes(&s[0], 19, &[0]);
+        assert!(invalid(&s[0]));
 
         // the first directory entry is the offsets: make it an unknown kind
         let dir = |p: &str| {
             let b = std::fs::read(p).unwrap();
             le_u64(&b, 48)
         };
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), dir(s.path(0)), &99u32.to_le_bytes());
-        assert!(invalid(s.path(0)), "required unknown section");
-        patch_bytes(s.path(0), dir(s.path(0)) + 4, &0u32.to_le_bytes());
+        small_v5(&s[0]);
+        patch_bytes(&s[0], dir(&s[0]), &99u32.to_le_bytes());
+        assert!(invalid(&s[0]), "required unknown section");
+        patch_bytes(&s[0], dir(&s[0]) + 4, &0u32.to_le_bytes());
         // optional now, so skipped, and the offsets are missing
-        assert!(invalid(s.path(0)), "offsets missing");
+        assert!(invalid(&s[0]), "offsets missing");
 
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), dir(s.path(0)) + 8, &u64::MAX.to_le_bytes());
-        assert!(invalid(s.path(0)), "section outside the file");
+        small_v5(&s[0]);
+        patch_bytes(&s[0], dir(&s[0]) + 8, &u64::MAX.to_le_bytes());
+        assert!(invalid(&s[0]), "section outside the file");
 
-        small_v5(s.path(0));
-        patch_bytes(s.path(0), 48, &u64::MAX.to_le_bytes());
-        assert!(invalid(s.path(0)), "directory outside the file");
+        small_v5(&s[0]);
+        patch_bytes(&s[0], 48, &u64::MAX.to_le_bytes());
+        assert!(invalid(&s[0]), "directory outside the file");
     }
 
     /// The cell-ID hash is written, set after the fact and compared.
     #[test]
     fn test_v5_cell_ids_align_stores() {
-        let s = Scratch::new("cellids", 2);
+        let (_dir, s) = scratch(2);
         let ids = ["AAAC-1", "AAAG-1"];
-        let mut w = CellGeneSparseWriter::new(s.path(0), true, 2, 4, TARGET).unwrap();
+        let mut w = CellGeneSparseWriter::new(&s[0], true, 2, 4, TARGET).unwrap();
         w.set_cell_ids(&ids).unwrap();
         for c in 0..2 {
             w.write_cell_chunk(CsrCellChunk::from_data(&[1u32], &[1u32], c, TARGET, true))
                 .unwrap();
         }
         w.finalise().unwrap();
-        small_v5(s.path(1));
+        small_v5(&s[1]);
 
         let (a, b) = (
-            ParallelSparseReader::new(s.path(0)).unwrap(),
-            ParallelSparseReader::new(s.path(1)).unwrap(),
+            ParallelSparseReader::new(&s[0]).unwrap(),
+            ParallelSparseReader::new(&s[1]).unwrap(),
         );
         assert_eq!(a.cell_id_hash(), Some(crate::store::v5::cell_id_hash(&ids)));
         assert_eq!(b.cell_id_hash(), None);
         assert!(crate::store::v5::check_same_cells(&[&a, &b]).is_err());
 
-        crate::store::v5::set_cell_ids(&[s.path(1)], &ids).unwrap();
-        let b = ParallelSparseReader::new(s.path(1)).unwrap();
+        crate::store::v5::set_cell_ids(&[&s[1]], &ids).unwrap();
+        let b = ParallelSparseReader::new(&s[1]).unwrap();
         crate::store::v5::check_same_cells(&[&a, &b]).unwrap();
         assert_eq!(b.read_cells_parallel(&[0, 1]).unwrap().len(), 2);
-        assert!(crate::store::v5::set_cell_ids(&[s.path(1)], &ids[..1]).is_err());
+        assert!(crate::store::v5::set_cell_ids(&[&s[1]], &ids[..1]).is_err());
     }
 
     /// TF-IDF reads `ln1p(x / lib * scale * n / total_f)` in both orientations.
     #[test]
     fn test_v5_tf_idf_matches_the_formula() {
-        let s = Scratch::new("tfidf", 2);
+        let (_dir, s) = scratch(2);
         let (n_cells, n_genes) = (40, 12);
         let [dp, _, _] = allele_layers(n_cells, n_genes);
-        let mut w = CellGeneSparseWriter::new(s.path(0), true, n_cells, n_genes, 0.0)
+        let mut w = CellGeneSparseWriter::new(&s[0], true, n_cells, n_genes, 0.0)
             .unwrap()
             .with_kinds(crate::store::v5::FeatureKind::Peak, NormKind::LogCpm)
             .unwrap();
@@ -1932,11 +1930,11 @@ pub(crate) mod tests {
             w.write_cell_layers(c, &idx, &[&vals], true).unwrap();
         }
         w.finalise().unwrap();
-        crate::store::gene_file::write_gene_file(s.path(0), s.path(1), None, false).unwrap();
+        crate::store::gene_file::write_gene_file(&s[0], &s[1], None, false).unwrap();
 
-        let genes = ParallelSparseReader::new(s.path(1)).unwrap();
+        let genes = ParallelSparseReader::new(&s[1]).unwrap();
         let idf = crate::store::v5::tf_idf_weights(&genes, None).unwrap();
-        crate::store::v5::set_tf_idf(&[s.path(0), s.path(1)], &idf, 1e4).unwrap();
+        crate::store::v5::set_tf_idf(&[&s[0], &s[1]], &idf, 1e4).unwrap();
 
         let lib: Vec<f32> = dp.iter().map(|r| r.iter().sum::<u32>() as f32).collect();
         let total: Vec<f64> = (0..n_genes)
@@ -1947,8 +1945,8 @@ pub(crate) mod tests {
             (dp[c][g] as f32 / lib[c] * (1e4 * w)).ln_1p()
         };
 
-        let cells = ParallelSparseReader::new(s.path(0)).unwrap();
-        let genes = ParallelSparseReader::new(s.path(1)).unwrap();
+        let cells = ParallelSparseReader::new(&s[0]).unwrap();
+        let genes = ParallelSparseReader::new(&s[1]).unwrap();
         assert_eq!(cells.norm_kind(), NormKind::TfIdf);
         let all_cells: Vec<usize> = (0..n_cells).collect();
         let all_genes: Vec<usize> = (0..n_genes).collect();

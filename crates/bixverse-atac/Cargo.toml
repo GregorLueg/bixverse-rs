@@ -36,6 +36,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 approx.workspace = true
+tempfile.workspace = true
 
 [package.metadata.docs.rs]
 features = ["h5"]

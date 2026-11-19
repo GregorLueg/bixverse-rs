@@ -8,16 +8,13 @@ use bixverse_sc_data::store::{quality::MinCellQuality, reader::ParallelSparseRea
 use bixverse_sc_export::ad_export::{Column, ColumnData, ObsTable, VarTable};
 use bixverse_sc_export::prelude::*;
 use std::path::{Path, PathBuf};
+use tempfile::{NamedTempFile, TempPath, tempdir};
 
 const N_CELLS: usize = 30;
 const N_GENES: usize = 12;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/tests/fixtures/anndata_csr.h5ad")
-}
-
-fn tmp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("bixverse_export_{}_{name}", std::process::id()))
 }
 
 /// Dense cells x genes from a CSR `X` (h5ad or Zarr).
@@ -36,8 +33,8 @@ fn dense_x(f: &AnnFile) -> Vec<f64> {
 }
 
 /// The cell file of the fixture, every cell and gene kept.
-fn store() -> PathBuf {
-    let bin = tmp("cells.bin");
+fn store() -> TempPath {
+    let bin = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
     let qc = MinCellQuality {
         min_unique_genes: 0,
         min_lib_size: 0,
@@ -46,7 +43,7 @@ fn store() -> PathBuf {
     };
     let (n, g, _) = write_h5_counts(
         fixture(),
-        bin.clone(),
+        bin.to_path_buf(),
         "csr",
         N_CELLS,
         N_GENES,
@@ -77,7 +74,8 @@ fn parts(cells: &[usize]) -> AdParts {
 }
 
 fn check(out: &Path, format: AdFormat) {
-    let reader = ParallelSparseReader::new(store().to_str().unwrap()).unwrap();
+    let bin = store();
+    let reader = ParallelSparseReader::new(bin.to_str().unwrap()).unwrap();
     // a subset in a new order, over several batches
     let cells: Vec<usize> = (0..N_CELLS).rev().step_by(2).collect();
     save_store(&reader, out, format, &cells, false, parts(&cells), 4).unwrap();
@@ -98,30 +96,28 @@ fn check(out: &Path, format: AdFormat) {
 
 #[test]
 fn test_save_store_h5ad_round_trip() {
-    let out = tmp("out.h5ad");
+    let dir = tempdir().unwrap();
     check(
-        &out,
+        &dir.path().join("out.h5ad"),
         AdFormat::H5ad {
             compression: Some(6),
         },
     );
-    let _ = std::fs::remove_file(out);
 }
 
 #[cfg(feature = "zarr")]
 #[test]
 fn test_save_store_zarr_round_trip() {
-    let out = tmp("out.zarr");
-    let _ = std::fs::remove_dir_all(&out);
-    check(&out, AdFormat::Zarr);
-    let _ = std::fs::remove_dir_all(out);
+    let dir = tempdir().unwrap();
+    check(&dir.path().join("out.zarr"), AdFormat::Zarr);
 }
 
 #[test]
 fn test_bad_parts_fail_before_the_file_exists() {
-    let reader = ParallelSparseReader::new(store().to_str().unwrap()).unwrap();
-    let out = tmp("bad.h5ad");
-    let _ = std::fs::remove_file(&out);
+    let bin = store();
+    let reader = ParallelSparseReader::new(bin.to_str().unwrap()).unwrap();
+    let dir = tempdir().unwrap();
+    let out = dir.path().join("bad.h5ad");
     let cells = [0, 1, 2];
     let mut p = parts(&cells);
     p.var.index.pop();

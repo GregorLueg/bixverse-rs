@@ -2610,37 +2610,7 @@ mod tests {
     use crate::store::chunk::tests::{cell_chunk, gene_chunk};
     use crate::store::writer::{CellGeneSparseWriter, write_cell_chunks_parallel, write_cell_rows};
     use bincode::serde::encode_to_vec;
-
-    /// RAII guard that removes a test's temp file even if an assert fails.
-    struct TempBin(std::path::PathBuf);
-
-    /// Drop implementation for [`TempBin`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempBin {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempBin {
-        /// Reserve a uniquely named scratch file in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix.
-        ///
-        /// ### Returns
-        ///
-        /// The guard; the path is available via [`Self::path`].
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_data_io_{name}.bin")))
-        }
-
-        /// Path of the guarded file as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::{NamedTempFile, TempPath};
 
     ///////////////////////
     // Writer and reader //
@@ -2649,20 +2619,20 @@ mod tests {
     /// Writer to reader round trip: orientation, target size and both chunks.
     #[test]
     fn test_cell_based_file_round_trip() {
-        let temp = TempBin::new("cell_round_trip");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let chunks = vec![
             cell_chunk(&[5, 70_000], &[0, 2], 0),
             cell_chunk(&[1, 2, 3], &[0, 1, 2], 1),
         ];
 
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), true, 2, 3, 1e4).expect("writer opens");
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), true, 2, 3, 1e4)
+            .expect("writer opens");
         for chunk in chunks {
             writer.write_cell_chunk(chunk).expect("write");
         }
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert_eq!(reader.target_size(), Some(1e4));
         assert!(reader.is_cell_based());
 
@@ -2685,13 +2655,13 @@ mod tests {
     /// ### Returns
     ///
     /// The temp guard and an open reader over it.
-    fn csr_test_store(name: &str) -> (TempBin, ParallelSparseReader) {
-        csr_test_store_with(name, false)
+    fn csr_test_store() -> (TempPath, ParallelSparseReader) {
+        csr_test_store_with(false)
     }
 
     /// [`csr_test_store`] in the legacy v3 format when `legacy` is set.
-    fn csr_test_store_with(name: &str, legacy: bool) -> (TempBin, ParallelSparseReader) {
-        let temp = TempBin::new(name);
+    fn csr_test_store_with(legacy: bool) -> (TempPath, ParallelSparseReader) {
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let chunks = vec![
             cell_chunk(&[5, 70_000], &[0, 2], 0),
             cell_chunk(&[1, 2, 3], &[0, 1, 2], 1),
@@ -2703,19 +2673,19 @@ mod tests {
         } else {
             CellGeneSparseWriter::new
         };
-        let mut writer = ctor(temp.path(), true, 3, 4, 1e4).expect("writer opens");
+        let mut writer = ctor(temp.to_str().unwrap(), true, 3, 4, 1e4).expect("writer opens");
         for chunk in chunks {
             writer.write_cell_chunk(chunk).expect("write");
         }
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::open_any(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::open_any(temp.to_str().unwrap()).expect("reader opens");
         (temp, reader)
     }
 
     #[test]
     fn test_read_cells_csr_matches_chunk_path() {
-        let (_temp, reader) = csr_test_store("csr_matches_chunks");
+        let (_temp, reader) = csr_test_store();
         let order = [2usize, 0, 1];
 
         let batch = reader
@@ -2749,7 +2719,7 @@ mod tests {
 
     #[test]
     fn test_read_cells_csr_layer_selection() {
-        let (_temp, reader) = csr_test_store("csr_layers");
+        let (_temp, reader) = csr_test_store();
 
         let raw_only = reader
             .read_cells_csr(&[0, 1, 2], &DataLayerReturn::Raw)
@@ -2766,7 +2736,7 @@ mod tests {
 
     #[test]
     fn test_read_cells_csr_repeats_and_subsets() {
-        let (_temp, reader) = csr_test_store("csr_repeats");
+        let (_temp, reader) = csr_test_store();
 
         // A cell may legitimately appear twice in one batch: sampling with
         // replacement is a normal thing for a training loop to ask for.
@@ -2781,7 +2751,7 @@ mod tests {
 
     #[test]
     fn test_read_cells_csr_rejects_unknown_cell() {
-        let (_temp, reader) = csr_test_store("csr_unknown_cell");
+        let (_temp, reader) = csr_test_store();
 
         let err = reader
             .read_cells_csr(&[99], &DataLayerReturn::Raw)
@@ -2791,15 +2761,15 @@ mod tests {
 
     #[test]
     fn test_read_cells_csr_rejects_gene_major_store() {
-        let temp = TempBin::new("csr_gene_major");
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), false, 2, 1, 1e4).expect("writer opens");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), false, 2, 1, 1e4)
+            .expect("writer opens");
         writer
             .write_gene_chunk(gene_chunk(&[1, 2], &[0, 1], 0))
             .expect("write");
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         let err = reader
             .read_cells_csr(&[0], &DataLayerReturn::Raw)
             .expect_err("store is gene-major");
@@ -2818,8 +2788,8 @@ mod tests {
     /// ### Returns
     ///
     /// The temp guard and an open reader over it.
-    fn csc_test_store(name: &str) -> (TempBin, ParallelSparseReader) {
-        let temp = TempBin::new(name);
+    fn csc_test_store() -> (TempPath, ParallelSparseReader) {
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let chunks = vec![
             gene_chunk(&[5, 70_000, 2], &[0, 3, 5], 0),
             gene_chunk(&[1, 2, 3, 4, 5, 6], &[0, 1, 2, 3, 4, 5], 1),
@@ -2827,14 +2797,14 @@ mod tests {
             gene_chunk(&[], &[], 3),
         ];
 
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), false, 6, 4, 1e4).expect("writer opens");
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), false, 6, 4, 1e4)
+            .expect("writer opens");
         for chunk in chunks {
             writer.write_gene_chunk(chunk).expect("write");
         }
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         (temp, reader)
     }
 
@@ -2861,7 +2831,7 @@ mod tests {
     /// repeated-gene case.
     #[test]
     fn test_read_genes_sparse_matches_chunk_path() {
-        let (_temp, reader) = csc_test_store("csc_matches_chunks");
+        let (_temp, reader) = csc_test_store();
         let genes = [2usize, 0, 3, 1, 0];
 
         let subsets: Vec<Option<IndexSet<u32>>> = vec![
@@ -2899,7 +2869,7 @@ mod tests {
     /// cell subset, with one batch and with several.
     #[test]
     fn test_read_genes_sparse_csr_matches_transposed_csc() {
-        let (_temp, reader) = csc_test_store("csc_to_csr_matches");
+        let (_temp, reader) = csc_test_store();
         let genes = [2usize, 0, 3, 1, 0];
 
         let subsets: Vec<Option<IndexSet<u32>>> = vec![
@@ -2937,7 +2907,7 @@ mod tests {
     /// Fused cell reads equal the chunk path for a non-f32 target.
     #[test]
     fn test_read_cells_sparse_matches_chunk_path() {
-        let (_temp, reader) = csr_test_store("csr_sparse_matches_chunks");
+        let (_temp, reader) = csr_test_store();
         let order = [2usize, 0, 1, 0];
 
         for layer in [
@@ -2959,7 +2929,7 @@ mod tests {
     /// sits past a dropped cell.
     #[test]
     fn test_read_genes_sparse_reports_overflow() {
-        let (_temp, reader) = csc_test_store("csc_overflow");
+        let (_temp, reader) = csc_test_store();
         let keep: IndexSet<u32> = [3_u32].into_iter().collect();
 
         for cells in [None, Some(&keep)] {
@@ -2979,7 +2949,7 @@ mod tests {
 
     #[test]
     fn test_read_genes_sparse_rejects_cell_major_store() {
-        let (_temp, reader) = csr_test_store("csc_cell_major");
+        let (_temp, reader) = csr_test_store();
         let err = reader
             .read_genes_sparse::<f32>(&[0], None, &DataLayerReturn::Raw)
             .expect_err("store is cell-major");
@@ -2988,7 +2958,7 @@ mod tests {
 
     #[test]
     fn test_decompress_chunk_into_matches_allocating_path() {
-        let (_temp, reader) = csr_test_store_with("csr_scratch", true);
+        let (_temp, reader) = csr_test_store_with(true);
 
         // A dirty buffer must be overwritten, not appended to: the scratch is
         // reused across every cell a worker owns.
@@ -3004,7 +2974,7 @@ mod tests {
 
     #[test]
     fn test_identity_index_map_is_detected() {
-        let (_temp, reader) = csr_test_store("csr_identity_map");
+        let (_temp, reader) = csr_test_store();
         assert!(matches!(reader.lookup, ChunkLookup::Identity));
         assert_eq!(reader.chunk_index_of(2).expect("in range"), 2);
     }
@@ -3040,11 +3010,11 @@ mod tests {
     /// not a supported version, and nothing exercised that guard.
     #[test]
     fn test_reader_rejects_a_version_mismatch() {
-        let temp = TempBin::new("version_mismatch");
-        write_valid_file(temp.path());
-        patch_file_header(temp.path(), |h| h.version = SC_FILE_VERSION + 1);
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
+        patch_file_header(temp.to_str().unwrap(), |h| h.version = SC_FILE_VERSION + 1);
 
-        match ParallelSparseReader::new(temp.path()) {
+        match ParallelSparseReader::new(temp.to_str().unwrap()) {
             Err(ScDataErrors::FileVersionMismatch { expected, found }) => {
                 assert_eq!(expected, SC_FILE_VERSION);
                 assert_eq!(found, SC_FILE_VERSION + 1);
@@ -3057,12 +3027,12 @@ mod tests {
     /// A file that is not ours at all must be refused rather than parsed.
     #[test]
     fn test_reader_rejects_a_bad_magic() {
-        let temp = TempBin::new("bad_magic");
-        write_valid_file(temp.path());
-        patch_file_header(temp.path(), |h| h.magic = *b"NOTOURS!");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
+        patch_file_header(temp.to_str().unwrap(), |h| h.magic = *b"NOTOURS!");
 
         assert!(
-            ParallelSparseReader::new(temp.path()).is_err(),
+            ParallelSparseReader::new(temp.to_str().unwrap()).is_err(),
             "a wrong magic string must not open"
         );
     }
@@ -3071,12 +3041,14 @@ mod tests {
     /// out of bounds off the mmap.
     #[test]
     fn test_reader_rejects_a_main_header_offset_past_eof() {
-        let temp = TempBin::new("offset_past_eof");
-        write_valid_file(temp.path());
-        patch_file_header(temp.path(), |h| h.main_header_offset = u64::MAX / 2);
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
+        patch_file_header(temp.to_str().unwrap(), |h| {
+            h.main_header_offset = u64::MAX / 2
+        });
 
         assert!(
-            ParallelSparseReader::new(temp.path()).is_err(),
+            ParallelSparseReader::new(temp.to_str().unwrap()).is_err(),
             "an out-of-range main header offset must not open"
         );
     }
@@ -3084,14 +3056,14 @@ mod tests {
     /// A file truncated mid-payload must error rather than panic.
     #[test]
     fn test_reader_rejects_a_truncated_file() {
-        let temp = TempBin::new("truncated");
-        write_valid_file(temp.path());
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
 
-        let bytes = std::fs::read(temp.path()).expect("read back");
-        std::fs::write(temp.path(), &bytes[..bytes.len() / 2]).expect("truncate");
+        let bytes = std::fs::read(temp.to_str().unwrap()).expect("read back");
+        std::fs::write(temp.to_str().unwrap(), &bytes[..bytes.len() / 2]).expect("truncate");
 
         assert!(
-            ParallelSparseReader::new(temp.path()).is_err(),
+            ParallelSparseReader::new(temp.to_str().unwrap()).is_err(),
             "a truncated file must not open"
         );
     }
@@ -3099,10 +3071,10 @@ mod tests {
     /// The gene-based half of the same pin, with one chunk forced to u32 raw.
     #[test]
     fn test_gene_based_file_round_trip() {
-        let temp = TempBin::new("gene_round_trip");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), false, 4, 2, 1e5).expect("writer opens");
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), false, 4, 2, 1e5)
+            .expect("writer opens");
         writer
             .write_gene_chunk(gene_chunk(&[9, 8], &[0, 3], 0))
             .expect("write");
@@ -3111,7 +3083,7 @@ mod tests {
             .expect("write");
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert_eq!(reader.target_size(), Some(1e5));
         assert!(reader.is_gene_based());
 
@@ -3123,9 +3095,9 @@ mod tests {
     /// Regression: the writer used to `assert!` on the orientation.
     #[test]
     fn test_writer_rejects_wrong_chunk_orientation() {
-        let temp = TempBin::new("mode_mismatch");
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), true, 1, 1, 0.0).expect("writer opens");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), true, 1, 1, 0.0)
+            .expect("writer opens");
 
         match writer.write_gene_chunk(gene_chunk(&[1], &[0], 0)) {
             Err(ScDataErrors::ReaderModeMismatch { actual, requested }) => {
@@ -3139,17 +3111,20 @@ mod tests {
     /// A target size of 0 means raw only: reader and peek must both say `None`.
     #[test]
     fn test_raw_only_file_reports_no_target_size() {
-        let temp = TempBin::new("no_target_size");
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), true, 1, 2, 0.0).expect("writer opens");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), true, 1, 2, 0.0)
+            .expect("writer opens");
         writer
             .write_cell_chunk(cell_chunk(&[1, 2], &[0, 1], 0))
             .expect("write");
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert_eq!(reader.target_size(), None);
-        assert_eq!(peek_target_size(temp.path()).expect("peek"), None);
+        assert_eq!(
+            peek_target_size(temp.to_str().unwrap()).expect("peek"),
+            None
+        );
     }
 
     ////////////////////////
@@ -3217,10 +3192,10 @@ mod tests {
     #[test]
     fn test_library_index_matches_chunk_headers() {
         for (compressed, v5) in [(false, false), (true, false), (false, true), (true, true)] {
-            let temp = TempBin::new(&format!("library_index_{compressed}_{v5}"));
-            write_index_test_file(temp.path(), compressed, v5);
+            let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+            write_index_test_file(temp.to_str().unwrap(), compressed, v5);
 
-            let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+            let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
             assert!(reader.library_index.is_some());
             let (answered, stored) = library_sizes_both_ways(&reader, &[1, 2, 0, 2]);
             assert_eq!(answered, vec![9, 70_005, 6, 70_005]);
@@ -3231,11 +3206,11 @@ mod tests {
     /// v4 files without an index (offset 0) fall back to the chunk headers.
     #[test]
     fn test_library_sizes_fall_back_without_an_index() {
-        let temp = TempBin::new("library_index_absent");
-        write_index_test_file(temp.path(), false, false);
-        patch_file_header(temp.path(), |h| h.library_index_offset = 0);
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_index_test_file(temp.to_str().unwrap(), false, false);
+        patch_file_header(temp.to_str().unwrap(), |h| h.library_index_offset = 0);
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert!(reader.library_index.is_none());
         let (answered, _) = library_sizes_both_ways(&reader, &[0, 1, 2]);
         assert_eq!(answered, vec![6, 9, 70_005]);
@@ -3244,13 +3219,15 @@ mod tests {
     /// An index offset past the end of the file must error, not panic.
     #[test]
     fn test_reader_rejects_a_library_index_past_eof() {
-        let temp = TempBin::new("library_index_past_eof");
-        write_valid_file(temp.path());
-        let len = std::fs::metadata(temp.path()).expect("stat").len();
-        patch_file_header(temp.path(), |h| h.library_index_offset = len);
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
+        let len = std::fs::metadata(temp.to_str().unwrap())
+            .expect("stat")
+            .len();
+        patch_file_header(temp.to_str().unwrap(), |h| h.library_index_offset = len);
 
         assert!(matches!(
-            ParallelSparseReader::new(temp.path()),
+            ParallelSparseReader::new(temp.to_str().unwrap()),
             Err(ScDataErrors::HeaderDecodeFailed)
         ));
     }
@@ -3258,14 +3235,16 @@ mod tests {
     /// An index whose count disagrees with the chunk count must error.
     #[test]
     fn test_reader_rejects_a_library_index_with_the_wrong_count() {
-        let temp = TempBin::new("library_index_wrong_count");
-        write_valid_file(temp.path());
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        write_valid_file(temp.to_str().unwrap());
         // The main header starts with its own byte length, not the chunk count.
-        let main_header_offset = read_file_header(temp.path()).main_header_offset;
-        patch_file_header(temp.path(), |h| h.library_index_offset = main_header_offset);
+        let main_header_offset = read_file_header(temp.to_str().unwrap()).main_header_offset;
+        patch_file_header(temp.to_str().unwrap(), |h| {
+            h.library_index_offset = main_header_offset
+        });
 
         assert!(matches!(
-            ParallelSparseReader::new(temp.path()),
+            ParallelSparseReader::new(temp.to_str().unwrap()),
             Err(ScDataErrors::HeaderDecodeFailed)
         ));
     }
@@ -3274,7 +3253,7 @@ mod tests {
     /// the index must match the chunk headers and the sizes it reports.
     #[test]
     fn test_library_index_on_the_ingest_write_path() {
-        let temp = TempBin::new("library_index_ingest");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let mut rows: Vec<Vec<(u32, u32)>> = (0..300_u32)
             .map(|c| {
                 (0..20_u32)
@@ -3283,12 +3262,12 @@ mod tests {
                     .collect()
             })
             .collect();
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), true, 300, 20, 1e4).expect("writer opens");
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), true, 300, 20, 1e4)
+            .expect("writer opens");
         let (_, reported) = write_cell_rows(&mut rows, 0, 1e4, &mut writer).expect("write");
         writer.finalise().expect("finalise");
 
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert!(reader.library_index.is_some());
         let (answered, stored) = library_sizes_both_ways(&reader, &(0..300).collect::<Vec<_>>());
         assert_eq!(answered, stored);
@@ -3298,16 +3277,19 @@ mod tests {
     /// Gene-based files carry no library-size index.
     #[test]
     fn test_gene_based_file_has_no_library_index() {
-        let temp = TempBin::new("library_index_gene_file");
-        let mut writer =
-            CellGeneSparseWriter::new(temp.path(), false, 2, 1, 1e4).expect("writer opens");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let mut writer = CellGeneSparseWriter::new(temp.to_str().unwrap(), false, 2, 1, 1e4)
+            .expect("writer opens");
         writer
             .write_gene_chunk(gene_chunk(&[1, 2], &[0, 1], 0))
             .expect("write");
         writer.finalise().expect("finalise");
 
-        assert_eq!(read_file_header(temp.path()).library_index_offset, 0);
-        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        assert_eq!(
+            read_file_header(temp.to_str().unwrap()).library_index_offset,
+            0
+        );
+        let reader = ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens");
         assert!(reader.library_index.is_none());
     }
 }
