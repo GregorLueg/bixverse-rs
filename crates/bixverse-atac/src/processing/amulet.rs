@@ -22,7 +22,9 @@ use bixverse_sc_data::store::interval_index::FeatureInterval;
 use rayon::prelude::*;
 use statrs::distribution::{DiscreteCDF, Poisson};
 
-use crate::io::fragments::{ChromAcc, extend_larger, fold_batch, plan_batches};
+use crate::io::fragments::{
+    ChromAcc, extend_larger, fold_batch, last_used_chromosome, plan_batches,
+};
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 
@@ -56,9 +58,11 @@ pub struct AmuletParams {
     pub max_mem_gb: Option<f64>,
     /// Count a cell's trailing loci on the last chromosome used, those no
     /// later fragment of the cell starts beyond. The reference
-    /// implementation loses them at the end of its input, so `false`
-    /// reproduces its counts when the file has a tabix index (which gives the
-    /// chromosome order); without one they are always counted.
+    /// implementation loses them there (and only there: a probe with chr21,
+    /// chr22, chrX and a contig keeps chr21's and drops chr22's), so `false`
+    /// reproduces its counts. The order comes from the tabix index, or from
+    /// reading the file backwards; a plain gzip file without an index has
+    /// neither, and its trailing loci are counted.
     pub count_trailing_loci: bool,
 }
 
@@ -386,21 +390,26 @@ pub fn amulet(
     params.validate()?;
     let n_cells = barcodes.len();
     let index = BarcodeIndex::new(barcodes)?;
+    let mut restrict_chroms: Vec<String> = restrict.iter().map(|r| r.chrom.clone()).collect();
+    restrict_chroms.sort_unstable();
+    restrict_chroms.dedup();
     let restrict = RegionIndex::new(restrict);
     let (batches, order) = plan_batches(path, params.max_mem_gb, MEM_PER_COMPRESSED_BYTE, |c| {
         params.uses(c)
     })?;
     // the reference flushes a cell's pending loci when the chromosome
     // changes but not at the end of the file, so trailing loci are lost on
-    // the last chromosome used; the file order is only known with an index
+    // the last chromosome used
     let last_used = match batches.first() {
         Some(Some(_)) => order.iter().rev().find(|c| params.uses(c)).cloned(),
-        _ => None,
+        _ if params.count_trailing_loci => None,
+        _ => last_used_chromosome(path, |c| params.uses(c))?,
     };
 
     let mut n_fragments = vec![0u32; n_cells];
     let mut n_overlaps = vec![0u32; n_cells];
     let mut sites: Vec<Vec<u32>> = Vec::new();
+    let mut used_seen: Vec<String> = Vec::new();
     for batch in &batches {
         let acc = fold_batch(
             path,
@@ -425,6 +434,7 @@ pub fn amulet(
         for (a, b) in n_fragments.iter_mut().zip(&acc.n_valid) {
             *a += b;
         }
+        used_seen.extend(acc.frags.chroms.iter().cloned());
         for (chrom, frags) in acc.frags.chroms.into_iter().zip(acc.frags.values) {
             let drop_trailing =
                 !params.count_trailing_loci && last_used.as_deref() == Some(chrom.as_str());
@@ -444,6 +454,24 @@ pub fn amulet(
                 .collect();
             sites.extend(merge_sites(kept));
         }
+    }
+
+    // an empty result would call every cell a singlet without a word
+    if n_cells > 0 && n_fragments.iter().all(|&n| n == 0) {
+        return Err(AtacErrors::InvalidArgument(
+            "no fragment of the requested cells lies on a chromosome AMULET uses (autosomes \
+             named 1 to 22, with or without 'chr', or the `chroms` list); check the barcodes \
+             and the chromosome naming"
+                .into(),
+        ));
+    }
+    if !restrict_chroms.is_empty() && !restrict_chroms.iter().any(|c| used_seen.contains(c)) {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "no restriction region lies on a chromosome AMULET used (regions on {}, fragments on \
+             {}); check the chromosome naming",
+            restrict_chroms.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+            used_seen.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+        )));
     }
 
     // sites shared by too many cells are repeats

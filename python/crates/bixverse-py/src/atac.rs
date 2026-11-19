@@ -237,7 +237,7 @@ pub fn atac_tss_positions<'py>(
     biotypes: Vec<String>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let genes = py.detach(|| read_gtf_genes(&path)).map_err(atac_err)?;
-    let tss = tss_positions(&genes, &biotypes);
+    let tss = tss_positions(&genes, &biotypes).map_err(atac_err)?;
     let out = PyDict::new(py);
     out.set_item("chrom", tss.iter().map(|t| t.0.clone()).collect::<Vec<_>>())?;
     out.set_item(
@@ -279,7 +279,7 @@ pub fn atac_gene_activity_regions<'py>(
         max_width,
         biotypes,
     };
-    let (regions, names, ids) = gene_activity_regions(&genes, &params);
+    let (regions, names, ids) = gene_activity_regions(&genes, &params).map_err(atac_err)?;
     let out = regions_dict(py, &regions)?;
     out.set_item("name", names)?;
     out.set_item("gene_id", ids)?;

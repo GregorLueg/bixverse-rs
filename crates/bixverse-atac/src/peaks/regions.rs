@@ -43,7 +43,9 @@ pub fn region(chrom: &str, start: u32, end: u32) -> FeatureInterval {
 /// Read the first three columns of a BED file (plain, gzip or BGZF, by
 /// magic bytes).
 ///
-/// `#`, `track` and `browser` lines are skipped.
+/// `#`, `track` and `browser` lines are skipped. Fields may be separated by
+/// tabs or spaces. Zero-length records (`end == start`, as some insertion and
+/// blacklist files carry) hold no base and are skipped.
 ///
 /// ### Params
 ///
@@ -65,16 +67,18 @@ pub fn read_bed(path: &Path) -> Result<Vec<FeatureInterval>, AtacErrors> {
             continue;
         }
         let bad = || AtacErrors::InvalidArgument(format!("malformed BED line '{line}'"));
-        let mut f = line.split('\t');
+        let mut f = line.split_whitespace();
         let (Some(chrom), Some(start), Some(end)) = (f.next(), f.next(), f.next()) else {
             return Err(bad());
         };
         let start: u32 = start.parse().map_err(|_| bad())?;
         let end: u32 = end.parse().map_err(|_| bad())?;
-        if end <= start {
+        if end < start {
             return Err(bad());
         }
-        out.push(region(chrom, start, end));
+        if end > start {
+            out.push(region(chrom, start, end));
+        }
     }
     Ok(out)
 }
@@ -257,6 +261,16 @@ impl RegionIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_read_bed_takes_spaces_and_skips_empty_records() {
+        let p = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        std::fs::write(&p, "track name=x\nchr1 10 20\nchr1\t30\t30\tzero\nchr2\t5\t9\tname\t0\t+\n").unwrap();
+        let r = read_bed(&p).unwrap();
+        assert_eq!(r, vec![region("chr1", 10, 20), region("chr2", 5, 9)]);
+        std::fs::write(&p, "chr1\t20\t10\n").unwrap();
+        assert!(read_bed(&p).is_err());
+    }
 
     #[test]
     fn test_overlap_index_matches_brute_force() {

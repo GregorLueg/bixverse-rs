@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use bixverse_core::core::math::vector_helpers::{mean_sd_f64, pearson_correlation};
 use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
 use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
-use bixverse_sc_data::store::{chunk::norm_value, reader::peek_target_size};
+use bixverse_sc_data::store::chunk::norm_value;
 
 use crate::prelude::*;
 
@@ -141,8 +141,9 @@ pub fn set_tf_idf_on_store(
 /// With `idf = None` this is the store's own norm layer (the store must be
 /// TF-IDF). With an explicit IDF the values are recomputed from the raw counts
 /// as `ln1p(x / lib * scale * idf_f)` through the same [`norm_value`], with the
-/// store's scale and library sizes; passing the store's own IDF gives the norm
-/// layer bit for bit.
+/// store's library sizes and its TF-IDF scale ([`TF_IDF_SCALE`] for a store
+/// that is not TF-IDF); passing the store's own IDF gives the norm layer bit
+/// for bit.
 ///
 /// ### Params
 ///
@@ -183,8 +184,8 @@ pub fn read_tf_idf(
             gene_reader.dims().total_genes
         )));
     }
-    let scale = peek_target_size(gene_path)?
-        .ok_or_else(|| AtacErrors::InvalidArgument("the store records no target size".into()))?;
+    // a TF-IDF store keeps its own scale; any other store takes Signac's
+    let scale = gene_reader.tf_idf_scale().unwrap_or(TF_IDF_SCALE);
     let lib = library_sizes(cell_path, cells)?;
 
     let mut m: CompressedSparseData2<f32> =

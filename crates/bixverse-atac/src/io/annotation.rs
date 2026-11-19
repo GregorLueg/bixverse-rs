@@ -110,26 +110,57 @@ fn gtf_attribute<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
 
 /// Read the genes of a GTF.
 ///
+/// GENCODE and Ensembl GTFs carry `gene` rows. UCSC and RefSeq style GTFs
+/// often carry only `transcript` (or only `exon`) rows; those are collapsed
+/// per `gene_id` to the span of all their rows, as Signac does with
+/// transcripts. The biotype is `gene_type` or `gene_biotype`, else
+/// `transcript_type` or `transcript_biotype`, else empty.
+///
 /// ### Params
 ///
 /// * `path` - The GTF, plain or gzip (by magic bytes)
 ///
 /// ### Returns
 ///
-/// One [`GeneRecord`] per `gene` row in file order, or an error for a
-/// malformed gene row or a file without gene rows.
+/// One [`GeneRecord`] per gene in file order of first appearance, or an
+/// error for a malformed row or a file with none of the three row types.
 pub fn read_gtf_genes(path: &Path) -> Result<Vec<GeneRecord>, AtacErrors> {
-    let mut genes = Vec::new();
+    for feature in ["gene", "transcript", "exon"] {
+        let genes = read_gtf_rows(path, feature)?;
+        if !genes.is_empty() {
+            return Ok(genes);
+        }
+    }
+    Err(AtacErrors::InvalidArgument(format!(
+        "{} has no gene, transcript or exon rows",
+        path.display()
+    )))
+}
+
+/// The rows of one feature type of a GTF, one [`GeneRecord`] per `gene_id`
+/// spanning all its rows.
+///
+/// ### Params
+///
+/// * `path` - The GTF
+/// * `feature` - Third-column value to read
+///
+/// ### Returns
+///
+/// The genes in order of first appearance, or an error for a malformed row.
+fn read_gtf_rows(path: &Path, feature: &str) -> Result<Vec<GeneRecord>, AtacErrors> {
+    let mut genes: Vec<GeneRecord> = Vec::new();
+    let mut by_id: FxHashMap<String, usize> = FxHashMap::default();
     for line in open_text(path)?.lines() {
         let line = line?;
         if line.starts_with('#') {
             continue;
         }
         let f: Vec<&str> = line.splitn(9, '\t').collect();
-        if f.len() < 9 || f[2] != "gene" {
+        if f.len() < 9 || f[2] != feature {
             continue;
         }
-        let bad = || AtacErrors::InvalidArgument(format!("malformed GTF gene row '{line}'"));
+        let bad = || AtacErrors::InvalidArgument(format!("malformed GTF {feature} row '{line}'"));
         let start: u32 = f[3].parse().map_err(|_| bad())?;
         let end: u32 = f[4].parse().map_err(|_| bad())?;
         if start == 0 || end < start {
@@ -140,10 +171,20 @@ pub fn read_gtf_genes(path: &Path) -> Result<Vec<GeneRecord>, AtacErrors> {
             .filter(|n| !n.is_empty())
             .unwrap_or(&gene_id)
             .to_string();
-        let biotype = gtf_attribute(f[8], "gene_type")
-            .or_else(|| gtf_attribute(f[8], "gene_biotype"))
+        let biotype = ["gene_type", "gene_biotype", "transcript_type", "transcript_biotype"]
+            .iter()
+            .find_map(|k| gtf_attribute(f[8], k))
             .unwrap_or("")
             .to_string();
+        // gene rows stand as they are; transcript and exon rows of one gene on
+        // one chromosome collapse to their span
+        if let Some(&i) = by_id.get(&gene_id).filter(|&&i| feature != "gene" && genes[i].chrom == f[0]) {
+            let g = &mut genes[i];
+            g.start = g.start.min(start - 1);
+            g.end = g.end.max(end);
+            continue;
+        }
+        by_id.insert(gene_id.clone(), genes.len());
         genes.push(GeneRecord {
             gene_id,
             gene_name,
@@ -157,12 +198,6 @@ pub fn read_gtf_genes(path: &Path) -> Result<Vec<GeneRecord>, AtacErrors> {
                 _ => 0,
             },
         });
-    }
-    if genes.is_empty() {
-        return Err(AtacErrors::InvalidArgument(format!(
-            "{} has no gene rows",
-            path.display()
-        )));
     }
     Ok(genes)
 }
@@ -181,6 +216,36 @@ fn keep_biotype(g: &GeneRecord, biotypes: &[String]) -> bool {
     biotypes.is_empty() || biotypes.contains(&g.biotype)
 }
 
+/// Error when a biotype filter keeps none of the genes.
+///
+/// A GTF without biotypes (RefSeq) would otherwise turn the default
+/// protein-coding filter into an empty TSS set and all-zero scores.
+///
+/// ### Params
+///
+/// * `genes` - The genes
+/// * `biotypes` - The filter
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`AtacErrors::InvalidArgument`] naming the biotypes present.
+fn check_biotypes(genes: &[GeneRecord], biotypes: &[String]) -> Result<(), AtacErrors> {
+    if genes.is_empty() || genes.iter().any(|g| keep_biotype(g, biotypes)) {
+        return Ok(());
+    }
+    let mut present: Vec<&str> = genes.iter().map(|g| g.biotype.as_str()).collect();
+    present.sort_unstable();
+    present.dedup();
+    let present = if present == [""] {
+        "none (the GTF carries no biotype attributes); pass an empty biotype list".to_string()
+    } else {
+        present.iter().take(5).copied().collect::<Vec<_>>().join(", ")
+    };
+    Err(AtacErrors::InvalidArgument(format!(
+        "no gene has a biotype in {biotypes:?}; the GTF has: {present}"
+    )))
+}
+
 /// TSS positions of the genes of some biotypes.
 ///
 /// ### Params
@@ -190,13 +255,18 @@ fn keep_biotype(g: &GeneRecord, biotypes: &[String]) -> bool {
 ///
 /// ### Returns
 ///
-/// `(chromosome, 0-based position)` per kept gene, in input order.
-pub fn tss_positions(genes: &[GeneRecord], biotypes: &[String]) -> Vec<(String, u32)> {
-    genes
+/// `(chromosome, 0-based position)` per kept gene, in input order, or an
+/// error when the filter keeps no gene.
+pub fn tss_positions(
+    genes: &[GeneRecord],
+    biotypes: &[String],
+) -> Result<Vec<(String, u32)>, AtacErrors> {
+    check_biotypes(genes, biotypes)?;
+    Ok(genes
         .iter()
         .filter(|g| keep_biotype(g, biotypes))
         .map(|g| (g.chrom.clone(), g.tss()))
-        .collect()
+        .collect())
 }
 
 /// R's `make.unique`: later duplicates get `.1`, `.2`, ...
@@ -238,7 +308,10 @@ fn make_unique(names: &[String]) -> Vec<String> {
 /// `GeneActivity`).
 ///
 /// Keeps genes of the requested biotypes shorter than `max_width`, extends
-/// them strand aware and clips at the chromosome start.
+/// them strand aware and clips at the chromosome start. Duplicate names are
+/// made unique after the filters, so a name keeps its plain form for the
+/// gene that survives them; Signac makes them unique before filtering, so
+/// it can name that gene `X.1`. Ours matches the RNA gene names better.
 ///
 /// ### Params
 ///
@@ -247,11 +320,13 @@ fn make_unique(names: &[String]) -> Vec<String> {
 ///
 /// ### Returns
 ///
-/// `(regions, gene names, gene ids)`, parallel, names made unique.
+/// `(regions, gene names, gene ids)`, parallel, names made unique, or an
+/// error when the biotype filter keeps no gene.
 pub fn gene_activity_regions(
     genes: &[GeneRecord],
     params: &GeneActivityParams,
-) -> (Vec<FeatureInterval>, Vec<String>, Vec<String>) {
+) -> Result<(Vec<FeatureInterval>, Vec<String>, Vec<String>), AtacErrors> {
+    check_biotypes(genes, &params.biotypes)?;
     let kept: Vec<&GeneRecord> = genes
         .iter()
         .filter(|g| keep_biotype(g, &params.biotypes) && g.end - g.start < params.max_width)
@@ -276,7 +351,7 @@ pub fn gene_activity_regions(
         .collect();
     let names: Vec<String> = kept.iter().map(|g| g.gene_name.clone()).collect();
     let ids = kept.iter().map(|g| g.gene_id.clone()).collect();
-    (regions, make_unique(&names), ids)
+    Ok((regions, make_unique(&names), ids))
 }
 
 ///////////
@@ -336,7 +411,8 @@ mod tests {
             gene("D", 500, 600_000, 1, "protein_coding"),
             gene("A", 100, 200, 1, "protein_coding"),
         ];
-        let (regions, names, ids) = gene_activity_regions(&genes, &GeneActivityParams::default());
+        let (regions, names, ids) =
+            gene_activity_regions(&genes, &GeneActivityParams::default()).unwrap();
         assert_eq!(ids, vec!["ID_A", "ID_B", "ID_A"]);
         let got: Vec<(u32, u32)> = regions.iter().map(|r| (r.start, r.end)).collect();
         assert_eq!(got, vec![(3000, 6000), (5000, 8000), (0, 200)]);

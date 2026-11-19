@@ -21,11 +21,16 @@ use std::path::Path;
 
 use rustc_hash::FxHashMap;
 
-use crate::io::fragments::{BarcodeIndex, Fragment, fold_fragments};
+use crate::io::fragments::{BarcodeIndex, Coverage, Fragment, fold_fragments_checked};
 use crate::prelude::*;
 
 /// Chromosome names treated as the mitochondrial genome by default.
 pub const MITO_CHROMS: [&str; 4] = ["chrM", "MT", "chrMT", "M"];
+
+/// Chromosomes whose TSSs never enter the TSS enrichment, whatever
+/// `mito_chroms` says: Signac's fixed list (`TSSEnrichment`), whose huge
+/// coverage would inflate every score.
+const TSS_EXCLUDED_CHROMS: [&str; 3] = ["chrM", "Mt", "MT"];
 
 ///////////
 // Types //
@@ -124,6 +129,8 @@ pub struct FragmentQc {
     centre_width: f64,
     /// Width of both flanks together, for the score.
     flank_width: f64,
+    /// What the pass saw; off target means on a chromosome without a TSS.
+    pub coverage: Coverage,
 }
 
 impl FragmentQc {
@@ -190,7 +197,7 @@ impl FragmentQc {
 /// ### Params
 ///
 /// * `tss` - `(chromosome, 0-based position)`
-/// * `mito` - Chromosomes to leave out
+/// * `mito` - Chromosomes to leave out, on top of [`TSS_EXCLUDED_CHROMS`]
 ///
 /// ### Returns
 ///
@@ -198,7 +205,8 @@ impl FragmentQc {
 fn index_tss(tss: &[(String, u32)], mito: &[String]) -> FxHashMap<String, Vec<u32>> {
     let mut by_chrom: FxHashMap<String, Vec<u32>> = FxHashMap::default();
     for (c, p) in tss {
-        if !mito.iter().any(|m| m == c) {
+        let excluded = TSS_EXCLUDED_CHROMS.contains(&c.as_str()) || mito.iter().any(|m| m == c);
+        if !excluded {
             by_chrom.entry(c.clone()).or_default().push(*p);
         }
     }
@@ -287,7 +295,9 @@ fn tss_hits(f: &Fragment, tss: &[u32], p: &FragmentQcParams, c: &mut CellCounts)
 ///
 /// ### Returns
 ///
-/// The [`FragmentQc`], or an I/O or parse error.
+/// The [`FragmentQc`], or an I/O or parse error, or an error when none of
+/// the barcodes is in the file or no fragment lies on a chromosome with a
+/// TSS (see [`Coverage`]).
 pub fn fragment_qc(
     path: &Path,
     barcodes: &[String],
@@ -299,9 +309,14 @@ pub fn fragment_qc(
     let n = barcodes.len();
     let empty: Vec<u32> = Vec::new();
 
-    let counts = fold_fragments(
+    let tss_chroms: Vec<&str> = tss.keys().map(String::as_str).collect();
+    let targets = (!tss_chroms.is_empty()).then_some(&tss_chroms[..]);
+    let (counts, coverage) = fold_fragments_checked(
         path,
+        barcodes,
         &index,
+        targets,
+        "TSSs",
         || vec![CellCounts::default(); n],
         |acc: &mut Vec<CellCounts>, chrom: &str, frags: &[Fragment]| {
             let is_mito = params.mito_chroms.iter().any(|m| m == chrom);
@@ -343,6 +358,7 @@ pub fn fragment_qc(
         tss_flank: pick(|c| c.tss_flank),
         centre_width: (2 * params.tss_centre + 1) as f64,
         flank_width: (2 * (params.tss_flank_outer - params.tss_flank_inner + 1)) as f64,
+        coverage,
     })
 }
 
@@ -404,5 +420,19 @@ mod tests {
         assert_eq!(s[0], 1.0);
         assert!((s[1] - 2002.0 / (1.0 / 3.0) / 1001.0).abs() < 1e-12);
         assert_eq!(s[2], 0.0);
+    }
+
+    #[test]
+    fn test_mito_tss_never_counted() {
+        let tss = vec![
+            ("chr1".to_string(), 10),
+            ("chrM".to_string(), 20),
+            ("Mt".to_string(), 30),
+            ("chrMT".to_string(), 40),
+        ];
+        let idx = index_tss(&tss, &[]);
+        assert!(idx.contains_key("chr1") && idx.contains_key("chrMT"));
+        assert!(!idx.contains_key("chrM") && !idx.contains_key("Mt"));
+        assert!(!index_tss(&tss, &["chrMT".to_string()]).contains_key("chrMT"));
     }
 }

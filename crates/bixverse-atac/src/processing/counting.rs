@@ -18,7 +18,7 @@ use bixverse_sc_data::store::interval_index::{
 use bixverse_sc_data::store::v5::{FeatureKind, set_cell_ids, set_feature_kind};
 use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
-use crate::io::fragments::{BarcodeIndex, Fragment, extend_larger, fold_fragments};
+use crate::io::fragments::{BarcodeIndex, Coverage, Fragment, extend_larger, fold_fragments_checked};
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 
@@ -36,8 +36,8 @@ pub enum CountMode {
     /// (SnapATAC2 and ArchR put the right one at `end - 1`).
     #[default]
     Insertion,
-    /// Like `Insertion`, but a fragment counts at most once per feature
-    /// (SnapATAC2's default).
+    /// SnapATAC2's default (`paired-insertion`): insertions at the start and
+    /// at `end - 1`, and a fragment counts at most once per feature.
     PairedInsertion,
     /// Each fragment overlapping a feature counts once (Signac
     /// `FeatureMatrix`).
@@ -73,6 +73,8 @@ pub struct FeatureCounts {
     pub indices: Vec<Vec<u32>>,
     /// Per cell, the counts, parallel to `indices`.
     pub counts: Vec<Vec<u32>>,
+    /// What the pass saw; off target means on a chromosome without features.
+    pub coverage: Coverage,
 }
 
 ///////////////
@@ -89,14 +91,17 @@ pub struct FeatureCounts {
 /// * `out` - Hits are appended here, one id per count
 #[inline]
 fn fragment_hits(regions: &ChromRegions, f: &Fragment, mode: CountMode, out: &mut Vec<u32>) {
-    let right = f.end;
     match mode {
         CountMode::Fragment => regions.for_each_overlap(f.start, f.end, |id| out.push(id)),
         CountMode::Insertion => {
+            let right = f.end;
             regions.for_each_overlap(f.start, f.start + 1, |id| out.push(id));
             regions.for_each_overlap(right, right + 1, |id| out.push(id));
         }
         CountMode::PairedInsertion => {
+            // SnapATAC2 puts the right insertion on the last base of the
+            // fragment; the end of a fragment line is exclusive
+            let right = f.end - 1;
             let from = out.len();
             regions.for_each_overlap(f.start, f.start + 1, |id| out.push(id));
             let left_end = out.len();
@@ -120,7 +125,9 @@ fn fragment_hits(regions: &ChromRegions, f: &Fragment, mode: CountMode, out: &mu
 ///
 /// ### Returns
 ///
-/// The [`FeatureCounts`], or an I/O or parse error.
+/// The [`FeatureCounts`], or an I/O or parse error, or an error when none of
+/// the barcodes is in the file or no fragment lies on a chromosome with a
+/// feature (see [`Coverage`]).
 pub fn count_fragments(
     path: &Path,
     barcodes: &[String],
@@ -131,9 +138,15 @@ pub fn count_fragments(
     let regions = RegionIndex::new(features);
     let n = barcodes.len();
 
-    let hits: Vec<Vec<u32>> = fold_fragments(
+    let mut feature_chroms: Vec<&str> = features.iter().map(|f| f.chrom.as_str()).collect();
+    feature_chroms.sort_unstable();
+    feature_chroms.dedup();
+    let (hits, coverage): (Vec<Vec<u32>>, Coverage) = fold_fragments_checked(
         path,
+        barcodes,
         &index,
+        Some(&feature_chroms),
+        "features",
         || vec![Vec::new(); n],
         |acc: &mut Vec<Vec<u32>>, chrom: &str, frags: &[Fragment]| {
             let Some(chrom_regions) = regions.chrom(chrom) else {
@@ -173,6 +186,7 @@ pub fn count_fragments(
         n_features: features.len(),
         indices,
         counts,
+        coverage,
     })
 }
 
@@ -328,6 +342,9 @@ mod tests {
         // right insertion is the raw end: end 100 is inside [100, 200)
         assert_eq!(hits(10, 100, CountMode::Insertion), vec![0]);
         assert_eq!(hits(10, 99, CountMode::Insertion), Vec::<u32>::new());
+        // paired insertion puts it at end - 1: end 100 is outside, end 101 inside
+        assert_eq!(hits(10, 100, CountMode::PairedInsertion), Vec::<u32>::new());
+        assert_eq!(hits(10, 101, CountMode::PairedInsertion), vec![0]);
     }
 
     #[test]
