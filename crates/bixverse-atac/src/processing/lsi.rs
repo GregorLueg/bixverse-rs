@@ -18,7 +18,7 @@ use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
 
-use bixverse_core::core::math::vector_helpers::pearson_correlation;
+use bixverse_core::core::math::vector_helpers::{mean_sd_f64, pearson_correlation};
 use bixverse_sc::sc_processing::pca::{PcaSolver, SingleCellPcaParams, sparse_pca_on_matrix};
 use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
 use bixverse_sc_data::store::{chunk::norm_value, reader::peek_target_size};
@@ -130,25 +130,6 @@ pub fn set_tf_idf_on_store(
     let idf = tf_idf_weights(&ParallelSparseReader::new(gene_path)?, cells)?;
     set_tf_idf(&[cell_path, gene_path], &idf, scale)?;
     Ok(idf)
-}
-
-/// Mean and sample standard deviation (n - 1) of a column.
-///
-/// ### Params
-///
-/// * `x` - The values
-///
-/// ### Returns
-///
-/// `(mean, sd)` in f64; `sd` is 0 for fewer than two values.
-fn mean_sd(x: &[f32]) -> (f64, f64) {
-    let n = x.len() as f64;
-    let mean = x.iter().map(|&v| v as f64).sum::<f64>() / n;
-    if x.len() < 2 {
-        return (mean, 0.0);
-    }
-    let ss: f64 = x.iter().map(|&v| (v as f64 - mean).powi(2)).sum();
-    (mean, (ss / (n - 1.0)).sqrt())
 }
 
 /// TF-IDF of a block of a store, cells x features.
@@ -369,7 +350,7 @@ pub fn lsi_on_matrix(
         .map(|j| {
             let col: Vec<f32> = (0..scores.nrows()).map(|i| scores[(i, j)]).collect();
             if params.scale_embeddings {
-                let (mean, sd) = mean_sd(&col);
+                let (mean, sd) = mean_sd_f64(col.iter().copied());
                 col.iter()
                     .map(|&v| {
                         let z = ((v as f64 - mean) / sd) as f32;
@@ -564,12 +545,5 @@ mod tests {
             0,
         );
         assert!(matches!(err, Err(AtacErrors::NotTfIdf)));
-    }
-
-    #[test]
-    fn test_mean_sd_uses_n_minus_one() {
-        let (m, s) = mean_sd(&[1.0, 2.0, 3.0, 4.0]);
-        assert_relative_eq!(m, 2.5);
-        assert_relative_eq!(s, (5.0f64 / 3.0).sqrt());
     }
 }

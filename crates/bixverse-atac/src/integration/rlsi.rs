@@ -15,12 +15,11 @@
 //! feature set.
 
 use faer::{Mat, MatRef};
-use rustc_hash::FxHashMap;
 
-use bixverse_sc::sc_batch_correction::batch_utils::{batch_knn_search, cosine_normalise};
-use bixverse_sc::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
+use bixverse_core::core::math::vector_helpers::mean_sd_f64;
+use bixverse_sc::sc_batch_correction::batch_utils::cosine_normalise;
 use bixverse_sc::sc_batch_correction::seurat_anchors::{
-    AnchorSet, build_sample_tree, find_anchor_pairs, score_anchors, tree_merge_embeddings,
+    AnchorSpaces, ScoredAnchors, anchors_all_pairs, integrate_with_anchors, mnn_scored_anchors,
 };
 use bixverse_sc_data::store::v5::tf_idf_weights;
 
@@ -71,9 +70,6 @@ impl Default for RlsiParams {
     }
 }
 
-/// Anchor pairs `(cell in a, cell in b)` and their scores.
-pub type ScoredAnchors = (Vec<(u32, u32)>, Vec<f32>);
-
 /// One batch's LSI and TF-IDF, the input of the anchor search.
 #[derive(Clone, Debug)]
 pub struct BatchLsi {
@@ -117,12 +113,11 @@ fn select_columns(m: MatRef<f32>, dims: &[usize]) -> Mat<f32> {
 /// Cells of `from` x components of `onto`.
 fn centred_projection(from: &BatchLsi, onto: &BatchLsi) -> Result<Mat<f32>, AtacErrors> {
     let mut p = project_lsi(&from.tf_idf, onto.loadings.as_ref(), &onto.singular_values)?;
-    let n = p.nrows() as f64;
     for j in 0..p.ncols() {
-        let mean = ((0..p.nrows()).map(|i| p[(i, j)] as f64).sum::<f64>() / n) as f32;
-        for i in 0..p.nrows() {
-            p[(i, j)] -= mean;
-        }
+        let (mean, _) = mean_sd_f64(p.col_as_slice(j).iter().copied());
+        p.col_as_slice_mut(j)
+            .iter_mut()
+            .for_each(|v| *v -= mean as f32);
     }
     Ok(p)
 }
@@ -144,16 +139,14 @@ fn anchor_space(own: &Mat<f32>, projected: &Mat<f32>, l2_norm: bool) -> (Mat<f32
     if !l2_norm {
         return (own.clone(), projected.clone());
     }
-    let (n_own, n_proj) = (own.nrows(), projected.nrows());
-    let n = (n_own + n_proj) as f64;
     let sd: Vec<f32> = (0..own.ncols())
         .map(|j| {
-            let col = (0..n_own)
-                .map(|i| own[(i, j)] as f64)
-                .chain((0..n_proj).map(|i| projected[(i, j)] as f64));
-            let mean = col.clone().sum::<f64>() / n;
-            let ss: f64 = col.map(|v| (v - mean).powi(2)).sum();
-            (ss / (n - 1.0)).sqrt() as f32
+            let col = own
+                .col_as_slice(j)
+                .iter()
+                .chain(projected.col_as_slice(j))
+                .copied();
+            mean_sd_f64(col).1 as f32
         })
         .collect();
     let scale = |m: &Mat<f32>| {
@@ -220,19 +213,25 @@ pub fn rlsi_anchors(
     let own_a = select_columns(a.embedding.as_ref(), dims);
     let own_b = select_columns(b.embedding.as_ref(), dims);
 
-    let knn = &params.knn_params;
-    // within-batch neighbours include the cell itself, as Seurat's k + 1
-    let (nnaa, _) = batch_knn_search(own_a.as_ref(), own_a.as_ref(), k_nn + 1, knn, seed, verbose)?;
-    let (nnbb, _) = batch_knn_search(own_b.as_ref(), own_b.as_ref(), k_nn + 1, knn, seed, verbose)?;
-    let (nnab, _) = batch_knn_search(query_a.as_ref(), query_b.as_ref(), k_nn, knn, seed, verbose)?;
-    let (nnba, _) = batch_knn_search(ref_b.as_ref(), ref_a.as_ref(), k_nn, knn, seed, verbose)?;
-
-    let pairs = find_anchor_pairs(&nnab, &nnba, params.k_anchor);
-    if pairs.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let scores = score_anchors(&pairs, &nnaa, &nnab, &nnba, &nnbb, params.k_score, n_a);
-    Ok((pairs, scores))
+    // scored on the unnormalised own LSI, searched across in the other
+    // batch's space
+    let spaces = AnchorSpaces {
+        own_a: own_a.as_ref(),
+        own_b: own_b.as_ref(),
+        a_query: query_a.as_ref(),
+        b_index: query_b.as_ref(),
+        b_query: ref_b.as_ref(),
+        a_index: ref_a.as_ref(),
+    };
+    Ok(mnn_scored_anchors(
+        &spaces,
+        params.k_anchor,
+        params.k_score,
+        None,
+        &params.knn_params,
+        seed,
+        verbose,
+    )?)
 }
 
 /// rLSI integration of an embedding from per-batch LSIs.
@@ -287,38 +286,19 @@ pub fn rlsi_integration(
         ));
     }
 
-    let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();
-    let mut anchor_counts = vec![vec![0u32; n_batches]; n_batches];
-    for a in 0..n_batches {
-        for b in (a + 1)..n_batches {
-            let (pairs, scores) = rlsi_anchors(&batches[a], &batches[b], params, seed, verbose)?;
-            anchor_counts[a][b] = pairs.len() as u32;
-            anchor_counts[b][a] = pairs.len() as u32;
-            anchors_by_pair.insert(
-                (a, b),
-                AnchorSet {
-                    pairs,
-                    scores,
-                    batch_pair: (a, b),
-                },
-            );
-        }
-    }
-
-    let merge_order = build_sample_tree(&anchor_counts);
-    let (per_batch, per_batch_rows) = split_pca_by_batch(embedding, batch_indices);
-    let (merged, index_map) = tree_merge_embeddings(
-        per_batch,
-        per_batch_rows,
+    let anchors_by_pair = anchors_all_pairs(n_batches, |a, b| {
+        rlsi_anchors(&batches[a], &batches[b], params, seed, verbose)
+    })?;
+    Ok(integrate_with_anchors(
+        embedding,
+        batch_indices,
         &anchors_by_pair,
-        &merge_order,
         params.k_weight,
         params.sd,
         &params.knn_params,
         seed,
         verbose,
-    )?;
-    Ok(reorder_to_original(&merged, &index_map))
+    )?)
 }
 
 /// rLSI integration over a peak or tile store.

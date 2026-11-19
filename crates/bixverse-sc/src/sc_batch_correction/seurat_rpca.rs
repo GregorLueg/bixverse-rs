@@ -6,27 +6,18 @@
 //! projected bases. Anchor filtering is CCA-only in Seurat and is skipped here.
 
 use faer::{Mat, MatRef};
-use rustc_hash::FxHashMap;
 use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::sc_batch_correction::batch_utils::{batch_knn_search, cosine_normalise};
-use crate::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
+use crate::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::sc_batch_correction::seurat_anchors::{
-    AnchorSet, build_sample_tree, find_anchor_pairs, score_anchors, tree_merge_embeddings,
+    AnchorSpaces, anchors_all_pairs, integrate_with_anchors, mnn_scored_anchors,
 };
 use crate::sc_batch_correction::seurat_cca::load_hvg_standardised;
 use crate::sc_processing::pca::{SingleCellPcaParams, clr_offsets_on_store, pca_on_sc_sparse};
 use bixverse_core::core::math::pca_svd::randomised_svd;
 use serde::Deserialize;
-
-///////////
-// Types //
-///////////
-
-/// Anchor pairs plus their per-pair scores, one score per pair.
-type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 
 ////////////
 // Params //
@@ -160,76 +151,6 @@ fn normalise_own_scores(scores: &Mat<f32>, l2_norm: bool) -> Mat<f32> {
     } else {
         scores.clone()
     }
-}
-
-////////////////////////////
-// Per-pair anchor finder //
-////////////////////////////
-
-/// Find and score anchor pairs for a single batch pair in the rPCA path.
-///
-/// Runs Seurat's four cross-basis kNN queries:
-/// - `nnaa`: batch-A self kNN in A's own basis
-/// - `nnbb`: batch-B self kNN in B's own basis
-/// - `nnab`: batch-A queries projected into B's basis, find nearest
-///   batch-B cells in B's basis
-/// - `nnba`: batch-B queries projected into A's basis, find nearest
-///   batch-A cells in A's basis
-///
-/// Extracts MNN pairs via [find_anchor_pairs] and scores them via
-/// [score_anchors]. Unlike CCA, no gene-space filter step runs (matches
-/// Seurat's `FilterAnchors` being CCA-only).
-///
-/// ### Params
-///
-/// * `a_in_a` - Batch A in its own PCA basis, `(n_a, dims)`
-/// * `b_in_b` - Batch B in its own PCA basis, `(n_b, dims)`
-/// * `a_in_b` - Batch A projected into batch-B basis, `(n_a, dims)`
-/// * `b_in_a` - Batch B projected into batch-A basis, `(n_b, dims)`
-/// * `params` - Method parameters
-/// * `knn_params` - kNN backend parameters
-/// * `seed` - Random seed for the kNN backend
-/// * `verbose` - `0` silent, `1` normal, `2` detailed
-///
-/// ### Returns
-///
-/// `(pairs, scores)`. Empty when no MNN survives.
-#[allow(clippy::too_many_arguments)]
-fn find_rpca_anchors_for_pair(
-    a_in_a: MatRef<f32>,
-    b_in_b: MatRef<f32>,
-    a_in_b: MatRef<f32>,
-    b_in_a: MatRef<f32>,
-    params: &SeuratRpcaParams,
-    knn_params: &KnnParams,
-    seed: usize,
-    verbose: usize,
-) -> Result<AnchorPairsScored, ScErrors> {
-    let k_nn = params.k_anchor.max(params.k_score);
-    let k_aa = k_nn.min(a_in_a.nrows());
-    let k_bb = k_nn.min(b_in_b.nrows());
-    let k_ab = k_nn.min(b_in_b.nrows());
-    let k_ba = k_nn.min(a_in_a.nrows());
-
-    let (nnaa, _) = batch_knn_search(a_in_a, a_in_a, k_aa, knn_params, seed, verbose)?;
-    let (nnbb, _) = batch_knn_search(b_in_b, b_in_b, k_bb, knn_params, seed, verbose)?;
-    let (nnab, _) = batch_knn_search(a_in_b, b_in_b, k_ab, knn_params, seed, verbose)?;
-    let (nnba, _) = batch_knn_search(b_in_a, a_in_a, k_ba, knn_params, seed, verbose)?;
-
-    let pairs = find_anchor_pairs(&nnab, &nnba, params.k_anchor);
-    if pairs.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let scores = score_anchors(
-        &pairs,
-        &nnaa,
-        &nnab,
-        &nnba,
-        &nnbb,
-        params.k_score,
-        a_in_a.nrows(),
-    );
-    Ok((pairs, scores))
 }
 
 ///////////////////
@@ -386,101 +307,85 @@ pub fn seurat_rpca_integration<S: SingleCellReading>(
     }
 
     // Per-pair anchor finding.
-    let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();
-    let mut anchor_counts: Vec<Vec<u32>> = vec![vec![0_u32; n_batches]; n_batches];
+    let anchors_by_pair = anchors_all_pairs(n_batches, |a, b| {
+        let pair_start = Instant::now();
+        if verbosity.normal_verbosity() {
+            println!("rPCA: finding anchors for batch pair ({a}, {b})");
+        }
 
-    for a in 0..n_batches {
-        for b in (a + 1)..n_batches {
-            let pair_start = Instant::now();
-            if verbosity.normal_verbosity() {
-                println!("rPCA: finding anchors for batch pair ({a}, {b})");
-            }
+        // Truncate loadings to `dims` used for anchoring.
+        let dims_use = params
+            .dims
+            .min(per_batch_loadings[a].ncols())
+            .min(per_batch_loadings[b].ncols());
+        let load_a_trunc = Mat::from_fn(per_batch_loadings[a].nrows(), dims_use, |i, j| {
+            per_batch_loadings[a][(i, j)]
+        });
+        let load_b_trunc = Mat::from_fn(per_batch_loadings[b].nrows(), dims_use, |i, j| {
+            per_batch_loadings[b][(i, j)]
+        });
 
-            // Truncate loadings to `dims` used for anchoring.
-            let dims_use = params
-                .dims
-                .min(per_batch_loadings[a].ncols())
-                .min(per_batch_loadings[b].ncols());
-            let load_a_trunc = Mat::from_fn(per_batch_loadings[a].nrows(), dims_use, |i, j| {
-                per_batch_loadings[a][(i, j)]
-            });
-            let load_b_trunc = Mat::from_fn(per_batch_loadings[b].nrows(), dims_use, |i, j| {
-                per_batch_loadings[b][(i, j)]
-            });
+        let a_in_a = normalise_own_scores(&per_batch_pca_scores[a], params.l2_norm);
+        let b_in_b = normalise_own_scores(&per_batch_pca_scores[b], params.l2_norm);
 
-            let a_in_a = normalise_own_scores(&per_batch_pca_scores[a], params.l2_norm);
-            let b_in_b = normalise_own_scores(&per_batch_pca_scores[b], params.l2_norm);
+        let a_in_b = project_into_basis(
+            load_b_trunc.as_ref(),
+            per_batch_standardised[a].as_ref(),
+            params.l2_norm,
+        );
+        let b_in_a = project_into_basis(
+            load_a_trunc.as_ref(),
+            per_batch_standardised[b].as_ref(),
+            params.l2_norm,
+        );
 
-            let a_in_b = project_into_basis(
-                load_b_trunc.as_ref(),
-                per_batch_standardised[a].as_ref(),
-                params.l2_norm,
-            );
-            let b_in_a = project_into_basis(
-                load_a_trunc.as_ref(),
-                per_batch_standardised[b].as_ref(),
-                params.l2_norm,
-            );
+        // restrict own-basis embeddings to `dims_use` columns too.
+        let a_in_a = Mat::from_fn(a_in_a.nrows(), dims_use, |i, j| a_in_a[(i, j)]);
+        let b_in_b = Mat::from_fn(b_in_b.nrows(), dims_use, |i, j| b_in_b[(i, j)]);
 
-            // restrict own-basis embeddings to `dims_use` columns too.
-            let a_in_a = Mat::from_fn(a_in_a.nrows(), dims_use, |i, j| a_in_a[(i, j)]);
-            let b_in_b = Mat::from_fn(b_in_b.nrows(), dims_use, |i, j| b_in_b[(i, j)]);
-
-            let (pairs, scores) = find_rpca_anchors_for_pair(
-                a_in_a.as_ref(),
-                b_in_b.as_ref(),
-                a_in_b.as_ref(),
-                b_in_a.as_ref(),
-                params,
-                &params.knn_params,
-                seed,
-                verbose,
-            )?;
-
-            let count = pairs.len();
-            if verbosity.normal_verbosity() {
-                println!(
-                    "  found {} anchors in {:.2?}",
-                    count.separate_with_underscores(),
-                    pair_start.elapsed()
-                );
-            }
-            anchor_counts[a][b] = count as u32;
-            anchor_counts[b][a] = count as u32;
-            anchors_by_pair.insert(
-                (a, b),
-                AnchorSet {
-                    pairs,
-                    scores,
-                    batch_pair: (a, b),
-                },
+        // no gene-space filter: Seurat's FilterAnchors is CCA only
+        let spaces = AnchorSpaces {
+            own_a: a_in_a.as_ref(),
+            own_b: b_in_b.as_ref(),
+            a_query: a_in_b.as_ref(),
+            b_index: b_in_b.as_ref(),
+            b_query: b_in_a.as_ref(),
+            a_index: a_in_a.as_ref(),
+        };
+        let anchors = mnn_scored_anchors(
+            &spaces,
+            params.k_anchor,
+            params.k_score,
+            None,
+            &params.knn_params,
+            seed,
+            verbose,
+        )?;
+        if verbosity.normal_verbosity() {
+            println!(
+                "  found {} anchors in {:.2?}",
+                anchors.0.len().separate_with_underscores(),
+                pair_start.elapsed()
             );
         }
-    }
+        Ok::<_, ScErrors>(anchors)
+    })?;
 
     // drop everything unneeded
     drop(per_batch_standardised);
     drop(per_batch_loadings);
     drop(per_batch_pca_scores);
 
-    let merge_order = build_sample_tree(&anchor_counts);
-
-    let (per_batch_scores, per_batch_union_indices) =
-        split_pca_by_batch(&pca_scores, batch_indices);
-
-    let (merged, index_map) = tree_merge_embeddings(
-        per_batch_scores,
-        per_batch_union_indices,
+    let corrected = integrate_with_anchors(
+        &pca_scores,
+        batch_indices,
         &anchors_by_pair,
-        &merge_order,
         params.k_weight,
         params.sd,
         &params.knn_params,
         seed,
         verbose,
     )?;
-
-    let corrected = reorder_to_original(&merged, &index_map);
 
     if verbosity.normal_verbosity() {
         println!("rPCA integration complete in {:.2?}", start_total.elapsed());

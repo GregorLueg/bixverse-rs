@@ -10,18 +10,15 @@
 use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
 use crate::sc_batch_correction::batch_utils::{
-    batch_knn_search, cosine_normalise, par_for_each_col_mut, standardise_per_column,
+    cosine_normalise, par_for_each_col_mut, standardise_per_column,
 };
-use crate::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
 use crate::sc_batch_correction::seurat_anchors::{
-    AnchorSet, build_sample_tree, filter_anchor_pairs, find_anchor_pairs, score_anchors,
-    tree_merge_embeddings,
+    AnchorFilter, AnchorSpaces, anchors_all_pairs, integrate_with_anchors, mnn_scored_anchors,
 };
 use crate::sc_processing::pca::{
     SingleCellPcaParams, clr_offsets_on_store, pca_on_sc_sparse, resolve_clr_size_factor,
@@ -32,13 +29,6 @@ use serde::Deserialize;
 
 /// Cells per parallel task when transposing gene-major rows into a matrix
 const CELL_TILE: usize = 16;
-
-///////////
-// Types //
-///////////
-
-/// Anchor pairs plus their per-pair scores, one score per pair.
-type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 
 ////////////
 // Params //
@@ -345,84 +335,6 @@ fn top_loading_gene_positions(loadings: MatRef<f32>, dims: usize, n_top: usize) 
     kept
 }
 
-////////////////////////////
-// Per-pair anchor finder //
-////////////////////////////
-
-/// Find and score anchor pairs for a single batch pair in the CCA path.
-///
-/// Runs the four Seurat kNN queries in the shared L2-normalised CC space
-/// (`nnaa`, `nnbb`, `nnab`, `nnba` with `k = max(k_anchor, k_score)`), extracts
-/// MNN pairs via [find_anchor_pairs], optionally filters them in
-/// gene-expression space via [filter_anchor_pairs], then scores the survivors
-/// via [score_anchors] on the merged neighbourhood.
-///
-/// ### Params
-///
-/// * `cc_a` - Batch-A rows of the CC embedding, `(n_a, dims)`
-/// * `cc_b` - Batch-B rows of the CC embedding, `(n_b, dims)`
-/// * `filter_a` - Optional L2-normalised top-loading-gene expression for
-///   batch A, `(n_a, n_top_features)`. When `Some`, `FilterAnchors` runs.
-/// * `filter_b` - Same for batch B
-/// * `params` - Method parameters
-/// * `knn_params` - kNN backend parameters
-/// * `seed` - Random seed for the kNN backend
-/// * `verbose` - `0` silent, `1` normal, `2` detailed
-///
-/// ### Returns
-///
-/// `(pairs, scores)` where `pairs[i] = (a, b)` are indices into batch A
-/// / batch B and `scores[i]` is the rescaled shared-neighbour score.
-/// Both are empty when no MNN survives.
-#[allow(clippy::too_many_arguments)]
-fn find_cca_anchors_for_pair(
-    cc_a: MatRef<f32>,
-    cc_b: MatRef<f32>,
-    filter_a: Option<MatRef<f32>>,
-    filter_b: Option<MatRef<f32>>,
-    params: &SeuratCcaParams,
-    knn_params: &KnnParams,
-    seed: usize,
-    verbose: usize,
-) -> Result<AnchorPairsScored, ScErrors> {
-    let k_nn = params.k_anchor.max(params.k_score);
-    let k_aa = k_nn.min(cc_a.nrows());
-    let k_bb = k_nn.min(cc_b.nrows());
-    let k_ab = k_nn.min(cc_b.nrows());
-    let k_ba = k_nn.min(cc_a.nrows());
-
-    let (nnaa, _) = batch_knn_search(cc_a, cc_a, k_aa, knn_params, seed, verbose)?;
-    let (nnbb, _) = batch_knn_search(cc_b, cc_b, k_bb, knn_params, seed, verbose)?;
-    let (nnab, _) = batch_knn_search(cc_a, cc_b, k_ab, knn_params, seed, verbose)?;
-    let (nnba, _) = batch_knn_search(cc_b, cc_a, k_ba, knn_params, seed, verbose)?;
-
-    let mut pairs = find_anchor_pairs(&nnab, &nnba, params.k_anchor);
-
-    if let (Some(fa), Some(fb)) = (filter_a, filter_b) {
-        let k_filter = params.k_filter.min(fb.nrows());
-        if k_filter > 0 {
-            let (nn_filter, _) = batch_knn_search(fa, fb, k_filter, knn_params, seed, verbose)?;
-            pairs = filter_anchor_pairs(&pairs, &nn_filter, params.k_filter);
-        }
-    }
-
-    if pairs.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let scores = score_anchors(
-        &pairs,
-        &nnaa,
-        &nnab,
-        &nnba,
-        &nnbb,
-        params.k_score,
-        cc_a.nrows(),
-    );
-
-    Ok((pairs, scores))
-}
-
 ///////////////////
 // Main function //
 ///////////////////
@@ -555,149 +467,132 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
 
     // Per-pair anchor computation: load only the two batches involved,
     // build CC space and filter expression, extract anchors, drop.
-    let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();
-    let mut anchor_counts: Vec<Vec<u32>> = vec![vec![0_u32; n_batches]; n_batches];
+    let anchors_by_pair = anchors_all_pairs(n_batches, |a, b| {
+        let pair_start = Instant::now();
+        if verbosity.normal_verbosity() {
+            println!("CCA: finding anchors for batch pair ({a}, {b})");
+        }
 
-    for a in 0..n_batches {
-        for b in (a + 1)..n_batches {
-            let pair_start = Instant::now();
-            if verbosity.normal_verbosity() {
-                println!("CCA: finding anchors for batch pair ({a}, {b})");
-            }
+        let cells_a: Vec<usize> = per_batch_positions[a]
+            .iter()
+            .map(|&row| cell_indices[row])
+            .collect();
+        let cells_b: Vec<usize> = per_batch_positions[b]
+            .iter()
+            .map(|&row| cell_indices[row])
+            .collect();
 
-            let cells_a: Vec<usize> = per_batch_positions[a]
+        let clr_a = clr_offsets.map(|offs| -> Vec<f64> {
+            per_batch_positions[a]
                 .iter()
-                .map(|&row| cell_indices[row])
-                .collect();
-            let cells_b: Vec<usize> = per_batch_positions[b]
+                .map(|&row| offs[row])
+                .collect()
+        });
+        let clr_b = clr_offsets.map(|offs| -> Vec<f64> {
+            per_batch_positions[b]
                 .iter()
-                .map(|&row| cell_indices[row])
-                .collect();
+                .map(|&row| offs[row])
+                .collect()
+        });
 
-            let clr_a = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[a]
-                    .iter()
-                    .map(|&row| offs[row])
-                    .collect()
-            });
-            let clr_b = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[b]
-                    .iter()
-                    .map(|&row| offs[row])
-                    .collect()
-            });
+        let x1 = load_hvg_standardised(
+            reader,
+            &cells_a,
+            gene_indices,
+            clr_a.as_deref(),
+            params.pca_params.clr,
+            params.pca_params.size_factor,
+            &verbosity,
+        )?;
+        let x2 = load_hvg_standardised(
+            reader,
+            &cells_b,
+            gene_indices,
+            clr_b.as_deref(),
+            params.pca_params.clr,
+            params.pca_params.size_factor,
+            &verbosity,
+        )?;
 
-            let x1 = load_hvg_standardised(
+        let (cc_a, cc_b) = build_cca_anchor_space(
+            x1.as_ref(),
+            x2.as_ref(),
+            params.num_cc.max(params.dims),
+            params.l2_norm,
+            seed,
+        )?;
+        drop(x1);
+        drop(x2);
+
+        // Restrict CC embedding to the anchor-kNN dimensions.
+        let dims_use = params.dims.min(cc_a.ncols());
+        let cc_a_dim = Mat::from_fn(cc_a.nrows(), dims_use, |i, j| cc_a[(i, j)]);
+        let cc_b_dim = Mat::from_fn(cc_b.nrows(), dims_use, |i, j| cc_b[(i, j)]);
+
+        let filter_a = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
+            Some(load_filter_expression(
                 reader,
                 &cells_a,
-                gene_indices,
+                &top_absolute_genes,
                 clr_a.as_deref(),
                 params.pca_params.clr,
                 params.pca_params.size_factor,
                 &verbosity,
-            )?;
-            let x2 = load_hvg_standardised(
+            )?)
+        } else {
+            None
+        };
+        let filter_b = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
+            Some(load_filter_expression(
                 reader,
                 &cells_b,
-                gene_indices,
+                &top_absolute_genes,
                 clr_b.as_deref(),
                 params.pca_params.clr,
                 params.pca_params.size_factor,
                 &verbosity,
-            )?;
+            )?)
+        } else {
+            None
+        };
 
-            let (cc_a, cc_b) = build_cca_anchor_space(
-                x1.as_ref(),
-                x2.as_ref(),
-                params.num_cc.max(params.dims),
-                params.l2_norm,
-                seed,
-            )?;
-            drop(x1);
-            drop(x2);
-
-            // Restrict CC embedding to the anchor-kNN dimensions.
-            let dims_use = params.dims.min(cc_a.ncols());
-            let cc_a_dim = Mat::from_fn(cc_a.nrows(), dims_use, |i, j| cc_a[(i, j)]);
-            let cc_b_dim = Mat::from_fn(cc_b.nrows(), dims_use, |i, j| cc_b[(i, j)]);
-
-            let filter_a = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
-                Some(load_filter_expression(
-                    reader,
-                    &cells_a,
-                    &top_absolute_genes,
-                    clr_a.as_deref(),
-                    params.pca_params.clr,
-                    params.pca_params.size_factor,
-                    &verbosity,
-                )?)
-            } else {
-                None
-            };
-            let filter_b = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
-                Some(load_filter_expression(
-                    reader,
-                    &cells_b,
-                    &top_absolute_genes,
-                    clr_b.as_deref(),
-                    params.pca_params.clr,
-                    params.pca_params.size_factor,
-                    &verbosity,
-                )?)
-            } else {
-                None
-            };
-
-            let (pairs, scores) = find_cca_anchors_for_pair(
-                cc_a_dim.as_ref(),
-                cc_b_dim.as_ref(),
-                filter_a.as_ref().map(|m| m.as_ref()),
-                filter_b.as_ref().map(|m| m.as_ref()),
-                params,
-                &params.knn_params,
-                seed,
-                verbose,
-            )?;
-
-            let count = pairs.len();
-            if verbosity.normal_verbosity() {
-                println!(
-                    "  found {} anchors in {:.2?}",
-                    count.separate_with_underscores(),
-                    pair_start.elapsed()
-                );
-            }
-            anchor_counts[a][b] = count as u32;
-            anchor_counts[b][a] = count as u32;
-            anchors_by_pair.insert(
-                (a, b),
-                AnchorSet {
-                    pairs,
-                    scores,
-                    batch_pair: (a, b),
-                },
+        let filter = match (&filter_a, &filter_b) {
+            (Some(fa), Some(fb)) => Some(AnchorFilter {
+                a: fa.as_ref(),
+                b: fb.as_ref(),
+                k_filter: params.k_filter,
+            }),
+            _ => None,
+        };
+        let anchors = mnn_scored_anchors(
+            &AnchorSpaces::shared(cc_a_dim.as_ref(), cc_b_dim.as_ref()),
+            params.k_anchor,
+            params.k_score,
+            filter,
+            &params.knn_params,
+            seed,
+            verbose,
+        )?;
+        if verbosity.normal_verbosity() {
+            println!(
+                "  found {} anchors in {:.2?}",
+                anchors.0.len().separate_with_underscores(),
+                pair_start.elapsed()
             );
         }
-    }
+        Ok::<_, ScErrors>(anchors)
+    })?;
 
-    let merge_order = build_sample_tree(&anchor_counts);
-
-    let (per_batch_scores, per_batch_union_indices) =
-        split_pca_by_batch(&pca_scores, batch_indices);
-
-    let (merged, index_map) = tree_merge_embeddings(
-        per_batch_scores,
-        per_batch_union_indices,
+    let corrected = integrate_with_anchors(
+        &pca_scores,
+        batch_indices,
         &anchors_by_pair,
-        &merge_order,
         params.k_weight,
         params.sd,
         &params.knn_params,
         seed,
         verbose,
     )?;
-
-    let corrected = reorder_to_original(&merged, &index_map);
 
     if verbosity.normal_verbosity() {
         println!("CCA integration complete in {:.2?}", start_total.elapsed());

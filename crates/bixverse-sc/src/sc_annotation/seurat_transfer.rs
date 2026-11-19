@@ -6,8 +6,9 @@
 //! an ATAC store. Each side is scaled per feature on its own (`ScaleData`,
 //! clipped above at `scale_max`), then per cell (`Standardize`); the canonical
 //! correlation vectors are the singular vectors of the cells x cells cross
-//! product, computed exactly without forming it ([`cross_product_svd`]). Anchors are mutual nearest neighbours in that space, L2 normalised
-//! per cell, scored by shared neighbours. The labels then move through
+//! product, computed exactly without forming it (`cross_product_svd`).
+//! Anchors are mutual nearest neighbours in that space, L2 normalised per
+//! cell, scored by shared neighbours. The labels then move through
 //! Gaussian-kernel weights of each query cell to its nearest anchor cells in
 //! an embedding of the query, for ATAC its LSI.
 //!
@@ -21,11 +22,12 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 
 use crate::prelude::*;
-use crate::sc_batch_correction::batch_utils::{batch_knn_search, cosine_normalise};
+use crate::sc_batch_correction::batch_utils::{cosine_normalise, par_for_each_col_mut};
 use crate::sc_batch_correction::seurat_anchors::{
-    AnchorSet, find_anchor_pairs, find_weights, score_anchors,
+    AnchorSet, AnchorSpaces, find_weights, mnn_scored_anchors,
 };
 use crate::sc_processing::pca::scale_csc_chunk;
+use bixverse_core::core::math::vector_helpers::mean_sd_f64;
 
 ////////////
 // Params //
@@ -132,17 +134,11 @@ fn scale_features<S: SingleCellReading>(
 ///
 /// `keep.len()` x cells.
 fn standardise_cells(m: MatRef<f32>, keep: &[usize]) -> Mat<f32> {
-    let n = keep.len() as f64;
     let mut out = Mat::from_fn(keep.len(), m.ncols(), |i, j| m[(keep[i], j)]);
-    out.as_mut().par_col_chunks_mut(1).for_each(|mut col| {
-        let mean = (0..col.nrows()).map(|i| col[(i, 0)] as f64).sum::<f64>() / n;
-        let ss: f64 = (0..col.nrows())
-            .map(|i| (col[(i, 0)] as f64 - mean).powi(2))
-            .sum();
-        let sd = (ss / (n - 1.0)).sqrt();
-        for i in 0..col.nrows() {
-            col[(i, 0)] = ((col[(i, 0)] as f64 - mean) / sd) as f32;
-        }
+    par_for_each_col_mut(&mut out, |_, col| {
+        let (mean, sd) = mean_sd_f64(col.iter().copied());
+        col.iter_mut()
+            .for_each(|v| *v = ((*v as f64 - mean) / sd) as f32);
     });
     out
 }
@@ -253,28 +249,15 @@ pub fn find_transfer_anchors<R: SingleCellReading, Q: SingleCellReading>(
         (cc_ref, cc_query)
     };
 
-    let knn = &params.knn_params;
-    let (r, q) = (cc_ref.as_ref(), cc_query.as_ref());
-    // within-set neighbours include the cell itself, as Seurat's k + 1
-    let (nnaa, _) = batch_knn_search(r, r, k_nn + 1, knn, seed, verbose)?;
-    let (nnbb, _) = batch_knn_search(q, q, k_nn + 1, knn, seed, verbose)?;
-    let (nnab, _) = batch_knn_search(r, q, k_nn, knn, seed, verbose)?;
-    let (nnba, _) = batch_knn_search(q, r, k_nn, knn, seed, verbose)?;
-
-    let pairs = find_anchor_pairs(&nnab, &nnba, params.k_anchor);
-    let scores = if pairs.is_empty() {
-        Vec::new()
-    } else {
-        score_anchors(
-            &pairs,
-            &nnaa,
-            &nnab,
-            &nnba,
-            &nnbb,
-            params.k_score,
-            r.nrows(),
-        )
-    };
+    let (pairs, scores) = mnn_scored_anchors(
+        &AnchorSpaces::shared(cc_ref.as_ref(), cc_query.as_ref()),
+        params.k_anchor,
+        params.k_score,
+        None,
+        &params.knn_params,
+        seed,
+        verbose,
+    )?;
     Ok(AnchorSet {
         pairs,
         scores,

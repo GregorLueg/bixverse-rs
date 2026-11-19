@@ -6,10 +6,11 @@
 //! correction application on an embedding, and the greedy hierarchical merge
 //! tree.
 //!
-//! CCA and rPCA differ only in how the shared low-dimensional space between
-//! a batch pair is constructed. Once that space (or spaces, for rPCA) is
-//! available, callers issue four kNN queries themselves and hand the
-//! neighbour lists here.
+//! CCA, rPCA, rLSI and label transfer differ only in how the shared
+//! low-dimensional space between a batch pair is constructed. Once that space
+//! (or spaces, for rPCA and rLSI) is available, [`mnn_scored_anchors`] runs
+//! Seurat's four kNN searches, the anchor pairs and the scores, and
+//! [`integrate_with_anchors`] merges the batches along the anchor tree.
 //!
 //! References: Stuart et al., Cell, 2019 (Seurat v3).
 
@@ -18,7 +19,8 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::prelude::*;
-use crate::sc_batch_correction::batch_utils::par_for_each_col_mut;
+use crate::sc_batch_correction::batch_utils::{batch_knn_search, par_for_each_col_mut};
+use crate::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
 use crate::sc_batch_correction::harmony_core::{row_major_to_mat, to_row_major};
 use bixverse_core::core::math::vector_helpers::quantile_sorted;
 
@@ -55,6 +57,210 @@ impl AnchorSet {
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
+}
+
+/// Anchor pairs `(cell in a, cell in b)` and their scores.
+pub type ScoredAnchors = (Vec<(u32, u32)>, Vec<f32>);
+
+/// The spaces of the four anchor kNN searches between batches A and B.
+///
+/// CCA and label transfer search one shared space throughout; rPCA and rLSI
+/// search each direction in the space of its index batch.
+#[derive(Clone, Copy, Debug)]
+pub struct AnchorSpaces<'a> {
+    /// A in its own space, for the within-A search
+    pub own_a: MatRef<'a, f32>,
+    /// B in its own space, for the within-B search
+    pub own_b: MatRef<'a, f32>,
+    /// A cells, queries of the A to B search
+    pub a_query: MatRef<'a, f32>,
+    /// B cells, index of the A to B search
+    pub b_index: MatRef<'a, f32>,
+    /// B cells, queries of the B to A search
+    pub b_query: MatRef<'a, f32>,
+    /// A cells, index of the B to A search
+    pub a_index: MatRef<'a, f32>,
+}
+
+impl<'a> AnchorSpaces<'a> {
+    /// All four searches in one shared space (CCA, label transfer).
+    ///
+    /// ### Params
+    ///
+    /// * `a` - Batch A in the shared space
+    /// * `b` - Batch B in the shared space
+    ///
+    /// ### Returns
+    ///
+    /// The spaces.
+    pub fn shared(a: MatRef<'a, f32>, b: MatRef<'a, f32>) -> Self {
+        Self {
+            own_a: a,
+            own_b: b,
+            a_query: a,
+            b_index: b,
+            b_query: b,
+            a_index: a,
+        }
+    }
+}
+
+/// Seurat's gene-space anchor filter (`FilterAnchors`, CCA only).
+#[derive(Clone, Copy, Debug)]
+pub struct AnchorFilter<'a> {
+    /// Batch A cells in the filter space
+    pub a: MatRef<'a, f32>,
+    /// Batch B cells in the filter space
+    pub b: MatRef<'a, f32>,
+    /// Neighbours of an A cell among which its anchor partner must be
+    pub k_filter: usize,
+}
+
+////////////////////
+// Anchor finding //
+////////////////////
+
+/// Scored mutual nearest neighbour anchors between two batches: Seurat's
+/// `FindNN`, `FindAnchorPairs`, optionally `FilterAnchors`, and
+/// `ScoreAnchors`.
+///
+/// As in `FindNN`, the within-batch searches run at `k + 1` (the cell itself
+/// comes back as its first neighbour) and the cross-batch searches at `k`,
+/// with `k = max(k_anchor, k_score)`; both are clamped to the batch sizes.
+///
+/// ### Params
+///
+/// * `spaces` - The search spaces, see [`AnchorSpaces`]
+/// * `k_anchor` - Neighbours for the mutual nearest neighbours
+/// * `k_score` - Neighbours for the shared neighbour score
+/// * `filter` - Optional gene-space filter
+/// * `knn_params` - kNN backend
+/// * `seed` - Seed of the kNN backend
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `(pairs, scores)`: `(cell in a, cell in b)` and the rescaled shared
+/// neighbour score of each pair. Empty when no mutual neighbour survives.
+#[allow(clippy::too_many_arguments)]
+pub fn mnn_scored_anchors(
+    spaces: &AnchorSpaces,
+    k_anchor: usize,
+    k_score: usize,
+    filter: Option<AnchorFilter>,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<ScoredAnchors, ScErrors> {
+    let k_nn = k_anchor.max(k_score);
+    let (n_a, n_b) = (spaces.own_a.nrows(), spaces.own_b.nrows());
+    let search = |query, index, k| batch_knn_search(query, index, k, knn_params, seed, verbose);
+    let (nnaa, _) = search(spaces.own_a, spaces.own_a, (k_nn + 1).min(n_a))?;
+    let (nnbb, _) = search(spaces.own_b, spaces.own_b, (k_nn + 1).min(n_b))?;
+    let (nnab, _) = search(spaces.a_query, spaces.b_index, k_nn.min(n_b))?;
+    let (nnba, _) = search(spaces.b_query, spaces.a_index, k_nn.min(n_a))?;
+
+    let mut pairs = find_anchor_pairs(&nnab, &nnba, k_anchor);
+    if let Some(f) = filter {
+        let k_filter = f.k_filter.min(f.b.nrows());
+        if k_filter > 0 {
+            let (nn_filter, _) = search(f.a, f.b, k_filter)?;
+            pairs = filter_anchor_pairs(&pairs, &nn_filter, f.k_filter);
+        }
+    }
+    if pairs.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let scores = score_anchors(&pairs, &nnaa, &nnab, &nnba, &nnbb, k_score, n_a);
+    Ok((pairs, scores))
+}
+
+/// Anchors for every batch pair `a < b`.
+///
+/// ### Params
+///
+/// * `n_batches` - Number of batches
+/// * `anchors_for_pair` - Scored anchors of one pair `(a, b)`
+///
+/// ### Returns
+///
+/// The [`AnchorSet`] of every pair, keyed by `(a, b)` with `a < b`, or the
+/// first error of `anchors_for_pair`.
+pub fn anchors_all_pairs<E, F>(
+    n_batches: usize,
+    mut anchors_for_pair: F,
+) -> Result<FxHashMap<(usize, usize), AnchorSet>, E>
+where
+    F: FnMut(usize, usize) -> Result<ScoredAnchors, E>,
+{
+    let mut anchors_by_pair = FxHashMap::default();
+    for a in 0..n_batches {
+        for b in (a + 1)..n_batches {
+            let (pairs, scores) = anchors_for_pair(a, b)?;
+            anchors_by_pair.insert(
+                (a, b),
+                AnchorSet {
+                    pairs,
+                    scores,
+                    batch_pair: (a, b),
+                },
+            );
+        }
+    }
+    Ok(anchors_by_pair)
+}
+
+/// Seurat's `IntegrateEmbeddings` from the anchors of every batch pair:
+/// batches merge along the anchor-count tree ([`build_sample_tree`]), each
+/// query corrected by kernel-weighted anchor differences on `embedding`
+/// itself ([`tree_merge_embeddings`]).
+///
+/// ### Params
+///
+/// * `embedding` - Cells x dimensions to integrate, rows aligned with
+///   `batch_indices`
+/// * `batch_indices` - 0-based batch per cell
+/// * `anchors_by_pair` - From [`anchors_all_pairs`]
+/// * `k_weight` - Anchor cells per query cell in the weights
+/// * `sd` - Gaussian kernel bandwidth divisor
+/// * `knn_params` - kNN backend
+/// * `seed` - Seed of the kNN backend
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// The integrated embedding, rows in input order.
+#[allow(clippy::too_many_arguments)]
+pub fn integrate_with_anchors(
+    embedding: &Mat<f32>,
+    batch_indices: &[usize],
+    anchors_by_pair: &FxHashMap<(usize, usize), AnchorSet>,
+    k_weight: usize,
+    sd: f32,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<Mat<f32>, ScErrors> {
+    let n_batches = batch_indices.iter().max().map_or(0, |&b| b + 1);
+    let mut anchor_counts = vec![vec![0u32; n_batches]; n_batches];
+    for (&(a, b), set) in anchors_by_pair {
+        anchor_counts[a][b] = set.len() as u32;
+        anchor_counts[b][a] = set.len() as u32;
+    }
+    let merge_order = build_sample_tree(&anchor_counts);
+    let (per_batch, per_batch_rows) = split_pca_by_batch(embedding, batch_indices);
+    let (merged, index_map) = tree_merge_embeddings(
+        per_batch,
+        per_batch_rows,
+        anchors_by_pair,
+        &merge_order,
+        k_weight,
+        sd,
+        knn_params,
+        seed,
+        verbose,
+    )?;
+    Ok(reorder_to_original(&merged, &index_map))
 }
 
 //////////////////////
@@ -854,6 +1060,34 @@ fn stack_vertical(top: &Mat<f32>, bottom: &Mat<f32>) -> Mat<f32> {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    /// Two copies of one batch in a shared space: every cell anchors to its
+    /// own copy, with every score in `[0, 1]`.
+    #[test]
+    fn test_mnn_scored_anchors_identical_batches() {
+        let n = 40;
+        let x = Mat::from_fn(n, 3, |i, j| (i * (j + 2)) as f32 + (i % 7) as f32 * 0.37);
+        let knn_params = KnnParams {
+            knn_method: "exhaustive".to_string(),
+            ann_dist: "euclidean".to_string(),
+            ..KnnParams::default()
+        };
+        let (pairs, scores) = mnn_scored_anchors(
+            &AnchorSpaces::shared(x.as_ref(), x.as_ref()),
+            5,
+            10,
+            None,
+            &knn_params,
+            42,
+            0,
+        )
+        .unwrap();
+        assert_eq!(pairs.len(), scores.len());
+        for i in 0..n as u32 {
+            assert!(pairs.contains(&(i, i)), "cell {i} misses its copy");
+        }
+        assert!(scores.iter().all(|&s| (0.0..=1.0).contains(&s)));
+    }
 
     /// Only cells that are neighbours in both directions become anchor pairs.
     #[test]
