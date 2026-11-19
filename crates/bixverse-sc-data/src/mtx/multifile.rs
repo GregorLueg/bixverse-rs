@@ -461,6 +461,16 @@ mod tests {
 1 4 2\n1 2\n1 4\n";
 
     /// Task over an identity gene universe of four genes.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Experiment ID
+    /// * `path` - The MTX file
+    /// * `cells_as_rows` - Whether rows are cells
+    ///
+    /// ### Returns
+    ///
+    /// The task.
     fn task(name: &str, path: &TempPath, cells_as_rows: bool) -> MtxFileTask {
         MtxFileTask {
             exp_id: name.to_string(),
@@ -471,6 +481,10 @@ mod tests {
     }
 
     /// QC that keeps everything.
+    ///
+    /// ### Returns
+    ///
+    /// The thresholds.
     fn keep_all() -> MinCellQuality {
         MinCellQuality {
             min_unique_genes: 1,

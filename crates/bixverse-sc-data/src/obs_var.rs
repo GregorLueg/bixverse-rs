@@ -217,7 +217,7 @@ pub fn to_snake_case(x: &str) -> String {
 fn common_len(cols: &[(String, ColumnData)]) -> Result<usize, ScDataErrors> {
     let n = cols.first().map(|(_, c)| c.len()).unwrap_or(0);
     if let Some((name, c)) = cols.iter().find(|(_, c)| c.len() != n) {
-        return Err(ScDataErrors::UnsupportH5ADFormat(format!(
+        return Err(ScDataErrors::UnsupportedH5adFormat(format!(
             "column '{}' has {} rows, expected {}",
             name,
             c.len(),
@@ -294,7 +294,7 @@ fn assemble_h5ad(
     let mut cols = frame.cols;
 
     if cols.is_empty() && frame.idx.is_none() {
-        return Err(ScDataErrors::UnsupportH5ADFormat(format!(
+        return Err(ScDataErrors::UnsupportedH5adFormat(format!(
             "no {} data found in the h5 file",
             kind.group()
         )));
@@ -343,6 +343,10 @@ fn assemble_h5ad(
 ///
 /// * `cw` - The column writer
 /// * `vals` - Values, `None` for NULL
+///
+/// ### Returns
+///
+/// `Ok(())`, or the Parquet error.
 fn write_optional<T: DataType>(
     cw: &mut SerializedColumnWriter<'_>,
     vals: impl Iterator<Item = Option<T::T>>,
@@ -371,6 +375,10 @@ fn write_optional<T: DataType>(
 /// * `cols` - Final columns, all of length `n_rows`
 /// * `n_rows` - Row count
 /// * `out_path` - Output file
+///
+/// ### Returns
+///
+/// `Ok(())` once the file is closed, or the Parquet or I/O error.
 fn write_parquet(
     cols: &[(String, ColumnData)],
     n_rows: usize,
@@ -619,6 +627,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     /// Variable-length UTF-8 strings
+    ///
+    /// ### Params
+    ///
+    /// * `xs` - The strings
+    ///
+    /// ### Returns
+    ///
+    /// The HDF5 strings.
     fn vlen(xs: &[&str]) -> Vec<VarLenUnicode> {
         xs.iter()
             .map(|s| VarLenUnicode::from_str(s).unwrap())
@@ -626,6 +642,12 @@ mod tests {
     }
 
     /// Write a vlen string dataset
+    ///
+    /// ### Params
+    ///
+    /// * `g` - Group to write into
+    /// * `name` - Dataset name
+    /// * `xs` - The strings
     fn write_strings(g: &Group, name: &str, xs: &[&str]) {
         g.new_dataset_builder()
             .with_data(&vlen(xs))
@@ -634,6 +656,14 @@ mod tests {
     }
 
     /// Read a Parquet file back into column names and rows of fields
+    ///
+    /// ### Params
+    ///
+    /// * `path` - The Parquet file
+    ///
+    /// ### Returns
+    ///
+    /// Column names and one row of fields per record.
     fn read_back(path: &Path) -> (Vec<String>, Vec<Vec<Field>>) {
         let reader = SerializedFileReader::try_from(path).unwrap();
         let names = reader
@@ -658,11 +688,30 @@ mod tests {
     }
 
     /// One column of the read-back rows
+    ///
+    /// ### Params
+    ///
+    /// * `names` - Column names
+    /// * `rows` - Rows from [`read_back`]
+    /// * `name` - Column to take
+    ///
+    /// ### Returns
+    ///
+    /// The column, top to bottom.
     fn column(names: &[String], rows: &[Vec<Field>], name: &str) -> Vec<Field> {
         let j = names.iter().position(|n| n == name).unwrap();
         rows.iter().map(|r| r[j].clone()).collect()
     }
 
+    /// A Parquet string field.
+    ///
+    /// ### Params
+    ///
+    /// * `x` - The string
+    ///
+    /// ### Returns
+    ///
+    /// The field.
     fn s(x: &str) -> Field {
         Field::Str(x.to_string())
     }
@@ -670,6 +719,10 @@ mod tests {
     /// An obs group with every encoding: `_index` attribute, new and old
     /// categoricals, nullable, float32, int32, int64 out of range, bool,
     /// plain and long fixed-length strings, and one unsupported group
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
     fn write_obs_fixture(path: &Path) {
         let file = File::create(path).unwrap();
         let obs = file.create_group("obs").unwrap();

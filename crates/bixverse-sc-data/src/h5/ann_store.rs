@@ -74,7 +74,7 @@ impl AnnFile {
     ///
     /// ### Returns
     ///
-    /// The handle, or [`ScDataErrors::UnsupportH5ADFormat`] for a Zarr store
+    /// The handle, or [`ScDataErrors::UnsupportedH5adFormat`] for a Zarr store
     /// in a build without the `zarr` feature.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ScDataErrors> {
         let path = path.as_ref();
@@ -85,7 +85,7 @@ impl AnnFile {
                 return Ok(Self::Zarr(Arc::new(store)));
             }
             #[cfg(not(feature = "zarr"))]
-            return Err(ScDataErrors::UnsupportH5ADFormat(format!(
+            return Err(ScDataErrors::UnsupportedH5adFormat(format!(
                 "{} is a Zarr store; this build lacks the `zarr` feature",
                 path.display()
             )));
@@ -588,6 +588,14 @@ mod tests {
     use std::path::PathBuf;
 
     /// anndata-written fixtures, `python/dev/gen_anndata_fixture.py`.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - File or store name inside `python/tests/fixtures`
+    ///
+    /// ### Returns
+    ///
+    /// Its path.
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../python/tests/fixtures")
@@ -596,6 +604,12 @@ mod tests {
 
     /// The Zarr store reads like its h5ad twin: scan, obs / var, and the cell
     /// file built from it, byte for byte.
+    ///
+    /// ### Params
+    ///
+    /// * `zarr` - Zarr fixture name
+    /// * `h5ad` - h5ad fixture name
+    /// * `format` - How `X` is stored, as [`crate::h5::h5ad::parse_h5ad_format`] takes it
     fn assert_matches_h5ad(zarr: &str, h5ad: &str, format: &str) {
         let (z, h) = (fixture(zarr), fixture(h5ad));
         assert!(is_zarr(&z) && !is_zarr(&h));

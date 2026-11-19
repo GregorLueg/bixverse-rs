@@ -232,9 +232,10 @@ pub enum ScDataErrors {
     #[cfg(feature = "h5")]
     Hdf5(#[from] hdf5::Error),
 
-    /// Provide custom error message for unsupported file formats.
+    /// The h5ad stores `X` in a layout the loader does not read, or a group it
+    /// needs is missing or malformed.
     #[error("Unknown or unsupported h5ad format: {0}")]
-    UnsupportH5ADFormat(String),
+    UnsupportedH5adFormat(String),
 
     /// An anndata Zarr store could not be opened or read: missing node,
     /// unsupported data type or codec, or a store error.
@@ -287,8 +288,8 @@ pub enum ScDataErrors {
     /// The library-size vector read from `obs` does not match the number of
     /// cells in `X`.
     ///
-    /// Indicates a malformed h5ad — typical cause is a user-edited obs table
-    /// whose row count drifted from the matrix.
+    /// Indicates a malformed h5ad. The typical cause is a user-edited obs
+    /// table whose row count drifted from the matrix.
     #[error("Library size column length ({found}) does not match cell count ({expected})")]
     LibSizeLengthMismatch {
         /// Expected length (number of cells in `X`).

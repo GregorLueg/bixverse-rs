@@ -1,5 +1,5 @@
 //! Helpers to extract genes for plotting. Can densify raw and normalised
-//! counts, do Z-score normalisation for groups and caclulate proportion
+//! counts, do Z-score normalisation for groups and calculate proportion
 //! of cells.
 
 use indexmap::IndexSet;

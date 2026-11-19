@@ -56,11 +56,11 @@ fn len_of(file: &AnnFile, path: &str) -> Result<usize, ScDataErrors> {
 ///
 /// ### Returns
 ///
-/// The number of rows, or [ScDataErrors::UnsupportH5ADFormat] if none can be
+/// The number of rows, or [ScDataErrors::UnsupportedH5adFormat] if none can be
 /// resolved.
 fn frame_length(file: &AnnFile, group: &str) -> Result<usize, ScDataErrors> {
     let unresolved =
-        || ScDataErrors::UnsupportH5ADFormat(format!("cannot resolve the length of /{group}"));
+        || ScDataErrors::UnsupportedH5adFormat(format!("cannot resolve the length of /{group}"));
 
     let Some(index) = file.attr_str(group, "_index")? else {
         let first = file
@@ -156,7 +156,7 @@ pub fn get_h5ad_dimensions<P: AsRef<Path>>(h5_path: P) -> Result<H5adDimensions,
     let format = match file.node("X") {
         Some(NodeKind::Group) => {
             if file.node("X/indptr") != Some(NodeKind::Array) {
-                return Err(ScDataErrors::UnsupportH5ADFormat(
+                return Err(ScDataErrors::UnsupportedH5adFormat(
                     "/X is a group but contains no indptr dataset".to_string(),
                 ));
             }
@@ -173,12 +173,12 @@ pub fn get_h5ad_dimensions<P: AsRef<Path>>(h5_path: P) -> Result<H5adDimensions,
                 [r, c] if *r == n_obs && *c == n_var => H5ADFormat::DenseRow,
                 [r, c] if *r == n_var && *c == n_obs => H5ADFormat::DenseCol,
                 [r, c] => {
-                    return Err(ScDataErrors::UnsupportH5ADFormat(format!(
+                    return Err(ScDataErrors::UnsupportedH5adFormat(format!(
                         "/X dense dims ({r} x {c}) match neither obs/var ({n_obs} / {n_var}) ordering"
                     )));
                 }
                 other => {
-                    return Err(ScDataErrors::UnsupportH5ADFormat(format!(
+                    return Err(ScDataErrors::UnsupportedH5adFormat(format!(
                         "unexpected /X rank: {}",
                         other.len()
                     )));
@@ -186,7 +186,7 @@ pub fn get_h5ad_dimensions<P: AsRef<Path>>(h5_path: P) -> Result<H5adDimensions,
             }
         }
         None => {
-            return Err(ScDataErrors::UnsupportH5ADFormat(
+            return Err(ScDataErrors::UnsupportedH5adFormat(
                 "could not locate /X in the h5ad file".to_string(),
             ));
         }
@@ -267,11 +267,25 @@ mod tests {
     use hdf5::types::VarLenUnicode;
     use tempfile::NamedTempFile;
 
+    /// Variable-length UTF-8 strings for a dataset.
+    ///
+    /// ### Params
+    ///
+    /// * `xs` - The strings
+    ///
+    /// ### Returns
+    ///
+    /// The HDF5 strings.
     fn strings(xs: &[&str]) -> Vec<VarLenUnicode> {
         xs.iter().map(|x| x.parse().unwrap()).collect()
     }
 
     /// An h5ad with a 3 x 2 obs / var, `X` as given by `write_x`.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
+    /// * `write_x` - Writes the `X` group or dataset into the file
     fn write_h5ad(path: &Path, write_x: impl Fn(&File)) {
         let f = File::create(path).unwrap();
         for (grp, ids) in [("obs", vec!["c1", "c2", "c3"]), ("var", vec!["g1", "g2"])] {

@@ -1119,6 +1119,10 @@ impl ParallelSparseReader {
 
     /// Whether the file carries a library-size index. Lets tests in other
     /// modules check which path `read_cell_library_sizes` takes.
+    ///
+    /// ### Returns
+    ///
+    /// `true` if the index is present.
     #[cfg(test)]
     pub(crate) fn has_library_index(&self) -> bool {
         self.library_index.is_some()
@@ -2387,9 +2391,9 @@ impl SingleCellReading for ParallelSparseReader {
 
     /// Read genes with raw counts and indices only.
     ///
-    /// On v4 the norm layer is neither recomputed nor converted, `data_norm`
-    /// comes back empty and the decoded indices move into the chunk. v3 reads
-    /// both layers, as [`Self::read_gene_parallel`].
+    /// On v4 and v5 the norm layer is neither recomputed nor converted,
+    /// `data_norm` comes back empty and the decoded indices move into the
+    /// chunk. v3 reads both layers, as [`Self::read_gene_parallel`].
     ///
     /// ### Params
     ///
@@ -2397,7 +2401,8 @@ impl SingleCellReading for ParallelSparseReader {
     ///
     /// ### Returns
     ///
-    /// Returns an array of `CscGeneChunk` with an empty `data_norm` on v4.
+    /// Returns an array of `CscGeneChunk` with an empty `data_norm` on v4 and
+    /// v5.
     fn read_gene_parallel_raw(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, ScDataErrors> {
         if !self.is_v4() {
             return self.read_gene_parallel(indices);
@@ -2660,6 +2665,14 @@ mod tests {
     }
 
     /// [`csr_test_store`] in the legacy v3 format when `legacy` is set.
+    ///
+    /// ### Params
+    ///
+    /// * `legacy` - Write v3
+    ///
+    /// ### Returns
+    ///
+    /// The path, removed on drop, and an open reader over it.
     fn csr_test_store_with(legacy: bool) -> (TempPath, ParallelSparseReader) {
         let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let chunks = vec![
@@ -2982,6 +2995,11 @@ mod tests {
     /// Rewrite the 64-byte header slot of an existing file, applying `edit` to
     /// the decoded [`FileHeader`]. Lets a test corrupt one field of an otherwise
     /// valid file without hand-assembling the whole layout.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - The file
+    /// * `edit` - Change to the decoded header
     fn patch_file_header(path: &str, edit: impl FnOnce(&mut FileHeader)) {
         let mut bytes = std::fs::read(path).expect("read back");
         let (mut header, _) = decode_from_slice::<FileHeader, _>(&bytes[0..64], config::standard())
@@ -2998,6 +3016,10 @@ mod tests {
     }
 
     /// Build a minimal but valid cell-based file at `path`.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
     fn write_valid_file(path: &str) {
         let mut writer = CellGeneSparseWriter::new_v4(path, true, 1, 3, 1e4).expect("writer opens");
         writer
@@ -3149,6 +3171,12 @@ mod tests {
 
     /// Write three cells, out of index order and one with a u32 count,
     /// through the per-chunk or the pre-compressed write path, as v4 or v5.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
+    /// * `compressed` - Use the pre-compressed write path
+    /// * `v5` - Write v5 rather than v4
     fn write_index_test_file(path: &str, compressed: bool, v5: bool) {
         let chunks = vec![
             cell_chunk(&[5, 70_000], &[0, 2], 2),
@@ -3173,6 +3201,15 @@ mod tests {
 
     /// Library sizes for `indices` as the reader answers them, and as the
     /// chunk headers store them.
+    ///
+    /// ### Params
+    ///
+    /// * `reader` - Reader over the cell file
+    /// * `indices` - Cells to look up
+    ///
+    /// ### Returns
+    ///
+    /// `(from the reader, from the chunk headers)`.
     fn library_sizes_both_ways(
         reader: &ParallelSparseReader,
         indices: &[usize],

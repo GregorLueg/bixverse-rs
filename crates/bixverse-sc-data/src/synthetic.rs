@@ -1269,6 +1269,15 @@ mod cellsweep_synthetic_tests {
     use super::*;
 
     /// Pooled counts per gene over the rows in `rows`.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - The synthetic data
+    /// * `rows` - Cells to pool
+    ///
+    /// ### Returns
+    ///
+    /// Summed counts per gene.
     fn pooled(data: &CellSweepSyntheticData, rows: &[usize]) -> Vec<f64> {
         let n_genes = data.matrix.shape.1;
         let mut out = vec![0.0; n_genes];
@@ -1282,6 +1291,16 @@ mod cellsweep_synthetic_tests {
         out
     }
 
+    /// Pearson correlation.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First vector
+    /// * `b` - Second vector, same length
+    ///
+    /// ### Returns
+    ///
+    /// The correlation.
     fn pearson(a: &[f64], b: &[f64]) -> f64 {
         let n = a.len() as f64;
         let ma = a.iter().sum::<f64>() / n;

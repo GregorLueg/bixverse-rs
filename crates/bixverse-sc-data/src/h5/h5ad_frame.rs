@@ -64,6 +64,16 @@ impl ColumnData {
     /// The filtered column.
     #[cfg(feature = "parquet")]
     pub(crate) fn gather(self, keep: &[usize]) -> Self {
+        /// The elements at `keep`, in that order.
+        ///
+        /// ### Params
+        ///
+        /// * `v` - Values
+        /// * `keep` - Positions to take
+        ///
+        /// ### Returns
+        ///
+        /// The gathered values.
         fn pick<T: Clone>(v: &[T], keep: &[usize]) -> Vec<T> {
             keep.iter().map(|&i| v[i].clone()).collect()
         }
@@ -108,6 +118,16 @@ impl ColumnData {
     ///
     /// The levels, or `None` for a categorical of categoricals.
     pub(crate) fn into_levels(self) -> Option<Vec<String>> {
+        /// Format every value, `NA` for a missing one.
+        ///
+        /// ### Params
+        ///
+        /// * `v` - Values
+        /// * `f` - Formatter for present values
+        ///
+        /// ### Returns
+        ///
+        /// The strings.
         fn render<T>(v: Vec<Option<T>>, f: impl Fn(T) -> String) -> Vec<String> {
             v.into_iter()
                 .map(|x| x.map(&f).unwrap_or_else(|| "NA".to_string()))
@@ -581,6 +601,11 @@ pub enum PlainX<'a> {
 /// * `g` - The dataframe group
 /// * `name` - Column name
 /// * `col` - The values
+///
+/// ### Returns
+///
+/// `Ok(())`, or an error for a string that is not valid UTF-8 or a missing
+/// value in a logical column.
 fn write_column(g: &Group, name: &str, col: &ColumnData) -> Result<(), ScDataErrors> {
     let strings = |v: &[Option<String>]| -> Result<Vec<VarLenUnicode>, ScDataErrors> {
         v.iter()
@@ -646,6 +671,10 @@ fn write_column(g: &Group, name: &str, col: &ColumnData) -> Result<(), ScDataErr
 /// * `n_var` - Number of genes
 /// * `obs` - Cell columns, identifier first
 /// * `var` - Gene columns, identifier first
+///
+/// ### Returns
+///
+/// `Ok(())`, or an error for a column whose length does not match.
 pub fn write_h5ad_plain<P: AsRef<Path>>(
     h5_path: P,
     x: PlainX,

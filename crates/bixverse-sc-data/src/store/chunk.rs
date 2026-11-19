@@ -113,6 +113,7 @@ pub enum RawCounts {
 /// Raw count element size discriminant for the binary format.
 /// Stored as a single byte in chunk headers.
 pub(crate) const RAW_ELEM_U16: u8 = 2;
+/// Raw count element size discriminant for u32 counts.
 pub(crate) const RAW_ELEM_U32: u8 = 4;
 
 /// Header length of a CSR cell chunk: 4+4+4+8+8+4 bytes. See
@@ -129,6 +130,10 @@ impl RawCounts {
     /// ### Returns
     ///
     /// The count as u32
+    ///
+    /// ### Params
+    ///
+    /// * `i` - Position
     pub fn get(&self, i: usize) -> u32 {
         match self {
             RawCounts::U16(v) => v[i] as u32,
@@ -269,6 +274,14 @@ impl RawCounts {
     ///
     /// If all values fit in u16, stores as U16 for better compression.
     /// Otherwise stores as U32.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - The counts
+    ///
+    /// ### Returns
+    ///
+    /// The counts as U16 when they all fit, U32 otherwise.
     pub fn from_u32_auto(data: &[u32]) -> Self {
         if data.iter().all(|&v| v <= u16::MAX as u32) {
             RawCounts::U16(data.iter().map(|&v| v as u16).collect())
@@ -828,6 +841,14 @@ impl CsrCellChunk {
     /// - data_raw: `data_raw_len * raw_elem_size` bytes
     /// - data_norm: `data_norm_len * 2` bytes
     /// - indices: `indices_len * 4` bytes (u32)
+    ///
+    /// ### Params
+    ///
+    /// * `writer` - Destination
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or the I/O error.
     pub fn write_to_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
         writer.write_all(&self.to_bytes())
     }
@@ -892,7 +913,7 @@ impl CsrCellChunk {
     ///
     /// * `buffer` - A slice of u8's representing the buffer
     ///
-    /// ### Return
+    /// ### Returns
     ///
     /// The `CsrCellChunk`
     pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, ScDataErrors> {
@@ -1133,6 +1154,14 @@ impl CscGeneChunk {
     /// - data_raw: `data_raw_len * raw_elem_size` bytes
     /// - data_norm: `data_norm_len * 2` bytes
     /// - indices: `indices_len * 4` bytes (u32)
+    ///
+    /// ### Params
+    ///
+    /// * `writer` - Destination
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or the I/O error.
     pub fn write_to_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
         writer.write_all(&(self.data_raw.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.data_norm.len() as u32).to_le_bytes())?;
@@ -1180,7 +1209,7 @@ impl CscGeneChunk {
     ///
     /// * `buffer` - A slice of u8's representing the buffer
     ///
-    /// ### Return
+    /// ### Returns
     ///
     /// The `CscGeneChunk`
     pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, ScDataErrors> {
@@ -2045,12 +2074,19 @@ pub(crate) mod tests {
     /// of the reserved block (28 reserved bytes, all zero when written).
     #[derive(Encode, Decode, Serialize, Deserialize)]
     struct TargetSizeFileHeader {
+        /// File magic.
         magic: [u8; 8],
+        /// File version.
         version: u32,
+        /// Offset of the main header.
         main_header_offset: u64,
+        /// Cell- or gene-based.
         cell_based: bool,
+        /// Target size of the norm.
         target_size: f32,
+        /// Reserved, zero.
         _reserved_1: [u8; 28],
+        /// Padding.
         _reserved_2: [u8; 3],
     }
 

@@ -353,9 +353,9 @@ fn cell_library_sizes(matrix: &CompressedSparseData2<u32, f32>, n_cells: usize) 
 /// Largest share of the store's cells for which reading the subset from the
 /// cell-major store beats the gene-major sweep.
 ///
-/// Measured on a 985k-cell, 36.5k-gene store (10 threads, warm page cache):
-/// VST HVG breaks even near 12 % of cells, the scTransform fit near 20 %. 10 %
-/// sits inside both. A cold cache only pushes the crossover out, since the
+/// VST HVG breaks even a little above 10 % of cells and the scTransform fit
+/// further out, so 10 % sits inside both. The figures are indicative, not a
+/// tuned optimum. A cold cache only pushes the crossover out, since the
 /// gene-major path reads the whole file whatever the subset.
 pub const CELL_SUBSET_MAX_FRACTION: f64 = 0.10;
 
@@ -699,6 +699,10 @@ mod tests {
 
     /// Four cells, three genes. Gene 1 is expressed everywhere, gene 2 in a
     /// single cell.
+    ///
+    /// ### Returns
+    ///
+    /// Gene-major counts with a norm layer.
     fn toy_csc() -> CompressedSparseData2<u32, f32> {
         let data: Vec<u32> = vec![
             3, 5, // gene 0, cells 0 and 2

@@ -57,6 +57,10 @@ pub enum H5ADFormat {
 /// ### Returns
 ///
 /// The [H5ADFormat]
+///
+/// ### Params
+///
+/// * `s` - `"csr"`, `"csc"`, `"dense_row"` or `"dense_col"`, any case
 pub fn parse_h5ad_format(s: &str) -> Option<H5ADFormat> {
     match s.to_lowercase().as_str() {
         "csr" => Some(H5ADFormat::Csr),
@@ -363,7 +367,7 @@ fn h5ad_quality(
     verbose: bool,
 ) -> Result<(H5ADFormat, CellOnFileQuality), ScDataErrors> {
     let format = parse_h5ad_format(h5ad_format)
-        .ok_or_else(|| ScDataErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
+        .ok_or_else(|| ScDataErrors::UnsupportedH5adFormat(h5ad_format.to_string()))?;
     check_ann_filters(h5_path, raw_slot, &format)?;
     let quality = match format {
         H5ADFormat::Csr => parse_h5_csr_quality(h5_path, shape, raw_slot, cell_quality, verbose)?,
@@ -411,7 +415,7 @@ fn print_h5ad_quality(quality: &CellOnFileQuality, shape: (usize, usize)) {
 /// * `bin_path` - Path to the binarised object on disk to write to
 /// * `h5ad_format` - Was the h5ad data stored in: "csc", "csr", "dense_row",
 ///   or "dense_col".
-/// * `no_cells` - Total number of obversations in the data.
+/// * `no_cells` - Total number of observations in the data.
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
@@ -529,7 +533,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 /// * `bin_path` - Path to the binarised object on disk to write to
 /// * `h5ad_format` - Was the h5ad data stored in: "csc", "csr", "dense_row",
 ///   or "dense_col".
-/// * `no_cells` - Total number of obversations in the data.
+/// * `no_cells` - Total number of observations in the data.
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
@@ -809,7 +813,8 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
 
 /// Helper function that reads in full CSC data from an h5 file
 ///
-/// The function assumes that the data is stored as cells x genes.
+/// The h5ad stores cells x genes in CSC, so every gene is one contiguous run
+/// of cell indices.
 ///
 /// ### Params
 ///
@@ -822,7 +827,8 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The `CompressedSparseData2` in CSR format with the counts stored as u32.
+/// The kept genes as rows (indptr over genes, cell indices), labelled CSR and
+/// shaped `(genes, cells)`, with the counts as u32. Transpose for cell-major.
 pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
@@ -1524,6 +1530,7 @@ pub(crate) fn write_h5_cell_major_cells(
         );
     }
 
+    /// One read-ahead slice: offset of its first entry, values, gene indices.
     type Slice = (usize, Vec<f32>, Vec<u32>);
 
     std::thread::scope(|scope| -> Result<(), ScDataErrors> {
@@ -1683,9 +1690,9 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// Returns an [ScDataErrors::UnsupportH5ADFormat]
+/// Returns an [ScDataErrors::UnsupportedH5adFormat]
 pub fn dense_col_not_supported<T>() -> Result<T, ScDataErrors> {
-    Err(ScDataErrors::UnsupportH5ADFormat(
+    Err(ScDataErrors::UnsupportedH5adFormat(
         "dense_col ingestion is not yet implemented".to_string(),
     ))
 }
@@ -2827,10 +2834,16 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    /// Cells in the CSC transpose fixture.
     const CSC_TEST_CELLS: usize = 300;
+    /// Genes in the CSC transpose fixture.
     const CSC_TEST_GENES: usize = 40;
 
     /// Seeded dense count matrix, cells x genes, with sparse and empty cells.
+    ///
+    /// ### Returns
+    ///
+    /// `dense[cell][gene]` counts.
     fn csc_test_dense() -> Vec<Vec<u32>> {
         let mut state = 0x5EED_CAFEu64;
         let mut next = || {
@@ -2855,6 +2868,12 @@ mod tests {
     }
 
     /// Write the dense matrix as a CSR or CSC `X` group.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
+    /// * `dense` - `dense[cell][gene]` counts
+    /// * `csc` - Write CSC rather than CSR
     fn write_sparse_h5ad(path: &Path, dense: &[Vec<u32>], csc: bool) {
         let (outer, inner) = if csc {
             (CSC_TEST_GENES, CSC_TEST_CELLS)
@@ -2890,6 +2909,11 @@ mod tests {
             .unwrap();
     }
 
+    /// QC that drops some cells and genes of [`csc_test_dense`].
+    ///
+    /// ### Returns
+    ///
+    /// The thresholds.
     fn csc_test_qc() -> MinCellQuality {
         MinCellQuality {
             min_unique_genes: 2,

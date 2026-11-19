@@ -98,10 +98,34 @@ impl Stored {
 /// saturate when converted to integers.
 pub trait H5Elem: hdf5::H5Type + Copy + Default + Send + Sync {
     /// Convert from a signed integer.
+    ///
+    /// ### Params
+    ///
+    /// * `v` - The value
+    ///
+    /// ### Returns
+    ///
+    /// `v` clamped into the target range.
     fn from_i64(v: i64) -> Self;
     /// Convert from an unsigned integer.
+    ///
+    /// ### Params
+    ///
+    /// * `v` - The value
+    ///
+    /// ### Returns
+    ///
+    /// `v` clamped into the target range.
     fn from_u64(v: u64) -> Self;
     /// Convert from a float.
+    ///
+    /// ### Params
+    ///
+    /// * `v` - The value
+    ///
+    /// ### Returns
+    ///
+    /// `v` truncated towards zero and saturated for integer targets.
     fn from_f64(v: f64) -> Self;
 }
 
@@ -324,6 +348,12 @@ fn chunk_index(ds: &Dataset, n_chunks: usize, chunk_len: usize) -> Option<Vec<Ch
 /// ### Returns
 ///
 /// Always `None`.
+///
+/// ### Params
+///
+/// * `_ds` - The dataset
+/// * `_n_chunks` - Number of chunks
+/// * `_chunk_len` - Elements per chunk
 #[cfg(not(any(hdf5_chunk_info, hdf5_chunk_iter)))]
 fn chunk_index(_ds: &Dataset, _n_chunks: usize, _chunk_len: usize) -> Option<Vec<ChunkLoc>> {
     None
@@ -408,6 +438,10 @@ struct Scratch {
 /// * `file` - The file
 /// * `buf` - Destination, filled completely
 /// * `offset` - Absolute byte offset
+///
+/// ### Returns
+///
+/// `Ok(())` once `buf` is full, or the I/O error.
 #[cfg(unix)]
 fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
@@ -423,6 +457,10 @@ fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::
 /// * `file` - The file
 /// * `buf` - Destination, filled completely
 /// * `offset` - Absolute byte offset
+///
+/// ### Returns
+///
+/// `Ok(())` once `buf` is full, or the I/O error.
 #[cfg(windows)]
 fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;

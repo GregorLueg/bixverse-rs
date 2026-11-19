@@ -91,8 +91,7 @@ const GZ_INPUT_BYTES: usize = 1024 * 1024;
 ///
 /// Does what `flate2::read::MultiGzDecoder` does, CRC32 and size check of
 /// every member included, on a larger input buffer and without flate2's gzip
-/// layer, which is where the single inflate thread of the text pass lost about
-/// 15%.
+/// layer, which costs the single inflate thread of the text pass noticeably.
 struct GzMembers<R> {
     /// The compressed file
     inner: R,
@@ -1113,6 +1112,11 @@ impl MtxReader {
     ///   reach and the target library size
     /// * `cells_as_rows` - Boolean. Are the cells the rows (= true) or columns in
     ///   the mtx file.
+    ///
+    /// ### Returns
+    ///
+    /// The reader with the header parsed, or an error for an unreadable file or
+    /// an unsupported banner.
     pub fn new<P: AsRef<Path>>(
         path: P,
         qc_params: MinCellQuality,
@@ -1668,6 +1672,10 @@ mod tests {
 4 3 9\n";
 
     /// The `(gene indices, raw counts)` the two fixtures both encode.
+    ///
+    /// ### Returns
+    ///
+    /// One `(gene indices, raw counts)` pair per cell.
     fn expected_cells() -> Vec<(Vec<u32>, Vec<u32>)> {
         vec![
             (vec![0, 2], vec![5, 7]),
@@ -1677,6 +1685,14 @@ mod tests {
     }
 
     /// Write `body` to a scratch `.mtx` file and hand back its guard.
+    ///
+    /// ### Params
+    ///
+    /// * `body` - File content
+    ///
+    /// ### Returns
+    ///
+    /// The path, removed on drop.
     fn write_mtx(body: &str) -> TempPath {
         let temp = NamedTempFile::with_suffix(".mtx").unwrap().into_temp_path();
         std::fs::write(&temp, body).expect("mtx file written");
@@ -1684,6 +1700,10 @@ mod tests {
     }
 
     /// QC thresholds that keep every cell and gene of the fixtures.
+    ///
+    /// ### Returns
+    ///
+    /// The thresholds.
     fn keep_all_qc() -> MinCellQuality {
         MinCellQuality {
             min_unique_genes: 1,
@@ -1695,6 +1715,15 @@ mod tests {
 
     /// Read the first `n_cells` cells of a written store back as
     /// `(gene indices, raw counts)`.
+    ///
+    /// ### Params
+    ///
+    /// * `bin_path` - Cell-based store
+    /// * `n_cells` - Cells to read
+    ///
+    /// ### Returns
+    ///
+    /// One `(gene indices, raw counts)` pair per cell.
     fn read_back(bin_path: &str, n_cells: usize) -> Vec<(Vec<u32>, Vec<u32>)> {
         let reader = ParallelSparseReader::new(bin_path).expect("reader opens");
         let indices: Vec<usize> = (0..n_cells).collect();
@@ -1711,6 +1740,14 @@ mod tests {
     /////////////////
 
     /// Parse an integer-field line that must not raise a value error.
+    ///
+    /// ### Params
+    ///
+    /// * `line` - One entry line
+    ///
+    /// ### Returns
+    ///
+    /// `(row, col, value)`, or `None` for a line that is not an entry.
     fn int(line: &[u8]) -> Option<(u32, u32, u32)> {
         parse_entry(line, MtxField::Integer).expect("no value error")
     }
@@ -2104,6 +2141,10 @@ mod tests {
     }
 
     /// QC that drops some genes and some cells of [`random_counts`].
+    ///
+    /// ### Returns
+    ///
+    /// The thresholds.
     fn dropping_qc() -> MinCellQuality {
         MinCellQuality {
             min_unique_genes: 8,
@@ -2176,6 +2217,15 @@ mod tests {
 
     /// Write `body` as a gzip of `members` concatenated members, as bgzip or
     /// `cat a.gz b.gz` produce.
+    ///
+    /// ### Params
+    ///
+    /// * `body` - Uncompressed content
+    /// * `members` - Number of gzip members to split it into
+    ///
+    /// ### Returns
+    ///
+    /// The path, removed on drop.
     fn write_gz(body: &str, members: usize) -> TempPath {
         use flate2::Compression;
         use flate2::write::GzEncoder;

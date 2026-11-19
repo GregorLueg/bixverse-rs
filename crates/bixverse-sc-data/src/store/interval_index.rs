@@ -553,6 +553,10 @@ mod tests {
 
     /// A spread of features on three chromosomes, deliberately out of
     /// genomic order, with one long feature that spans many short ones.
+    ///
+    /// ### Returns
+    ///
+    /// The features, in store order.
     fn features() -> Vec<FeatureInterval> {
         let mut out = Vec::new();
         let mut state = 7u64;
@@ -585,6 +589,17 @@ mod tests {
     }
 
     /// Brute force: every feature overlapping the query, in genomic order.
+    ///
+    /// ### Params
+    ///
+    /// * `f` - Features
+    /// * `chrom` - Chromosome
+    /// * `start` - Query start
+    /// * `end` - Query end, exclusive
+    ///
+    /// ### Returns
+    ///
+    /// Indices of the overlapping features.
     fn brute(f: &[FeatureInterval], chrom: &str, start: u32, end: u32) -> Vec<usize> {
         let mut hits: Vec<usize> = (0..f.len())
             .filter(|&i| f[i].chrom == chrom && f[i].start < end && f[i].end > start)

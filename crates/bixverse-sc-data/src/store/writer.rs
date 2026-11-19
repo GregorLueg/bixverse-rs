@@ -43,7 +43,8 @@ pub struct CellPayload {
     pub original_index: usize,
     /// Library size of the cell, as stored in the chunk header.
     pub library_size: usize,
-    /// Size-prepended lz4 payload.
+    /// Encoded chunk from [`crate::store::v4::ChunkFormat::encode_cell`] of
+    /// the writer it goes to.
     pub bytes: Vec<u8>,
 }
 

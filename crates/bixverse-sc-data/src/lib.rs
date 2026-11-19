@@ -1,6 +1,9 @@
 //! The single cell data layer: the bixverse binary sparse format, its
-//! streaming readers and writers, and ingestion from h5ad, 10x h5 (feature
-//! `h5`) and MTX.
+//! streaming readers and writers, and the store tools (gene file build,
+//! archive, merge, v3 / v4 to v5 upgrade). Ingestion from MTX, from h5ad and
+//! 10x h5 (feature `h5`) and from anndata Zarr (feature `zarr`, through
+//! `h5::ann_store`), and the obs / var export to Parquet (feature `parquet`,
+//! `obs_var`).
 //!
 //! ## Feature flags
 #![doc = document_features::document_features!()]

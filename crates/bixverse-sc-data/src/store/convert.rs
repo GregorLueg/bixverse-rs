@@ -337,6 +337,13 @@ mod tests {
     };
     use indexmap::IndexSet;
 
+    /// Assert two sparse reads agree, the norm at the precision `exact` asks for.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First read
+    /// * `b` - Second read
+    /// * `exact` - Compare the norm bit for bit rather than at f16
     fn assert_sparse_equal(
         a: &CompressedSparseData2<f32, f32>,
         b: &CompressedSparseData2<f32, f32>,
@@ -354,6 +361,12 @@ mod tests {
 
     /// Every read path of a converted store matches the v3 or v4 original, for
     /// each codec and with a zero target size (norm always stored).
+    ///
+    /// ### Params
+    ///
+    /// * `version` - Input layout, v3 or v4
+    /// * `codec` - Codec of the output
+    /// * `target` - Target size of the input, `0.0` stores the norm
     fn check_conversion(version: u32, codec: ChunkCodec, target: f32) {
         let exact = version == SC_FILE_VERSION_V4;
         let (_dir, s) = scratch(4);

@@ -129,7 +129,9 @@ fn unshuffle(bytes: &[u8], width: usize) -> Vec<u8> {
 
 /// Bounds-checked cursor over a decompressed block.
 struct Cursor<'a> {
+    /// The decompressed block.
     buf: &'a [u8],
+    /// Read position in `buf`.
     pos: usize,
 }
 
@@ -155,6 +157,15 @@ impl<'a> Cursor<'a> {
     }
 
     /// Take `count` shuffled values of `width` bytes and unshuffle them.
+    ///
+    /// ### Params
+    ///
+    /// * `count` - Values to take
+    /// * `width` - Bytes per value
+    ///
+    /// ### Returns
+    ///
+    /// The unshuffled bytes, or [`ScDataErrors::ArchiveCorrupt`] past the end.
     fn take_shuffled(&mut self, count: usize, width: usize) -> Result<Vec<u8>, ScDataErrors> {
         let n = count
             .checked_mul(width)
@@ -164,6 +175,14 @@ impl<'a> Cursor<'a> {
 }
 
 /// Little-endian `u32`s from a byte slice of exact length.
+///
+/// ### Params
+///
+/// * `bytes` - A multiple of 4 bytes
+///
+/// ### Returns
+///
+/// The values.
 fn le_u32s(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
         .as_chunks::<4>()
@@ -173,6 +192,14 @@ fn le_u32s(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
 }
 
 /// Little-endian `u64`s from a byte slice of exact length.
+///
+/// ### Params
+///
+/// * `bytes` - A multiple of 8 bytes
+///
+/// ### Returns
+///
+/// The values.
 fn le_u64s(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
     bytes
         .as_chunks::<8>()
@@ -668,6 +695,14 @@ mod tests {
     /// Cell `i` expresses gene `g` when `(i * 7 + g * 3) % 5 == 0`, count
     /// `1 + (i + g) % 4`; cell 2 is empty. Cells in `odd_norm` get a norm that
     /// does not recompute, and cell 5 gets a count above `u16::MAX`.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output cell file
+    /// * `n_cells` - Cells
+    /// * `n_genes` - Genes
+    /// * `target` - Target size
+    /// * `odd_norm` - Cells whose norm is perturbed
     fn write_cells(path: &str, n_cells: usize, n_genes: usize, target: f32, odd_norm: &[usize]) {
         let mut writer = CellGeneSparseWriter::new(path, true, n_cells, n_genes, target).unwrap();
         for i in 0..n_cells {
@@ -693,6 +728,16 @@ mod tests {
         writer.finalise().unwrap();
     }
 
+    /// Every cell of a store with all its fields.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Cell file
+    ///
+    /// ### Returns
+    ///
+    /// Per cell: raw counts, norm bits, indices, library size, original index,
+    /// keep flag and raw element size.
     #[allow(clippy::type_complexity)]
     fn read_cells(path: &str) -> Vec<(Vec<u32>, Vec<u32>, Vec<u32>, usize, usize, bool, u8)> {
         ParallelSparseReader::new(path)

@@ -1447,12 +1447,19 @@ pub(crate) mod tests {
         (dir, paths)
     }
 
+    /// Cells in the synthetic store.
     pub(crate) const N_CELLS: usize = 300;
+    /// Genes in the synthetic store.
     pub(crate) const N_GENES: usize = 40;
+    /// Target size of the synthetic store.
     pub(crate) const TARGET: f32 = 1e4;
 
     /// Cells with a spread of counts, one empty cell, one with a count above
     /// every small width, and one whose stored norm does not recompute.
+    ///
+    /// ### Returns
+    ///
+    /// The cells, in index order.
     pub(crate) fn synthetic_cells() -> Vec<CsrCellChunk> {
         let mut state = 12345u64;
         let mut next = move || {
@@ -1492,6 +1499,13 @@ pub(crate) mod tests {
     }
 
     /// Write the synthetic store in a legacy version: v3 or v4.
+    ///
+    /// ### Params
+    ///
+    /// * `version` - [`SC_FILE_VERSION_V3`] or [`SC_FILE_VERSION_V4`]
+    /// * `cell_path` - Cell file
+    /// * `gene_path` - Gene file
+    /// * `target` - Target size
     pub(crate) fn write_legacy_store(version: u32, cell_path: &str, gene_path: &str, target: f32) {
         let ctor = if version == SC_FILE_VERSION_V3 {
             CellGeneSparseWriter::new_v3
@@ -1515,6 +1529,15 @@ pub(crate) mod tests {
     /// The norm as compared across a conversion: at the f16 precision v3
     /// holds, exactly from v4 (whose recompute and verbatim values both carry
     /// over to v5 unchanged).
+    ///
+    /// ### Params
+    ///
+    /// * `norm` - The norm layer
+    /// * `exact` - Keep f32 bits rather than f16
+    ///
+    /// ### Returns
+    ///
+    /// The bits to compare.
     pub(crate) fn norm_bits(norm: &[f32], exact: bool) -> Vec<u32> {
         norm.iter()
             .map(|&v| {
@@ -1527,6 +1550,13 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Assert two cells agree, the norm at the precision `exact` asks for.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First cell
+    /// * `b` - Second cell
+    /// * `exact` - Compare the norm bit for bit rather than at f16
     pub(crate) fn assert_cells_equal(a: &CsrCellChunk, b: &CsrCellChunk, exact: bool) {
         assert_eq!(a.original_index, b.original_index);
         assert_eq!(a.library_size, b.library_size);
@@ -1542,6 +1572,13 @@ pub(crate) mod tests {
         );
     }
 
+    /// Assert two genes agree, the norm at the precision `exact` asks for.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First gene
+    /// * `b` - Second gene
+    /// * `exact` - Compare the norm bit for bit rather than at f16
     pub(crate) fn assert_genes_equal(a: &CscGeneChunk, b: &CscGeneChunk, exact: bool) {
         assert_eq!(a.original_index, b.original_index);
         assert_eq!(a.nnz, b.nnz);
@@ -1557,6 +1594,14 @@ pub(crate) mod tests {
     }
 
     /// The context a single-layer log-CPM cell chunk decodes with.
+    ///
+    /// ### Params
+    ///
+    /// * `norm_f32` - Whether a verbatim norm is f32 (v5)
+    ///
+    /// ### Returns
+    ///
+    /// The context.
     fn cell_ctx(norm_f32: bool) -> V4Ctx<'static> {
         V4Ctx {
             target_size: TARGET,
@@ -1572,6 +1617,14 @@ pub(crate) mod tests {
     }
 
     /// The chunk format of a version.
+    ///
+    /// ### Params
+    ///
+    /// * `version` - File version
+    ///
+    /// ### Returns
+    ///
+    /// The format, lz4 at the synthetic target size.
     fn format(version: u32) -> ChunkFormat {
         ChunkFormat {
             version,
@@ -1667,6 +1720,15 @@ pub(crate) mod tests {
     /// Dense `[cell][gene]` layers for the multi-layer tests: DP-like depth,
     /// AD-like alt counts with zeros where depth is not, and a binarised
     /// layer of ones.
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Cells
+    /// * `n_genes` - Genes
+    ///
+    /// ### Returns
+    ///
+    /// `[depth, alt, binarised]`.
     fn allele_layers(n_cells: usize, n_genes: usize) -> [Vec<Vec<u32>>; 3] {
         let mut state = 99u64;
         let mut next = move || {
@@ -1691,6 +1753,12 @@ pub(crate) mod tests {
     }
 
     /// Write `layers` as a v5 cell file, then its gene file.
+    ///
+    /// ### Params
+    ///
+    /// * `cell_path` - Cell file
+    /// * `gene_path` - Gene file
+    /// * `layers` - Dense `[cell][gene]` layers, layer 0 first
     fn write_layer_store(cell_path: &str, gene_path: &str, layers: &[Vec<Vec<u32>>]) {
         let (n_cells, n_genes) = (layers[0].len(), layers[0][0].len());
         let mut w = CellGeneSparseWriter::new(cell_path, true, n_cells, n_genes, 0.0)
@@ -1815,6 +1883,12 @@ pub(crate) mod tests {
     }
 
     /// Overwrite bytes of a finished file.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - The file
+    /// * `at` - Byte offset
+    /// * `bytes` - Replacement bytes
     fn patch_bytes(path: &str, at: u64, bytes: &[u8]) {
         use std::io::{Seek, SeekFrom, Write};
         let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
@@ -1823,6 +1897,10 @@ pub(crate) mod tests {
     }
 
     /// A small v5 cell file.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Output file
     fn small_v5(path: &str) {
         let mut w = CellGeneSparseWriter::new(path, true, 2, 4, TARGET).unwrap();
         for c in 0..2 {
