@@ -33,6 +33,7 @@ use bixverse_sc::sc_processing::scrublet::{
     FinalScrubletRes, calculate_doublet_scores, call_doublets,
 };
 use bixverse_sc::sc_processing::utils_doublets::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 use serde::Deserialize;
 
 ///////////////
@@ -781,6 +782,71 @@ where
     let pair_2_out = if return_pairs { Some(pair_2) } else { None };
 
     Ok((res, pca_out, pair_1_out, pair_2_out))
+}
+
+/// Run [`run_scrublet_gpu`] on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `params` - The [`ScrubletParamsGpu`] for this run
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `streaming` - Stream HVG computation to reduce memory pressure
+/// * `seed` - Seed for reproducibility
+/// * `device` - CubeCL runtime device
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+/// * `return_combined_pca` - Whether to return the combined PCA embedding
+/// * `return_pairs` - Whether to return the parent indices of each doublet
+///
+/// ### Returns
+///
+/// `FinalScrubletRes` as [`run_scrublet_gpu`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_scrublet_gpu_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    params: &ScrubletParamsGpu,
+    cell_indices: &[usize],
+    streaming: bool,
+    seed: usize,
+    device: Device,
+    verbose: usize,
+    return_combined_pca: bool,
+    return_pairs: bool,
+) -> Result<FinalScrubletRes, ScGpuErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => run_scrublet_gpu(
+            &sub.reader()?,
+            &sub.cell_reader()?,
+            params,
+            &sub.local,
+            streaming,
+            seed,
+            device,
+            verbose,
+            return_combined_pca,
+            return_pairs,
+        ),
+        None => run_scrublet_gpu(
+            &gene_reader,
+            &ParallelSparseReader::new(f_path_cell)?,
+            params,
+            cell_indices,
+            streaming,
+            seed,
+            device,
+            verbose,
+            return_combined_pca,
+            return_pairs,
+        ),
+    }
 }
 
 ///////////
