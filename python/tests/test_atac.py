@@ -216,3 +216,23 @@ def test_rna_methods_refuse_or_warn_on_gene_activity(exp):
     with pytest.warns(UserWarning, match="holds gene activity"):
         check_rna_counts(ga, "aucell", refuse=False)
     check_rna_counts(exp, "scrublet", refuse=True)
+
+
+def test_differential_accessibility_reads_the_peaks(exp):
+    with pytest.raises(ValueError, match="No ATAC"):
+        bv.de.find_markers(exp, [0], [1], modality="atac")
+    atac.add_atac_fragments(
+        exp, FIX / "fragments.tsv.gz", peaks=FIX / "peaks.bed", mode="fragment"
+    )
+    m = _tsv("signac/peaks/matrix.tsv.gz")
+    dense = np.zeros((1883, 500))
+    dense[m["feature_idx"].to_numpy(), m["cell_idx"].to_numpy()] = m["value"].to_numpy()
+    groups = {"a": list(range(250)), "b": list(range(250, 500))}
+
+    pb = bv.de.get_pseudobulked(exp, groups, modality="atac")
+    want = np.stack([dense[:, :250].sum(1), dense[:, 250:].sum(1)])
+    np.testing.assert_array_equal(pb.counts, want)
+    assert pb.gene_ids.tolist() == exp.var(modality="atac")["feature_id"].to_list()
+
+    res = bv.de.find_markers(exp, groups["a"], groups["b"], modality="atac", verbose=0)
+    assert res["gene_id"][0].startswith("chr22:")
