@@ -32,8 +32,10 @@ from bixverse._core.multimodal import (
     SingleCellsMultiModal,
     adt_rows,
     check_modality,
+    feature_store,
     modality_cache,
     require_adt,
+    resolve_modality,
 )
 from bixverse._core.repr import compact_repr
 from bixverse._core.state import CsrMatrix
@@ -44,7 +46,7 @@ from bixverse._core.traj import PagaRes
 # Globals #
 ###########
 
-ExprModality = Literal["rna", "adt"]
+ExprModality = Literal["rna", "adt", "atac"]
 Layer = Literal["norm", "magic"]
 
 
@@ -281,14 +283,29 @@ def _in_memory(
 
 
 @beartype
-def _store_genes(sc: ScOrMc, features: Sequence[str]) -> tuple[np.ndarray, list[str]]:
-    """0-based gene indices and the surviving ids.
+def _store_genes(
+    sc: ScOrMc, features: Sequence[str], modality: ExprModality
+) -> tuple[str, np.ndarray, list[str]]:
+    """The feature-major file of a modality's store, the 0-based indices of
+    the features in it, and the surviving ids.
+
+    Peaks of a multi-modal experiment are looked up in its ATAC store; every
+    other store keys its features in var.
 
     Raises:
         ValueError: If nothing matched.
     """
+    if resolve_modality(sc, modality) == "atac" and isinstance(
+        sc, SingleCellsMultiModal
+    ):
+        _, genes_path, ids = feature_store(sc, modality)
+        held = ids.tolist()
+        feats = _match_features(features, held)
+        pos = {f: i for i, f in enumerate(held)}
+        return str(genes_path), np.asarray([pos[f] for f in feats]), feats
+    assert not isinstance(sc, MetaCells)
     idx = sc.gene_indices(list(features))
-    return idx, sc.gene_ids(idx).tolist()
+    return str(sc.genes_path), idx, sc.gene_ids(idx).tolist()
 
 
 #############
@@ -355,11 +372,13 @@ def extract_gene_expression(
 
     Args:
         sc: The experiment, a subset or meta cells.
-        features: Gene ids, or ADT feature ids for `"adt"`.
+        features: Gene ids, ADT feature ids for `"adt"`, peak or tile ids
+            (`chr:start-end`) for `"atac"`.
         obs_cols: obs columns to attach.
         scale: z-score each feature across the rows.
         clip: Clip the z-scores to `[-clip, clip]`, with `scale`.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, `"adt"` on a `SingleCellsMultiModal`, or
+            `"atac"` for peak accessibility (its norm is the TF-IDF).
         layer: `"norm"`, or `"magic"` for the imputed layer of `run_magic`.
 
     Returns:
@@ -381,10 +400,10 @@ def extract_gene_expression(
     held = _in_memory(sc, features, modality, layer)
     if held is None:
         assert not isinstance(sc, MetaCells)
-        genes, feats = _store_genes(sc, features)
+        genes_path, genes, feats = _store_genes(sc, features, modality)
         values = np.asarray(
             _bixverse.extract_genes_dense(
-                str(sc.genes_path),
+                genes_path,
                 np.ascontiguousarray(sc.cells_to_keep, dtype=np.uint32),
                 np.ascontiguousarray(genes, dtype=np.uint32),
                 scale,
@@ -445,10 +464,12 @@ def extract_dot_plot_data(
 
     Args:
         sc: The experiment, a subset or meta cells.
-        features: Gene ids, or ADT feature ids for `"adt"`.
+        features: Gene ids, ADT feature ids for `"adt"`, peak or tile ids
+            (`chr:start-end`) for `"atac"`.
         grouping_variable: obs column to group by.
         scale_exp: Min-max scale the means per feature into `scaled_exp`.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, `"adt"` on a `SingleCellsMultiModal`, or
+            `"atac"` for peak accessibility (its norm is the TF-IDF).
 
     Returns:
         `gene` and `group` (Enums, in feature and level order), `mean_exp`,
@@ -468,9 +489,9 @@ def extract_dot_plot_data(
     held = _in_memory(sc, features, modality, "norm")
     if held is None:
         assert not isinstance(sc, MetaCells)
-        genes, feats = _store_genes(sc, features)
+        genes_path, genes, feats = _store_genes(sc, features, modality)
         mean, frac = _bixverse.grouped_gene_stats(
-            str(sc.genes_path),
+            genes_path,
             np.ascontiguousarray(sc.cells_to_keep[keep], dtype=np.uint32),
             np.ascontiguousarray(genes, dtype=np.uint32),
             np.ascontiguousarray(codes, dtype=np.uint32),
@@ -534,12 +555,15 @@ def extract_feature_plot_data(
     expr_modality: ExprModality = "rna",
     embd_modality: Modality = "rna",
     layer: Layer = "norm",
+    expr_sc: ScOrMc | None = None,
 ) -> pl.DataFrame:
     """Per-cell expression on an embedding, long.
 
     The expression and the embedding modality are chosen independently, so
     RNA can colour an ADT embedding and either can go on a WNN one. Both key
     on the kept cell ids. Rows stay in kept cell order within each gene.
+    With `expr_sc` the expression comes from another object over the same
+    cells, such as the gene activity of an ATAC experiment on its UMAP.
 
     Args:
         sc: The experiment, a subset or meta cells.
@@ -548,9 +572,11 @@ def extract_feature_plot_data(
         scale: z-score each feature.
         clip: Clip the z-scores, with `scale`.
         obs_cols: obs columns to attach.
-        expr_modality: `"rna"` or `"adt"`.
+        expr_modality: `"rna"`, `"adt"` or `"atac"`.
         embd_modality: `"rna"`, `"adt"`, `"atac"` or `"wnn"`.
         layer: `"norm"` or `"magic"`.
+        expr_sc: Where the expression comes from; `None` for `sc`. Joined on
+            the cell ids, so only cells kept in both are drawn.
 
     Returns:
         `cell_id`, `dim_*`, the obs columns, `gene` (Enum) and `expression`.
@@ -559,7 +585,12 @@ def extract_feature_plot_data(
         >>> long = bv.pl.extract_feature_plot_data(sc, genes, "umap", scale=True)
     """
     expr = extract_gene_expression(
-        sc, features, scale=scale, clip=clip, modality=expr_modality, layer=layer
+        sc if expr_sc is None else expr_sc,
+        features,
+        scale=scale,
+        clip=clip,
+        modality=expr_modality,
+        layer=layer,
     )
     embd = extract_embedding_data(
         sc, embedding, obs_cols=obs_cols, modality=embd_modality
@@ -584,11 +615,13 @@ def extract_gene_violin_data(
 
     Args:
         sc: The experiment, a subset or meta cells.
-        features: Gene ids, or ADT feature ids for `"adt"`.
+        features: Gene ids, ADT feature ids for `"adt"`, peak or tile ids
+            (`chr:start-end`) for `"atac"`.
         grouping_variable: obs column to group by.
         scale: z-score each feature across the cells.
         clip: Clip the z-scores to `[-clip, clip]`, with `scale`.
-        modality: `"rna"`, or `"adt"` on a `SingleCellsMultiModal`.
+        modality: `"rna"`, `"adt"` on a `SingleCellsMultiModal`, or
+            `"atac"` for peak accessibility (its norm is the TF-IDF).
         layer: `"norm"`, or `"magic"` for the imputed layer of `run_magic`.
 
     Returns:

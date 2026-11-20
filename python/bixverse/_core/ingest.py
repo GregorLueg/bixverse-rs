@@ -805,6 +805,11 @@ def load_tenx_h5(
     Examples:
         >>> sc = bv.io.load_tenx_h5("experiments/tenx", "path/to/file.h5")
     """
+    if feature_type == "Peaks":
+        raise ValueError(
+            "Peaks are not genes: load them with bv.io.load_atac_tenx (ATAC only) or "
+            "bv.atac.add_atac_tenx (next to the RNA)."
+        )
     qc = qc or MinQualityParams()
     h5 = Path(h5_path).expanduser()
     meta = get_tenx_h5_metadata(h5)

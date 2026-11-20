@@ -56,6 +56,7 @@ finds the three files for you. The h5ad readers take an anndata Zarr store
 with a warning; a v3 store no longer opens. `upgrade_sc_store` converts both.
 """
 
+from bixverse._core.atac import load_atac_fragments, load_atac_tenx
 from bixverse._core.download import (
     download_cd34_data,
     download_demuxlet_pbmc,
@@ -146,6 +147,8 @@ __all__ = [
     "get_cell_ranger_params",
     "get_h5ad_dimensions",
     "get_tenx_h5_metadata",
+    "load_atac_fragments",
+    "load_atac_tenx",
     "load_csr",
     "load_existing",
     "load_h5ad",

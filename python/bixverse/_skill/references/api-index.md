@@ -24,6 +24,7 @@ Single-cell streaming for Python, in Rust.
 - `ScCache`: Analysis results held in memory.
 - `ScMap`: Ids and index sets of an experiment.
 - `SingleCells`: A single cell experiment on disk.
+- `SingleCellsAtac`: A single cell ATAC experiment on disk: peaks or tiles, no RNA.
 - `SingleCellsMultiModal`: A single cell experiment with RNA plus ADT and / or ATAC.
 - `SingleCellsSubset`: The cells of one level of an obs column.
 - `SparseFileError`: A sparse store is missing, truncated, corrupt, or of the wrong format version or layout.
@@ -67,6 +68,8 @@ Getting counts into an experiment directory, and back out.
 - `get_cell_ranger_params`: The mtx parameters for a Cell Ranger output directory.
 - `get_h5ad_dimensions`: Dimensions and storage layout of an h5ad file or anndata Zarr store.
 - `get_tenx_h5_metadata`: Detect the layout of a 10x h5 file and read its dimensions.
+- `load_atac_fragments`: Load an ATAC-only experiment from a fragment file.
+- `load_atac_tenx`: Load an ATAC-only experiment from a 10x peak matrix h5.
 - `load_csr`: Load an in-memory cells x genes count matrix.
 - `load_existing`: Open an experiment directory and restore any state Python saved.
 - `load_h5ad`: Load an h5ad file or anndata Zarr store.
@@ -384,20 +387,28 @@ Multi-modal single cell: ADT counts, their PCA and the WNN graph.
 
 ## bv.atac
 
-Single cell ATAC: peak or tile counts next to the RNA, QC, TF-IDF and LSI.
+Single cell ATAC: peak or tile counts, QC, TF-IDF, LSI, links to genes.
 
 - `AtacInfo`: What the ATAC store holds and how far it was processed.
 - `add_atac_fragments`: Count a fragment file into peaks or genome tiles as the ATAC store.
 - `add_atac_tenx`: Add the `Peaks` of a 10x multiome h5 as the ATAC store.
 - `amulet`: Flag multiplets from fragment overlaps (AMULET), written to obs.
-- `atac_fragment_qc`: Per-cell QC from the fragment file, written to obs.
+- `annotate_peaks`: The closest gene of every ATAC feature (Signac `ClosestFeature`).
+- `barcode_fragment_counts`: Fragments per barcode, every barcode in the file, for cell calling.
 - `calculate_lsi`: LSI over the TF-IDF of the kept cells (Signac `RunSVD`).
 - `call_peaks`: Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
 - `find_top_features`: The most accessible features (Signac `FindTopFeatures`).
+- `fragment_profiles`: TSS insertion profile and fragment length histogram of the kept cells.
+- `fragment_qc`: Per-cell QC from the fragment file, written to obs.
 - `gene_activity`: Count fragments over gene body plus promoter into a gene activity store.
+- `get_gene_activity`: Open an experiment's gene activity store, its cell filter brought in line.
 - `get_lsi_depth_cor`: Correlation of each LSI component with the library size.
+- `merge_fragments`: Merge per-sample fragment files into one, as `cellranger-arc aggr` does.
+- `peak_to_gene`: Link peaks to nearby genes by correlation over groups of cells.
 - `project_lsi`: Project the query's kept cells onto the reference LSI.
-- `run_rlsi`: rLSI integration (Signac's `FindIntegrationAnchors(reduction = "rlsi")`
+- `read_cellranger_barcodes`: The cell barcodes Cell Ranger ATAC called.
+- `remove_blacklisted`: Drop the peaks that overlap a blacklist region.
+- `run_rlsi`: rLSI integration, Signac's `FindIntegrationAnchors(reduction = "rlsi")`.
 - `run_tfidf`: Switch the ATAC store to TF-IDF over the kept cells (Signac method 1).
 
 ## bv.pipeline
@@ -439,11 +450,14 @@ Plot data extractors and matplotlib plots for single cell results.
 - `extract_paga_plot_data`: The PAGA graph with every cluster at the centroid of its cells.
 - `feature_plot`: Feature expression over an embedding, one panel per feature.
 - `feature_scatter_plot`: Two features against each other, coloured by point density or binned
+- `fragment_length_plot`: Fragment length distribution, one line per group (Signac
 - `heatmap_plot`: Genes x cells, cells blocked by group with a colour strip per group.
 - `joint_plot`: Genes per cell against UMIs per cell, hexbinned with marginal
+- `lsi_depth_plot`: Correlation of each LSI component with the library size (Signac
 - `milo_nhood_plot`: The Milo neighbourhood graph over an embedding.
 - `paga_plot`: The PAGA graph over an embedding, every cluster at the centroid of
 - `stacked_violin_plot`: Expression across groups, one row of violins per feature.
+- `tss_profile_plot`: Tn5 insertions around the TSSs, one line per group (Signac `TSSPlot`).
 - `violin_plot`: QC violins.
 
 ## bv.loader

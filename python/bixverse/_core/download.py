@@ -45,6 +45,13 @@ PBMC_MULTIOME_FILES: tuple[str, ...] = (
     "pbmc_unsorted_3k_atac_fragments.tsv.gz.tbi",
     "pbmc_unsorted_3k_atac_peaks.bed",
     "gencode.v32.primary_assembly.annotation.gtf.gz",
+    "hg38-blacklist.v2.bed.gz",
+)
+
+# Upstream of the ENCODE blacklist (Amemiya et al. 2019), the fallback while
+# the release copy is missing.
+BLACKLIST_UPSTREAM: str = (
+    "https://github.com/Boyle-Lab/Blacklist/raw/master/lists/hg38-blacklist.v2.bed.gz"
 )
 
 
@@ -405,9 +412,10 @@ def download_pbmc_multiome(
     """The 10x PBMC unsorted 3k multiome (Cell Ranger ARC 2.0).
 
     The filtered feature barcode matrix (RNA and Cell Ranger's peak counts in
-    one h5), the fragment file with its tabix index, Cell Ranger's peaks and
-    the GENCODE v32 annotation its GRCh38 reference was built from. 10x
-    Genomics data, CC BY 4.0.
+    one h5), the fragment file with its tabix index, Cell Ranger's peaks,
+    the GENCODE v32 annotation its GRCh38 reference was built from, and the
+    ENCODE hg38 blacklist (v2, Amemiya et al. 2019). 10x Genomics data, CC BY
+    4.0.
 
     Args:
         cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
@@ -418,5 +426,8 @@ def download_pbmc_multiome(
     """
     root = _cache(cache_dir) / "pbmc_multiome"
     for file in PBMC_MULTIOME_FILES:
-        _fetch_file(file, data_urls(file), root, quiet)
+        urls = data_urls(file)
+        if file == "hg38-blacklist.v2.bed.gz":
+            urls.append(BLACKLIST_UPSTREAM)
+        _fetch_file(file, urls, root, quiet)
     return root

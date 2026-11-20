@@ -23,6 +23,12 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core import db
+from bixverse._core.atac_exp import (
+    ATAC_KINDS,
+    SingleCellsAtac,
+    atac_info_payload,
+    restore_lsi,
+)
 from bixverse._core.multimodal import (
     SingleCellsMultiModal,
     mm_from_payload,
@@ -54,8 +60,10 @@ def save(sc: SingleCells) -> None:
 
     obs / var changes are in the DuckDB already and need no saving. The
     residual model is opaque for now and is not written; a warning says so.
-    A `SingleCellsMultiModal` also writes its ADT counts, ADT cache and WNN
-    slot, and `load_existing` hands it back as one.
+    A `SingleCellsMultiModal` also writes its ADT counts, ADT cache, ATAC
+    LSI and WNN slot, and `load_existing` hands it back as one; a
+    `SingleCellsAtac` its LSI. Everything else about an ATAC store (kind,
+    count mode, TF-IDF) is in the store and comes back without this file.
 
     Args:
         sc: The experiment.
@@ -73,6 +81,9 @@ def save(sc: SingleCells) -> None:
     if isinstance(sc, SingleCellsMultiModal):
         mm_arrays, meta["multi_modal"] = mm_payload(sc)
         arrays.update(mm_arrays)
+    if isinstance(sc, SingleCellsAtac):
+        atac_arrays, meta["atac"] = atac_info_payload(sc.atac)
+        arrays.update(atac_arrays)
 
     npz, js = sc.dir / MEMORY_NPZ, sc.dir / MEMORY_JSON
     tmp_npz, tmp_js = npz.with_suffix(".npz.tmp"), js.with_suffix(".json.tmp")
@@ -98,10 +109,12 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
             multi-modal experiment saved does so regardless.
 
     Returns:
-        The experiment. With `memory_py.*` present, the cell filter, HVGs and
-        cache come from there (and for a multi-modal one the ADT counts, ADT
-        cache and WNN slot); otherwise the map is rebuilt from the DuckDB and
-        the cache is empty.
+        The experiment: a `SingleCellsAtac` when the store holds peaks or
+        tiles. With `memory_py.*` present, the cell filter, HVGs and cache
+        come from there (and for a multi-modal one the ADT counts, ADT cache,
+        ATAC LSI and WNN slot); otherwise the map is rebuilt from the DuckDB
+        and the cache is empty. An ATAC store's kind, count mode and TF-IDF
+        come from the store either way.
 
     Restores the stores from `counts.bxa` when only the archive is there,
     and warns about a store in the v4 format.
@@ -111,7 +124,7 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
             file pair is missing.
         RuntimeError: If the store is in the v3 format, which no longer opens.
         ValueError: If the memory file is of an unknown format or does not
-            fit the store.
+            fit the store, or `multi_modal` is asked of an ATAC-only store.
 
     Examples:
         >>> sc = bv.io.load_existing("experiments/demo")
@@ -137,8 +150,15 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
             "upgrade_sc_store() converts it to v5.",
             stacklevel=2,
         )
+    atac_root = _bixverse.store_feature_kind(cells) in ATAC_KINDS
+    if atac_root and multi_modal:
+        raise ValueError(
+            f"{directory} is an ATAC-only experiment; it opens as a SingleCellsAtac."
+        )
     npz, js = directory / MEMORY_NPZ, directory / MEMORY_JSON
     if not npz.exists() and not js.exists():
+        if atac_root:
+            return SingleCellsAtac(directory)
         return (
             SingleCellsMultiModal(directory) if multi_modal else SingleCells(directory)
         )
@@ -149,11 +169,12 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
     if meta.get("format") != MEMORY_FORMAT:
         raise ValueError(f"unknown {MEMORY_JSON} format {meta.get('format')}")
     mm_meta = meta.get("multi_modal")
-    sc = (
-        SingleCellsMultiModal(directory)
-        if multi_modal or mm_meta is not None
-        else SingleCells(directory)
-    )
+    if atac_root:
+        sc: SingleCells = SingleCellsAtac(directory)
+    elif multi_modal or mm_meta is not None:
+        sc = SingleCellsMultiModal(directory)
+    else:
+        sc = SingleCells(directory)
     with np.load(npz, allow_pickle=False) as fh:
         arrays = {k: fh[k] for k in fh.files}
 
@@ -165,6 +186,8 @@ def load_existing(directory: Path | str, *, multi_modal: bool = False) -> Single
         arrays.get("map/hvg"),
     )
     sc.cache = cache_from_payload(arrays, meta)
+    if isinstance(sc, SingleCellsAtac) and meta.get("atac") is not None:
+        restore_lsi(sc.atac, arrays, meta["atac"])
     if isinstance(sc, SingleCellsMultiModal) and mm_meta is not None:
         mm_from_payload(sc, arrays, mm_meta)
         adt = sc.adt

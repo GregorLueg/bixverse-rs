@@ -88,6 +88,7 @@ class SingleCellsSubset(ScBase):
             )
         self.dir = sc.dir
         self.reader = sc.reader
+        self.root_modality = sc.root_modality
         self.grouping_column = grouping_column
         self.group = group
         self.subset_to_original = obs["cell_idx"].to_numpy().astype(np.uint32)

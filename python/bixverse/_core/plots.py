@@ -593,6 +593,7 @@ def feature_plot(
     clip: float | None = None,
     expr_modality: ExprModality = "rna",
     embd_modality: Modality = "rna",
+    expr_sc: ScOrMc | None = None,
     layer: Layer = "norm",
     point_size: float | None = None,
     point_alpha: float = 0.5,
@@ -620,8 +621,10 @@ def feature_plot(
         feature_labels: Feature id to panel title.
         scale: z-score the expression.
         clip: Clip the z-scores, with `scale`.
-        expr_modality: `"rna"` or `"adt"`.
+        expr_modality: `"rna"`, `"adt"` or `"atac"`.
         embd_modality: `"rna"`, `"adt"`, `"atac"` or `"wnn"`.
+        expr_sc: Where the expression comes from, e.g. the gene activity
+            of an ATAC experiment; `None` for `x`.
         layer: `"norm"` or `"magic"`.
         point_size: Point size in mm; Seurat's auto size when `None`.
         point_alpha: Point alpha.
@@ -661,6 +664,7 @@ def feature_plot(
             obs_cols=[label_by] if label_by else None,
             expr_modality=expr_modality,
             embd_modality=embd_modality,
+            expr_sc=expr_sc,
             layer=layer,
         )
     frame = frame.sort("expression")
@@ -1708,9 +1712,12 @@ def joint_plot(
     *,
     log_scale: bool = False,
     palette: ContinuousPalette = "sequential",
+    x_label: str | None = None,
+    y_label: str | None = None,
 ) -> Figure:
     """Genes per cell against UMIs per cell, hexbinned with marginal
-    histograms.
+    histograms. Any two count columns work, e.g. ATAC fragments against
+    TSS enrichment, with the labels set.
 
     Args:
         x: A `CellQc`, or a frame with both columns.
@@ -1719,6 +1726,8 @@ def joint_plot(
         nb_features: Genes per cell column; `"log10_nnz"` / `"nnz"`.
         log_scale: log10 both axes first.
         palette: The continuous palette; the histograms take its middle.
+        x_label: x-axis label; `"Genes per cell"` when `None`.
+        y_label: y-axis label; `"UMIs per cell"` when `None`.
 
     Returns:
         The figure: the hexbin and the two marginal histograms.
@@ -1762,8 +1771,10 @@ def joint_plot(
     def logged(col: str) -> bool:
         return log_scale or col.startswith("log10")
 
-    main.set_xlabel("Genes per cell" + (" (log10)" if logged(nb_features) else ""))
-    main.set_ylabel("UMIs per cell" + (" (log10)" if logged(library_size) else ""))
+    x_text = x_label or "Genes per cell"
+    y_text = y_label or "UMIs per cell"
+    main.set_xlabel(x_text + (" (log10)" if logged(nb_features) else ""))
+    main.set_ylabel(y_text + (" (log10)" if logged(library_size) else ""))
     return fig
 
 
@@ -2140,3 +2151,148 @@ def milo_nhood_plot(
     _axis_labels(ax, embedding)
     ax.autoscale_view()
     return ax
+
+
+##############
+# ATAC plots #
+##############
+
+
+@beartype
+def lsi_depth_plot(
+    x: pl.DataFrame,
+    *,
+    threshold: float = 0.75,
+    ax: Axes | None = None,
+) -> Figure:
+    """Correlation of each LSI component with the library size (Signac
+    `DepthCor`).
+
+    A component that tracks sequencing depth carries depth, not biology;
+    Signac drops the first one by default when it does. Components the LSI
+    left out of the embedding are drawn hollow.
+
+    Args:
+        x: `bv.atac.get_lsi_depth_cor(x)`.
+        threshold: Dashed guides at `+-threshold`.
+        ax: Axes to draw on.
+
+    Returns:
+        The figure.
+
+    Raises:
+        ValueError: If `x` lacks `component` or `depth_cor`.
+
+    Examples:
+        >>> fig = bv.pl.lsi_depth_plot(bv.atac.get_lsi_depth_cor(x))
+    """
+    missing = {"component", "depth_cor"} - set(x.columns)
+    if missing:
+        raise ValueError(f"column(s) not found: {sorted(missing)}")
+    ax = _new_ax(ax, (5.0, 3.6))
+    comp = x["component"].to_numpy()
+    cor = x["depth_cor"].to_numpy()
+    dropped = (
+        x["dropped"].to_numpy() if "dropped" in x.columns else np.zeros(len(comp), bool)
+    )
+    colour = bx_colors("main", n=5)[0]
+    ax.scatter(comp[~dropped], cor[~dropped], color=colour, s=28, zorder=3)
+    ax.scatter(
+        comp[dropped], cor[dropped], facecolor="none", edgecolor=colour, s=28, zorder=3
+    )
+    for t in (threshold, -threshold):
+        ax.axhline(t, color="grey", linestyle="--", linewidth=0.8)
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.set_ylim(-1.05, 1.05)
+    ax.set_xlabel("LSI component")
+    ax.set_ylabel("Correlation with depth")
+    return _figure(ax)
+
+
+@beartype
+def tss_profile_plot(
+    x: pl.DataFrame,
+    *,
+    value: Literal["enrichment", "insertions"] = "enrichment",
+    palette: Palette = "main",
+    ax: Axes | None = None,
+) -> Figure:
+    """Tn5 insertions around the TSSs, one line per group (Signac `TSSPlot`).
+
+    Args:
+        x: The first frame of `bv.atac.fragment_profiles`.
+        value: `"enrichment"` (over the flank background) or the raw
+            `"insertions"`.
+        palette: Discrete palette for the groups.
+        ax: Axes to draw on.
+
+    Returns:
+        The figure.
+
+    Examples:
+        >>> tss, lengths = bv.atac.fragment_profiles(x, frags, gtf, group_by="leiden")
+        >>> fig = bv.pl.tss_profile_plot(tss)
+    """
+    ax = _new_ax(ax, (5.5, 3.6))
+    groups = x["group"].unique(maintain_order=True).to_list()
+    colours = bx_colors(palette, n=max(len(groups), 2))
+    for g, c in zip(groups, colours, strict=False):
+        part = x.filter(pl.col("group") == g)
+        ax.plot(
+            part["offset"].to_numpy(), part[value].to_numpy(), color=c, lw=1, label=g
+        )
+    if len(groups) > 1:
+        ax.legend(frameon=False, fontsize=8)
+    ax.axvline(0, color="grey", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Distance from TSS (bp)")
+    ax.set_ylabel("TSS enrichment" if value == "enrichment" else "Insertions")
+    return _figure(ax)
+
+
+@beartype
+def fragment_length_plot(
+    x: pl.DataFrame,
+    *,
+    log_scale: bool = False,
+    palette: Palette = "main",
+    ax: Axes | None = None,
+) -> Figure:
+    """Fragment length distribution, one line per group (Signac
+    `FragmentHistogram`).
+
+    A good library shows the nucleosome-free peak under 147 bp and the
+    mono- and di-nucleosome peaks near 200 and 400 bp.
+
+    Args:
+        x: The second frame of `bv.atac.fragment_profiles`.
+        log_scale: log10 y-axis.
+        palette: Discrete palette for the groups.
+        ax: Axes to draw on.
+
+    Returns:
+        The figure.
+
+    Examples:
+        >>> fig = bv.pl.fragment_length_plot(lengths)
+    """
+    ax = _new_ax(ax, (5.5, 3.6))
+    groups = x["group"].unique(maintain_order=True).to_list()
+    colours = bx_colors(palette, n=max(len(groups), 2))
+    for g, c in zip(groups, colours, strict=False):
+        part = x.filter(pl.col("group") == g)
+        ax.plot(
+            part["length"].to_numpy(),
+            part["fraction"].to_numpy(),
+            color=c,
+            lw=1,
+            label=g,
+        )
+    if len(groups) > 1:
+        ax.legend(frameon=False, fontsize=8)
+    for nuc in (147, 294):
+        ax.axvline(nuc, color="grey", linestyle="--", linewidth=0.8)
+    if log_scale:
+        ax.set_yscale("log")
+    ax.set_xlabel("Fragment length (bp)")
+    ax.set_ylabel("Fraction of fragments")
+    return _figure(ax)
