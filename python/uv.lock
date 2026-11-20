@@ -436,7 +436,7 @@ requires-dist = [
     { name = "bixverse-gpu", marker = "extra == 'gpu'", editable = "gpu" },
     { name = "duckdb", specifier = ">=2.0" },
     { name = "jax", marker = "extra == 'jax'", specifier = ">=0.5" },
-    { name = "manifolds-rs", marker = "extra == 'embed'", specifier = ">=0.6.0" },
+    { name = "manifolds-rs", marker = "extra == 'embed'", specifier = ">=0.7.0" },
     { name = "matplotlib", marker = "extra == 'plots'", specifier = ">=3.8" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.25" },
     { name = "numpy", specifier = ">=1.23" },
@@ -450,7 +450,7 @@ provides-extras = ["embed", "gpu", "jax", "mlx", "plots", "sparse", "torch"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "manifolds-rs", specifier = ">=0.6.0" },
+    { name = "manifolds-rs", specifier = ">=0.7.0" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "maturin", specifier = ">=1.15,<2.0" },
     { name = "pytest", specifier = ">=8" },
@@ -492,7 +492,7 @@ dependencies = [
 requires-dist = [
     { name = "beartype", specifier = ">=0.19" },
     { name = "bixverse", editable = "." },
-    { name = "manifolds-rs", specifier = ">=0.6.0" },
+    { name = "manifolds-rs", specifier = ">=0.7.0" },
     { name = "numpy", specifier = ">=1.23" },
     { name = "polars", specifier = ">=2.0.0" },
 ]
@@ -2110,7 +2110,7 @@ wheels = [
 
 [[package]]
 name = "manifolds-rs"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beartype" },
@@ -2118,9 +2118,9 @@ dependencies = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/f8/416888fae0bc2424bc6d3e0ecc9fdd15a95c8b896b8e0aea6de3e7a47f31/manifolds_rs-0.6.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:279e1396cb8db5b376ca0b9e31a5f56f570f187db83fe15e8da0794b33fb978a", size = 15784968, upload-time = "2026-11-10T07:12:51.539Z" },
-    { url = "https://files.pythonhosted.org/packages/92/19/f6090f71d08f1f42874fd795858d251a8e2d0a8970e4154e44ed888d2ffb/manifolds_rs-0.6.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:cde2f960cd04caabea8b7492883ad609a2358548203603a0ddfc089322c26e87", size = 14529812, upload-time = "2026-11-10T07:12:54.66Z" },
-    { url = "https://files.pythonhosted.org/packages/22/fa/ba3e6175f57463ecfc1471a2d33f3624a6aca853a829b78a1a70e6d94775/manifolds_rs-0.6.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:662ec50187c3642eb0c3addf7aca0d8351f3a55b90019f39a3116808d130c2cc", size = 16823807, upload-time = "2026-11-10T07:12:57.447Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/74/804586e6c90fc95c23e73874d15f8701ccde7b3dba1170a3c3d09dc69346/manifolds_rs-0.7.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:bd58eeaa05a2628ac6f694741cf7f45140528db5dcc2137bed9fc225bc381eec", size = 16310063, upload-time = "2026-11-17T22:48:11.124Z" },
+    { url = "https://files.pythonhosted.org/packages/47/88/0187c2b64f2e6ba058de42b2970730f28722c1ebe6057caa297e4a405668/manifolds_rs-0.7.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:f71bf5a7b815e40933ac136ad68ee5298cb0d739aed7e1b1e44dcd314207375d", size = 14995227, upload-time = "2026-11-17T22:48:13.333Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/34/8b25ccb1d791630e69c972d8672c27d742179068e72cb6429aca8083bc34/manifolds_rs-0.7.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d81143e2487607f6dc3eefa3a3eff4dd3a6d3bbe2653754eb1a276130009c7f0", size = 17373756, upload-time = "2026-11-17T22:48:15.437Z" },
 ]
 
 [[package]]

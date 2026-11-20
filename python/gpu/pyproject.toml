@@ -29,7 +29,7 @@ dependencies = [
     "numpy>=1.23",
     "polars>=2.0.0",
     # GPU UMAP, densMAP, t-SNE and PHATE run in the manifolds-rs wheel.
-    "manifolds-rs>=0.6.0",
+    "manifolds-rs>=0.7.0",
 ]
 dynamic = ["version"]
 classifiers = [
