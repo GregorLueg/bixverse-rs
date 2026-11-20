@@ -2,6 +2,45 @@
 
 ## 0.11.0
 
+Major release that enables a v5 format for other modalities in the single cell
+space and a first wave of methods for single cell ATACseq.
+
+### Features
+
+- New crate `bixverse-atac` (facade feature `atac`): fragment files and 10x
+  multiome peaks into peak or tile stores, GTF annotation, fragment QC,
+  AMULET multiplets, a port of MACS3 `callpeak`, gene activity, TF-IDF, top
+  features, LSI, LSI projection and rLSI integration; per-group TSS profiles
+  and fragment length histograms, fragments per barcode, fragment file
+  merging, closest-gene annotation, region overlap masks and peak to gene
+  links. Every fragment pass errors when no requested barcode is in the file
+  or the fragments share no chromosome name with the features.
+- New crate `bixverse-sc-export` (facade features `export`, `export-zarr`):
+  a store to h5ad or AnnData Zarr through `scx-core`.
+- Features `zarr` and `zarr-blosc`: the h5ad ingest paths, scans and obs /
+  var frames also read anndata Zarr stores, v2 and v3.
+- Store format v5: raw layers (`write_cell_layers()`,
+  `ParallelSparseReader::with_layer()`), feature and norm kinds
+  (`FeatureKind::Peak`, `Tile`, `GeneActivity`), a TF-IDF norm, a cell-ID hash
+  and a genome interval index (with genome build). `incompat`, `ro_compat`
+  and `compat` header bits and preserved unknown sections let the format grow
+  without a v6. Header and chunk checksums (`verify_store()`), provenance,
+  caller metadata (`set_store_metadata()`), a header-only `peek_store_info()`
+  and a cell / gene file check (`check_store_pair_paths()`).
+- Logistic regression test for markers and differential accessibility, a
+  port of Seurat's `LRDETest`, in `sc_analysis::dge_lr`.
+- Seurat label transfer (`find_transfer_anchors()`, `transfer_labels()`) in
+  `sc_annotation::seurat_transfer`, for RNA or gene activity queries.
+- `node_order` (`"bfs"` or `"shuffle"`) on `LeidenParams`;
+  `LeidenParams::for_algorithm()` and `louvain()` give the per-algorithm
+  defaults.
+- `KMeansSpec` takes `k_means_algorithm` (`"emeans"` or `"lloyd"`) and
+  `e_means_epochs`; `parse_kmeans_algorithm()` parses the first.
+- `run_scrublet_on_store()`, `run_boost_on_store()`,
+  `run_scdblfinder_on_store()` and `run_scrublet_gpu_on_store()` take the
+  store paths and read a small cell selection from the cell-based store
+  instead of sweeping the gene-based one (#134). Same results at the same seed.
+
 ### Breaking
 
 - `bixverse-sc-data` is split into `store`, `h5` and `mtx` modules; the
@@ -40,42 +79,6 @@
   more than one raw layer, and passes the norm through for log-CPM inputs
   only.
 
-### Features
-
-- New crate `bixverse-atac` (facade feature `atac`): fragment files and 10x
-  multiome peaks into peak or tile stores, GTF annotation, fragment QC,
-  AMULET multiplets, a port of MACS3 `callpeak`, gene activity, TF-IDF, top
-  features, LSI, LSI projection and rLSI integration; per-group TSS profiles
-  and fragment length histograms, fragments per barcode, fragment file
-  merging, closest-gene annotation, region overlap masks and peak to gene
-  links. Every fragment pass errors when no requested barcode is in the file
-  or the fragments share no chromosome name with the features.
-- New crate `bixverse-sc-export` (facade features `export`, `export-zarr`):
-  a store to h5ad or AnnData Zarr through `scx-core`.
-- Features `zarr` and `zarr-blosc`: the h5ad ingest paths, scans and obs /
-  var frames also read anndata Zarr stores, v2 and v3.
-- Store format v5: raw layers (`write_cell_layers()`,
-  `ParallelSparseReader::with_layer()`), feature and norm kinds
-  (`FeatureKind::Peak`, `Tile`, `GeneActivity`), a TF-IDF norm, a cell-ID hash
-  and a genome interval index (with genome build). `incompat`, `ro_compat`
-  and `compat` header bits and preserved unknown sections let the format grow
-  without a v6. Header and chunk checksums (`verify_store()`), provenance,
-  caller metadata (`set_store_metadata()`), a header-only `peek_store_info()`
-  and a cell / gene file check (`check_store_pair_paths()`).
-- Logistic regression test for markers and differential accessibility, a
-  port of Seurat's `LRDETest`, in `sc_analysis::dge_lr`.
-- Seurat label transfer (`find_transfer_anchors()`, `transfer_labels()`) in
-  `sc_annotation::seurat_transfer`, for RNA or gene activity queries.
-- `node_order` (`"bfs"` or `"shuffle"`) on `LeidenParams`;
-  `LeidenParams::for_algorithm()` and `louvain()` give the per-algorithm
-  defaults.
-- `KMeansSpec` takes `k_means_algorithm` (`"emeans"` or `"lloyd"`) and
-  `e_means_epochs`; `parse_kmeans_algorithm()` parses the first.
-- `run_scrublet_on_store()`, `run_boost_on_store()`,
-  `run_scdblfinder_on_store()` and `run_scrublet_gpu_on_store()` take the
-  store paths and read a small cell selection from the cell-based store
-  instead of sweeping the gene-based one (#134). Same results at the same seed.
-
 ### Changed results
 
 - e-means is the k-means default everywhere: `KMeansParamsWrappers::default()`,
@@ -91,26 +94,12 @@
 - Seurat rPCA and CCA search within-batch neighbours at `k + 1` and cap each
   cell at `k_weight` anchor pairs, as Seurat does. Results differ at the same
   seed.
-- The normalised layer is recomputed in f32, also for v4 stores, which read it
+- The normalised layer is recomputed in `f32`, also for v4 stores, which read it
   at f16 before, through `libm` in f64 so every OS derives the same bits.
   Values differ slightly.
 
 ### Fixes
 
-- Streaming a CSC h5ad held the whole transpose in memory; it now keeps to
-  the budget it is given.
-- `call_peaks` hung on a group without fragments and on `q_value = 1`.
-- `PairedInsertion` counts the right cut at `end - 1`, as SnapATAC2. Counts
-  differ.
-- The TSS enrichment always leaves out TSSs on `chrM`, `Mt` and `MT`.
-- AMULET drops trailing loci on the last chromosome used also without a tabix
-  index (text and BGZF files), as the reference implementation does.
-- `read_bed` takes space-separated files and skips zero-length records; GTFs
-  without `gene` rows are read from their transcripts or exons.
-- `upgrade_store_to_v5` syncs before swapping, keeps the original until the
-  swap, and resumes a half-done upgrade. The merge and the gene-to-cell
-  transpose keep the store's kinds, scales, IDF and layers instead of
-  writing a default log-CPM gene store.
 - Corrupt chunk lengths and legacy chunk offsets error instead of panicking;
   the gene file build refuses cells with unsorted indices instead of
   scattering them wrongly.

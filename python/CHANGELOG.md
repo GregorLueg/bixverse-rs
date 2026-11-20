@@ -71,8 +71,8 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 
 - e-means is the k-means default of Harmony v1 and v2, fast clustering (also
   inside Boost and scDblFinder), SCENIC, DSB and NMF consensus, on CPU and
-  GPU. Results differ at the same seed; `km_type="standard"` or `k_means_algorithm="lloyd"`
-  gives Lloyd's back.
+  GPU. Results differ at the same seed; `km_type="standard"` or
+  `k_means_algorithm="lloyd"` gives Lloyd's back.
 - Leiden runs 2 iterations by default (was 5) and Louvain coloured local
   moving, fast clustering included. Results differ at the same seed.
 - Harmony v2 follows harmony2: `HarmonyV2Params.block_size` is 0.05 (was
@@ -93,14 +93,6 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 - `scrublet`, `boost`, `scdblfinder` and the GPU `scrublet` read a small cell
   selection, such as one `group_by` group, from the cell-based store instead
   of sweeping the gene-based one (#134). Same results at the same seed.
-- ATAC: `call_peaks` hung on an empty group and on `q_value=1`; `atac_frip`
-  went stale after a recount; `paired-insertion` counted at the raw fragment
-  end instead of `end - 1` (counts differ); the TSS enrichment counted chrM
-  TSSs when `mito_chroms` left them out; peak and tile stores reached HVG,
-  PCA and MAGIC.
-- The nucleosome signal of a cell with no nucleosome-free or
-  mononucleosomal fragment is 0, not NaN.
-- The marker tables of ATAC call their id column `feature_id`, not `gene_id`.
 
 **Notes**
 
