@@ -31,7 +31,10 @@ use bixverse_sc_data::store::convert::upgrade_store_to_v5;
 use bixverse_sc_data::store::gene_file::write_gene_file;
 use bixverse_sc_data::store::merge::{BinMergeTask, merge_sc_bin_files};
 use bixverse_sc_data::store::v4::parse_chunk_codec;
-use bixverse_sc_data::store::v5::set_cell_ids as v5_set_cell_ids;
+use bixverse_sc_data::store::v5::{
+    check_store_pair_paths, peek_store_info, set_cell_ids as v5_set_cell_ids,
+    set_store_metadata as v5_set_store_metadata, verify_store as v5_verify_store,
+};
 use bixverse_sc_data::store::{
     quality::{CellQuality, MinCellQuality},
     reader::{ParallelSparseReader, SingleCellReading, peek_file_version},
@@ -939,8 +942,108 @@ pub fn file_version(path: PathBuf) -> PyResult<u32> {
 /// a v4 file is `"gene"`.
 #[pyfunction]
 pub fn store_feature_kind(path: PathBuf) -> PyResult<&'static str> {
-    let reader = ParallelSparseReader::new(path_str(&path)?).map_err(BvErr::from)?;
-    Ok(reader.feature_kind().name())
+    let info = peek_store_info(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(info.feature_kind.name())
+}
+
+/// Read how the norm of a store derives, from its header
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary (v4 or v5)
+///
+/// ### Returns
+///
+/// `"none"`, `"log_cpm"` or `"tf_idf"`; a v4 file is `"log_cpm"`.
+#[pyfunction]
+pub fn store_norm_kind(path: PathBuf) -> PyResult<&'static str> {
+    let info = peek_store_info(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(match info.norm_kind {
+        bixverse_sc_data::store::v5::NormKind::None => "none",
+        bixverse_sc_data::store::v5::NormKind::LogCpm => "log_cpm",
+        bixverse_sc_data::store::v5::NormKind::TfIdf => "tf_idf",
+    })
+}
+
+/// Caller metadata of a store, read from its header and directory only
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary
+///
+/// ### Returns
+///
+/// Dict of `key: value` strings; empty for v4.
+#[pyfunction]
+pub fn store_metadata(py: Python<'_>, path: PathBuf) -> PyResult<Bound<'_, PyDict>> {
+    let info = peek_store_info(path_str(&path)?).map_err(BvErr::from)?;
+    let out = PyDict::new(py);
+    for (k, v) in info.metadata {
+        out.set_item(k, v)?;
+    }
+    Ok(out)
+}
+
+/// Set caller metadata on both files of a v5 store
+///
+/// ### Params
+///
+/// * `f_path_cells` - Cell-based binary
+/// * `f_path_genes` - Gene-based binary
+/// * `entries` - `key: value` strings; keys replace, others are kept
+///
+/// ### Returns
+///
+/// `None`, or a `ValueError` for a multi-line key or value or a v4 store.
+#[pyfunction]
+pub fn set_store_metadata(
+    py: Python<'_>,
+    f_path_cells: PathBuf,
+    f_path_genes: PathBuf,
+    entries: Vec<(String, String)>,
+) -> PyResult<()> {
+    let cells = path_str(&f_path_cells)?;
+    let genes = path_str(&f_path_genes)?;
+    let pairs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    py.detach(|| v5_set_store_metadata(&[cells, genes], &pairs))
+        .map_err(BvErr::from)?;
+    Ok(())
+}
+
+/// Check every chunk of a store file against its checksums
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based binary
+///
+/// ### Returns
+///
+/// `True` when every chunk matched, `False` for a file without checksums
+/// (v4); raises on a corrupt chunk.
+#[pyfunction]
+pub fn verify_store(py: Python<'_>, path: PathBuf) -> PyResult<bool> {
+    let p = path_str(&path)?;
+    Ok(py.detach(|| v5_verify_store(p)).map_err(BvErr::from)?)
+}
+
+/// Error unless a cell file and a gene file belong to the same store
+///
+/// ### Params
+///
+/// * `f_path_cells` - Cell-based binary
+/// * `f_path_genes` - Gene-based binary
+///
+/// ### Returns
+///
+/// `None`, or a `ValueError` naming the field that differs.
+#[pyfunction]
+pub fn check_store_pair(f_path_cells: PathBuf, f_path_genes: PathBuf) -> PyResult<()> {
+    check_store_pair_paths(path_str(&f_path_cells)?, path_str(&f_path_genes)?)
+        .map_err(BvErr::from)?;
+    Ok(())
 }
 
 /// Convert both binaries (v3 or v4) to the v5 format in place
@@ -1017,9 +1120,9 @@ pub fn set_cell_ids(
 /// The 16-byte hash as hex, `None` when the store records no cell IDs.
 #[pyfunction]
 pub fn cell_id_hash(path: PathBuf) -> PyResult<Option<String>> {
-    let reader = ParallelSparseReader::new(path_str(&path)?).map_err(BvErr::from)?;
-    Ok(reader
-        .cell_id_hash()
+    let info = peek_store_info(path_str(&path)?).map_err(BvErr::from)?;
+    Ok(info
+        .cell_id_hash
         .map(|h| h.iter().map(|b| format!("{b:02x}")).collect()))
 }
 

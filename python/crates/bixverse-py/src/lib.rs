@@ -78,6 +78,11 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(io::restore_cells_archive, m)?,
         wrap_pyfunction!(io::file_version, m)?,
         wrap_pyfunction!(io::store_feature_kind, m)?,
+        wrap_pyfunction!(io::store_norm_kind, m)?,
+        wrap_pyfunction!(io::store_metadata, m)?,
+        wrap_pyfunction!(io::set_store_metadata, m)?,
+        wrap_pyfunction!(io::verify_store, m)?,
+        wrap_pyfunction!(io::check_store_pair, m)?,
         wrap_pyfunction!(io::upgrade_to_v5, m)?,
         wrap_pyfunction!(io::set_cell_ids, m)?,
         wrap_pyfunction!(io::cell_id_hash, m)?,
@@ -224,6 +229,12 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(atac::atac_lsi, m)?,
         wrap_pyfunction!(atac::atac_project_lsi, m)?,
         wrap_pyfunction!(atac::atac_rlsi, m)?,
+        wrap_pyfunction!(atac::atac_fragment_profiles, m)?,
+        wrap_pyfunction!(atac::atac_barcode_fragment_counts, m)?,
+        wrap_pyfunction!(atac::atac_merge_fragments, m)?,
+        wrap_pyfunction!(atac::atac_closest_genes, m)?,
+        wrap_pyfunction!(atac::atac_overlaps_any, m)?,
+        wrap_pyfunction!(atac::atac_peak_to_gene, m)?,
     ] {
         m.add_function(f)?;
     }

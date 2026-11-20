@@ -1132,7 +1132,7 @@ pub fn set_store_metadata(paths: &[&str], entries: &[(&str, &str)]) -> Result<()
     let mut current = Vec::with_capacity(paths.len());
     for &p in paths {
         rewritable_header(p)?;
-        current.push(ParallelSparseReader::new(p)?.store_metadata());
+        current.push(peek_store_info(p)?.metadata);
     }
     for (&p, mut pairs) in paths.iter().zip(current) {
         for (k, v) in entries {
@@ -1184,6 +1184,167 @@ pub(crate) fn provenance(codec: ChunkCodec) -> Vec<u8> {
 /// match.
 pub fn verify_store(path: &str) -> Result<bool, ScDataErrors> {
     ParallelSparseReader::new(path)?.verify_chunks()
+}
+
+/// Store-level facts read from the header and section directory only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreInfo {
+    /// Format version.
+    pub version: u32,
+    /// What the features are; genes before v5.
+    pub feature_kind: FeatureKind,
+    /// How the norm derives; log-CPM before v5.
+    pub norm_kind: NormKind,
+    /// Cell-ID hash, `None` when unset or before v5.
+    pub cell_id_hash: Option<[u8; 16]>,
+    /// Caller metadata, see [`set_store_metadata`]; empty before v5.
+    pub metadata: Vec<(String, String)>,
+}
+
+/// Read a store's [`StoreInfo`] without mapping the file.
+///
+/// Reads the 128-byte header, the section directory and the metadata
+/// section, nothing else, so it is cheap on any store size. A v3 or v4 file
+/// reports the fixed legacy kinds.
+///
+/// ### Params
+///
+/// * `path` - A cell- or gene-based file
+///
+/// ### Returns
+///
+/// The [`StoreInfo`], or an error for a file that is not a store or a
+/// malformed v5 header or directory.
+pub fn peek_store_info(path: &str) -> Result<StoreInfo, ScDataErrors> {
+    let version = peek_file_version(path)?;
+    if version != SC_FILE_VERSION {
+        return Ok(StoreInfo {
+            version,
+            feature_kind: FeatureKind::Gene,
+            norm_kind: NormKind::LogCpm,
+            cell_id_hash: None,
+            metadata: Vec::new(),
+        });
+    }
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len() as usize;
+    let mut head = [0u8; V5_HEADER_LEN];
+    f.read_exact(&mut head)?;
+    let h = V5FileHeader::parse(&head)?;
+    let range = dir_range(&h, file_len)?;
+    let mut dir = vec![0u8; range.len()];
+    f.seek(SeekFrom::Start(range.start as u64))?;
+    f.read_exact(&mut dir)?;
+    let mut metadata = Vec::new();
+    for e in parse_directory(&dir, file_len)? {
+        if SectionKind::from_code(e.code) == Some(SectionKind::Metadata) {
+            let mut bytes = vec![0u8; e.len as usize];
+            f.seek(SeekFrom::Start(e.offset))?;
+            f.read_exact(&mut bytes)?;
+            metadata = parse_key_values(&bytes);
+        }
+    }
+    Ok(StoreInfo {
+        version,
+        feature_kind: h.feature_kind,
+        norm_kind: h.norm_kind,
+        cell_id_hash: (h.cell_id_hash != [0; 16]).then_some(h.cell_id_hash),
+        metadata,
+    })
+}
+
+/// Header, directory and IDF bytes of a v5 file, read without mapping it.
+///
+/// ### Params
+///
+/// * `path` - The file
+///
+/// ### Returns
+///
+/// The header and the raw IDF section, empty without one.
+fn peek_header_and_idf(path: &str) -> Result<(V5FileHeader, Vec<u8>), ScDataErrors> {
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len() as usize;
+    let mut head = [0u8; V5_HEADER_LEN];
+    f.read_exact(&mut head)?;
+    let h = V5FileHeader::parse(&head)?;
+    let range = dir_range(&h, file_len)?;
+    let mut dir = vec![0u8; range.len()];
+    f.seek(SeekFrom::Start(range.start as u64))?;
+    f.read_exact(&mut dir)?;
+    let mut idf = Vec::new();
+    for e in parse_directory(&dir, file_len)? {
+        if SectionKind::from_code(e.code) == Some(SectionKind::Idf) {
+            idf = vec![0u8; e.len as usize];
+            f.seek(SeekFrom::Start(e.offset))?;
+            f.read_exact(&mut idf)?;
+        }
+    }
+    Ok((h, idf))
+}
+
+/// [`check_store_pair`] from the files' headers alone, for the open path.
+///
+/// Reads the two headers, directories and IDF sections, nothing else. A pair
+/// with a v3 or v4 file is checked on its shape through the reader.
+///
+/// ### Params
+///
+/// * `cells` - The cell-based file
+/// * `genes` - The gene-based file
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`ScDataErrors::StorePairMismatch`] naming the first field
+/// that differs.
+pub fn check_store_pair_paths(cells: &str, genes: &str) -> Result<(), ScDataErrors> {
+    let differ = |field: &str| Err(ScDataErrors::StorePairMismatch(field.to_string()));
+    let versions = (peek_file_version(cells)?, peek_file_version(genes)?);
+    if versions != (SC_FILE_VERSION, SC_FILE_VERSION) {
+        if versions.0 != versions.1 {
+            return differ("format version");
+        }
+        let (c, g) = (
+            ParallelSparseReader::open_any(cells)?,
+            ParallelSparseReader::open_any(genes)?,
+        );
+        if !c.is_cell_based() || g.is_cell_based() {
+            return differ("orientation (expected a cell file and a gene file)");
+        }
+        let (a, b) = (c.dims(), g.dims());
+        if (a.total_cells, a.total_genes) != (b.total_cells, b.total_genes) {
+            return differ("shape");
+        }
+        return Ok(());
+    }
+    let ((c, c_idf), (g, g_idf)) = (peek_header_and_idf(cells)?, peek_header_and_idf(genes)?);
+    if !c.cell_based || g.cell_based {
+        return differ("orientation (expected a cell file and a gene file)");
+    }
+    if (c.n_cells, c.n_features) != (g.n_cells, g.n_features) {
+        return differ("shape");
+    }
+    if c.n_layers != g.n_layers {
+        return differ("raw layer count");
+    }
+    if c.feature_kind != g.feature_kind {
+        return differ("feature kind");
+    }
+    if c.norm_kind != g.norm_kind {
+        return differ("norm kind");
+    }
+    if (c.target_size.to_bits(), c.tf_idf_scale.to_bits())
+        != (g.target_size.to_bits(), g.tf_idf_scale.to_bits())
+    {
+        return differ("norm target size or TF-IDF scale");
+    }
+    if c_idf != g_idf {
+        return differ("IDF");
+    }
+    if c.cell_id_hash != g.cell_id_hash {
+        return differ("cell IDs");
+    }
+    Ok(())
 }
 
 /// Error unless every store was written for the same cells.
@@ -1520,6 +1681,22 @@ mod tests {
             pair(&s[0], &s[1]),
             Err(ScDataErrors::StorePairMismatch(m)) if m.contains("norm kind")
         ));
+        assert!(matches!(
+            check_store_pair_paths(&s[0], &s[1]),
+            Err(ScDataErrors::StorePairMismatch(m)) if m.contains("norm kind")
+        ));
+        set_tf_idf(&[&s[1]], &idf, 1e4).unwrap();
+        check_store_pair_paths(&s[0], &s[1]).unwrap();
+        set_tf_idf(&[&s[1]], &vec![1.0; idf.len()], 1e4).unwrap();
+        assert!(matches!(
+            check_store_pair_paths(&s[0], &s[1]),
+            Err(ScDataErrors::StorePairMismatch(m)) if m.contains("IDF")
+        ));
+        assert!(check_store_pair_paths(&s[1], &s[0]).is_err());
+
+        write_legacy_store(SC_FILE_VERSION_V4, &s[2], &s[3], TARGET);
+        check_store_pair_paths(&s[2], &s[3]).unwrap();
+        assert!(check_store_pair_paths(&s[2], &s[1]).is_err(), "v4 with v5");
     }
 
     #[test]
@@ -1567,6 +1744,30 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "writer" && v.starts_with("bixverse-sc-data"))
         );
+    }
+
+    #[test]
+    fn test_peek_store_info_matches_the_reader() {
+        let (_dir, s) = scratch(4);
+        v5_store(&s[0], &s[1]);
+        set_cell_ids(&[&s[0], &s[1]], &vec!["c"; N_CELLS]).unwrap();
+        set_feature_kind(&[&s[0], &s[1]], FeatureKind::Peak).unwrap();
+        set_store_metadata(&[&s[0], &s[1]], &[("count_mode", "insertion")]).unwrap();
+        let info = peek_store_info(&s[1]).unwrap();
+        let r = ParallelSparseReader::new(&s[1]).unwrap();
+        assert_eq!(info.version, SC_FILE_VERSION);
+        assert_eq!(info.feature_kind, r.feature_kind());
+        assert_eq!(info.norm_kind, r.norm_kind());
+        assert_eq!(info.cell_id_hash, r.cell_id_hash());
+        assert_eq!(info.metadata, r.store_metadata());
+
+        write_legacy_store(SC_FILE_VERSION_V4, &s[2], &s[3], TARGET);
+        let legacy = peek_store_info(&s[2]).unwrap();
+        assert_eq!(
+            (legacy.version, legacy.feature_kind),
+            (4, FeatureKind::Gene)
+        );
+        assert!(legacy.metadata.is_empty() && legacy.cell_id_hash.is_none());
     }
 
     #[test]

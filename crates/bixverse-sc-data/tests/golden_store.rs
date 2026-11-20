@@ -76,7 +76,7 @@ fn check(cells: &str, genes: &str, version: u32) {
             );
         }
     }
-    for g in 0..6 {
+    for (g, _) in COUNTS[0].iter().enumerate() {
         let gene = gr.read_gene(g).unwrap();
         let cells: Vec<u32> = (0..5u32).filter(|&c| COUNTS[c as usize][g] > 0).collect();
         assert_eq!(gene.indices, cells, "gene {g}");
