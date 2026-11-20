@@ -15,7 +15,7 @@ use crate::store::chunk::{FileHeader, SparseDataHeader};
 use crate::store::v4::{ChunkCodec, ChunkFormat};
 use crate::store::v5::{
     FeatureKind, MAX_LAYERS, NormKind, SectionKind, SectionWriter, V5_HEADER_LEN, V5FileHeader,
-    cell_id_hash,
+    cell_id_hash, encode_key_values, provenance,
 };
 
 /// Flush cadence for gene-based writers, in chunks.
@@ -100,6 +100,12 @@ pub struct CellGeneSparseWriter {
     cell_id_hash: [u8; 16],
     /// Per-feature IDF for [`NormKind::TfIdf`] (v5).
     idf: Option<Vec<f32>>,
+    /// TF-IDF scale (v5); `target_size` stays the log-CPM target.
+    tf_idf_scale: f32,
+    /// xxh3-64 of every chunk's stored bytes, in chunk order (v5).
+    chunk_checksums: Vec<u64>,
+    /// Caller metadata carried from the source store (v5).
+    metadata: Vec<(String, String)>,
 }
 
 impl CellGeneSparseWriter {
@@ -270,6 +276,9 @@ impl CellGeneSparseWriter {
             n_layers: 1,
             cell_id_hash: [0; 16],
             idf: None,
+            tf_idf_scale: 0.0,
+            chunk_checksums: Vec::new(),
+            metadata: Vec::new(),
         })
     }
 
@@ -339,8 +348,18 @@ impl CellGeneSparseWriter {
         Ok(())
     }
 
-    /// Copy the store-level fields of another v5 store: kinds, layer count,
-    /// cell-ID hash and IDF.
+    /// Set the cell-ID hash directly, for restores that carry the hash but
+    /// not the IDs (v5).
+    ///
+    /// ### Params
+    ///
+    /// * `hash` - The hash, all zero for none
+    pub(crate) fn set_cell_id_hash(&mut self, hash: [u8; 16]) {
+        self.cell_id_hash = hash;
+    }
+
+    /// Copy the store-level fields of another store: kinds, layer count,
+    /// target size, TF-IDF scale, cell-ID hash, IDF and caller metadata.
     ///
     /// For the other orientation of the same store, and for conversions that
     /// keep the store's identity.
@@ -362,6 +381,8 @@ impl CellGeneSparseWriter {
         self.n_layers = reader.n_layers();
         self.cell_id_hash = reader.cell_id_hash().unwrap_or([0; 16]);
         self.idf = reader.idf().map(<[f32]>::to_vec);
+        (self.target_size, self.tf_idf_scale) = reader.header_scales();
+        self.metadata = reader.store_metadata();
         Ok(())
     }
 
@@ -478,6 +499,10 @@ impl CellGeneSparseWriter {
     ) -> Result<(), ScDataErrors> {
         self.chunk_offsets.push(self.chunks_len);
         self.original_indices.push(original_index);
+        if self.version >= SC_FILE_VERSION {
+            self.chunk_checksums
+                .push(xxhash_rust::xxh3::xxh3_64(compressed));
+        }
 
         self.writer
             .write_all(&(compressed.len() as u64).to_le_bytes())?;
@@ -800,8 +825,16 @@ impl CellGeneSparseWriter {
         if let Some(idf) = self.idf.take() {
             sections.push_f32(SectionKind::Idf, &idf);
         }
+        sections.push_u64(
+            SectionKind::ChunkChecksums,
+            std::mem::take(&mut self.chunk_checksums),
+        );
+        sections.push_bytes(SectionKind::Provenance, provenance(self.codec));
+        if !self.metadata.is_empty() {
+            sections.push_bytes(SectionKind::Metadata, encode_key_values(&self.metadata));
+        }
 
-        let (dir_offset, n_sections) = sections.finish(&mut self.writer, &[])?;
+        let (dir_offset, n_sections, dir) = sections.finish(&mut self.writer, &[])?;
 
         let header = V5FileHeader {
             cell_based: self.cell_based,
@@ -809,15 +842,19 @@ impl CellGeneSparseWriter {
             norm_kind: self.norm_kind,
             n_layers: self.n_layers,
             target_size: self.target_size,
+            tf_idf_scale: self.tf_idf_scale,
             n_cells: self.total_cells,
             n_features: self.total_genes,
             n_chunks,
             dir_offset,
             n_sections,
             cell_id_hash: self.cell_id_hash,
+            incompat: 0,
+            ro_compat: 0,
+            compat: 0,
         };
         self.writer.seek(SeekFrom::Start(0))?;
-        self.writer.write_all(&header.encode())?;
+        self.writer.write_all(&header.encode(&dir))?;
         self.writer.flush()?;
         Ok(())
     }
@@ -924,9 +961,11 @@ pub fn compress_cell_row(
     let genes: Vec<u32> = row.iter().map(|&(g, _)| g).collect();
     let counts: Vec<u32> = row.iter().map(|&(_, c)| c).collect();
     // a norm scaled to another target than the file's does not recompute
-    let fast = (target_size.to_bits() == format.target_size.to_bits())
-        .then(|| format.encode_cell_counts(&genes, &counts, original_index))
-        .flatten();
+    let fast = if target_size.to_bits() == format.target_size.to_bits() {
+        format.encode_cell_counts(&genes, &counts, original_index)?
+    } else {
+        None
+    };
     if let Some((library_size, bytes)) = fast {
         let payload = CellPayload {
             original_index,

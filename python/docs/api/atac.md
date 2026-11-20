@@ -6,7 +6,10 @@
       show_root_heading: false
       show_root_toc_entry: false
 
-Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
+Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb) and
+[ATAC without RNA](../vignettes/atac_only.ipynb). The ATAC-only loaders,
+`bv.io.load_atac_fragments` and `bv.io.load_atac_tenx`, are on the
+[I/O page](io.md); the `SingleCellsAtac` class on the [core page](core.md).
 
 ## Adding the counts
 
@@ -20,6 +23,18 @@ Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
         - add_atac_fragments
         - AtacInfo
 
+## Barcodes and fragment files
+
+::: bixverse.atac
+    options:
+      show_root_heading: false
+      show_root_toc_entry: false
+      heading_level: 3
+      members:
+        - barcode_fragment_counts
+        - read_cellranger_barcodes
+        - merge_fragments
+
 ## QC and multiplets
 
 ::: bixverse.atac
@@ -28,10 +43,11 @@ Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
       show_root_toc_entry: false
       heading_level: 3
       members:
-        - atac_fragment_qc
+        - fragment_qc
+        - fragment_profiles
         - amulet
 
-## Peak calling
+## Peaks
 
 ::: bixverse.atac
     options:
@@ -40,6 +56,8 @@ Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
       heading_level: 3
       members:
         - call_peaks
+        - remove_blacklisted
+        - annotate_peaks
 
 ## TF-IDF and LSI
 
@@ -54,7 +72,7 @@ Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
         - calculate_lsi
         - get_lsi_depth_cor
 
-## Gene activity
+## Gene activity and links
 
 ::: bixverse.atac
     options:
@@ -63,6 +81,8 @@ Worked through in [Joint RNA and ATAC](../vignettes/atac_multiome.ipynb).
       heading_level: 3
       members:
         - gene_activity
+        - get_gene_activity
+        - peak_to_gene
 
 ## Mapping and integration
 

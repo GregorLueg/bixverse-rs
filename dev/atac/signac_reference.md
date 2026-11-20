@@ -1,7 +1,9 @@
 # Signac 1.17.1 numerics, as read from source
 
-Source: `~/repos/others/signac` (MIT). Read from code, not run: every number
-here still needs a generated fixture before it becomes a test.
+Source: `~/repos/others/signac` (MIT). Read from code. The definitions below
+that bixverse implements are checked against generated Signac outputs in
+`crates/bixverse-atac/tests/fixtures/pbmc3k_chr22/` (see its README); the
+rest is background.
 
 Version notes: `RunSVD` uses `RSpectra::svds` (not irlba); chromVAR interface
 removed in 1.17.0; `NucleosomeSignal` / `TSSEnrichment` deprecated in favour of

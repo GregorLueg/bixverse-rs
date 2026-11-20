@@ -169,6 +169,13 @@ def restore_cells_archive(
 ) -> None: ...
 def file_version(path: Path) -> int: ...
 def store_feature_kind(path: Path) -> str: ...
+def store_norm_kind(path: Path) -> str: ...
+def store_metadata(path: Path) -> dict[str, str]: ...
+def set_store_metadata(
+    f_path_cells: Path, f_path_genes: Path, entries: list[tuple[str, str]]
+) -> None: ...
+def verify_store(path: Path) -> bool: ...
+def check_store_pair(f_path_cells: Path, f_path_genes: Path) -> None: ...
 def upgrade_to_v5(
     f_path_cells: Path,
     f_path_genes: Path,
@@ -1273,6 +1280,48 @@ def atac_reduce_regions(
     chrom: list[str], start: list[int], end: list[int]
 ) -> dict[str, Any]: ...
 def atac_tss_positions(path: Path, biotypes: list[str]) -> dict[str, Any]: ...
+def atac_fragment_profiles(
+    fragments: Path,
+    barcodes: list[str],
+    groups: list[int],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    tss_strand: list[int],
+    half_width: int,
+    max_len: int,
+) -> dict[str, Any]: ...
+def atac_barcode_fragment_counts(
+    fragments: Path, exclude_chroms: list[str]
+) -> dict[str, Any]: ...
+def atac_merge_fragments(
+    paths: list[Path], prefixes: list[str], suffixes: list[str], out: Path
+) -> dict[str, Any]: ...
+def atac_closest_genes(
+    gtf: Path,
+    biotypes: list[str],
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+) -> dict[str, Any]: ...
+def atac_overlaps_any(
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    other_chrom: list[str],
+    other_start: list[int],
+    other_end: list[int],
+) -> np.ndarray: ...
+def atac_peak_to_gene(
+    peak_counts: np.ndarray,
+    gene_counts: np.ndarray,
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    max_distance: int,
+    scale: float,
+) -> dict[str, Any]: ...
 def atac_project_lsi(
     f_path_cells: Path,
     f_path_genes: Path,

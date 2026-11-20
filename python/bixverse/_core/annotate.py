@@ -1061,6 +1061,7 @@ def transfer_labels_seurat(
     label_column: str,
     weight_embedding: np.ndarray,
     *,
+    weight_owner: SingleCells | None = None,
     features: Sequence[str] | None = None,
     n_cc: int = 30,
     k_anchor: int = 5,
@@ -1087,7 +1088,12 @@ def transfer_labels_seurat(
             reference on `gene_id`.
         label_column: Reference obs column with the labels.
         weight_embedding: Kept query cells x dimensions for the weights, e.g.
-            `mm.atac_cache.embeddings["lsi"]`.
+            `mm.atac_cache.embeddings["lsi"]`. Its rows are matched to the
+            query by position.
+        weight_owner: The experiment `weight_embedding` came from. Checked to
+            keep the same cells as the query, so a filter set on one and not
+            the other cannot shift the rows. `bv.atac.get_gene_activity`
+            brings the gene activity in line with its experiment.
         features: Gene ids to anchor on. `None` uses the reference HVGs. Only
             those in both experiments are used.
         n_cc: Canonical correlation vectors.
@@ -1109,9 +1115,14 @@ def transfer_labels_seurat(
         the query's obs.
 
     Raises:
-        ValueError: Without features, or if `weight_embedding` does not cover
-            the kept query cells.
+        ValueError: Without features, if `weight_embedding` does not cover
+            the kept query cells, or `weight_owner` keeps other cells.
     """
+    if weight_owner is not None and weight_owner.cells_hash() != query.cells_hash():
+        raise ValueError(
+            "The query and the experiment of weight_embedding keep different cells. "
+            "Set the same filter on both (bv.atac.get_gene_activity syncs it)."
+        )
     if weight_embedding.ndim != 2 or weight_embedding.shape[0] != query.n_cells:
         raise ValueError(
             f"weight_embedding needs {query.n_cells} rows, one per kept query "

@@ -286,7 +286,7 @@ fn chrom_str<'a>(chrom: &'a [u8], line: &[u8]) -> Result<&'a str, AtacErrors> {
 ///
 /// The total block length, or `None` when the bytes do not start a BGZF
 /// block (plain gzip has no `BC` extra subfield).
-fn bgzf_block_len(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn bgzf_block_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < GZIP_FIXED_HEADER || bytes[0] != 31 || bytes[1] != 139 || bytes[2] != 8 {
         return None;
     }
@@ -422,6 +422,76 @@ where
     F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
     R: Fn(A, A) -> A + Sync + Send,
 {
+    let parser = FragmentParser {
+        barcodes,
+        fold: &fold,
+    };
+    let (acc, _) = drive(
+        path,
+        &|| (init(), Vec::new()),
+        &parser,
+        &|(a, _), (b, _)| (reduce(a, b), Vec::new()),
+    )?;
+    Ok(acc)
+}
+
+/// What the drivers do with a stretch of whole lines.
+pub(crate) trait Parse<A>: Sync {
+    /// Parse `text`, whole lines only, into `acc`.
+    ///
+    /// ### Params
+    ///
+    /// * `text` - The lines
+    /// * `acc` - The worker's accumulator
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or a parse error.
+    fn parse(&self, text: &[u8], acc: &mut A) -> Result<(), AtacErrors>;
+}
+
+/// The fragment parser behind every fold: requested cells only, runs of one
+/// chromosome to the consumer. Its accumulator carries the run buffer.
+struct FragmentParser<'a, F> {
+    /// Cells to keep.
+    barcodes: &'a BarcodeIndex<'a>,
+    /// The consumer.
+    fold: &'a F,
+}
+
+impl<A, F> Parse<(A, Vec<Fragment>)> for FragmentParser<'_, F>
+where
+    F: Fn(&mut A, &str, &[Fragment]) + Sync,
+{
+    fn parse(&self, text: &[u8], acc: &mut (A, Vec<Fragment>)) -> Result<(), AtacErrors> {
+        parse_lines(text, self.barcodes, &mut acc.0, self.fold, &mut acc.1)
+    }
+}
+
+/// Map a fragment file and run a parser over all of it in parallel.
+///
+/// ### Params
+///
+/// * `path` - The fragment file (BGZF, gzip or text)
+/// * `init` - New accumulator
+/// * `parse` - The parser
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error.
+pub(crate) fn drive<A, I, P, R>(
+    path: &Path,
+    init: &I,
+    parse: &P,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    P: Parse<A>,
+    R: Fn(A, A) -> A + Sync + Send,
+{
     let file = File::open(path)?;
     if file.metadata()?.len() == 0 {
         return Ok(init());
@@ -431,10 +501,245 @@ where
     let bytes: &[u8] = &mmap;
 
     match detect_compression(bytes) {
-        Compression::Bgzf => fold_bgzf(bytes, barcodes, &init, &fold, &reduce),
-        Compression::None => fold_text(bytes, barcodes, &init, &fold, &reduce),
-        Compression::Gzip => fold_gzip(&file, barcodes, &init, &fold, &reduce),
+        Compression::Bgzf => fold_bgzf(bytes, init, parse, reduce),
+        Compression::None => fold_text(bytes, init, parse, reduce),
+        Compression::Gzip => fold_gzip(&file, init, parse, reduce),
     }
+}
+
+//////////////
+// Coverage //
+//////////////
+
+/// What a pass over the fragment file saw of the requested cells.
+///
+/// The passes skip fragments of unrequested barcodes and of chromosomes
+/// without features without a word, so a barcode suffix (`-1`) or a
+/// chromosome naming (`chr1` against `1`) that differs between inputs gives
+/// all-zero results. The passes collect this alongside their own fold and
+/// check it before returning.
+#[derive(Clone, Debug, Default)]
+pub struct Coverage {
+    /// Fragments of the requested cells per chromosome.
+    pub per_chrom: FxHashMap<String, u64>,
+    /// Requested cells with no fragment in the file.
+    pub cells_missing: usize,
+    /// Fragments on chromosomes the pass has nothing on (no features, no
+    /// TSS), out of all fragments of the requested cells.
+    pub fragments_off_target: u64,
+    /// All fragments of the requested cells.
+    pub fragments_total: u64,
+}
+
+impl Coverage {
+    /// Fraction of the requested cells' fragments on chromosomes without
+    /// targets.
+    ///
+    /// ### Returns
+    ///
+    /// The fraction, `0.0` without fragments.
+    pub fn off_target_fraction(&self) -> f64 {
+        if self.fragments_total == 0 {
+            0.0
+        } else {
+            self.fragments_off_target as f64 / self.fragments_total as f64
+        }
+    }
+}
+
+/// Per-worker tally behind [`Coverage`].
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Tally {
+    /// Fragments per chromosome.
+    per_chrom: FxHashMap<String, u64>,
+    /// Whether each requested cell has a fragment.
+    seen: Vec<bool>,
+}
+
+impl Tally {
+    /// An empty tally for `n` cells.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Requested cells
+    ///
+    /// ### Returns
+    ///
+    /// The tally.
+    pub(crate) fn new(n: usize) -> Self {
+        Self {
+            per_chrom: FxHashMap::default(),
+            seen: vec![false; n],
+        }
+    }
+
+    /// Record a run of fragments.
+    ///
+    /// ### Params
+    ///
+    /// * `chrom` - Chromosome of the run
+    /// * `frags` - The fragments
+    #[inline]
+    pub(crate) fn add(&mut self, chrom: &str, frags: &[Fragment]) {
+        match self.per_chrom.get_mut(chrom) {
+            Some(n) => *n += frags.len() as u64,
+            None => {
+                self.per_chrom.insert(chrom.to_string(), frags.len() as u64);
+            }
+        }
+        for f in frags {
+            self.seen[f.cell as usize] = true;
+        }
+    }
+
+    /// Merge two tallies.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - The other tally
+    ///
+    /// ### Returns
+    ///
+    /// The merged tally.
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        for (c, n) in other.per_chrom {
+            *self.per_chrom.entry(c).or_default() += n;
+        }
+        for (a, b) in self.seen.iter_mut().zip(other.seen) {
+            *a |= b;
+        }
+        self
+    }
+
+    /// Check the tally and turn it into a [`Coverage`].
+    ///
+    /// Errors when none of the requested barcodes has a fragment, or when
+    /// the fragments' chromosomes and the targets' share no name. Partial
+    /// mismatches come back in the [`Coverage`] for the caller to report.
+    ///
+    /// ### Params
+    ///
+    /// * `barcodes` - The requested cells
+    /// * `targets` - Chromosome names the pass has something on; `None` when
+    ///   every chromosome counts (fragment counts, peak calling)
+    /// * `what` - What the targets are, for the error message
+    ///
+    /// ### Returns
+    ///
+    /// The [`Coverage`], or [`AtacErrors::BarcodesNotFound`] /
+    /// [`AtacErrors::InvalidArgument`].
+    pub(crate) fn check(
+        self,
+        barcodes: &[String],
+        targets: Option<&[&str]>,
+        what: &str,
+    ) -> Result<Coverage, AtacErrors> {
+        let cells_missing = self.seen.iter().filter(|&&s| !s).count();
+        if !barcodes.is_empty() && cells_missing == barcodes.len() {
+            return Err(AtacErrors::BarcodesNotFound {
+                n_missing: cells_missing,
+                n_requested: barcodes.len(),
+                example: barcodes[0].clone(),
+            });
+        }
+        let fragments_total: u64 = self.per_chrom.values().sum();
+        let on_target = |c: &str| targets.is_none_or(|t| t.contains(&c));
+        let fragments_off_target: u64 = self
+            .per_chrom
+            .iter()
+            .filter(|(c, _)| !on_target(c))
+            .map(|(_, &n)| n)
+            .sum();
+        if let Some(t) = targets
+            && fragments_total > 0
+            && fragments_off_target == fragments_total
+        {
+            let mut seen: Vec<&String> = self.per_chrom.keys().collect();
+            seen.sort();
+            return Err(AtacErrors::InvalidArgument(format!(
+                "no fragment lies on a chromosome of the {what}: the fragments use {}, the \
+                 {what} {}; check the chromosome naming (chr1 against 1) and the genome build",
+                example_names(seen.iter().map(|s| s.as_str())),
+                example_names(t.iter().copied())
+            )));
+        }
+        Ok(Coverage {
+            per_chrom: self.per_chrom,
+            cells_missing,
+            fragments_off_target,
+            fragments_total,
+        })
+    }
+}
+
+/// Up to three names for an error message.
+///
+/// ### Params
+///
+/// * `names` - The names
+///
+/// ### Returns
+///
+/// `'a', 'b', 'c', ...`.
+fn example_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let names: Vec<&str> = names.collect();
+    let mut s = names
+        .iter()
+        .take(3)
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > 3 {
+        s.push_str(", ...");
+    }
+    if s.is_empty() { "none".into() } else { s }
+}
+
+/// [`fold_fragments`] with a [`Coverage`] check.
+///
+/// ### Params
+///
+/// * `path` - The fragment file
+/// * `barcodes` - The requested cells, as indexed
+/// * `index` - Their index
+/// * `targets` - See [`Tally::check`]
+/// * `what` - See [`Tally::check`]
+/// * `init` - New accumulator
+/// * `fold` - Consumer of `(accumulator, chromosome, fragments)`
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The accumulator and the coverage, or an I/O, parse or coverage error.
+#[allow(clippy::too_many_arguments)]
+pub fn fold_fragments_checked<A, I, F, R>(
+    path: &Path,
+    barcodes: &[String],
+    index: &BarcodeIndex,
+    targets: Option<&[&str]>,
+    what: &str,
+    init: I,
+    fold: F,
+    reduce: R,
+) -> Result<(A, Coverage), AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    R: Fn(A, A) -> A + Sync + Send,
+{
+    let n = barcodes.len();
+    let (acc, tally) = fold_fragments(
+        path,
+        index,
+        || (init(), Tally::new(n)),
+        |(acc, tally): &mut (A, Tally), chrom: &str, frags: &[Fragment]| {
+            tally.add(chrom, frags);
+            fold(acc, chrom, frags);
+        },
+        |(a, ta), (b, tb)| (reduce(a, b), ta.merge(tb)),
+    )?;
+    Ok((acc, tally.check(barcodes, targets, what)?))
 }
 
 ///////////
@@ -642,6 +947,68 @@ where
     F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
     R: Fn(A, A) -> A + Sync + Send,
 {
+    // an index that does not belong to the file can still land on block
+    // boundaries; the chromosome of every line it leads to must be its own
+    let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+    let foreign: Mutex<Option<String>> = Mutex::new(None);
+    let checked = |acc: &mut A, chrom: &str, frags: &[Fragment]| {
+        if names.contains(&chrom) {
+            fold(acc, chrom, frags);
+        } else {
+            foreign
+                .lock()
+                .expect("not poisoned")
+                .get_or_insert_with(|| chrom.to_string());
+        }
+    };
+    let parser = FragmentParser {
+        barcodes,
+        fold: &checked,
+    };
+    let (acc, _) = parse_spans(
+        path,
+        spans,
+        &|| (init(), Vec::new()),
+        &parser,
+        &|(a, _), (b, _)| (reduce(a, b), Vec::new()),
+    )?;
+    if let Some(chrom) = foreign.into_inner().expect("not poisoned") {
+        return Err(AtacErrors::InvalidArgument(format!(
+            "the tabix index does not match the file: it leads to '{chrom}' fragments where it \
+             promises others; regenerate the .tbi"
+        )));
+    }
+    Ok(acc)
+}
+
+/// Run a parser over the lines of some chromosomes of a BGZF file, read
+/// through their tabix spans.
+///
+/// ### Params
+///
+/// * `path` - The BGZF file the spans come from
+/// * `spans` - Chromosomes to read, from [`chrom_spans`]
+/// * `init` - New accumulator
+/// * `parse` - The line parser
+/// * `reduce` - Merge of two accumulators
+///
+/// ### Returns
+///
+/// The combined accumulator, or an I/O or parse error, or an error for an
+/// index that does not match the file.
+pub(crate) fn parse_spans<A, I, P, R>(
+    path: &Path,
+    spans: &[ChromSpan],
+    init: &I,
+    parse: &P,
+    reduce: &R,
+) -> Result<A, AtacErrors>
+where
+    A: Send,
+    I: Fn() -> A + Sync + Send,
+    P: Parse<A>,
+    R: Fn(A, A) -> A + Sync + Send,
+{
     let file = File::open(path)?;
     // SAFETY: the file is opened read-only and not modified while mapped.
     let mmap = unsafe { Mmap::map(&file)? };
@@ -682,7 +1049,7 @@ where
             end: (end_in > 0).then_some(end_in),
         });
     }
-    fold_bgzf_segments(bytes, &blocks, &segments, barcodes, &init, &fold, &reduce)
+    fold_bgzf_segments(bytes, &blocks, &segments, init, parse, reduce)
 }
 
 /// Append `b` to `a`, keeping the larger of the two allocations: the merge
@@ -869,6 +1236,164 @@ pub(crate) fn first_chromosome(path: &Path) -> Result<Option<String>, AtacErrors
     Ok(None)
 }
 
+/// Counts fragments per barcode, every barcode in the file.
+struct BarcodeCounter<'a> {
+    /// Chromosomes whose fragments do not count.
+    exclude: &'a [String],
+}
+
+impl Parse<FxHashMap<Box<[u8]>, u64>> for BarcodeCounter<'_> {
+    fn parse(&self, text: &[u8], acc: &mut FxHashMap<Box<[u8]>, u64>) -> Result<(), AtacErrors> {
+        let mut excluded_chrom: (&[u8], bool) = (&[], false);
+        for line in text.split(|&b| b == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() || line[0] == b'#' {
+                continue;
+            }
+            let mut fields = line.split(|&b| b == b'\t');
+            let (Some(chrom), Some(_), Some(_), Some(bc)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return Err(bad_line(line));
+            };
+            if chrom != excluded_chrom.0 {
+                let skip = self.exclude.iter().any(|c| c.as_bytes() == chrom);
+                excluded_chrom = (chrom, skip);
+            }
+            if excluded_chrom.1 {
+                continue;
+            }
+            match acc.get_mut(bc) {
+                Some(n) => *n += 1,
+                None => {
+                    acc.insert(bc.into(), 1);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fragments per barcode, every barcode in the file.
+///
+/// For calling cells from the fragment file alone (a knee plot, a minimum
+/// fragment count), when no barcode list comes with it.
+///
+/// ### Params
+///
+/// * `path` - The fragment file
+/// * `exclude_chroms` - Chromosomes not counted (the mitochondrial genome,
+///   typically)
+///
+/// ### Returns
+///
+/// `(barcode, fragments)` pairs sorted by barcode, or an I/O or parse error.
+pub fn barcode_fragment_counts(
+    path: &Path,
+    exclude_chroms: &[String],
+) -> Result<Vec<(String, u64)>, AtacErrors> {
+    let counter = BarcodeCounter {
+        exclude: exclude_chroms,
+    };
+    // fold the smaller map into the larger
+    let counts = drive(path, &FxHashMap::default, &counter, &|a, b| {
+        if a.len() < b.len() {
+            merge_counts(b, a)
+        } else {
+            merge_counts(a, b)
+        }
+    })?;
+    let mut out: Vec<(String, u64)> = counts
+        .into_iter()
+        .map(|(k, v)| (String::from_utf8_lossy(&k).into_owned(), v))
+        .collect();
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Add the counts of `b` into `a`.
+///
+/// ### Params
+///
+/// * `a` - The larger map
+/// * `b` - The smaller map
+///
+/// ### Returns
+///
+/// The merged map.
+fn merge_counts(
+    mut a: FxHashMap<Box<[u8]>, u64>,
+    b: FxHashMap<Box<[u8]>, u64>,
+) -> FxHashMap<Box<[u8]>, u64> {
+    for (k, v) in b {
+        *a.entry(k).or_default() += v;
+    }
+    a
+}
+
+/// The last chromosome in file order that `uses` accepts, read from the end
+/// of the file.
+///
+/// For files without a tabix index, where the chromosome order is otherwise
+/// unknown. Only the lines after the last used chromosome are read (sex
+/// chromosomes, the mitochondrial genome, contigs), backwards from the end.
+///
+/// ### Params
+///
+/// * `path` - Fragment file
+/// * `uses` - Which chromosomes count
+///
+/// ### Returns
+///
+/// The chromosome, `None` when no line is on a used one or for plain gzip,
+/// which cannot be read backwards.
+pub(crate) fn last_used_chromosome(
+    path: &Path,
+    uses: impl Fn(&str) -> bool,
+) -> Result<Option<String>, AtacErrors> {
+    let file = File::open(path)?;
+    if file.metadata()?.len() == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the file is opened read-only and not modified while mapped.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let bytes: &[u8] = &mmap;
+    // the chromosome of the last used line among complete lines, scanning
+    // backwards; `None` to keep going
+    let scan = |text: &[u8]| -> Option<String> {
+        text.rsplit(|&b| b == b'\n')
+            .filter(|l| !l.is_empty() && l[0] != b'#')
+            .filter_map(|l| l.split(|&b| b == b'\t').next())
+            .filter_map(|c| std::str::from_utf8(c).ok())
+            .find(|c| uses(c))
+            .map(str::to_string)
+    };
+    match detect_compression(bytes) {
+        Compression::None => Ok(scan(bytes)),
+        Compression::Gzip => Ok(None),
+        Compression::Bgzf => {
+            let offsets = bgzf_block_offsets(bytes)?;
+            // text of the blocks read so far, the first line possibly cut
+            let mut text: Vec<u8> = Vec::new();
+            for w in offsets.windows(2).rev() {
+                let mut block = Vec::new();
+                GzDecoder::new(&bytes[w[0]..w[1]]).read_to_end(&mut block)?;
+                block.extend_from_slice(&text);
+                text = block;
+                let Some(nl) = text.iter().position(|&b| b == b'\n') else {
+                    continue;
+                };
+                // whole lines only; the cut head waits for the block before
+                if let Some(c) = scan(&text[nl + 1..]) {
+                    return Ok(Some(c));
+                }
+                text.truncate(nl + 1);
+            }
+            Ok(scan(&text))
+        }
+    }
+}
+
 /// A stretch of a BGZF file to parse: blocks `[b0, b1)`, minus `skip` bytes
 /// at the start of the first block's text, cut after `end` bytes of the last
 /// block's text when set.
@@ -890,25 +1415,18 @@ struct BlockSegment {
 /// ### Params
 ///
 /// * `bytes` - The mapped file
-/// * `barcodes` - Cells to keep
 /// * `init` - New accumulator
-/// * `fold` - Consumer
+/// * `parse` - The line parser
 /// * `reduce` - Merge
 ///
 /// ### Returns
 ///
 /// The combined accumulator.
-fn fold_bgzf<A, I, F, R>(
-    bytes: &[u8],
-    barcodes: &BarcodeIndex,
-    init: &I,
-    fold: &F,
-    reduce: &R,
-) -> Result<A, AtacErrors>
+fn fold_bgzf<A, I, P, R>(bytes: &[u8], init: &I, parse: &P, reduce: &R) -> Result<A, AtacErrors>
 where
     A: Send,
     I: Fn() -> A + Sync + Send,
-    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    P: Parse<A>,
     R: Fn(A, A) -> A + Sync + Send,
 {
     let offsets = bgzf_block_offsets(bytes)?;
@@ -919,7 +1437,7 @@ where
         skip: 0,
         end: None,
     };
-    fold_bgzf_segments(bytes, &blocks, &[whole], barcodes, init, fold, reduce)
+    fold_bgzf_segments(bytes, &blocks, &[whole], init, parse, reduce)
 }
 
 /// Fold over BGZF segments that each start and end at a line boundary.
@@ -933,27 +1451,25 @@ where
 /// * `bytes` - The mapped file
 /// * `blocks` - Byte ranges of the blocks the segments index into
 /// * `segments` - The stretches to read
-/// * `barcodes` - Cells to keep
 /// * `init` - New accumulator
-/// * `fold` - Consumer
+/// * `parse` - The line parser
 /// * `reduce` - Merge
 ///
 /// ### Returns
 ///
 /// The combined accumulator.
-fn fold_bgzf_segments<A, I, F, R>(
+fn fold_bgzf_segments<A, I, P, R>(
     bytes: &[u8],
     blocks: &[(usize, usize)],
     segments: &[BlockSegment],
-    barcodes: &BarcodeIndex,
     init: &I,
-    fold: &F,
+    parse: &P,
     reduce: &R,
 ) -> Result<A, AtacErrors>
 where
     A: Send,
     I: Fn() -> A + Sync + Send,
-    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    P: Parse<A>,
     R: Fn(A, A) -> A + Sync + Send,
 {
     // (segment, group in segment, first block, end block)
@@ -968,8 +1484,8 @@ where
     let acc = groups
         .par_iter()
         .try_fold(
-            || (init(), Vec::new(), Vec::new()),
-            |(mut acc, mut text, mut buf), &(s, g, b0, b1)| {
+            || (init(), Vec::new()),
+            |(mut acc, mut text), &(s, g, b0, b1)| {
                 let seg = segments[s];
                 text.clear();
                 let mut last_start = 0;
@@ -984,17 +1500,17 @@ where
                 }
                 let skip = if g == 0 { seg.skip.min(text.len()) } else { 0 };
                 let (head, body, tail) = split_edges(&text[skip..], g == 0);
-                parse_lines(body, barcodes, &mut acc, fold, &mut buf)?;
+                parse.parse(body, &mut acc)?;
                 edges.lock().expect("edge list lock poisoned").push((
                     s,
                     g,
                     head.to_vec(),
                     tail.to_vec(),
                 ));
-                Ok::<_, AtacErrors>((acc, text, buf))
+                Ok::<_, AtacErrors>((acc, text))
             },
         )
-        .map(|r| r.map(|(acc, _, _)| acc))
+        .map(|r| r.map(|(acc, _)| acc))
         .try_reduce(init, |a, b| Ok(reduce(a, b)))?;
 
     // a line cut at a group boundary is the tail of one group plus the head
@@ -1012,7 +1528,7 @@ where
         }
     }
     let mut rest = init();
-    parse_lines(&stitched, barcodes, &mut rest, fold, &mut Vec::new())?;
+    parse.parse(&stitched, &mut rest)?;
     Ok(reduce(acc, rest))
 }
 
@@ -1021,38 +1537,27 @@ where
 /// ### Params
 ///
 /// * `chunks` - Text chunks, each cut at a line boundary
-/// * `barcodes` - Cells to keep
 /// * `init` - New accumulator
-/// * `fold` - Consumer
+/// * `parse` - The line parser
 /// * `reduce` - Merge
 ///
 /// ### Returns
 ///
 /// The combined accumulator, or a parse error.
-fn par_parse<C, A, I, F, R>(
-    chunks: &[C],
-    barcodes: &BarcodeIndex,
-    init: &I,
-    fold: &F,
-    reduce: &R,
-) -> Result<A, AtacErrors>
+fn par_parse<C, A, I, P, R>(chunks: &[C], init: &I, parse: &P, reduce: &R) -> Result<A, AtacErrors>
 where
     C: AsRef<[u8]> + Sync,
     A: Send,
     I: Fn() -> A + Sync + Send,
-    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    P: Parse<A>,
     R: Fn(A, A) -> A + Sync + Send,
 {
     chunks
         .par_iter()
-        .try_fold(
-            || (init(), Vec::new()),
-            |(mut acc, mut buf), chunk| {
-                parse_lines(chunk.as_ref(), barcodes, &mut acc, fold, &mut buf)?;
-                Ok::<_, AtacErrors>((acc, buf))
-            },
-        )
-        .map(|r| r.map(|(acc, _)| acc))
+        .try_fold(init, |mut acc, chunk| {
+            parse.parse(chunk.as_ref(), &mut acc)?;
+            Ok::<_, AtacErrors>(acc)
+        })
         .try_reduce(init, |a, b| Ok(reduce(a, b)))
 }
 
@@ -1061,25 +1566,18 @@ where
 /// ### Params
 ///
 /// * `bytes` - The mapped file
-/// * `barcodes` - Cells to keep
 /// * `init` - New accumulator
-/// * `fold` - Consumer
+/// * `parse` - The line parser
 /// * `reduce` - Merge
 ///
 /// ### Returns
 ///
 /// The combined accumulator.
-fn fold_text<A, I, F, R>(
-    bytes: &[u8],
-    barcodes: &BarcodeIndex,
-    init: &I,
-    fold: &F,
-    reduce: &R,
-) -> Result<A, AtacErrors>
+fn fold_text<A, I, P, R>(bytes: &[u8], init: &I, parse: &P, reduce: &R) -> Result<A, AtacErrors>
 where
     A: Send,
     I: Fn() -> A + Sync + Send,
-    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    P: Parse<A>,
     R: Fn(A, A) -> A + Sync + Send,
 {
     let mut chunks = Vec::new();
@@ -1092,7 +1590,7 @@ where
         chunks.push(&bytes[start..end]);
         start = end;
     }
-    par_parse(&chunks, barcodes, init, fold, reduce)
+    par_parse(&chunks, init, parse, reduce)
 }
 
 /// [`fold_fragments`] on a plain gzip file: one inflating thread, parallel
@@ -1101,25 +1599,18 @@ where
 /// ### Params
 ///
 /// * `file` - The open file
-/// * `barcodes` - Cells to keep
 /// * `init` - New accumulator
-/// * `fold` - Consumer
+/// * `parse` - The line parser
 /// * `reduce` - Merge
 ///
 /// ### Returns
 ///
 /// The combined accumulator.
-fn fold_gzip<A, I, F, R>(
-    file: &File,
-    barcodes: &BarcodeIndex,
-    init: &I,
-    fold: &F,
-    reduce: &R,
-) -> Result<A, AtacErrors>
+fn fold_gzip<A, I, P, R>(file: &File, init: &I, parse: &P, reduce: &R) -> Result<A, AtacErrors>
 where
     A: Send,
     I: Fn() -> A + Sync + Send,
-    F: Fn(&mut A, &str, &[Fragment]) + Sync + Send,
+    P: Parse<A>,
     R: Fn(A, A) -> A + Sync + Send,
 {
     let mut decoder = MultiGzDecoder::new(std::io::BufReader::new(file));
@@ -1155,7 +1646,7 @@ where
                 break;
             }
         }
-        let part = par_parse(&chunks, barcodes, init, fold, reduce)?;
+        let part = par_parse(&chunks, init, parse, reduce)?;
         acc = reduce(acc, part);
         chunks.clear();
     }
@@ -1414,6 +1905,139 @@ mod tests {
                 .collect();
             assert_eq!(got, want, "spans {pick:?}");
         }
+    }
+
+    /// An index whose spans land on another chromosome's lines is refused
+    /// rather than read under the wrong name.
+    #[test]
+    fn test_span_with_a_foreign_chromosome_is_refused() {
+        let text = synthetic_text(3000);
+        let cells: Vec<String> = ["CCCG-1", "TTTA-1"].map(String::from).to_vec();
+        let bgzf = bgzf_bytes(text.as_bytes(), 997);
+        let file = temp_file(&bgzf);
+        let mut tbi = file.to_path_buf().into_os_string();
+        tbi.push(".tbi");
+        let tbi = TempPath::try_from_path(tbi).unwrap();
+        std::fs::write(&tbi, tabix_bytes(&text, &bgzf, 997)).unwrap();
+        let mut spans = chrom_spans(&file).unwrap().unwrap();
+        // chr1's bytes under chr2's name, as a stale index would give
+        spans[0].name = "chr2".into();
+        let idx = BarcodeIndex::new(&cells).unwrap();
+        let r = fold_fragment_spans(
+            &file,
+            &spans[..1],
+            &idx,
+            || 0usize,
+            |a, _, f| *a += f.len(),
+            |a, b| a + b,
+        );
+        assert!(matches!(r, Err(AtacErrors::InvalidArgument(m)) if m.contains("tabix")));
+    }
+
+    #[test]
+    fn test_coverage_errors_on_no_barcode_or_no_shared_chromosome() {
+        let file = temp_file(synthetic_text(50).as_bytes());
+        let fold = |a: &mut usize, _: &str, f: &[Fragment]| *a += f.len();
+        let run = |cells: &[String], targets: Option<&[&str]>| {
+            let idx = BarcodeIndex::new(cells).unwrap();
+            fold_fragments_checked(
+                &file,
+                cells,
+                &idx,
+                targets,
+                "features",
+                || 0usize,
+                fold,
+                |a, b| a + b,
+            )
+        };
+        let cells: Vec<String> = ["AAAC-1", "NONE-1"].map(String::from).to_vec();
+
+        let (_, cov) = run(&cells, Some(&["chr1", "chr2"])).unwrap();
+        assert_eq!(cov.cells_missing, 1);
+        assert_eq!(cov.fragments_total, cov.per_chrom.values().sum::<u64>());
+        assert!(
+            (cov.off_target_fraction() - 1.0 / 3.0).abs() < 0.05,
+            "chrX is off target"
+        );
+
+        let suffixless: Vec<String> = ["AAAC", "CCCG"].map(String::from).to_vec();
+        assert!(matches!(
+            run(&suffixless, None),
+            Err(AtacErrors::BarcodesNotFound { n_missing: 2, .. })
+        ));
+        assert!(matches!(
+            run(&cells, Some(&["1", "2", "X"])),
+            Err(AtacErrors::InvalidArgument(m)) if m.contains("chromosome naming")
+        ));
+    }
+
+    #[test]
+    fn test_barcode_counts_match_the_fold_on_every_compression() {
+        let text = synthetic_text(3000);
+        let cells: Vec<String> = ["AAAC-1", "CCCG-1", "GGGT-1", "TTTA-1"]
+            .map(String::from)
+            .to_vec();
+        let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
+        gz.write_all(text.as_bytes()).unwrap();
+        let files = [
+            temp_file(text.as_bytes()),
+            temp_file(&bgzf_bytes(text.as_bytes(), 997)),
+            temp_file(&gz.finish().unwrap()),
+        ];
+        let exclude = vec!["chrX".to_string()];
+        for f in &files {
+            let idx = BarcodeIndex::new(&cells).unwrap();
+            let want = fold_fragments(
+                f,
+                &idx,
+                || vec![0u64; cells.len()],
+                |acc: &mut Vec<u64>, chrom, frags| {
+                    if chrom != "chrX" {
+                        frags.iter().for_each(|x| acc[x.cell as usize] += 1);
+                    }
+                },
+                |mut a, b| {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            )
+            .unwrap();
+            let got = barcode_fragment_counts(f, &exclude).unwrap();
+            let mut sorted = cells.clone();
+            sorted.sort();
+            assert_eq!(got.iter().map(|g| g.0.clone()).collect::<Vec<_>>(), sorted);
+            for (bc, n) in got {
+                let i = cells.iter().position(|c| *c == bc).unwrap();
+                assert_eq!(n, want[i], "{bc}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_last_used_chromosome_reads_backwards() {
+        let text = synthetic_text(2000);
+        let autosome = |c: &str| c != "chrX";
+        for bytes in [text.clone().into_bytes(), bgzf_bytes(text.as_bytes(), 997)] {
+            let f = temp_file(&bytes);
+            assert_eq!(
+                last_used_chromosome(&f, autosome).unwrap().as_deref(),
+                Some("chr2")
+            );
+            assert_eq!(
+                last_used_chromosome(&f, |_| true).unwrap().as_deref(),
+                Some("chrX")
+            );
+            assert_eq!(last_used_chromosome(&f, |c| c == "chrY").unwrap(), None);
+        }
+        let mut gz = GzEncoder::new(Vec::new(), GzLevel::fast());
+        gz.write_all(text.as_bytes()).unwrap();
+        let f = temp_file(&gz.finish().unwrap());
+        assert_eq!(
+            last_used_chromosome(&f, autosome).unwrap(),
+            None,
+            "plain gzip"
+        );
     }
 
     #[test]

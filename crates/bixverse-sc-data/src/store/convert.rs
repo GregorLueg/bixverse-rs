@@ -6,7 +6,9 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::store::chunk::norm_value;
+use crate::store::chunk::{CscGeneChunk, CsrCellChunk, norm_value};
+use crate::store::gene_file::write_gene_file;
+use crate::store::reader::peek_file_version;
 use crate::store::v4::{ChunkCodec, V4Header, snap_v3_norm};
 use crate::store::writer::{CellGeneSparseWriter, CellPayload};
 
@@ -48,9 +50,9 @@ fn require_pre_v5(reader: &ParallelSparseReader) -> Result<(), ScDataErrors> {
 /// Convert a v3 or v4 cell-based file to v5.
 ///
 /// Streams in batches of [`CONVERT_CELL_BATCH`] chunks, in file order, so the
-/// original index of every chunk is kept. A v3 norm that is the f16 rounding
-/// of the recompute is dropped (see [`snap_v3_norm`]); a verbatim v4 norm
-/// widens to f32 exactly.
+/// original index of every chunk is kept. A v3 norm, or a verbatim v4 norm,
+/// that is the f16 rounding of the recompute is dropped (see
+/// [`snap_v3_norm`]); any other verbatim norm widens to f32 exactly.
 ///
 /// ### Params
 ///
@@ -79,7 +81,6 @@ pub fn convert_cell_file_to_v5(
         });
     }
     let dims = reader.dims();
-    let from_v3 = reader.file_version() == SC_FILE_VERSION_V3;
     let target_size = reader.target_size().unwrap_or(0.0);
     let order = reader.chunk_order()?;
 
@@ -104,7 +105,8 @@ pub fn convert_cell_file_to_v5(
         let payloads = cells
             .into_par_iter()
             .map(|mut cell| {
-                if from_v3 {
+                // v3 always, and v4 where a chunk kept its norm, hold f16
+                if !cell.data_norm.is_empty() {
                     let lib = cell.library_size as f32;
                     let raw: Vec<u32> = cell.data_raw.iter().collect();
                     snap_v3_norm(&mut cell.data_norm, |k| {
@@ -172,7 +174,6 @@ pub fn convert_gene_file_to_v5(
         });
     }
     let dims = reader.dims();
-    let from_v3 = reader.file_version() == SC_FILE_VERSION_V3;
     let target_size = reader.target_size().unwrap_or(0.0);
     let order = reader.chunk_order()?;
     let lib_f32: Vec<f32> = cell_lib.iter().map(|&l| l as f32).collect();
@@ -193,7 +194,7 @@ pub fn convert_gene_file_to_v5(
         let payloads = genes
             .into_par_iter()
             .map(|mut gene| {
-                if from_v3 {
+                if !gene.data_norm.is_empty() {
                     let raw: Vec<u32> = gene.data_raw.iter().collect();
                     // a cell outside the table yields NaN, which never matches,
                     // and `to_v4_bytes` stores the layer
@@ -241,7 +242,9 @@ pub fn convert_gene_file_to_v5(
 ///
 /// ### Returns
 ///
-/// `Ok(())` once both outputs are finalised.
+/// `Ok(())` once both outputs are finalised, or
+/// [`ScDataErrors::InvalidArgument`] when only one of `gene_in` and
+/// `gene_out` is given.
 pub fn convert_store_to_v5(
     cell_in: &str,
     gene_in: Option<&str>,
@@ -250,6 +253,11 @@ pub fn convert_store_to_v5(
     codec: ChunkCodec,
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
+    if gene_in.is_some() != gene_out.is_some() {
+        return Err(ScDataErrors::InvalidArgument(
+            "convert_store_to_v5 needs both gene_in and gene_out, or neither".into(),
+        ));
+    }
     let lib = convert_cell_file_to_v5(cell_in, cell_out, codec, verbose)?;
     if let (Some(gene_in), Some(gene_out)) = (gene_in, gene_out) {
         convert_gene_file_to_v5(gene_in, gene_out, &lib, codec, verbose)?;
@@ -257,12 +265,83 @@ pub fn convert_store_to_v5(
     Ok(())
 }
 
+/// Chunks compared entry by entry when checking a conversion.
+const VERIFY_SAMPLE: usize = 64;
+
+/// Check that a converted file holds the same data as its source.
+///
+/// Compares the shape, every chunk's size (library size per cell, nnz per
+/// gene) and the raw entries of up to [`VERIFY_SAMPLE`] chunks spread over
+/// the file.
+///
+/// ### Params
+///
+/// * `old` - The source file
+/// * `new` - The converted file
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`ScDataErrors::V4ChunkCorrupt`] naming what differs.
+fn verify_conversion(old: &str, new: &str) -> Result<(), ScDataErrors> {
+    let a = ParallelSparseReader::open_any(old)?;
+    let b = ParallelSparseReader::new(new)?;
+    let differ = |what: &str| {
+        Err(ScDataErrors::V4ChunkCorrupt(format!(
+            "converted {old} differs from the original in its {what}"
+        )))
+    };
+    if (a.dims(), a.n_chunks()) != (b.dims(), b.n_chunks()) {
+        return differ("shape");
+    }
+    let dims = a.dims();
+    let n = if dims.cell_based {
+        dims.total_cells
+    } else {
+        dims.total_genes
+    };
+    let all: Vec<usize> = (0..n).collect();
+    let step = (n / VERIFY_SAMPLE).max(1);
+    let sample: Vec<usize> = (0..n).step_by(step).collect();
+    if dims.cell_based {
+        if a.read_cell_library_sizes(&all)? != b.read_cell_library_sizes(&all)? {
+            return differ("library sizes");
+        }
+        let (x, y) = (
+            a.read_cells_parallel(&sample)?,
+            b.read_cells_parallel(&sample)?,
+        );
+        let raw = |c: &CsrCellChunk| (c.indices.clone(), c.data_raw.iter().collect::<Vec<u32>>());
+        if x.iter().map(raw).ne(y.iter().map(raw)) {
+            return differ("raw counts");
+        }
+    } else {
+        if a.read_gene_nnz(&all)? != b.read_gene_nnz(&all)? {
+            return differ("non-zeros per gene");
+        }
+        let (x, y) = (
+            a.read_gene_parallel_raw(&sample)?,
+            b.read_gene_parallel_raw(&sample)?,
+        );
+        let raw = |c: &CscGeneChunk| (c.indices.clone(), c.data_raw.iter().collect::<Vec<u32>>());
+        if x.iter().map(raw).ne(y.iter().map(raw)) {
+            return differ("raw counts");
+        }
+    }
+    Ok(())
+}
+
 /// Replace a v3 or v4 store by its v5 conversion, in place.
 ///
-/// Converts into `<path>.v5.tmp` next to each file first and only touches the
-/// originals once every conversion has succeeded, so a failure leaves the
-/// store as it was. Each original is then renamed to `<path>.v<n>.bak` (`n`
-/// its version) when `keep_backup` is set, and deleted otherwise.
+/// Converts into `<path>.v5.tmp` next to each file, checks every conversion
+/// against its source and syncs it to disk, and only then swaps it in with
+/// one atomic rename per file. With `keep_backup` the original is first
+/// hard-linked to `<path>.v<n>.bak` (`n` its version), so at every moment the
+/// path holds either the original or the finished conversion.
+///
+/// Resumable: leftover `.v5.tmp` files of an interrupted run are discarded,
+/// files already at v5 are kept, and a gene file still at v3 or v4 next to a
+/// v5 cell file is rebuilt from the cell file, so the pair is consistent by
+/// construction. Running it on a store that is fully v5 does nothing.
 ///
 /// ### Params
 ///
@@ -283,43 +362,85 @@ pub fn upgrade_store_to_v5(
     verbose: bool,
 ) -> Result<(), ScDataErrors> {
     let tmp = |p: &str| format!("{p}.v5.tmp");
-    let cleanup = |paths: &[Option<&str>]| {
-        for p in paths.iter().flatten() {
-            let _ = std::fs::remove_file(tmp(p));
-        }
-    };
+    let files: Vec<&str> = std::iter::once(cell_path).chain(gene_path).collect();
+    for p in &files {
+        let _ = std::fs::remove_file(tmp(p));
+    }
 
-    let mut versions = Vec::new();
+    let cell_version = peek_file_version(cell_path)?;
+    let gene_version = gene_path.map(peek_file_version).transpose()?;
+
+    // (path, version) of every file converted into its tmp
+    let mut staged: Vec<(&str, u32)> = Vec::new();
     let result = (|| {
-        let cell_tmp = tmp(cell_path);
-        let lib = convert_cell_file_to_v5(cell_path, &cell_tmp, codec, verbose)?;
-        if let Some(gene_path) = gene_path {
-            convert_gene_file_to_v5(gene_path, &tmp(gene_path), &lib, codec, verbose)?;
-        }
-        // the converted files must open and agree with the originals
-        for p in std::iter::once(cell_path).chain(gene_path) {
-            let old = ParallelSparseReader::open_any(p)?;
-            let new = ParallelSparseReader::new(&tmp(p))?;
-            if (old.dims(), old.n_chunks()) != (new.dims(), new.n_chunks()) {
-                return Err(ScDataErrors::V4ChunkCorrupt(format!(
-                    "converted {p} does not match the original"
-                )));
+        if cell_version != SC_FILE_VERSION {
+            let lib = convert_cell_file_to_v5(cell_path, &tmp(cell_path), codec, verbose)?;
+            verify_conversion(cell_path, &tmp(cell_path))?;
+            staged.push((cell_path, cell_version));
+            if let (Some(g), Some(v)) = (gene_path, gene_version)
+                && v != SC_FILE_VERSION
+            {
+                convert_gene_file_to_v5(g, &tmp(g), &lib, codec, verbose)?;
+                verify_conversion(g, &tmp(g))?;
+                staged.push((g, v));
             }
-            versions.push(old.file_version());
+        } else if let (Some(g), Some(v)) = (gene_path, gene_version)
+            && v != SC_FILE_VERSION
+        {
+            write_gene_file(cell_path, &tmp(g), None, verbose)?;
+            verify_conversion(g, &tmp(g))?;
+            staged.push((g, v));
+        }
+        for (p, _) in &staged {
+            // Windows refuses FlushFileBuffers on a read-only handle
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(tmp(p))?
+                .sync_all()?;
         }
         Ok(())
     })();
     if let Err(e) = result {
-        cleanup(&[Some(cell_path), gene_path]);
+        for p in &files {
+            let _ = std::fs::remove_file(tmp(p));
+        }
         return Err(e);
     }
 
-    for (p, version) in std::iter::once(cell_path).chain(gene_path).zip(versions) {
+    for (p, version) in &staged {
         if keep_backup {
-            std::fs::rename(p, format!("{p}.v{version}.bak"))?;
+            let bak = format!("{p}.v{version}.bak");
+            // a link left by an interrupted run is the same original
+            let _ = std::fs::remove_file(&bak);
+            std::fs::hard_link(p, &bak)?;
         }
         std::fs::rename(tmp(p), p)?;
     }
+    sync_parent_dirs(&files)?;
+    Ok(())
+}
+
+/// Flush the directory entries of the renamed files to disk.
+///
+/// ### Params
+///
+/// * `files` - Paths whose parent directories to sync
+///
+/// ### Returns
+///
+/// `Ok(())`, or the I/O error. A no-op off unix, where directories cannot be
+/// opened for syncing.
+fn sync_parent_dirs(files: &[&str]) -> Result<(), ScDataErrors> {
+    #[cfg(unix)]
+    for p in files {
+        let dir = std::path::Path::new(p)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = files;
     Ok(())
 }
 
@@ -368,7 +489,9 @@ mod tests {
     /// * `codec` - Codec of the output
     /// * `target` - Target size of the input, `0.0` stores the norm
     fn check_conversion(version: u32, codec: ChunkCodec, target: f32) {
-        let exact = version == SC_FILE_VERSION_V4;
+        // verbatim f16 norms of v3 and v4 snap to the f32 recompute, so both
+        // only agree with their source at f16
+        let exact = false;
         let (_dir, s) = scratch(4);
         write_legacy_store(version, &s[0], &s[1], target);
         convert_store_to_v5(&s[0], Some(&s[1]), &s[2], Some(&s[3]), codec, false).unwrap();
@@ -478,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v4_to_v5_round_trip_is_exact() {
+    fn test_v4_to_v5_round_trip() {
         check_conversion(SC_FILE_VERSION_V4, ChunkCodec::Lz4, TARGET);
         check_conversion(SC_FILE_VERSION_V4, ChunkCodec::Zstd, 0.0);
     }

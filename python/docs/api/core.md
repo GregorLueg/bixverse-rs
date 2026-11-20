@@ -9,6 +9,7 @@ The experiment classes and the objects they hand around.
         - SingleCells
         - SingleCellsSubset
         - SingleCellsMultiModal
+        - SingleCellsAtac
         - MetaCells
         - Counts
         - get_counts

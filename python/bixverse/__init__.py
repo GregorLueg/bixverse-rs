@@ -46,6 +46,7 @@ from ._bixverse import (
     __version__,
 )
 from ._core.agent_skill import install_agent_skill, warn_stale_agent_skills
+from ._core.atac_exp import SingleCellsAtac
 from ._core.db import TableNotFoundError
 from ._core.metacells import MetaCells
 from ._core.multimodal import SingleCellsMultiModal
@@ -71,6 +72,7 @@ __all__ = [
     "ScCache",
     "ScMap",
     "SingleCells",
+    "SingleCellsAtac",
     "SingleCellsMultiModal",
     "SingleCellsSubset",
     "SparseFileError",

@@ -68,11 +68,14 @@ if TYPE_CHECKING:
         embedding_plot,
         feature_plot,
         feature_scatter_plot,
+        fragment_length_plot,
         heatmap_plot,
         joint_plot,
+        lsi_depth_plot,
         milo_nhood_plot,
         paga_plot,
         stacked_violin_plot,
+        tss_profile_plot,
         violin_plot,
     )
 
@@ -83,11 +86,14 @@ PLOTS: tuple[str, ...] = (
     "embedding_plot",
     "feature_plot",
     "feature_scatter_plot",
+    "fragment_length_plot",
     "heatmap_plot",
     "joint_plot",
+    "lsi_depth_plot",
     "milo_nhood_plot",
     "paga_plot",
     "stacked_violin_plot",
+    "tss_profile_plot",
     "violin_plot",
 )
 
@@ -115,10 +121,13 @@ __all__ = [
     "extract_paga_plot_data",
     "feature_plot",
     "feature_scatter_plot",
+    "fragment_length_plot",
     "heatmap_plot",
     "joint_plot",
+    "lsi_depth_plot",
     "milo_nhood_plot",
     "paga_plot",
     "stacked_violin_plot",
+    "tss_profile_plot",
     "violin_plot",
 ]

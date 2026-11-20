@@ -10,7 +10,9 @@ use flate2::read::MultiGzDecoder;
 use bixverse_atac::integration::rlsi::{
     BatchLsi, RlsiParams, rlsi_anchors, rlsi_integration, rlsi_on_store,
 };
-use bixverse_atac::io::annotation::{GeneActivityParams, gene_activity_regions, read_gtf_genes};
+use bixverse_atac::io::annotation::{
+    GeneActivityParams, gene_activity_regions, read_gtf_genes, tss_positions,
+};
 use bixverse_atac::peaks::calling::{KeepDup, NarrowPeak, PeakCallParams, TagSource, call_peaks};
 use bixverse_atac::peaks::regions::{genome_tiles, read_bed, region};
 use bixverse_atac::processing::amulet::{AmuletParams, amulet};
@@ -23,6 +25,7 @@ use bixverse_atac::processing::features::{
 use bixverse_atac::processing::lsi::{
     LsiParams, TF_IDF_SCALE, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
 };
+use bixverse_atac::processing::profiles::fragment_profiles;
 use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_annotation::seurat_transfer::{
     TransferAnchorParams, TransferDataParams, find_transfer_anchors, transfer_labels,
@@ -252,6 +255,16 @@ fn test_fragment_counts_match_signac_genome_bins() {
 }
 
 #[test]
+fn test_paired_insertion_counts_match_snapatac2_peaks() {
+    let (peaks, _) = feature_file("snapatac2/peaks_paired-insertion/features.tsv.gz");
+    let c = count_fragments(&fragments(), &cells(), &peaks, CountMode::PairedInsertion).unwrap();
+    assert_eq!(
+        our_triplets(&c),
+        triplets("snapatac2/peaks_paired-insertion/matrix.tsv.gz")
+    );
+}
+
+#[test]
 fn test_fragment_counts_match_snapatac2_tiles() {
     let tiles = genome_tiles(&[("chr22".to_string(), CHR22_LEN)], 500);
     let c = count_fragments(&fragments(), &cells(), &tiles, CountMode::Fragment).unwrap();
@@ -415,7 +428,43 @@ fn test_lsi_matches_signac_run_svd() {
             1e-4,
             &format!("depth cor {}", j + 1),
         );
+
+        // loadings: one row per selected feature, keyed by store feature
+        let (_, load) = tsv("signac/lsi_loadings.tsv.gz");
+        assert_eq!(load.len(), features.len());
+        for r in &load {
+            let f: usize = r[0].parse().unwrap();
+            let k = features
+                .iter()
+                .position(|&x| x == f)
+                .expect("selected feature");
+            let theirs: f64 = r[j + 1].parse().unwrap();
+            let ours = res.loadings[(k, j)] as f64 * sign;
+            assert!(
+                (ours - theirs).abs() < 1e-4,
+                "loading {f} LSI_{}: {ours} vs {theirs}",
+                j + 1
+            );
+        }
     }
+}
+
+/// TSSs from the GTF (gene rows, protein coding) against Signac's
+/// `GetTSSPositions` on the same GTF.
+#[test]
+fn test_tss_positions_match_signac() {
+    let genes = read_gtf_genes(&fixtures().join("genes.gtf.gz")).unwrap();
+    let mut ours = tss_positions(&genes, &["protein_coding".to_string()]).unwrap();
+    let mut theirs: Vec<(String, u32)> = lines("signac/tss.bed")
+        .iter()
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f[0].to_string(), f[1].parse().unwrap())
+        })
+        .collect();
+    ours.sort();
+    theirs.sort();
+    assert_eq!(ours, theirs);
 }
 
 ///////////////////
@@ -425,7 +474,8 @@ fn test_lsi_matches_signac_run_svd() {
 #[test]
 fn test_gene_activity_regions_match_signac() {
     let genes = read_gtf_genes(&fixtures().join("genes.gtf.gz")).unwrap();
-    let (regions, names, _) = gene_activity_regions(&genes, &GeneActivityParams::default());
+    let (regions, names, _) =
+        gene_activity_regions(&genes, &GeneActivityParams::default()).unwrap();
     let mut ours: Vec<(String, String, u32, u32)> = regions
         .iter()
         .zip(&names)
@@ -734,14 +784,34 @@ fn test_transfer_anchors_match_seurat() {
     for p in their_pairs.iter().filter(|p| !ours.contains_key(p)) {
         assert!(tied.contains(&p.0), "Seurat anchor {p:?} missing");
     }
+    // scores are rescaled shared neighbour counts, so they move in steps of
+    // one neighbour; the smallest gap between Seurat's distinct scores is one
+    let mut levels: Vec<f64> = theirs.iter().map(|t| t.2).collect();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    let step = levels
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f64::INFINITY, f64::min);
+    // the f32 CCA embedding differs in its last bits from Seurat's f64 one and
+    // with the thread count (faer splits its reductions by it), so pairs on a
+    // near tie at the k_score boundary gain or lose one shared neighbour
     let mut n_off = 0;
     for &(r, q, score) in &theirs {
         if let Some(&s) = ours.get(&(r, q)) {
-            n_off += ((s as f64 - score).abs() > 1e-6) as usize;
+            let d = (s as f64 - score).abs();
+            assert!(
+                d <= step + 1e-6,
+                "anchor ({r}, {q}): {s} vs Seurat's {score}, more than one step of {step}"
+            );
+            n_off += (d > 1e-6) as usize;
         }
     }
-    // a swapped tied cell shifts the shared neighbour counts of a few pairs
-    assert!(n_off <= 2, "{n_off} anchor scores differ");
+    assert!(
+        n_off * 20 <= theirs.len(),
+        "{n_off} of {} anchor scores off by one step",
+        theirs.len()
+    );
 }
 
 #[test]
@@ -1008,8 +1078,87 @@ fn test_amulet_matches_reference() {
     check_amulet_case(2);
 }
 
+/// chr21 and chr22 each end with a locus five cells leave open, followed by
+/// chrX and a contig AMULET skips: the reference keeps chr21's and drops
+/// chr22's. Our run must agree with the tabix index and, read from the end
+/// of the file, without it. Generated by `dev/atac/gen_atac_amulet_trailing.py`.
+#[test]
+fn test_amulet_trailing_loci_follow_the_reference() {
+    let dir = fixtures().join("../amulet_trailing");
+    let cells = cells();
+    let restrict = read_bed(&dir.join("blacklist.bed")).unwrap();
+    let (_, summary) = tsv("../amulet_trailing/OverlapSummary.txt.gz");
+    let at: FxHashMap<&str, usize> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
+    let no_index = tempfile::TempDir::new().unwrap();
+    let copy = no_index.path().join("fragments.tsv.gz");
+    std::fs::copy(dir.join("fragments.tsv.gz"), &copy).unwrap();
+    for path in [dir.join("fragments.tsv.gz"), copy] {
+        let res = amulet(&path, &cells, &restrict, None).unwrap();
+        for r in &summary {
+            let i = at[r[0].as_str()];
+            assert_eq!(
+                res.n_overlaps[i],
+                r[2].parse::<u32>().unwrap(),
+                "{} overlaps, {}",
+                r[0],
+                path.display()
+            );
+        }
+    }
+}
+
 /// A lower threshold gives many more loci and exercises the repeat filter.
 #[test]
 fn test_amulet_threshold_one_matches_reference() {
     check_amulet_case(1);
+}
+
+//////////////
+// Profiles //
+//////////////
+
+/// TSS insertion profile and fragment length histogram against SnapATAC2's
+/// `TSS_profile` and `frag_size_distr`, exact, on its own TSS list.
+#[test]
+fn test_fragment_profiles_match_snapatac2() {
+    let cells = cells();
+    let tss: Vec<(String, u32, i8)> = lines("snapatac2/tss.bed.gz")
+        .iter()
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let strand = if f[5] == "-" { -1 } else { 1 };
+            (f[0].to_string(), f[1].parse().unwrap(), strand)
+        })
+        .collect();
+    // two groups, so the per-group split is exercised as well
+    let groups: Vec<u32> = (0..cells.len() as u32).map(|i| i % 2).collect();
+    let p = fragment_profiles(&fragments(), &cells, &groups, &tss, 2000, 1000).unwrap();
+    let sum = |v: &[Vec<u64>], i: usize| v.iter().map(|g| g[i]).sum::<u64>();
+
+    let (_, profile) = tsv("snapatac2/tss_profile.tsv");
+    assert_eq!(profile.len(), 4001);
+    for (i, r) in profile.iter().enumerate() {
+        assert_eq!(
+            sum(&p.tss, i),
+            r[1].parse::<u64>().unwrap(),
+            "offset {}",
+            r[0]
+        );
+    }
+    let (_, hist) = tsv("snapatac2/frag_size_distr.tsv");
+    assert_eq!(hist.len(), 1001);
+    for (i, r) in hist.iter().enumerate() {
+        assert_eq!(
+            sum(&p.lengths, i),
+            r[1].parse::<u64>().unwrap(),
+            "size {}",
+            r[0]
+        );
+    }
+    assert!(p.tss.iter().all(|g| g.iter().sum::<u64>() > 0));
 }

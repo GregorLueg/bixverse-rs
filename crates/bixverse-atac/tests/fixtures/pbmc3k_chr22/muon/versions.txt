@@ -1,5 +1,0 @@
-muon 0.2.1
-anndata 0.13.4
-scanpy 1.12.6
-numpy 2.5.5
-scipy 1.18.1

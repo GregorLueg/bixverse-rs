@@ -11,7 +11,8 @@ use thousands::Separable;
 use crate::prelude::*;
 use crate::store::{
     chunk::{CsrCellChunk, RawCounts},
-    reader::{ParallelSparseReader, SingleCellReading, peek_target_size},
+    reader::{ParallelSparseReader, SingleCellReading},
+    v5::{FeatureKind, NormKind},
     writer::{CellGeneSparseWriter, write_cell_chunks_parallel},
 };
 
@@ -102,10 +103,13 @@ fn remap_cell(
     renormalise: bool,
     target_size: f32,
 ) -> (CsrCellChunk, usize, usize) {
+    // a store without a derivable norm reads an empty norm layer, and the
+    // renormalising path never needs it
+    let norm_at = |i: usize| if renormalise { 0.0 } else { cell.data_norm[i] };
     let mut entries: Vec<(u32, u32, f32)> = Vec::with_capacity(cell.indices.len());
     for (i, &local_idx) in cell.indices.iter().enumerate() {
         if let Some(universe_idx) = gene_local_to_universe[local_idx as usize] {
-            entries.push((universe_idx, cell.data_raw.get(i), cell.data_norm[i]));
+            entries.push((universe_idx, cell.data_raw.get(i), norm_at(i)));
         }
     }
     entries.sort_unstable_by_key(|&(u, _, _)| u);
@@ -150,19 +154,24 @@ fn remap_cell(
 /// * `tasks` - One `BinMergeTask` per input source.
 /// * `output_bin_path` - Path to the new cells .bin file to write.
 /// * `universe_size` - Number of genes in the intersection universe.
-/// * `renormalise` - If `true`, recompute `data_norm` against `target_size`
-///   using each cell's surviving raw counts. If `false`, pass `data_norm`
-///   through untouched; the inputs are then checked to agree on the
-///   `target_size` recorded in their headers and
-///   [`ScDataErrors::TargetSizeMismatch`] is returned if they do not. Inputs
-///   predating that header field report nothing and are skipped by the check.
+/// * `renormalise` - If `true`, recompute `data_norm` as log-CPM against
+///   `target_size` using each cell's surviving raw counts. If `false`, pass
+///   `data_norm` through untouched; the inputs must then be log-CPM and agree
+///   on the `target_size` recorded in their headers, else
+///   [`ScDataErrors::StoreKindMismatch`] or
+///   [`ScDataErrors::TargetSizeMismatch`]. Inputs predating that header field
+///   report nothing and are skipped by the target check.
 /// * `target_size` - Target library size for renormalisation. Ignored when
 ///   `renormalise = false`.
 /// * `verbose` - Controls verbosity.
 ///
 /// ### Returns
 ///
-/// `MultiSingleCellsResult` summarising the merge.
+/// `MultiSingleCellsResult` summarising the merge, or
+/// [`ScDataErrors::StoreKindMismatch`] for inputs that differ in feature kind,
+/// or that carry more than one raw layer (the merge would drop the others).
+/// The output keeps the inputs' feature kind and is log-CPM; a TF-IDF store
+/// needs its IDF recomputed on the merged cells.
 pub fn merge_sc_bin_files<P: AsRef<Path>>(
     tasks: &[BinMergeTask],
     output_bin_path: P,
@@ -185,14 +194,44 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
         );
     }
 
+    let readers = tasks
+        .iter()
+        .map(|t| ParallelSparseReader::new(&t.bin_cells_path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let kind = readers
+        .first()
+        .map_or(FeatureKind::Gene, ParallelSparseReader::feature_kind);
+    for r in &readers {
+        if r.feature_kind() != kind {
+            return Err(ScDataErrors::StoreKindMismatch(format!(
+                "feature kind ({} and {})",
+                kind.name(),
+                r.feature_kind().name()
+            )));
+        }
+        if r.n_layers() > 1 {
+            return Err(ScDataErrors::StoreKindMismatch(format!(
+                "raw layers: an input carries {}, and the merge keeps only one",
+                r.n_layers()
+            )));
+        }
+        if !renormalise && r.norm_kind() != NormKind::LogCpm {
+            return Err(ScDataErrors::StoreKindMismatch(
+                "normalisation: passing the norm through needs log-CPM inputs; merge with \
+                 renormalise = true"
+                    .into(),
+            ));
+        }
+    }
+
     // Pass-through mode inherits the inputs' normalisation, so they have to
     // agree on it. Renormalise mode imposes `target_size` regardless.
     let output_target_size = if renormalise {
         target_size
     } else {
         let mut agreed: Option<f32> = None;
-        for task in tasks {
-            let Some(found) = peek_target_size(&task.bin_cells_path)? else {
+        for r in &readers {
+            let Some(found) = r.target_size() else {
                 continue;
             };
             match agreed {
@@ -215,12 +254,13 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
         total_cells,
         universe_size,
         output_target_size,
-    )?;
+    )?
+    .with_kinds(kind, NormKind::LogCpm)?;
 
     let mut per_file: Vec<PerFileMergeResult> = Vec::with_capacity(tasks.len());
     let mut new_cell_idx: usize = 0;
 
-    for (task_idx, task) in tasks.iter().enumerate() {
+    for (task_idx, (task, reader)) in tasks.iter().zip(&readers).enumerate() {
         if verbose {
             println!(
                 "  Input {}/{} ({}): {} cells",
@@ -230,8 +270,6 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
                 task.cells_to_keep.len().separate_with_underscores()
             );
         }
-
-        let reader = ParallelSparseReader::new(&task.bin_cells_path)?;
 
         let mut lib_size_out: Vec<usize> = Vec::with_capacity(task.cells_to_keep.len());
         let mut nnz_out: Vec<usize> = Vec::with_capacity(task.cells_to_keep.len());
@@ -305,8 +343,10 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
 /// per phase. That is the same trade the downstream CSR to CSC conversion
 /// makes.
 ///
-/// The output inherits the input's `target_size`, so the normalised layer keeps
-/// meaning the same thing on both sides.
+/// The output inherits the input's identity (feature kind, norm kind and its
+/// scales, IDF, cell-ID hash, metadata), so the normalised layer keeps meaning
+/// the same thing on both sides. A store whose norm is not log-CPM is carried
+/// as raw counts and its norm derived on read, as in the source.
 ///
 /// ### Params
 ///
@@ -319,8 +359,8 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// `()`, or a [`ScDataErrors`] when the source is not gene-major or a read or
-/// write fails.
+/// `()`, or a [`ScDataErrors`] when the source is not gene-major, carries more
+/// than one raw layer, or a read or write fails.
 pub fn gene_store_to_cell_store<P: AsRef<Path>>(
     in_path: P,
     out_path: P,
@@ -346,13 +386,18 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
     let cells_per_phase = cells_per_phase.max(1);
     let gene_batch_size = gene_batch_size.max(1);
 
-    let mut writer = CellGeneSparseWriter::new(
-        out_path,
-        true,
-        no_cells,
-        no_genes,
-        reader.target_size().unwrap_or(0.0),
-    )?;
+    if reader.n_layers() > 1 {
+        return Err(ScDataErrors::StoreKindMismatch(format!(
+            "raw layers: the source carries {}, and the transpose keeps only one",
+            reader.n_layers()
+        )));
+    }
+    let mut writer =
+        CellGeneSparseWriter::new(out_path, true, no_cells, no_genes, reader.header_scales().0)?;
+    writer.inherit_from(&reader)?;
+    // only a log-CPM norm can be stored verbatim where it does not recompute;
+    // every other kind is derived on read from the raw counts
+    let raw_only = reader.norm_kind() != NormKind::LogCpm;
 
     let n_phases = no_cells.div_ceil(cells_per_phase);
 
@@ -379,16 +424,18 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
             let block_end = (block_start + gene_batch_size).min(no_genes);
             let block: Vec<usize> = (block_start..block_end).collect();
 
-            for chunk in reader.read_gene_parallel(&block)? {
+            let chunks = if raw_only {
+                reader.read_gene_parallel_raw(&block)?
+            } else {
+                reader.read_gene_parallel(&block)?
+            };
+            for chunk in chunks {
                 let gene = chunk.original_index as u32;
                 for (slot, &cell) in chunk.indices.iter().enumerate() {
                     let cell = cell as usize;
                     if cell >= cell_start && cell < cell_end {
-                        buckets[cell - cell_start].push((
-                            gene,
-                            chunk.data_raw.get(slot),
-                            chunk.data_norm[slot],
-                        ));
+                        let norm = if raw_only { 0.0 } else { chunk.data_norm[slot] };
+                        buckets[cell - cell_start].push((gene, chunk.data_raw.get(slot), norm));
                     }
                 }
             }
@@ -397,6 +444,11 @@ pub fn gene_store_to_cell_store<P: AsRef<Path>>(
         for (offset, entries) in buckets.into_iter().enumerate() {
             let library_size: u64 = entries.iter().map(|&(_, raw, _)| raw as u64).sum();
             let raw: Vec<u32> = entries.iter().map(|&(_, r, _)| r).collect();
+            if raw_only {
+                let genes: Vec<u32> = entries.iter().map(|&(g, _, _)| g).collect();
+                writer.write_cell_layers(cell_start + offset, &genes, &[&raw], true)?;
+                continue;
+            }
 
             writer.write_cell_chunk(CsrCellChunk {
                 data_raw: RawCounts::from_u32_auto(&raw),

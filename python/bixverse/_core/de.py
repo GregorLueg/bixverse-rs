@@ -35,11 +35,10 @@ import polars as pl
 from beartype import BeartypeConf, beartype
 
 from bixverse import _bixverse
-from bixverse._core.atac import atac_paths, require_atac
 from bixverse._core.doublets import _as_character
 from bixverse._core.graph import _embedding, _first_dims
 from bixverse._core.integrate import _hard_state
-from bixverse._core.multimodal import SingleCellsMultiModal
+from bixverse._core.multimodal import feature_store, resolve_modality
 from bixverse._core.pp import _factor_codes, _obs_aligned
 from bixverse._core.repr import compact_repr
 from bixverse._core.single_cells import Selection, SingleCells
@@ -429,25 +428,27 @@ def _de_store(sc: ScOrScSubset, modality: DeModality) -> tuple[str, str, np.ndar
     """Cell file, feature file and feature ids of the store a test reads.
 
     Raises:
-        ValueError: If `modality="atac"` on anything but a
-            `SingleCellsMultiModal` with an ATAC store.
+        ValueError: If the object has no such store.
     """
-    if modality == "rna":
-        return str(sc.cells_path), str(sc.genes_path), sc.gene_ids()
-    if not isinstance(sc, SingleCellsMultiModal):
-        raise ValueError('modality="atac" needs a SingleCellsMultiModal.')
-    require_atac(sc)
-    cells, features = atac_paths(sc)
-    ids = sc.var(modality="atac")["feature_id"].to_numpy()
+    cells, features, ids = feature_store(sc, modality)
     return str(cells), str(features), ids
 
 
 @beartype(conf=_CONF)
-def _marker_method(method: Method | None, modality: DeModality) -> Method:
-    """The marker test, `None` resolving to `"lr"` on ATAC, `"wilcox"` on RNA."""
+def _id_col(sc: object, modality: DeModality) -> str:
+    """The id column of a marker table: `feature_id` for peaks and tiles."""
+    return "feature_id" if resolve_modality(sc, modality) == "atac" else "gene_id"
+
+
+@beartype(conf=_CONF)
+def _marker_method(sc: object, method: Method | None, modality: DeModality) -> Method:
+    """The marker test, `None` resolving to `"lr"` on ATAC, `"wilcox"` on RNA.
+
+    An ATAC-only experiment's default modality is ATAC.
+    """
     if method is not None:
         return method
-    return "lr" if modality == "atac" else "wilcox"
+    return "lr" if resolve_modality(sc, modality) == "atac" else "wilcox"
 
 
 @beartype(conf=_CONF)
@@ -496,7 +497,7 @@ def find_markers(
         alternative: The test alternative.
         min_prop: A gene is tested if this share of either group expresses it.
         modality: `"rna"`, or `"atac"` for the peaks or tiles of a
-            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
+            `SingleCellsMultiModal`; the ids are then in `feature_id`.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -513,7 +514,7 @@ def find_markers(
     check_range("min_prop", min_prop, 0, 1, False, False)
     cells_path, genes_path, ids = _de_store(sc, modality)
     c1, c2 = sc._resolve_cells(cells_1), sc._resolve_cells(cells_2)
-    if _marker_method(method, modality) == "lr":
+    if _marker_method(sc, method, modality) == "lr":
         res = _bixverse.dge_lr(
             cells_path, genes_path, c1, c2, min_prop, alternative, verbose
         )
@@ -523,7 +524,7 @@ def find_markers(
         )
     return pl.DataFrame(
         {
-            "gene_id": ids[res["genes_to_keep"]],
+            _id_col(sc, modality): ids[res["genes_to_keep"]],
             **{k: res[k] for k in ("lfc", "prop1", "prop2", "z_scores")},
             "p_values": res["p_values"],
             "fdr": res["fdr"],
@@ -562,7 +563,7 @@ def find_all_markers(
         min_prop: A gene is tested for a group if this share of the group or
             of the rest expresses it.
         modality: `"rna"`, or `"atac"` for the peaks or tiles of a
-            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
+            `SingleCellsMultiModal`; the ids are then in `feature_id`.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -582,7 +583,7 @@ def find_all_markers(
     groups = obs[column_of_interest].unique(maintain_order=True)
     cells_path, genes_path, gene_ids = _de_store(sc, modality)
     cell_groups = _groups_to_cells(obs, column_of_interest, groups.to_list())
-    if _marker_method(method, modality) == "lr":
+    if _marker_method(sc, method, modality) == "lr":
         arms = _bixverse.dge_one_vs_rest_lr(
             cells_path, genes_path, cell_groups, min_prop, alternative, verbose
         )
@@ -594,7 +595,7 @@ def find_all_markers(
         pl.DataFrame(
             {
                 "grp": groups.gather([g] * int(arm["genes_to_keep"].sum())),
-                "gene_id": gene_ids[arm["genes_to_keep"]],
+                _id_col(sc, modality): gene_ids[arm["genes_to_keep"]],
                 **{
                     k: arm[k]
                     for k in ("lfc", "prop1", "prop2", "z_scores", "p_values", "fdr")
@@ -641,7 +642,7 @@ def find_specific_markers(
             the reference.
         min_prop: A gene is tested if this share of any group expresses it.
         modality: `"rna"`, or `"atac"` for the peaks or tiles of a
-            `SingleCellsMultiModal`; the ids in `gene_id` are then peak ids.
+            `SingleCellsMultiModal`; the ids are then in `feature_id`.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
             method has it.
 
@@ -694,7 +695,7 @@ def find_specific_markers(
     cells_path, genes_path, gene_ids = _de_store(sc, modality)
     cell_groups = _groups_to_cells(obs, "grp", grp_names)
     references = np.asarray(ref_idx, dtype=np.uint32)
-    method = _marker_method(method, modality)
+    method = _marker_method(sc, method, modality)
     if method == "lr":
         arms = _bixverse.dge_one_vs_many_lr(
             cells_path,
@@ -727,7 +728,7 @@ def find_specific_markers(
             pl.DataFrame(
                 {
                     "ref_grp": [grp_names[r]] * len(genes),
-                    "gene_id": genes,
+                    _id_col(sc, modality): genes,
                     **{
                         k: arm[k]
                         for k in (
@@ -753,7 +754,7 @@ def find_specific_markers(
                 {
                     "ref_grp": [grp_names[r]] * (n_rivals * len(genes)),
                     "rival_grp": np.repeat(names[rivals], len(genes)).astype(str),
-                    "gene_id": np.tile(genes, n_rivals),
+                    _id_col(sc, modality): np.tile(genes, n_rivals),
                     "auroc": arm["auroc"].ravel(),
                     "lfc": arm["lfc"].ravel(),
                     "prop_ref": np.tile(arm["prop_ref"], n_rivals),

@@ -142,6 +142,14 @@ pub enum ScDataErrors {
     #[error("Invalid v5 store: {0}")]
     V5HeaderInvalid(String),
 
+    /// A cell file and a gene file that do not belong to the same store.
+    #[error("The cell and gene files do not belong together: their {0} differs")]
+    StorePairMismatch(String),
+
+    /// Stores that cannot be combined because their identity differs.
+    #[error("Cannot combine stores that differ in {0}")]
+    StoreKindMismatch(String),
+
     /// A read asked for the normalised layer of a store that has none: its
     /// norm kind is `none`, or TF-IDF without an IDF table.
     #[error("The store has no normalised layer ({0}); read the raw counts instead")]

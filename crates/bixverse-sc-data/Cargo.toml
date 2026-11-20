@@ -62,6 +62,7 @@ hdf5 = { workspace = true, optional = true }
 # Direct dependency so `build.rs` sees the linked HDF5 version (`DEP_HDF5_*`).
 hdf5-sys = { workspace = true, optional = true }
 indexmap.workspace = true
+libm.workspace = true
 lz4_flex.workspace = true
 memchr.workspace = true
 memmap2.workspace = true

@@ -3,6 +3,7 @@
 
 pub mod annotation;
 pub mod fragments;
+pub mod merge;
 #[cfg(feature = "h5")]
 pub mod tenx_peaks;
 

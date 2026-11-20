@@ -16,6 +16,7 @@ use std::time::Instant;
 use crate::prelude::*;
 use crate::sc_processing::pca::{PcaSolver, de_pca_solver};
 use crate::sc_processing::utils_doublets::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ///////////
 // Types //
@@ -451,6 +452,58 @@ impl<'a, S: SingleCellReading> Scrublet<'a, S> {
             self.params.expected_doublet_rate,
             verbose,
         )
+    }
+}
+
+/// Run Scrublet on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store. Pairs and per-cell results are
+/// positions in `cell_indices` on both paths.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `params` - Scrublet parameters
+/// * `streaming` - Stream HVG computation to reduce memory pressure
+/// * `seed` - Seed for reproducibility
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+/// * `return_combined_pca` - Whether to return the combined PCA embedding
+/// * `return_pairs` - Whether to return the parent indices of each doublet
+///
+/// ### Returns
+///
+/// `FinalScrubletRes` as [`Scrublet::run_scrublet`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_scrublet_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    params: ScrubletParams,
+    streaming: bool,
+    seed: usize,
+    verbose: usize,
+    return_combined_pca: bool,
+    return_pairs: bool,
+) -> Result<FinalScrubletRes, ScErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => Scrublet::new(&sub.reader()?, &sub.cell_reader()?, params, &sub.local)
+            .run_scrublet(streaming, seed, verbose, return_combined_pca, return_pairs),
+        None => {
+            let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+            Scrublet::new(&gene_reader, &cell_reader, params, cell_indices).run_scrublet(
+                streaming,
+                seed,
+                verbose,
+                return_combined_pca,
+                return_pairs,
+            )
+        }
     }
 }
 

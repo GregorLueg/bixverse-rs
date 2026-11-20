@@ -9,15 +9,18 @@ Rscript dev/atac/gen_atac_inputs.R [data_dir]      # default ~/data/bixverse/ata
 Rscript dev/atac/gen_atac_signac.R
 Rscript dev/atac/gen_atac_seurat.R
 RAYON_NUM_THREADS=1 POLARS_MAX_THREADS=1 uv run --python 3.12 \
-  --with snapatac2==2.10.0 --with muon==0.2.1 --with beartype \
+  --with snapatac2==2.10.0 --with beartype \
   python dev/atac/gen_atac_scverse.py
 uv run --python 3.12 --with macs3==3.1.0 --with beartype \
   python dev/atac/gen_atac_macs3.py
 ```
 
 Tool versions are in each folder's `versions.txt` (R 4.6.1, Signac 1.17.1,
-Seurat 6.0.0, SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0; muon 0.2.1, scipy
-1.18.1).
+Seurat 6.0.0, SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0, scipy
+1.18.1). Two smaller fixture sets sit next to this one: `../amulet_trailing/`
+(AMULET on several chromosomes, `dev/atac/gen_atac_amulet_trailing.py`) and
+`../peak2gene/` (peak to gene links from numpy and scipy,
+`dev/atac/gen_peak2gene.py`).
 
 ## Conventions
 
@@ -84,7 +87,7 @@ Seurat 6.0.0, SeuratObject 5.4.0, RSpectra 0.16.2; SnapATAC2 2.10.0; muon 0.2.1,
   Cut sites are not counted where they fall: for a fragment overlapping window
   `[ws, we)`, `start` and `end` (raw file values) count iff
   `ws + 3 <= c <= we + 2`. Reimplemented this way, the per-cell fast TSSe
-  matches Signac to 4e-16.
+  matches Signac; the tests assert 1e-9.
 - Full mode averages columns `500:1500` (labels `-500..500`) of a 2001 bp
   matrix whose label 0 is column 1000.
 - 2 cells have zero peak counts (one has a single fragment, one none). Their
@@ -154,8 +157,9 @@ fragments and is not imported: `imported = 0`, zero matrix column, metrics print
 - Not written because they are identical to Signac (asserted): `fragment`
   peaks (= `signac/peaks`), `fragment` and `paired-insertion` 5 kb tiles
   (= `signac/bins_5000`; no fragment here spans more than two 5 kb bins).
-- `peaks_insertion`, `peaks_paired-insertion`, `tiles_5000_insertion`,
-  `tiles_500_{fragment,insertion}`.
+- `peaks_paired-insertion`, `tiles_500_fragment`. SnapATAC2's `insertion`
+  counts at `e - 1`, which no bixverse mode reproduces (bixverse's `insertion`
+  is Cell Ranger's, see `tenx/`), so it is not written.
 - `cell_metrics.tsv`: `n_fragment` (unique fragments, equals Signac
   `frequency_count`), `frac_dup` (`1 - lines / sum(col 5)`), `frac_mito`,
   `tsse`.
@@ -164,22 +168,10 @@ fragments and is not imported: `imported = 0`, zero matrix column, metrics print
   4493 sites. Window `[t - 2000, t + 2001)`; every insertion (`s`, `e - 1`)
   in a window adds to that position (strand-flipped). Per cell
   `tsse = mean(profile[1995..=2005]) / ((sum(profile[0..100]) + sum(profile[3901..4001])) / 200 + 0.1)`.
-  `tss_profile.tsv` is the library profile (offset `-2000..2000`),
-  `library_tsse.tsv` the library score and fraction of insertions in a window.
-  Not comparable to Signac's TSSe.
+  `tss_profile.tsv` is the library profile (offset `-2000..2000`). Not
+  comparable to Signac's TSSe.
 - `frag_size_distr.tsv`: `frag_size_distr(max_recorded_size = 1000)`, count
   per `e - s`; row 0 holds fragments longer than 1000.
-
-## muon/
-
-On `signac/peaks` counts. `tfidf` defaults (`log_tf = True`, `log_idf = True`,
-scale 1e4): `log1p(x / n_cell * 1e4) * log1p(n_cells / n_feature)`, NaN to 0.
-The matrix is not stored; `idf.tsv` has the column sums and `log1p` IDF (inf
-for zero-count peaks, which never multiply a stored value).
-`lsi` defaults except `n_comps = 10` (default 50): scipy `svds` (ARPACK,
-`np.random.seed(0)`) on all 1883 peaks, no top-feature selection, components
-reversed to descending, embeddings z-scored with population sd (ddof 0),
-`stdev = d / sqrt(n_cells - 1)` (Signac divides by `n_features - 1`).
 
 ## macs3/
 
@@ -203,6 +195,6 @@ Cell Ranger ARC `Peaks` counts. Insertions at `s` and `e` (the raw file
 values), counted in a peak iff `ps <= c < pe`: this reproduces the matrix
 exactly. SnapATAC2 `insertion` (which uses `e - 1`) differs in 62 entries.
 
-Trimmed after generation to stay under 5 MB: `signac/tfidf/` (`RunTFIDF`
+Trimmed after generation to stay small (5.4 MB): `signac/tfidf/` (`RunTFIDF`
 method 1 on `peaks/`) and `snapatac2/tiles_500_paired-insertion/` are
 produced by the generators but not committed.

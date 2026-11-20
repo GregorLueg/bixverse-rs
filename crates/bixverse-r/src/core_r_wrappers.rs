@@ -414,7 +414,7 @@ impl FromRMap for LanczosParams {
         let defaults = LanczosParams::default();
 
         // `None` derives the basis from the requested component count.
-        // `r_list_count` is load bearing here: `NA_integer_` is `i32::MIN` and a
+        // `r_list_count` matters here: `NA_integer_` is `i32::MIN` and a
         // plain `as usize` turns it, or any negative, into ~1.8e19, which for
         // the restart budget is an unbounded loop rather than an error.
         let basis_size = r_list_count(params, "lanczos_basis_size")?;

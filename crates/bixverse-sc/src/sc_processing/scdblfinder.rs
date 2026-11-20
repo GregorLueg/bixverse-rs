@@ -20,6 +20,7 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_core::utils::vec_utils::min_max_scale;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::knn_graph::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ////////////////////////
 // Params and results //
@@ -1791,6 +1792,47 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             detected_doublet_rate,
             features: feature_table,
         })
+    }
+}
+
+/// Run scDblFinder on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `params` - ScDblFinder parameters
+/// * `seed` - Seed for reproducibility
+/// * `streaming` - Stream the gene selection pass
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `ScDblFinderResult` as [`ScDblFinder::run`].
+pub fn run_scdblfinder_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    params: ScDblFinderParams,
+    seed: usize,
+    streaming: bool,
+    verbose: usize,
+) -> Result<ScDblFinderResult, ScErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => ScDblFinder::new(&sub.reader()?, &sub.cell_reader()?, params, &sub.local)
+            .run(seed, streaming, verbose),
+        None => {
+            let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+            ScDblFinder::new(&gene_reader, &cell_reader, params, cell_indices)
+                .run(seed, streaming, verbose)
+        }
     }
 }
 

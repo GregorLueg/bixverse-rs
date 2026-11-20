@@ -14,7 +14,7 @@ import numpy as np
 from beartype import beartype
 
 from bixverse._core.pp import _set_pca
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, refuse_atac_features
 from bixverse._validate import Verbose
 from bixverse.params import PcaParams, to_rust
 from bixverse_gpu._backend import Backend, pick
@@ -60,6 +60,7 @@ def calculate_pca(
         BixverseError: Without a GPU adapter, or with `backend="mlx"` on a
             build without the MLX twins.
     """
+    refuse_atac_features(sc, "calculate_pca")
     params = pca_params or PcaParams()
     if sc.map.hvg is None and hvg is None:
         warnings.warn(

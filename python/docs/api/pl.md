@@ -67,6 +67,9 @@ Worked through in [A guide to single-cell plotting functions](../vignettes/singl
         - violin_plot
         - density_plot
         - joint_plot
+        - tss_profile_plot
+        - fragment_length_plot
+        - lsi_depth_plot
 
 ## Graphs over an embedding
 

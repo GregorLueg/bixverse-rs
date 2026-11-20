@@ -1,0 +1,1 @@
+numpy 2.5.5, scipy 1.18.1, max_distance 50000

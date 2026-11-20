@@ -60,9 +60,7 @@ def test_fragments_into_peaks_match_signac_library_size(with_peaks):
 
 
 def test_fragment_qc_matches_signac(with_peaks):
-    qc = atac.atac_fragment_qc(
-        with_peaks, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz"
-    )
+    qc = atac.fragment_qc(with_peaks, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
     ref = _tsv("signac/cell_metrics.tsv")
     assert qc["atac_n_fragments"].to_list() == ref["frequency_count"].to_list()
     np.testing.assert_allclose(
@@ -223,7 +221,7 @@ def test_rna_methods_refuse_or_warn_on_gene_activity(exp):
 def test_frip_counts_insertions_in_insertion_mode(exp):
     atac.add_atac_fragments(exp, FIX / "fragments.tsv.gz", peaks=FIX / "peaks.bed")
     assert exp.atac is not None and exp.atac.count_mode == "insertion"
-    qc = atac.atac_fragment_qc(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
+    qc = atac.fragment_qc(exp, FIX / "fragments.tsv.gz", FIX / "genes.gtf.gz")
     lib = exp.obs(cols=["atac_lib_size"])["atac_lib_size"].to_numpy()
     n = qc["atac_n_fragments"].to_numpy()
     frip = qc["atac_frip"].to_numpy()
@@ -249,7 +247,7 @@ def test_differential_accessibility_reads_the_peaks(exp):
     assert pb.gene_ids.tolist() == exp.var(modality="atac")["feature_id"].to_list()
 
     res = bv.de.find_markers(exp, groups["a"], groups["b"], modality="atac", verbose=0)
-    assert res["gene_id"][0].startswith("chr22:")
+    assert res["feature_id"][0].startswith("chr22:")
     # ATAC defaults to the logistic regression test
     lr = bv.de.find_markers(
         exp, groups["a"], groups["b"], method="lr", modality="atac", verbose=0
@@ -260,7 +258,7 @@ def test_differential_accessibility_reads_the_peaks(exp):
     )
     assert not np.allclose(wil["p_values"].to_numpy(), res["p_values"].to_numpy())
     arms = bv.de.find_all_markers(exp, "cell_grp", modality="atac", verbose=0)
-    assert arms["gene_id"][0].startswith("chr22:")
+    assert arms["feature_id"][0].startswith("chr22:")
     spec = bv.de.find_specific_markers(exp, "cell_grp", modality="atac", verbose=0)
     assert spec is not None and spec.params["method"] == "lr"
 

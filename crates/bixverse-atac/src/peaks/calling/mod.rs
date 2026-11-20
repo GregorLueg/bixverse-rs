@@ -153,11 +153,12 @@ pub struct PeakCallParams {
     pub shift: i32,
     /// Extension of each tag, also the fragment size `d` (`--extsize`).
     pub extsize: u32,
-    /// Effective genome size (`-g`).
+    /// Effective genome size (`-g`). The default is Signac's 2.7e9, not
+    /// MACS3's `hs` (2.913e9).
     pub genome_size: f64,
     /// Window of the local lambda (`--llocal`).
     pub llocal: u32,
-    /// q-value cutoff (`-q`).
+    /// q-value cutoff (`-q`), in `(0, 1)`.
     pub q_value: f64,
     /// Minimum peak length; `None` takes `extsize`, as MACS.
     pub min_length: Option<u32>,
@@ -176,7 +177,8 @@ pub struct PeakCallParams {
 }
 
 impl Default for PeakCallParams {
-    /// MACS3 defaults with Signac's shift and extension.
+    /// MACS3 defaults with Signac's shift, extension and effective genome
+    /// size (2.7e9; MACS3's own `hs` is 2.913e9), and every duplicate kept.
     ///
     /// ### Returns
     ///
@@ -264,8 +266,9 @@ impl PeakCallParams {
         if self.genome_size.is_nan() || self.genome_size <= 0.0 {
             return bad("genome_size must be positive");
         }
-        if self.q_value.is_nan() || self.q_value <= 0.0 || self.q_value > 1.0 {
-            return bad("q_value must lie in (0, 1]");
+        // at q = 1 the cutoff is 0 and every base would pass
+        if self.q_value.is_nan() || self.q_value <= 0.0 || self.q_value >= 1.0 {
+            return bad("q_value must lie in (0, 1)");
         }
         if self.keep_dup == KeepDup::AtMost(0) {
             return bad("keep_dup must keep at least one tag per position");
@@ -587,7 +590,9 @@ fn close_peak(
 /// ### Returns
 ///
 /// The peaks of each group, indexed by group, chromosomes in name order and
-/// peaks by position, or an I/O, parse or argument error.
+/// peaks by position, or an I/O, parse or argument error. A group with no
+/// tags (no cells, or none of its fragments on a read chromosome) has no
+/// peaks.
 pub fn call_peaks(
     path: &Path,
     barcodes: &[String],
@@ -644,8 +649,9 @@ pub fn call_peaks(
         }
     }
     spill.file.flush()?;
-    // MACS takes Python's log(q, 10), not log10(q)
-    let cutoff = -(params.q_value.ln() / 10f64.ln());
+    // MACS takes Python's log(q, 10), not log10(q), and compares the q-scores
+    // against it as f32
+    let cutoff = (-(params.q_value.ln() / 10f64.ln())) as f32 as f64;
 
     let d = params.extsize as i64;
     let llocal = params.llocal as i64;
@@ -936,6 +942,30 @@ mod tests {
     }
 
     #[test]
+    fn test_poisson_tail_without_background_is_empty() {
+        let ln_fact = ln_factorials(8);
+        assert_eq!(log10_poisson_upper(0, 0.0, &ln_fact), f64::NEG_INFINITY);
+    }
+
+    /// A group label no cell carries (and one whose cells have no fragments)
+    /// has a zero background, which used to hang the score pass.
+    #[test]
+    fn test_empty_groups_return_no_peaks() {
+        let mut text = String::new();
+        for i in 0..400u32 {
+            let start = 1_000 + (i % 40) * 7;
+            text.push_str(&format!("chr1\t{start}\t{}\tAAAC-1\t1\n", start + 120));
+        }
+        let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        std::fs::write(&path, text).unwrap();
+        let barcodes = vec!["AAAC-1".to_string(), "NONE-1".to_string()];
+        let peaks = call_peaks(&path, &barcodes, &[0, 2], None).unwrap();
+        assert_eq!(peaks.len(), 3);
+        assert!(!peaks[0].is_empty(), "the populated group calls its pile");
+        assert!(peaks[1].is_empty() && peaks[2].is_empty());
+    }
+
+    #[test]
     fn test_invalid_params_are_refused() {
         let p = PeakCallParams {
             keep_dup: KeepDup::AtMost(0),
@@ -944,6 +974,12 @@ mod tests {
         assert!(p.validate().is_err());
         let p = PeakCallParams {
             q_value: 0.0,
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+        // q = 1 gives a cutoff of 0, which used to loop forever
+        let p = PeakCallParams {
+            q_value: 1.0,
             ..Default::default()
         };
         assert!(p.validate().is_err());

@@ -51,6 +51,11 @@ pub(super) fn round5(x: f64) -> f64 {
 ///
 /// The log10 tail, rounded to five decimals.
 pub(super) fn log10_poisson_upper(k: u32, lambda: f64, ln_fact: &[f64]) -> f64 {
+    // no background: nothing is ever above k, and the log-space sum below
+    // would turn into NaN and never converge
+    if lambda <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
     let ln_lbd = lambda.ln();
     let mut m = k as u64 + 1;
     let mut logx = m as f64 * ln_lbd - ln_fact[m as usize];

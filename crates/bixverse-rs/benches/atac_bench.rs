@@ -107,7 +107,7 @@ fn main() {
     if let Ok(gtf) = std::env::var("ATAC_BENCH_GTF") {
         let t = Instant::now();
         let genes = read_gtf_genes(&PathBuf::from(gtf)).expect("GTF");
-        let tss = tss_positions(&genes, &["protein_coding".to_string()]);
+        let tss = tss_positions(&genes, &["protein_coding".to_string()]).unwrap();
         let gtf_s = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let qc =

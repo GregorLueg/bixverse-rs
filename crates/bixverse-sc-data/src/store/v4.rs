@@ -393,6 +393,15 @@ impl V4Header {
                 found: chunk.len(),
             });
         }
+        // a chunk-level feature this build does not know must not decode as
+        // if it were absent
+        let unknown_flags = chunk[25] & !(FLAG_NORM_STORED | FLAG_RAW_MINUS_ONE);
+        if unknown_flags != 0 || chunk[28..32] != [0; 4] {
+            return Err(ScDataErrors::V4ChunkCorrupt(format!(
+                "unknown chunk flags {unknown_flags:#x} or reserved bytes set, written by a \
+                 newer bixverse or corrupt"
+            )));
+        }
         Ok(Self {
             nnz: le_u32(chunk, 0) as usize,
             body_len: le_u32(chunk, 4) as usize,
@@ -475,8 +484,9 @@ struct EncodeIn<'a> {
 ///
 /// ### Returns
 ///
-/// Header plus body.
-fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Vec<u8> {
+/// Header plus body, or [`ScDataErrors::V4ChunkCorrupt`] for a chunk whose
+/// entry count or body does not fit the header's `u32` fields.
+fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Result<Vec<u8>, ScDataErrors> {
     debug_assert!((1..=MAX_LAYERS).contains(&p.layers.len()));
     let n = p.indices.len();
 
@@ -534,14 +544,23 @@ fn encode_chunk(p: &EncodeIn, codec: ChunkCodec) -> Vec<u8> {
         _ => (ChunkCodec::None, body.clone()),
     };
 
+    let too_big = || {
+        ScDataErrors::V4ChunkCorrupt(format!(
+            "chunk {} holds {n} entries in {} bytes, more than a chunk header can record",
+            p.original_index,
+            body.len()
+        ))
+    };
+    let n32 = u32::try_from(n).map_err(|_| too_big())?;
+    let body_len = u32::try_from(body.len()).map_err(|_| too_big())?;
     let mut out = Vec::with_capacity(V4_HEADER_LEN + payload.len());
-    out.extend_from_slice(&(n as u32).to_le_bytes());
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&n32.to_le_bytes());
+    out.extend_from_slice(&body_len.to_le_bytes());
     out.extend_from_slice(&p.aux.to_le_bytes());
     out.extend_from_slice(&(p.original_index as u64).to_le_bytes());
     out.extend_from_slice(&[p.to_keep as u8, flags, used.to_u8(), mask, 0, 0, 0, 0]);
     out.extend_from_slice(&payload);
-    out
+    Ok(out)
 }
 
 impl CsrCellChunk {
@@ -577,7 +596,7 @@ impl CsrCellChunk {
                 .zip(&self.data_norm)
                 .all(|(&x, &v)| norm_value(x as f32, lib, target_size).to_bits() == v.to_bits());
 
-        Ok(encode_chunk(
+        encode_chunk(
             &EncodeIn {
                 indices: &self.indices,
                 layers: &[&raw],
@@ -589,7 +608,7 @@ impl CsrCellChunk {
                 norm_f32: format.norm_f32(),
             },
             format.codec,
-        ))
+        )
     }
 }
 
@@ -637,7 +656,7 @@ impl CscGeneChunk {
                     })
                 });
 
-        Ok(encode_chunk(
+        encode_chunk(
             &EncodeIn {
                 indices: &self.indices,
                 layers: &[&raw],
@@ -649,7 +668,7 @@ impl CscGeneChunk {
                 norm_f32: format.norm_f32(),
             },
             format.codec,
-        ))
+        )
     }
 }
 
@@ -1216,7 +1235,7 @@ impl ChunkFormat {
                 layers.len()
             )));
         }
-        Ok(encode_chunk(
+        encode_chunk(
             &EncodeIn {
                 indices,
                 layers,
@@ -1228,7 +1247,7 @@ impl ChunkFormat {
                 norm_f32: true,
             },
             self.codec,
-        ))
+        )
     }
 
     /// Encode a cell chunk for a file of this format.
@@ -1264,16 +1283,17 @@ impl ChunkFormat {
     ///
     /// ### Returns
     ///
-    /// `(library size, payload)`, or `None` where the norm would be stored (v3,
-    /// or a target size of `0.0`); build the chunk then.
+    /// `Ok(Some((library size, payload)))`, `Ok(None)` where the norm would be
+    /// stored (v3, or a target size of `0.0`; build the chunk then), or an
+    /// error for a chunk too large for its header.
     pub fn encode_cell_counts(
         &self,
         genes: &[u32],
         counts: &[u32],
         original_index: usize,
-    ) -> Option<(usize, Vec<u8>)> {
+    ) -> Result<Option<(usize, Vec<u8>)>, ScDataErrors> {
         if !self.uses_v4_codec() || self.target_size == 0.0 {
-            return None;
+            return Ok(None);
         }
         // must stay the sum `CsrCellChunk::from_data` takes
         let library_size = counts.iter().map(|&x| x as f32).sum::<f32>() as usize;
@@ -1289,8 +1309,8 @@ impl ChunkFormat {
                 norm_f32: self.norm_f32(),
             },
             self.codec,
-        );
-        Some((library_size, bytes))
+        )?;
+        Ok(Some((library_size, bytes)))
     }
 
     /// Encode a gene chunk for a file of this format.
@@ -1337,7 +1357,7 @@ impl ChunkFormat {
         indices: &[u32],
         raw: &[u32],
         original_index: usize,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, ScDataErrors> {
         debug_assert!(self.uses_v4_codec() && indices.len() == raw.len());
         encode_chunk(
             &EncodeIn {
@@ -1526,9 +1546,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The norm as compared across a conversion: at the f16 precision v3
-    /// holds, exactly from v4 (whose recompute and verbatim values both carry
-    /// over to v5 unchanged).
+    /// The norm bits to compare: exact, or at the f16 precision v3 and verbatim
+    /// v4 norms hold (a conversion snaps those to the f32 recompute).
     ///
     /// ### Params
     ///
@@ -2020,7 +2039,7 @@ pub(crate) mod tests {
             .collect();
         let want = |c: usize, g: usize| {
             let w = (n_cells as f64 / total[g]) as f32;
-            (dp[c][g] as f32 / lib[c] * (1e4 * w)).ln_1p()
+            libm::log1p((dp[c][g] as f32 / lib[c] * (1e4 * w)) as f64) as f32
         };
 
         let cells = ParallelSparseReader::new(&s[0]).unwrap();

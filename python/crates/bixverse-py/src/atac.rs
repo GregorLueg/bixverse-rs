@@ -9,30 +9,36 @@ use std::path::PathBuf;
 use bixverse_atac::errors::AtacErrors;
 use bixverse_atac::integration::rlsi::{RlsiParams, rlsi_on_store};
 use bixverse_atac::io::annotation::{
-    GeneActivityParams, gene_activity_regions, read_gtf_genes, tss_positions,
+    GeneActivityParams, GeneRecord, closest_genes, gene_activity_regions, read_gtf_genes, tss_sites,
 };
+use bixverse_atac::io::fragments::{Coverage, barcode_fragment_counts};
+use bixverse_atac::io::merge::{FragmentInput, merge_fragment_files};
 use bixverse_atac::io::tenx_peaks::tenx_peaks_to_store;
 use bixverse_atac::peaks::calling::{
     KeepDup, NarrowPeak, PeakCallParams, call_peaks, parse_tag_source,
 };
-use bixverse_atac::peaks::regions::{genome_tiles, read_bed, reduce_regions, region};
+use bixverse_atac::peaks::regions::{genome_tiles, overlaps_any, read_bed, reduce_regions, region};
 use bixverse_atac::processing::amulet::{AmuletParams, amulet};
 use bixverse_atac::processing::counting::{count_fragments, parse_count_mode, write_counts_store};
 use bixverse_atac::processing::features::{
     TopFeatureCutoff, feature_total_stats, parse_top_feature_cutoff, select_top_features,
 };
+use bixverse_atac::processing::links::{LinkParams, PeakGeneLink, peak_to_gene_links};
 use bixverse_atac::processing::lsi::{
     LsiParams, lsi_on_store, project_lsi, read_tf_idf, set_tf_idf_on_store,
 };
+use bixverse_atac::processing::profiles::fragment_profiles;
 use bixverse_atac::processing::qc::{FragmentQcParams, fragment_qc};
 use bixverse_sc::sc_processing::knn::KnnParams;
 use bixverse_sc::sc_processing::pca::{PcaSolver, parse_pca_solver};
 use bixverse_sc_data::store::interval_index::FeatureInterval;
 use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_data::store::v5::parse_feature_kind;
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
+use faer::Mat;
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::{
-    CSlice, f64_array, from_py, index_vec, mat_array, mat_view, max_nnz, path_str, u32_array,
+    CSlice, f64_array, flat_array, from_py, index_vec, mat_array, mat_view, max_nnz, path_str,
+    u32_array,
 };
 use py_common::error::BvErr;
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -229,7 +235,8 @@ pub fn atac_reduce_regions<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of `chrom` and `pos` (0-based).
+/// Dict of `chrom`, `pos` (0-based), `strand` (`int8`, `-1` minus),
+/// `gene_id` and `gene_name`, one entry per kept gene.
 #[pyfunction]
 pub fn atac_tss_positions<'py>(
     py: Python<'py>,
@@ -237,7 +244,11 @@ pub fn atac_tss_positions<'py>(
     biotypes: Vec<String>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let genes = py.detach(|| read_gtf_genes(&path)).map_err(atac_err)?;
-    let tss = tss_positions(&genes, &biotypes);
+    let tss = tss_sites(&genes, &biotypes).map_err(atac_err)?;
+    let kept: Vec<&GeneRecord> = genes
+        .iter()
+        .filter(|g| biotypes.is_empty() || biotypes.contains(&g.biotype))
+        .collect();
     let out = PyDict::new(py);
     out.set_item("chrom", tss.iter().map(|t| t.0.clone()).collect::<Vec<_>>())?;
     out.set_item(
@@ -246,6 +257,21 @@ pub fn atac_tss_positions<'py>(
             .map(|t| t.1)
             .collect::<Vec<u32>>()
             .into_pyarray(py),
+    )?;
+    out.set_item(
+        "strand",
+        tss.iter()
+            .map(|t| t.2)
+            .collect::<Vec<i8>>()
+            .into_pyarray(py),
+    )?;
+    out.set_item(
+        "gene_id",
+        kept.iter().map(|g| g.gene_id.clone()).collect::<Vec<_>>(),
+    )?;
+    out.set_item(
+        "gene_name",
+        kept.iter().map(|g| g.gene_name.clone()).collect::<Vec<_>>(),
     )?;
     Ok(out)
 }
@@ -279,7 +305,7 @@ pub fn atac_gene_activity_regions<'py>(
         max_width,
         biotypes,
     };
-    let (regions, names, ids) = gene_activity_regions(&genes, &params);
+    let (regions, names, ids) = gene_activity_regions(&genes, &params).map_err(atac_err)?;
     let out = regions_dict(py, &regions)?;
     out.set_item("name", names)?;
     out.set_item("gene_id", ids)?;
@@ -355,7 +381,8 @@ pub fn atac_tenx_peaks_to_store<'py>(
 ///
 /// ### Returns
 ///
-/// Dict of `lib_size` and `nnz` per cell.
+/// Dict of `lib_size` and `nnz` per cell, plus `cells_missing`,
+/// `off_target_fraction` and `off_target_chroms` of the pass.
 #[pyfunction]
 #[pyo3(signature = (
     fragments, f_path_cells, f_path_genes, barcodes, chrom, start, end, mode, kind,
@@ -386,7 +413,7 @@ pub fn atac_fragments_to_store<'py>(
         .ok_or_else(|| PyValueError::new_err(format!("unknown feature kind '{kind}'")))?;
     let features = regions_from(&chrom, &start, &end)?;
     let (cells, genes) = (path_str(&f_path_cells)?, path_str(&f_path_genes)?);
-    let (lib, nnz) = py
+    let (lib, nnz, coverage) = py
         .detach(|| {
             let counts = count_fragments(&fragments, &barcodes, &features, mode)?;
             let nnz: Vec<usize> = counts.indices.iter().map(|v| v.len()).collect();
@@ -401,12 +428,14 @@ pub fn atac_fragments_to_store<'py>(
                 max_nnz(max_mem_gb),
                 verbose,
             )?;
-            Ok::<_, AtacErrors>((lib, nnz))
+            Ok::<_, AtacErrors>((lib, nnz, counts.coverage))
         })
         .map_err(atac_err)?;
     let out = PyDict::new(py);
     out.set_item("lib_size", lib.into_pyarray(py))?;
     out.set_item("nnz", u32_array(py, &nnz))?;
+    let targets: Vec<&str> = chrom.iter().map(String::as_str).collect();
+    coverage_items(&out, &coverage, &targets)?;
     Ok(out)
 }
 
@@ -427,7 +456,8 @@ pub fn atac_fragments_to_store<'py>(
 /// ### Returns
 ///
 /// Dict of per-cell `n_fragments` (`uint64`) and `nucleosome_signal`,
-/// `tss_enrichment`, `mito_fraction` (`float64`).
+/// `tss_enrichment`, `mito_fraction` (`float64`), plus the coverage keys
+/// (off target: on a chromosome without a TSS).
 #[pyfunction]
 pub fn atac_fragment_qc<'py>(
     py: Python<'py>,
@@ -454,7 +484,331 @@ pub fn atac_fragment_qc<'py>(
     out.set_item("nucleosome_signal", qc.nucleosome_signal().into_pyarray(py))?;
     out.set_item("tss_enrichment", qc.tss_enrichment().into_pyarray(py))?;
     out.set_item("mito_fraction", qc.mito_fraction().into_pyarray(py))?;
+    let targets: Vec<&str> = tss.iter().map(|t| t.0.as_str()).collect();
+    coverage_items(&out, &qc.coverage, &targets)?;
     out.set_item("n_fragments", qc.n_fragments.into_pyarray(py))?;
+    Ok(out)
+}
+
+/// Coverage of a fragment pass into a result dict.
+///
+/// ### Params
+///
+/// * `out` - The dict
+/// * `cov` - What the pass saw
+///
+/// ### Returns
+///
+/// `Ok(())`. Adds `cells_missing`, `off_target_fraction` and
+/// `off_target_chroms` (the three largest chromosomes without targets).
+fn coverage_items(out: &Bound<'_, PyDict>, cov: &Coverage, targets: &[&str]) -> PyResult<()> {
+    out.set_item("cells_missing", cov.cells_missing)?;
+    out.set_item("off_target_fraction", cov.off_target_fraction())?;
+    let mut off: Vec<(&String, &u64)> = cov
+        .per_chrom
+        .iter()
+        .filter(|(c, _)| !targets.is_empty() && !targets.contains(&c.as_str()))
+        .collect();
+    off.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    out.set_item(
+        "off_target_chroms",
+        off.iter()
+            .take(3)
+            .map(|(c, _)| (*c).clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(())
+}
+
+/// TSS profiles and fragment length histograms per group of cells
+/// (SnapATAC2's `TSS_profile` and `frag_size_distr`).
+///
+/// ### Params
+///
+/// * `fragments` - The fragment file
+/// * `barcodes` - Cells
+/// * `groups` - Group of each cell, `0..n_groups`
+/// * `tss_chrom` - TSS chromosomes
+/// * `tss_pos` - TSS positions (0-based)
+/// * `tss_strand` - TSS strands, `-1` minus, else plus
+/// * `half_width` - Profile half width
+/// * `max_len` - Longest fragment with its own bin
+///
+/// ### Returns
+///
+/// Dict of `tss` (`uint64`, groups x `2 * half_width + 1`), `lengths`
+/// (`uint64`, groups x `max_len + 1`, bin 0 the longer fragments) and the
+/// coverage keys.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn atac_fragment_profiles<'py>(
+    py: Python<'py>,
+    fragments: PathBuf,
+    barcodes: Vec<String>,
+    groups: Vec<u32>,
+    tss_chrom: Vec<String>,
+    tss_pos: Vec<u32>,
+    tss_strand: Vec<i8>,
+    half_width: u32,
+    max_len: u32,
+) -> PyResult<Bound<'py, PyDict>> {
+    if tss_chrom.len() != tss_pos.len() || tss_chrom.len() != tss_strand.len() {
+        return Err(PyValueError::new_err(
+            "tss_chrom, tss_pos and tss_strand differ in length",
+        ));
+    }
+    let tss: Vec<(String, u32, i8)> = tss_chrom
+        .into_iter()
+        .zip(tss_pos)
+        .zip(tss_strand)
+        .map(|((c, p), s)| (c, p, s))
+        .collect();
+    let res = py
+        .detach(|| fragment_profiles(&fragments, &barcodes, &groups, &tss, half_width, max_len))
+        .map_err(atac_err)?;
+    let n = res.tss.len();
+    let width = 2 * half_width as usize + 1;
+    let bins = max_len as usize + 1;
+    let out = PyDict::new(py);
+    out.set_item("tss", flat_array(py, res.tss.concat(), n, width)?)?;
+    out.set_item("lengths", flat_array(py, res.lengths.concat(), n, bins)?)?;
+    let targets: Vec<&str> = tss.iter().map(|t| t.0.as_str()).collect();
+    coverage_items(&out, &res.coverage, &targets)?;
+    Ok(out)
+}
+
+/// Fragments per barcode, every barcode in the file.
+///
+/// ### Params
+///
+/// * `fragments` - The fragment file
+/// * `exclude_chroms` - Chromosomes not counted
+///
+/// ### Returns
+///
+/// Dict of `barcode` (sorted) and `n_fragments` (`uint64`).
+#[pyfunction]
+pub fn atac_barcode_fragment_counts<'py>(
+    py: Python<'py>,
+    fragments: PathBuf,
+    exclude_chroms: Vec<String>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let counts = py
+        .detach(|| barcode_fragment_counts(&fragments, &exclude_chroms))
+        .map_err(atac_err)?;
+    let (bc, n): (Vec<String>, Vec<u64>) = counts.into_iter().unzip();
+    let out = PyDict::new(py);
+    out.set_item("barcode", bc)?;
+    out.set_item("n_fragments", n.into_pyarray(py))?;
+    Ok(out)
+}
+
+/// Merge fragment files into one indexed file, barcodes renamed per input.
+///
+/// ### Params
+///
+/// * `paths` - The inputs
+/// * `prefixes` - Barcode prefix per input
+/// * `suffixes` - Barcode suffix per input
+/// * `out` - Output path; the index goes to `<out>.tbi`
+///
+/// ### Returns
+///
+/// Dict of `n_fragments` per input (`uint64`) and `chroms` of the output.
+#[pyfunction]
+pub fn atac_merge_fragments<'py>(
+    py: Python<'py>,
+    paths: Vec<PathBuf>,
+    prefixes: Vec<String>,
+    suffixes: Vec<String>,
+    out: PathBuf,
+) -> PyResult<Bound<'py, PyDict>> {
+    if paths.len() != prefixes.len() || paths.len() != suffixes.len() {
+        return Err(PyValueError::new_err(
+            "paths, prefixes and suffixes differ in length",
+        ));
+    }
+    let inputs: Vec<FragmentInput> = paths
+        .into_iter()
+        .zip(prefixes)
+        .zip(suffixes)
+        .map(|((path, prefix), suffix)| FragmentInput {
+            path,
+            prefix,
+            suffix,
+        })
+        .collect();
+    let res = py
+        .detach(|| merge_fragment_files(&inputs, &out))
+        .map_err(atac_err)?;
+    let d = PyDict::new(py);
+    d.set_item("n_fragments", res.n_fragments.into_pyarray(py))?;
+    d.set_item("chroms", res.chroms)?;
+    Ok(d)
+}
+
+/// The closest gene body to every region, from a GTF.
+///
+/// ### Params
+///
+/// * `gtf` - The GTF
+/// * `biotypes` - Biotypes to keep, empty for all
+/// * `chrom` - Region chromosomes
+/// * `start` - Region starts
+/// * `end` - Region ends
+///
+/// ### Returns
+///
+/// Dict of `gene_name` and `gene_id` (`None` on a chromosome without genes),
+/// `distance` (`uint32`, 0 when overlapping) and `tss_distance` (`int64`,
+/// region centre to TSS, positive downstream).
+#[pyfunction]
+pub fn atac_closest_genes<'py>(
+    py: Python<'py>,
+    gtf: PathBuf,
+    biotypes: Vec<String>,
+    chrom: Vec<String>,
+    start: Vec<u32>,
+    end: Vec<u32>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let regions = regions_from(&chrom, &start, &end)?;
+    let (genes, hits) = py
+        .detach(|| {
+            let genes: Vec<GeneRecord> = read_gtf_genes(&gtf)?
+                .into_iter()
+                .filter(|g| biotypes.is_empty() || biotypes.contains(&g.biotype))
+                .collect();
+            if genes.is_empty() {
+                return Err(AtacErrors::InvalidArgument(format!(
+                    "no gene of the GTF has a biotype in {biotypes:?}"
+                )));
+            }
+            let hits = closest_genes(&regions, &genes);
+            Ok((genes, hits))
+        })
+        .map_err(atac_err)?;
+    let pick = |f: fn(&GeneRecord) -> &String| -> Vec<Option<String>> {
+        hits.iter()
+            .map(|h| h.gene.map(|i| f(&genes[i]).clone()))
+            .collect()
+    };
+    let out = PyDict::new(py);
+    out.set_item("gene_name", pick(|g| &g.gene_name))?;
+    out.set_item("gene_id", pick(|g| &g.gene_id))?;
+    out.set_item(
+        "distance",
+        hits.iter()
+            .map(|h| h.distance)
+            .collect::<Vec<u32>>()
+            .into_pyarray(py),
+    )?;
+    out.set_item(
+        "tss_distance",
+        hits.iter()
+            .map(|h| h.tss_distance)
+            .collect::<Vec<i64>>()
+            .into_pyarray(py),
+    )?;
+    Ok(out)
+}
+
+/// Whether each region overlaps any of another set.
+///
+/// ### Params
+///
+/// * `chrom` - Region chromosomes
+/// * `start` - Region starts
+/// * `end` - Region ends
+/// * `other_chrom` - Chromosomes of the set to test against
+/// * `other_start` - Its starts
+/// * `other_end` - Its ends
+///
+/// ### Returns
+///
+/// One flag per region (`bool`).
+#[pyfunction]
+pub fn atac_overlaps_any<'py>(
+    py: Python<'py>,
+    chrom: Vec<String>,
+    start: Vec<u32>,
+    end: Vec<u32>,
+    other_chrom: Vec<String>,
+    other_start: Vec<u32>,
+    other_end: Vec<u32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let regions = regions_from(&chrom, &start, &end)?;
+    let other = regions_from(&other_chrom, &other_start, &other_end)?;
+    Ok(overlaps_any(&regions, &other).into_pyarray(py).into_any())
+}
+
+/// Peak to gene links over groups of cells (ArchR `addPeak2GeneLinks`).
+///
+/// ### Params
+///
+/// * `peak_counts` - Groups x peaks, summed counts, C order
+/// * `gene_counts` - Groups x genes, summed counts, C order
+/// * `chrom` - Peak chromosomes
+/// * `start` - Peak starts
+/// * `end` - Peak ends
+/// * `tss_chrom` - TSS chromosome per gene column
+/// * `tss_pos` - TSS position per gene column
+/// * `max_distance` - Largest peak to TSS distance
+/// * `scale` - Normalisation scale
+///
+/// ### Returns
+///
+/// Dict of `peak`, `gene` (`uint32` column indices), `distance` (`int64`),
+/// `r`, `p`, `fdr` (`float64`), one row per tested pair.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn atac_peak_to_gene<'py>(
+    py: Python<'py>,
+    peak_counts: PyReadonlyArray2<'py, f64>,
+    gene_counts: PyReadonlyArray2<'py, f64>,
+    chrom: Vec<String>,
+    start: Vec<u32>,
+    end: Vec<u32>,
+    tss_chrom: Vec<String>,
+    tss_pos: Vec<u32>,
+    max_distance: u32,
+    scale: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let peaks = regions_from(&chrom, &start, &end)?;
+    if tss_chrom.len() != tss_pos.len() {
+        return Err(PyValueError::new_err(
+            "tss_chrom and tss_pos differ in length",
+        ));
+    }
+    let tss: Vec<(String, u32)> = tss_chrom.into_iter().zip(tss_pos).collect();
+    let as_mat = |a: &PyReadonlyArray2<'py, f64>| -> PyResult<Mat<f64>> {
+        let (r, c) = (a.shape()[0], a.shape()[1]);
+        let v = a.c_slice()?;
+        Ok(Mat::from_fn(r, c, |i, j| v[i * c + j]))
+    };
+    let (pc, gc) = (as_mat(&peak_counts)?, as_mat(&gene_counts)?);
+    let params = LinkParams {
+        max_distance,
+        scale,
+    };
+    let links = py
+        .detach(|| peak_to_gene_links(pc.as_ref(), gc.as_ref(), &peaks, &tss, &params))
+        .map_err(atac_err)?;
+    let out = PyDict::new(py);
+    let col = |f: fn(&PeakGeneLink) -> u32| links.iter().map(f).collect::<Vec<u32>>();
+    out.set_item("peak", col(|l| l.peak).into_pyarray(py))?;
+    out.set_item("gene", col(|l| l.gene).into_pyarray(py))?;
+    out.set_item(
+        "distance",
+        links
+            .iter()
+            .map(|l| l.distance)
+            .collect::<Vec<i64>>()
+            .into_pyarray(py),
+    )?;
+    let fcol = |f: fn(&PeakGeneLink) -> f64| links.iter().map(f).collect::<Vec<f64>>();
+    out.set_item("r", fcol(|l| l.r).into_pyarray(py))?;
+    out.set_item("p", fcol(|l| l.p).into_pyarray(py))?;
+    out.set_item("fdr", fcol(|l| l.fdr).into_pyarray(py))?;
     Ok(out)
 }
 

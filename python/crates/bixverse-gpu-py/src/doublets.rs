@@ -1,12 +1,12 @@
 //! Scrublet on the GPU, the twin of `rs_sc_scrublet_gpu`.
 
 use bixverse_sc::sc_processing::knn::KnnParams;
-use bixverse_sc_data::store::reader::ParallelSparseReader;
 use bixverse_sc_gpu::knn_gpu::KnnParamsGpu;
-use bixverse_sc_gpu::scrublet_gpu::{ScrubletGpuSpec, ScrubletKnnBackend, run_scrublet_gpu};
+use bixverse_sc_gpu::scrublet_gpu::{
+    ScrubletGpuSpec, ScrubletKnnBackend, run_scrublet_gpu_on_store,
+};
 use numpy::PyReadonlyArray1;
 use py_common::convert::{from_py, index_vec};
-use py_common::error::BvErr;
 use py_common::results::scrublet_dict;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -68,14 +68,12 @@ pub fn scrublet<'py>(
     };
     let params = spec.into_params(knn);
     let cells = index_vec(&cells)?;
-    let gene_reader = ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?;
-    let cell_reader = ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?;
     let res = py
         .detach(|| {
             on_device(|device| {
-                run_scrublet_gpu(
-                    &gene_reader,
-                    &cell_reader,
+                run_scrublet_gpu_on_store(
+                    f_path_gene,
+                    f_path_cell,
                     &params,
                     &cells,
                     streaming,

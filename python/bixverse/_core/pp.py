@@ -42,6 +42,7 @@ from bixverse._core.single_cells import (
     GENES_BIN,
     SingleCells,
     check_rna_counts,
+    refuse_atac_features,
 )
 from bixverse._core.state import MagicLayer
 from bixverse._core.subset import ScOrMc, ScOrScSubset
@@ -434,6 +435,7 @@ def find_hvg(
         >>> bv.pp.find_hvg(sc, hvg_no=2000)
         >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="meanvarbin"))
     """
+    refuse_atac_features(sc, "find_hvg")
     params = hvg_params or HvgParams()
     if isinstance(sc, MetaCells):
         _find_hvg_mc(sc, hvg_no, params, verbose)
@@ -584,6 +586,7 @@ def find_hvg_batch_aware(
         >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
         >>> bv.pp.calculate_pca(sc, 20, hvg=batch_hvg.hvg_gene_idx)
     """
+    refuse_atac_features(sc, "find_hvg_batch_aware")
     params = hvg_params or HvgParams()
     _check_not_residual(
         params,
@@ -816,6 +819,7 @@ def calculate_pca(
         >>> bv.pp.calculate_pca(sc, no_pcs=30)
         >>> bv.pp.calculate_pca(sc, no_pcs=30, sparse_svd=False, seed=1)
     """
+    refuse_atac_features(sc, "calculate_pca")
     params = pca_params or PcaParams()
     if isinstance(sc, MetaCells):
         if sc.hvg is None and hvg is None:
@@ -1232,6 +1236,7 @@ def run_magic(
         >>> magic = bv.params.MagicParams(n_steps=2)
         >>> bv.pp.run_magic(sc, ["gene_0001", "gene_0002"], magic_params=magic)
     """
+    refuse_atac_features(sc, "run_magic")
     params = magic_params or MagicParams()
     require_fresh(sc, ["knn"], modality)
     knn = modality_cache(sc, modality).knn

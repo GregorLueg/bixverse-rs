@@ -469,7 +469,8 @@ fn sorted_intersection_count(a: &[usize], b: &[usize]) -> u32 {
 /// Degenerate cases are treated as "trust all pairs equally": when there is a
 /// single pair, or when the 1st and 90th percentiles coincide (uniform counts),
 /// every anchor is returned with score `1.0`. Returning zeros in this case
-/// would silently cancel the downstream correction.
+/// would silently cancel the downstream correction. Seurat (`ScoreAnchors`)
+/// divides by the zero range there and gives `NaN` scores.
 ///
 /// ### Params
 ///
@@ -558,7 +559,8 @@ pub fn build_integration_matrix(
 ///   4. Column-normalise so each query cell's column sums to 1.
 ///
 /// The output is a CSC matrix of shape `(n_pairs, n_query)` with at most
-/// `k_weight` non-zeros per column.
+/// `k_weight` non-zeros per column. With fewer unique anchor cells than
+/// `k_weight`, all of them are used; Seurat stops with an error instead.
 ///
 /// ### Params
 ///
