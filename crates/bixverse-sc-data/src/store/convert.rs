@@ -392,7 +392,11 @@ pub fn upgrade_store_to_v5(
             staged.push((g, v));
         }
         for (p, _) in &staged {
-            std::fs::File::open(tmp(p))?.sync_all()?;
+            // Windows refuses FlushFileBuffers on a read-only handle
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(tmp(p))?
+                .sync_all()?;
         }
         Ok(())
     })();
