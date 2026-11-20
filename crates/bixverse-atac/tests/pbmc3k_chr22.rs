@@ -784,14 +784,34 @@ fn test_transfer_anchors_match_seurat() {
     for p in their_pairs.iter().filter(|p| !ours.contains_key(p)) {
         assert!(tied.contains(&p.0), "Seurat anchor {p:?} missing");
     }
+    // scores are rescaled shared neighbour counts, so they move in steps of
+    // one neighbour; the smallest gap between Seurat's distinct scores is one
+    let mut levels: Vec<f64> = theirs.iter().map(|t| t.2).collect();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    let step = levels
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f64::INFINITY, f64::min);
+    // the f32 CCA embedding differs in its last bits from Seurat's f64 one and
+    // with the thread count (faer splits its reductions by it), so pairs on a
+    // near tie at the k_score boundary gain or lose one shared neighbour
     let mut n_off = 0;
     for &(r, q, score) in &theirs {
         if let Some(&s) = ours.get(&(r, q)) {
-            n_off += ((s as f64 - score).abs() > 1e-6) as usize;
+            let d = (s as f64 - score).abs();
+            assert!(
+                d <= step + 1e-6,
+                "anchor ({r}, {q}): {s} vs Seurat's {score}, more than one step of {step}"
+            );
+            n_off += (d > 1e-6) as usize;
         }
     }
-    // a swapped tied cell shifts the shared neighbour counts of a few pairs
-    assert!(n_off <= 2, "{n_off} anchor scores differ");
+    assert!(
+        n_off * 20 <= theirs.len(),
+        "{n_off} of {} anchor scores off by one step",
+        theirs.len()
+    );
 }
 
 #[test]
