@@ -21,6 +21,8 @@ Worked through in [Single-cell data I/O in bixverse](../vignettes/single_cell_io
         - load_h5ad_norm
         - stream_h5ad
         - load_tenx_h5
+        - load_atac_fragments
+        - load_atac_tenx
         - load_mtx
         - get_cell_ranger_params
 

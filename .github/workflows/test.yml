@@ -35,6 +35,8 @@ jobs:
         -p bixverse-sc --features multi-modal
         -p bixverse-rs --features single-cell,multi-modal
         -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+        -p bixverse-atac --features hdf5-static
+        -p bixverse-rs --features atac,hdf5-static
       # extendr links against R, so this lane needs the gnu ABI on Windows and
       # a shared libR on Linux.
       r-runs: |

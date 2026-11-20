@@ -54,6 +54,7 @@ nav:
           - Meta cells: vignettes/meta_cells.ipynb
           - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
           - Joint RNA and ATAC: vignettes/atac_multiome.ipynb
+          - ATAC without RNA: vignettes/atac_only.ipynb
       - Methods:
           - Differential expression: vignettes/differential_expression.ipynb
           - Differential abundance: vignettes/differential_abundance.ipynb

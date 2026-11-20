@@ -16,13 +16,35 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   is `NmfConsensusParams.kmeans_iters`.
 - The parameter bundles are written in Python now, no longer generated from
   the R specs. `bixverse.params._generated` is `bixverse.params._specs`.
+- `bv.io.load_tenx_h5(feature_type="Peaks")` raises; peaks load through
+  `bv.atac.add_atac_tenx` or `bv.io.load_atac_tenx`.
+- Opening an experiment checks that its cell and gene files belong together,
+  and raises when they do not.
 
 **Features**
 
 - `bv.atac`, single cell ATAC on `SingleCellsMultiModal`: 10x multiome peaks
   or fragment files counted into peaks or tiles, fragment QC, AMULET
   multiplets, peak calling per group (a MACS3 `callpeak` port), TF-IDF, top
-  features, LSI, LSI projection, rLSI integration and gene activity.
+  features, LSI, LSI projection, rLSI integration and gene activity; TSS
+  profiles and fragment length histograms, blacklist removal, closest-gene
+  annotation, fragment file merging, `barcode_map` for barcodes that differ
+  from the cell ids, and peak to gene links (`peak_to_gene`). Fragment
+  passes raise when no cell id is a barcode of the file or the fragments
+  share no chromosome name with the features, and warn on partial mismatches.
+- `bv.SingleCellsAtac`, ATAC without RNA: `bv.io.load_atac_fragments` (cells
+  from a barcode list, Cell Ranger's calls or a fragment count cut-off) and
+  `bv.io.load_atac_tenx`. Every `bv.atac` function, the graph, embedding,
+  marker and plot functions take it; `bv.io.load_existing` opens it.
+- The ATAC state is rebuilt from the store on open; `bv.io.save` keeps only
+  the LSI. `bv.atac.get_gene_activity` reopens the gene activity with the
+  experiment's cell filter, which `set_cells_to_keep` now carries over.
+- Plots: `bv.pl.tss_profile_plot`, `fragment_length_plot`,
+  `lsi_depth_plot`; peaks on a plot with `expr_modality="atac"`;
+  `feature_plot(expr_sc=...)` colours one object's embedding with another's
+  expression; `joint_plot` takes axis labels.
+- `transfer_labels_seurat(weight_owner=...)` checks the weight embedding keeps
+  the query's cells.
 - Methods that assume RNA counts refuse a gene activity store (residuals,
   doublets, Bonsai, gene set proportions) or warn on it, in both wheels.
 - `modality="atac"` on `bv.graph`, `bv.embed`, `bv.integrate.harmony`, the
@@ -39,7 +61,8 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   included); `bv.io.save_zarr` writes one, `genes=` included.
 - `bv.io.save_h5ad` takes `genes=` (indices or ids, in column order) and
   streams only those genes out of the store (#129).
-- `bv.io.download_pbmc_multiome`, and a joint RNA and ATAC vignette on it.
+- `bv.io.download_pbmc_multiome` (now with the ENCODE hg38 blacklist), a
+  joint RNA and ATAC vignette and an ATAC-only vignette on it.
 - `node_order` on `find_clusters` and the fast clustering bundles; the
   Harmony bundles take `k_means_algorithm` and `e_means_epochs`, fast
   clustering `km_type="emeans"` and `e_means_epochs`.
@@ -70,6 +93,14 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
 - `scrublet`, `boost`, `scdblfinder` and the GPU `scrublet` read a small cell
   selection, such as one `group_by` group, from the cell-based store instead
   of sweeping the gene-based one (#134). Same results at the same seed.
+- ATAC: `call_peaks` hung on an empty group and on `q_value=1`; `atac_frip`
+  went stale after a recount; `paired-insertion` counted at the raw fragment
+  end instead of `end - 1` (counts differ); the TSS enrichment counted chrM
+  TSSs when `mito_chroms` left them out; peak and tile stores reached HVG,
+  PCA and MAGIC.
+- The nucleosome signal of a cell with no nucleosome-free or
+  mononucleosomal fragment is 0, not NaN.
+- The marker tables of ATAC call their id column `feature_id`, not `gene_id`.
 
 **Notes**
 
