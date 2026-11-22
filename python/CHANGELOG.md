@@ -85,6 +85,7 @@ Builds against the `bixverse-rs` workspace at 0.11.0.
   same seed.
 - The normalised layer is read at f32, also from v4 stores, which gave f16
   before. Values differ slightly.
+- `edge-rs` was updated to `0.4.0`. Results move slightly at the same seed.
 
 **Fixes**
 

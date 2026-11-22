@@ -97,6 +97,7 @@ space and a first wave of methods for single cell ATACseq.
 - The normalised layer is recomputed in `f32`, also for v4 stores, which read it
   at f16 before, through `libm` in f64 so every OS derives the same bits.
   Values differ slightly.
+- `edge-rs` was updated to `0.4.0`. Results move slightly at the same seed.
 
 ### Fixes
 
