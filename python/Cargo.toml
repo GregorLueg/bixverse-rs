@@ -35,7 +35,7 @@ crossbeam-channel = "0.5"
 cubecl = { version = "0.11.0", features = ["wgpu"] }
 cubecl-utils-rs = "0.2.0"
 # the `Tested` the edgeR test takes; one copy with bixverse-methods
-edge-rs = "0.3.2"
+edge-rs = "0.4.0"
 # Same features as the workspace: the default `npy` feature drags `stacker`
 # into the tree.
 indexmap = "2.13.0"
