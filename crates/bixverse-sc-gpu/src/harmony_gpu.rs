@@ -123,8 +123,9 @@ pub struct HarmonyParamsV2Gpu {
     pub batch_proportion_cutoff: f32,
     /// Whether to estimate lambda dynamically per cluster
     pub use_dynamic_lambda: bool,
-    /// GPU k-means parameters; `None` uses the k-means defaults rather than
-    /// the Harmony default of `HARMONY_KMEANS_ITERS` iterations
+    /// GPU k-means parameters; `None` takes [`KMeansGpuParams::default`]
+    /// (e-means). Its 30 iterations, rather than `HARMONY_KMEANS_ITERS`, only
+    /// matter under Lloyd's
     pub kmeans_params: Option<KMeansGpuParams>,
 }
 
