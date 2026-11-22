@@ -58,6 +58,9 @@ jobs:
       # not known to round-trip. Wheels only until `maturin sdist` plus a clean
       # install has been shown to work.
       sdist: false
+      # Cross-compiled on x86_64. hdf5-static (cmake) and blosc's C++ snappy
+      # have to build for aarch64, so rehearse with a dispatch before a bump.
+      linux-arm64: true
 
   # The `bixverse-gpu` wheel. Same workspace version as `bixverse`, so the same
   # `py-v` tag: the call above owns it and this one only builds. Its ref is the
@@ -70,6 +73,7 @@ jobs:
       tag: false
       repository-url: ${{ (github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi') && 'https://test.pypi.org/legacy/' || '' }}
       sdist: false
+      linux-arm64: true
 
   # The upload lives here rather than in the reusable workflow, and has to.
   # PyPI's trusted publishing matches the OIDC token's `job_workflow_ref`, which
