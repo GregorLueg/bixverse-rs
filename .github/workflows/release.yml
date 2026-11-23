@@ -17,4 +17,7 @@ jobs:
       # cargo publish builds each member to verify it, and bixverse-r's build
       # links against R.
       needs-r: true
+      # scx-core always links HDF5 and the runner has none, so build it.
+      member-features: |
+        bixverse-sc-export=hdf5-static
     secrets: inherit

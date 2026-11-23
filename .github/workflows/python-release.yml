@@ -61,6 +61,11 @@ jobs:
       # Cross-compiled on x86_64. hdf5-static (cmake) and blosc's C++ snappy
       # have to build for aarch64, so rehearse with a dispatch before a bump.
       linux-arm64: true
+      # hdf5-static wants cmake >= 3.26. The aarch64 cross image ships 3.22 and
+      # has python3; the x86_64 pypa image has cmake 4 and no python3.
+      before-script-linux: |
+        if command -v python3 >/dev/null; then python3 -m pip install -q 'cmake>=3.26,<4'; fi
+        hash -r
 
   # The `bixverse-gpu` wheel. Same workspace version as `bixverse`, so the same
   # `py-v` tag: the call above owns it and this one only builds. Its ref is the
