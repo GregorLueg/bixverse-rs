@@ -731,6 +731,11 @@ impl LanczosParams {
 }
 
 impl Default for LanczosParams {
+    /// The default [`LanczosParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -1350,6 +1355,11 @@ impl BlockLanczosParams {
 }
 
 impl Default for BlockLanczosParams {
+    /// The default [`BlockLanczosParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

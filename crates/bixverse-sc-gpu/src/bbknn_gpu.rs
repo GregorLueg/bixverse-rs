@@ -64,8 +64,12 @@ impl BbknnParamsGpu {
     }
 }
 
-/// Default implementation for BbknnParamsGpu
 impl Default for BbknnParamsGpu {
+    /// The default [`BbknnParamsGpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -92,6 +96,11 @@ pub struct BbknnParamsGpuSpec {
 }
 
 impl Default for BbknnParamsGpuSpec {
+    /// The default [`BbknnParamsGpuSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = BbknnParamsGpu::new();
         Self {

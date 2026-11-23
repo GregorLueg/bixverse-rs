@@ -10,10 +10,10 @@ use bixverse_sc::sc_processing::cellsweep::{
     CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, infer_empty_droplets,
     run_cellsweep,
 };
-use bixverse_sc::sc_processing::doublet_detection::{BoostClassifier, BoostParams};
-use bixverse_sc::sc_processing::scdblfinder::{ScDblFinder, ScDblFinderParams};
-use bixverse_sc::sc_processing::scrublet::{Scrublet, ScrubletParams};
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc::sc_processing::doublet_detection::{BoostParams, run_boost_on_store};
+use bixverse_sc::sc_processing::scdblfinder::{ScDblFinderParams, run_scdblfinder_on_store};
+use bixverse_sc::sc_processing::scrublet::{ScrubletParams, run_scrublet_on_store};
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use py_common::convert::CSlice;
 use py_common::convert::{f64_array, u32_array};
@@ -22,30 +22,6 @@ use py_common::error::BvErr;
 use py_common::results::scrublet_dict;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-
-/////////////
-// Helpers //
-/////////////
-
-/// Open the gene- and cell-based stores
-///
-/// ### Params
-///
-/// * `f_path_gene` - The gene-based binary
-/// * `f_path_cell` - The cell-based binary
-///
-/// ### Returns
-///
-/// `(gene_reader, cell_reader)`.
-fn readers(
-    f_path_gene: &str,
-    f_path_cell: &str,
-) -> PyResult<(ParallelSparseReader, ParallelSparseReader)> {
-    Ok((
-        ParallelSparseReader::new(f_path_gene).map_err(BvErr::from)?,
-        ParallelSparseReader::new(f_path_cell).map_err(BvErr::from)?,
-    ))
-}
 
 ///////////////////////
 // Doublet detection //
@@ -92,10 +68,13 @@ pub fn scrublet<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: ScrubletParams = from_py(params, "scrublet params")?;
     let cells = index_vec(&cells)?;
-    let (gene_reader, cell_reader) = readers(f_path_gene, f_path_cell)?;
     let res = py
         .detach(|| {
-            Scrublet::new(&gene_reader, &cell_reader, params, &cells).run_scrublet(
+            run_scrublet_on_store(
+                f_path_gene,
+                f_path_cell,
+                &cells,
+                params,
                 streaming,
                 seed,
                 verbose,
@@ -139,11 +118,17 @@ pub fn boost<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let params: BoostParams = from_py(params, "boost params")?;
     let cells = index_vec(&cells)?;
-    let (gene_reader, cell_reader) = readers(f_path_gene, f_path_cell)?;
     let res = py
         .detach(|| {
-            BoostClassifier::new(&gene_reader, &cell_reader, params, &cells)
-                .run_boost(streaming, seed, verbose)
+            run_boost_on_store(
+                f_path_gene,
+                f_path_cell,
+                &cells,
+                params,
+                streaming,
+                seed,
+                verbose,
+            )
         })
         .map_err(BvErr::from)?;
 
@@ -195,11 +180,17 @@ pub fn scdblfinder<'py>(
     let mut params: ScDblFinderParams = from_py(params, "scdblfinder params")?;
     params.return_features = return_features;
     let cells = index_vec(&cells)?;
-    let (gene_reader, cell_reader) = readers(f_path_gene, f_path_cell)?;
     let res = py
         .detach(|| {
-            ScDblFinder::new(&gene_reader, &cell_reader, params, &cells)
-                .run(seed, streaming, verbose)
+            run_scdblfinder_on_store(
+                f_path_gene,
+                f_path_cell,
+                &cells,
+                params,
+                seed,
+                streaming,
+                verbose,
+            )
         })
         .map_err(BvErr::from)?;
 

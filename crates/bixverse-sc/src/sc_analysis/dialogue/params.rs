@@ -172,6 +172,11 @@ impl PmdParams {
 }
 
 impl Default for PmdParams {
+    /// The default [`PmdParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 2,
@@ -257,6 +262,11 @@ impl HlmParams {
 }
 
 impl Default for HlmParams {
+    /// The default [`HlmParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_cells_per_sample: 2,
@@ -330,6 +340,11 @@ impl RefineParams {
 }
 
 impl Default for RefineParams {
+    /// The default [`RefineParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             support_p: 0.1,

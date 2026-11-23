@@ -5,20 +5,22 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::FromRList;
+use crate::ml_r_wrappers::kmeans_spec_from_r_map;
 use crate::r_rust_interface::r_list_to_map;
 #[cfg(feature = "single-cell")]
 use crate::r_rust_interface::{r_list_count, r_list_count_allow_zero};
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::bbknn_gpu::BbknnParamsGpu;
+use bixverse_rs::gpu::sc_gpu::fast_clusters_gpu::KMeansGpuSpec;
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::fast_mnn_gpu::FastMnnParamsGpu;
 #[cfg(feature = "single-cell")]
-use bixverse_rs::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
+use bixverse_rs::gpu::sc_gpu::harmony_gpu::{HarmonyParamsV2Gpu, HarmonyParamsV2GpuSpec};
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::knn_gpu::KnnParamsGpu;
 #[cfg(feature = "single-cell")]
 use bixverse_rs::gpu::sc_gpu::scrublet_gpu::{ScrubletKnnBackend, ScrubletParamsGpu};
-use bixverse_rs::ml::clustering::k_means::parse_kmeans_init;
+use bixverse_rs::ml::clustering::k_means::KMeansSpec;
 #[cfg(feature = "single-cell")]
 use bixverse_rs::single_cell::sc_batch_correction::harmony_core::HARMONY_KMEANS_ITERS;
 #[cfg(feature = "single-cell")]
@@ -28,33 +30,48 @@ use bixverse_rs::single_cell::sc_processing::knn::KnnParams;
 // KMeansGpuParams //
 /////////////////////
 
-/// Parses [KMeansGpuParams] from an R list.
 impl FromRList for KMeansGpuParams {
+    /// Parse the [KMeansGpuParams] from an R list: the shared k-means keys
+    /// (see [kmeans_spec_from_r_map]) plus `fixed` and `quantise`. Missing
+    /// keys take [KMeansGpuSpec::default].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to parse
+    ///
+    /// ### Returns
+    ///
+    /// The [KMeansGpuParams], or an error for an unknown algorithm or
+    /// initialisation.
     fn from_r_list(r_list: List) -> Result<Self> {
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
-
-        let iters = params_list
-            .get("k_means_iter")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(50) as usize;
-
-        let init = params_list
-            .get("k_means_init")
-            .and_then(|v| v.as_str())
-            .and_then(parse_kmeans_init);
-
-        let fixed = params_list
-            .get("fixed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let quantise_to_f16 = params_list
-            .get("quantise")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        Ok(Self::new(iters, init, fixed, quantise_to_f16))
+        gpu_kmeans_spec_from_r_map(&params_list, KMeansGpuSpec::default())?
+            .into_params()
+            .map_err(Error::Other)
     }
+}
+
+/// Read the GPU k-means keys from an already flattened R list.
+///
+/// ### Params
+///
+/// * `params` - The flattened R list
+/// * `defaults` - Values of `fixed` and `quantise` when absent
+///
+/// ### Returns
+///
+/// The [KMeansGpuSpec], or an error for a key of the wrong type.
+fn gpu_kmeans_spec_from_r_map(
+    params: &HashMap<&str, Robj>,
+    defaults: KMeansGpuSpec,
+) -> Result<KMeansGpuSpec> {
+    let flag =
+        |key: &str, default: bool| params.get(key).and_then(|v| v.as_bool()).unwrap_or(default);
+    Ok(KMeansGpuSpec {
+        kmeans: kmeans_spec_from_r_map(params)?,
+        fixed: flag("fixed", defaults.fixed),
+        quantise: flag("quantise", defaults.quantise),
+    })
 }
 
 ////////////////////////
@@ -67,9 +84,9 @@ impl FromRList for HarmonyParamsV2Gpu {
     ///
     /// Should values not be found within the List, the parameters will default
     /// to the values defined in `HarmonyParamsV2Gpu::default()`. The
-    /// `kmeans_params` field is populated from the same list, with
-    /// GPU-Harmony-specific defaults (`iters = HARMONY_KMEANS_ITERS`,
-    /// `fixed = false`).
+    /// `kmeans_params` field is populated from the same list, with the
+    /// [HarmonyParamsV2GpuSpec] defaults (e-means; under Lloyd's
+    /// `HARMONY_KMEANS_ITERS` fixed iterations; not quantised).
     ///
     /// ### Params
     ///
@@ -147,29 +164,17 @@ impl FromRList for HarmonyParamsV2Gpu {
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.use_dynamic_lambda);
 
-        let kmeans_iters = params_list
-            .get("k_means_iter")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(HARMONY_KMEANS_ITERS);
-        let kmeans_init = params_list
-            .get("k_means_init")
-            .and_then(|v| v.as_str())
-            .and_then(parse_kmeans_init);
-        let kmeans_fixed = params_list
-            .get("fixed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let kmeans_quantise = params_list
-            .get("quantise")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let kmeans_params = Some(KMeansGpuParams::new(
-            kmeans_iters,
-            kmeans_init,
-            kmeans_fixed,
-            kmeans_quantise,
-        ));
+        let spec_defaults = HarmonyParamsV2GpuSpec::default();
+        let mut kmeans = gpu_kmeans_spec_from_r_map(
+            &params_list,
+            KMeansGpuSpec {
+                kmeans: KMeansSpec::default(),
+                fixed: spec_defaults.fixed,
+                quantise: spec_defaults.quantise,
+            },
+        )?;
+        kmeans.kmeans = kmeans.kmeans.with_default_iters(HARMONY_KMEANS_ITERS);
+        let kmeans_params = Some(kmeans.into_params().map_err(Error::Other)?);
 
         Ok(Self {
             k,

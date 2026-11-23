@@ -137,6 +137,37 @@ pub enum ScDataErrors {
     #[error("v4 gene chunk needs the per-cell library-size table, which the file does not carry")]
     V4MissingCellLibraryTable,
 
+    /// The v5 file header or its section directory is malformed, or uses a
+    /// feature this build does not know.
+    #[error("Invalid v5 store: {0}")]
+    V5HeaderInvalid(String),
+
+    /// A cell file and a gene file that do not belong to the same store.
+    #[error("The cell and gene files do not belong together: their {0} differs")]
+    StorePairMismatch(String),
+
+    /// Stores that cannot be combined because their identity differs.
+    #[error("Cannot combine stores that differ in {0}")]
+    StoreKindMismatch(String),
+
+    /// A read asked for the normalised layer of a store that has none: its
+    /// norm kind is `none`, or TF-IDF without an IDF table.
+    #[error("The store has no normalised layer ({0}); read the raw counts instead")]
+    NormNotAvailable(String),
+
+    /// A raw layer index past the store's layer count.
+    #[error("Raw layer {requested} requested, but the store has {available}")]
+    LayerOutOfRange {
+        /// Requested layer.
+        requested: usize,
+        /// Layers in the store.
+        available: usize,
+    },
+
+    /// A v3 store was opened for analysis. v3 is only read by the converters.
+    #[error("{0} is a v3 store, which only the converters read: run upgrade_store_to_v5 first")]
+    V3NeedsConversion(String),
+
     /// The file is not a bixverse count archive.
     #[error("Not a bixverse count archive (magic string mismatch)")]
     ArchiveMagicMismatch,
@@ -209,9 +240,15 @@ pub enum ScDataErrors {
     #[cfg(feature = "h5")]
     Hdf5(#[from] hdf5::Error),
 
-    /// Provide custom error message for unsupported file formats.
+    /// The h5ad stores `X` in a layout the loader does not read, or a group it
+    /// needs is missing or malformed.
     #[error("Unknown or unsupported h5ad format: {0}")]
-    UnsupportH5ADFormat(String),
+    UnsupportedH5adFormat(String),
+
+    /// An anndata Zarr store could not be opened or read: missing node,
+    /// unsupported data type or codec, or a store error.
+    #[error("Zarr error: {0}")]
+    ZarrError(String),
 
     /// Two columns of an obs / var table end up with the same name after
     /// snake_case. DuckDB rejects the table, so the export stops before
@@ -259,8 +296,8 @@ pub enum ScDataErrors {
     /// The library-size vector read from `obs` does not match the number of
     /// cells in `X`.
     ///
-    /// Indicates a malformed h5ad — typical cause is a user-edited obs table
-    /// whose row count drifted from the matrix.
+    /// Indicates a malformed h5ad. The typical cause is a user-edited obs
+    /// table whose row count drifted from the matrix.
     #[error("Library size column length ({found}) does not match cell count ({expected})")]
     LibSizeLengthMismatch {
         /// Expected length (number of cells in `X`).

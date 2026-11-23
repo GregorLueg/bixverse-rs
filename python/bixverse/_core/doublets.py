@@ -36,7 +36,13 @@ from bixverse._core import db
 from bixverse._core.ingest import _prepare
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, Selection, SingleCells
+from bixverse._core.single_cells import (
+    CELLS_BIN,
+    GENES_BIN,
+    Selection,
+    SingleCells,
+    check_rna_counts,
+)
 from bixverse._validate import Verbose
 from bixverse.params import (
     BoostParams,
@@ -493,6 +499,7 @@ def _scrublet(
 ) -> ScrubletRes:
     """The body of `scrublet` over `to_rust(params)`, with the extension call
     `rust_fn` supplied, so the GPU twin shares it."""
+    check_rna_counts(sc, "scrublet", refuse=True)
     cells = _cells(sc, cells_to_use)
 
     def run(c: np.ndarray, v: int) -> dict[str, Any]:
@@ -683,6 +690,7 @@ def doublet_detection_boost(
         >>> boost = bv.doublets.doublet_detection_boost(sc, group_by="sample_id")
         >>> sc.add_obs(bv.doublets.get_data(boost))
     """
+    check_rna_counts(sc, "doublet_detection_boost", refuse=True)
     params = boost_params or BoostParams()
     cells = _cells(sc, cells_to_use)
 
@@ -789,6 +797,7 @@ def scdblfinder(
         >>> dbl = bv.doublets.scdblfinder(sc, return_features=True)
         >>> sc.add_obs(bv.doublets.get_data(dbl))
     """
+    check_rna_counts(sc, "scdblfinder", refuse=True)
     params = scdblfinder_params or ScdblfinderParams()
     cells = _cells(sc, cells_to_use)
 

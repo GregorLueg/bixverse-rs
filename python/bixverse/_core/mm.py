@@ -563,9 +563,10 @@ def generate_wnn_graph(
     Args:
         mm: The experiment.
         modality_1: First modality.
-        modality_2: Second modality.
+        modality_2: Second modality, `"adt"` or `"atac"`.
         embd_to_use_1: Embedding of the first, `"pca"` or a name in its cache.
-        embd_to_use_2: Embedding of the second.
+        embd_to_use_2: Embedding of the second, `"lsi"` (or a correction of it)
+            for ATAC.
         no_embd_to_use_1: Leading dimensions of the first. `None` for all.
         no_embd_to_use_2: Leading dimensions of the second. `None` for all.
         wnn_params: The WNN parameters. `None` uses the defaults. Their `k`
@@ -585,6 +586,7 @@ def generate_wnn_graph(
     Examples:
         >>> bv.mm.generate_wnn_graph(mm)
         >>> bv.mm.generate_wnn_graph(mm, no_embd_to_use_1=15, no_embd_to_use_2=8)
+        >>> bv.mm.generate_wnn_graph(mm, modality_2="atac", embd_to_use_2="lsi")
         >>> bv.graph.find_clusters(mm, modality="wnn")
     """
     params = wnn_params or WnnParams()

@@ -136,6 +136,38 @@ where
     variance.sqrt()
 }
 
+/// Mean and sample standard deviation (`n - 1`), accumulated in `f64`.
+///
+/// Two passes over the values, so a single precision column of any length
+/// keeps its precision; reference implementations (R, Seurat, Signac) work in
+/// double.
+///
+/// ### Params
+///
+/// * `x` - The values; iterated twice
+///
+/// ### Returns
+///
+/// `(mean, sd)`. `sd` is 0 for fewer than two values; the mean of no values is
+/// NaN.
+pub fn mean_sd_f64<T, I>(x: I) -> (f64, f64)
+where
+    T: Into<f64>,
+    I: IntoIterator<Item = T>,
+    I::IntoIter: Clone,
+{
+    let it = x.into_iter();
+    let (n, sum) = it
+        .clone()
+        .fold((0usize, 0.0f64), |(n, s), v| (n + 1, s + v.into()));
+    let mean = sum / n as f64;
+    if n < 2 {
+        return (mean, 0.0);
+    }
+    let ss: f64 = it.map(|v| (v.into() - mean).powi(2)).sum();
+    (mean, (ss / (n - 1) as f64).sqrt())
+}
+
 /// Sum of squares of a slice, accumulated in `f64`.
 ///
 /// Accumulating in the storage type is the wrong default for anything this is
@@ -409,6 +441,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sd divides by `n - 1`, and short inputs do not divide by zero.
+    #[test]
+    fn test_mean_sd_f64_uses_n_minus_one() {
+        let (m, s) = mean_sd_f64([1.0f32, 2.0, 3.0, 4.0]);
+        approx::assert_relative_eq!(m, 2.5);
+        approx::assert_relative_eq!(s, (5.0f64 / 3.0).sqrt());
+        assert_eq!(mean_sd_f64([7.0f32]), (7.0, 0.0));
+    }
 
     /// The sum of squares has to survive a large running total swamping small
     /// increments, which is the failure mode that put a 2.5% error into every

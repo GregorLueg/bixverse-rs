@@ -33,7 +33,7 @@ from beartype import beartype
 from bixverse import _bixverse
 from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 from bixverse.params import BonsaiParams, to_rust
 
@@ -270,6 +270,7 @@ def _bonsai(
 ) -> BonsaiTree:
     """The body of `bonsai`, with the extension module `ext` (its `sc_bonsai`
     and `mc_bonsai`) supplied, so the GPU twin shares it."""
+    check_rna_counts(sc, "bonsai", refuse=True)
     params = bonsai_params or BonsaiParams()
     genes_in = _genes_in(hvg, sc.n_genes)
     gene_ids = sc.gene_ids(genes_in)

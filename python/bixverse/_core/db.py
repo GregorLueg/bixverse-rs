@@ -39,13 +39,14 @@ from bixverse._core.repr import compact_repr
 
 DB_NAME: str = "sc_duckdb.db"
 
-Table = Literal["obs", "var", "var_adt"]
+Table = Literal["obs", "var", "var_adt", "var_atac"]
 
 # index column, identifier column
 TABLE_KEYS: dict[str, tuple[str, str]] = {
     "obs": ("cell_idx", "cell_id"),
     "var": ("gene_idx", "gene_id"),
     "var_adt": ("feature_idx", "feature_id"),
+    "var_atac": ("feature_idx", "feature_id"),
 }
 
 PROTECTED_COLUMNS: dict[str, tuple[str, ...]] = {

@@ -16,25 +16,25 @@ pub const NO_GROUP: u16 = u16::MAX;
 // Single cells //
 //////////////////
 
-/// Helper function to rank specifically `F16` type slices
+/// Rank a slice of non-negative `f32` values by their bit patterns
 ///
 /// ### Params
 ///
-/// * `vec` - Slice of `F16`
+/// * `vec` - The values
 ///
 /// ### Returns
 ///
 /// The ranked values as an f32 vector.
-fn rank_f16(vec: &[F16]) -> Vec<f32> {
+fn rank_nonneg_f32(vec: &[f32]) -> Vec<f32> {
     let n = vec.len();
     if n == 0 {
         return Vec::new();
     }
 
-    // F16 bit pattern is monotonic in value for non-negative finite values
+    // f32 bit pattern is monotonic in value for non-negative finite values
     // (IEEE 754 sign-magnitude). Normalised counts are >= 0, so sorting by
-    // raw u16 bits matches sorting by value, with a cheaper integer compare.
-    let mut indexed: Vec<(u16, usize)> = vec
+    // raw u32 bits matches sorting by value, with a cheaper integer compare.
+    let mut indexed: Vec<(u32, usize)> = vec
         .iter()
         .enumerate()
         .map(|(i, v)| (v.to_bits(), i))
@@ -77,10 +77,10 @@ fn rank_f16(vec: &[F16]) -> Vec<f32> {
 /// Nothing; `out` holds one midrank per gene.
 pub(crate) fn rank_cell_into(
     indices: &[u32],
-    data: &[F16],
+    data: &[f32],
     n_genes: usize,
     out: &mut Vec<f32>,
-    sort_buf: &mut Vec<(u16, usize)>,
+    sort_buf: &mut Vec<(u32, usize)>,
 ) {
     let num_nonzeros = data.len();
     let num_zeros = n_genes - num_nonzeros;
@@ -207,7 +207,7 @@ fn split_by_offsets<'a, V>(flat: &'a mut [V], offsets: &[usize]) -> Vec<&'a mut 
 pub fn fast_csr_ranking(
     row_ptr: &[usize],
     col_indices: &[u32],
-    data: &[F16],
+    data: &[f32],
     nrow: usize,
     ncol: usize,
     rank_within_rows: bool,
@@ -230,12 +230,12 @@ pub fn fast_csr_ranking(
 
                 if num_zeros == 0 {
                     let row_data = &data[start..end];
-                    return rank_f16(row_data);
+                    return rank_nonneg_f32(row_data);
                 }
 
                 let row_data = &data[start..end];
                 let row_cols = &col_indices[start..end];
-                let nonzero_ranks = rank_f16(row_data);
+                let nonzero_ranks = rank_nonneg_f32(row_data);
                 let zero_rank = (1.0 + num_zeros as f32) / 2.0;
                 let mut result = vec![zero_rank; ncol];
 
@@ -335,12 +335,12 @@ fn tie_contribution(t: usize) -> f64 {
 pub fn csr_rank_sum_stats_two_groups(
     row_ptr: &[usize],
     col_indices: &[u32],
-    data: &[F16],
+    data: &[f32],
     n_grp1: usize,
     nrow: usize,
     ncol: usize,
 ) -> Vec<(f64, f64)> {
-    // (u16, u32) is 8 bytes against 16 for (u16, usize) after alignment
+    // (u32, u32) is 8 bytes against 16 for (u32, usize) after alignment
     // padding, and this buffer is the dominant transient allocation.
     let (mut flat, offsets) = bucket_by_column(row_ptr, col_indices, nrow, ncol, |i, row| {
         (data[i].to_bits(), row as u32)
@@ -434,8 +434,8 @@ pub struct GeneGroupStats {
     tie_cross: Vec<u128>,
     /// `sum (t^3 - t)` over tie blocks of all grouped cells pooled
     tie_pooled: u128,
-    /// The gene's grouped non-zeros as `(f16 bits, group)`
-    values: Vec<(u16, u16)>,
+    /// The gene's grouped non-zeros as `(f32 bits, group)`
+    values: Vec<(u32, u16)>,
     /// Cells per group strictly below the current block
     less_than: Vec<u64>,
     /// Cells per group inside the current block
@@ -481,7 +481,7 @@ impl GeneGroupStats {
     /// * `indices` - The gene's cell indices, aligned with `data_norm`.
     /// * `lookup` - Group label per cell of the store, [NO_GROUP] for cells
     ///   outside every group.
-    pub fn gather(&mut self, data_norm: &[F16], indices: &[u32], lookup: &[u16]) {
+    pub fn gather(&mut self, data_norm: &[f32], indices: &[u32], lookup: &[u16]) {
         self.nnz.fill(0);
         self.sum.fill(0.0);
         self.values.clear();
@@ -492,7 +492,7 @@ impl GeneGroupStats {
                 continue;
             }
             self.nnz[group as usize] += 1;
-            self.sum[group as usize] += value.to_f32() as f64;
+            self.sum[group as usize] += value as f64;
             self.values.push((value.to_bits(), group));
         }
     }
@@ -519,7 +519,7 @@ impl GeneGroupStats {
         }
         self.close_block();
 
-        // f16 bits are monotonic in value for non-negative finite values
+        // f32 bits are monotonic in value for non-negative finite values
         let mut values = std::mem::take(&mut self.values);
         values.sort_unstable_by_key(|&(bits, _)| bits);
 
@@ -648,7 +648,7 @@ pub(crate) fn append_cell_chunks(
     chunks: &[CsrCellChunk],
     indptr: &mut Vec<usize>,
     indices: &mut Vec<u32>,
-    data: &mut Vec<F16>,
+    data: &mut Vec<f32>,
 ) {
     let mut current = *indptr.last().unwrap_or(&0);
 
@@ -658,53 +658,6 @@ pub(crate) fn append_cell_chunks(
         current += chunk.data_norm.len();
         indptr.push(current);
     }
-}
-
-/// Helper function to rank all cells within a given chunk vector
-///
-/// ### Params
-///
-/// * `chunk_vec` - Vector of `CsrCellChunk` to rank.
-/// * `no_genes` - Number of represented genes in this data.
-/// * `rank_within_rows` - This boolean controls if the ranking happens within
-///   cells (for example for AUCell) or across genes (for example for DGE).
-///
-/// ### Returns
-///
-/// A `Vec<Vec<f32>>` that pending the rank_within_rows represents the ranks
-/// across genes or across cells.
-pub fn rank_csr_chunk_vec(
-    chunk_vec: Vec<CsrCellChunk>,
-    no_genes: usize,
-    rank_within_rows: bool,
-) -> Vec<Vec<f32>> {
-    let no_cells = chunk_vec.len();
-    let mut all_data: Vec<Vec<F16>> = Vec::with_capacity(chunk_vec.len());
-    let mut all_indices: Vec<Vec<u32>> = Vec::with_capacity(chunk_vec.len());
-    let mut indptr: Vec<usize> = Vec::with_capacity(chunk_vec.len() + 1);
-    let mut current_indptr = 0_usize;
-
-    indptr.push(current_indptr);
-
-    for chunk in chunk_vec {
-        let data_len = chunk.data_norm.len();
-        all_data.push(chunk.data_norm);
-        all_indices.push(chunk.indices);
-        current_indptr += data_len;
-        indptr.push(current_indptr);
-    }
-
-    let all_data = flatten_vector(all_data);
-    let all_indices = flatten_vector(all_indices);
-
-    fast_csr_ranking(
-        &indptr,
-        &all_indices,
-        &all_data,
-        no_cells,
-        no_genes,
-        rank_within_rows,
-    )
 }
 
 ///////////////
@@ -805,19 +758,13 @@ pub fn rank_within_rows_f32(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::sc_traits::F16;
-
-    // Helper to create F16 from f32
-    fn f16_vec(values: &[f32]) -> Vec<F16> {
-        values.iter().map(|&v| F16::from_f32(v)).collect()
-    }
 
     /// A row with no stored entries ranks as one tie across the full gene width.
     #[test]
     fn test_all_zeros_row() {
         let row_ptr = vec![0, 0, 3];
         let col_indices = vec![0, 1, 2];
-        let data = f16_vec(&[1.0, 2.0, 3.0]);
+        let data = vec![1.0, 2.0, 3.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
 
@@ -830,7 +777,7 @@ mod tests {
     fn test_multiple_tied_zeros() {
         let row_ptr = vec![0, 2];
         let col_indices = vec![0, 3];
-        let data = f16_vec(&[1.0, 2.0]);
+        let data = vec![1.0, 2.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 1, 4, true);
 
@@ -847,7 +794,7 @@ mod tests {
     fn test_row_vs_column_ranking() {
         let row_ptr = vec![0, 3, 4];
         let col_indices = vec![0, 1, 2, 0];
-        let data = f16_vec(&[1.0, 2.0, 5.0, 3.0]);
+        let data = vec![1.0, 2.0, 5.0, 3.0];
 
         let row_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
         let col_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, false);
@@ -867,7 +814,7 @@ mod tests {
     fn test_column_ranking_with_ties() {
         let row_ptr = vec![0, 2, 3, 4];
         let col_indices = vec![0, 1, 1, 0];
-        let data = f16_vec(&[2.0, 1.0, 1.0, 2.0]);
+        let data = vec![2.0, 1.0, 1.0, 2.0];
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 3, 2, false);
 
@@ -898,7 +845,7 @@ mod tests {
         // [2.0, 1.0, 0.0, 0.0]
         let row_ptr = vec![0, 2, 4, 5, 8, 9, 11];
         let col_indices: Vec<u32> = vec![0, 2, 1, 2, 0, 0, 1, 2, 2, 0, 1];
-        let data = f16_vec(&[2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 3.0, 4.0, 1.0, 2.0, 1.0]);
+        let data = vec![2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 3.0, 4.0, 1.0, 2.0, 1.0];
 
         let n_grp1 = 3;
         let (nrow, ncol) = (6, 4);
@@ -926,7 +873,7 @@ mod tests {
         // S = (27 - 3) + (8 - 2) + (1 - 1) = 30
         let row_ptr = vec![0, 1, 2, 3, 4, 5, 5];
         let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0];
-        let data = f16_vec(&[1.0, 1.0, 1.0, 2.0, 2.0]);
+        let data = vec![1.0, 1.0, 1.0, 2.0, 2.0];
 
         let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
 
@@ -943,7 +890,7 @@ mod tests {
         // Six distinct values, no zeros: S must be exactly 0.
         let row_ptr = vec![0, 1, 2, 3, 4, 5, 6];
         let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0, 0];
-        let data = f16_vec(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
 
         let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
 
@@ -957,11 +904,11 @@ mod tests {
     fn two_group_reference(column: &[f32], a: &[usize], b: &[usize]) -> (f64, f64) {
         let mut row_ptr = vec![0_usize];
         let mut col_indices: Vec<u32> = Vec::new();
-        let mut data: Vec<F16> = Vec::new();
+        let mut data: Vec<f32> = Vec::new();
         for &cell in a.iter().chain(b) {
             if column[cell] != 0.0 {
                 col_indices.push(0);
-                data.push(F16::from_f32(column[cell]));
+                data.push(column[cell]);
             }
             row_ptr.push(col_indices.len());
         }
@@ -981,11 +928,11 @@ mod tests {
     /// Run [GeneGroupStats] on one gene column.
     fn group_stats(column: &[f32], lookup: &[u16], sizes: &[usize]) -> GeneGroupStats {
         let mut indices: Vec<u32> = Vec::new();
-        let mut data: Vec<F16> = Vec::new();
+        let mut data: Vec<f32> = Vec::new();
         for (cell, &v) in column.iter().enumerate() {
             if v != 0.0 {
                 indices.push(cell as u32);
-                data.push(F16::from_f32(v));
+                data.push(v);
             }
         }
 
@@ -1057,11 +1004,11 @@ mod tests {
         let mut reused = GeneGroupStats::new(2);
         for column in [&a, &b] {
             let mut indices: Vec<u32> = Vec::new();
-            let mut data: Vec<F16> = Vec::new();
+            let mut data: Vec<f32> = Vec::new();
             for (cell, &v) in column.iter().enumerate() {
                 if v != 0.0 {
                     indices.push(cell as u32);
-                    data.push(F16::from_f32(v));
+                    data.push(v);
                 }
             }
             reused.gather(&data, &indices, &lookup);
@@ -1088,7 +1035,7 @@ mod tests {
 
         let mut indptr = vec![0_usize];
         let mut indices: Vec<u32> = Vec::new();
-        let mut data: Vec<F16> = Vec::new();
+        let mut data: Vec<f32> = Vec::new();
 
         append_cell_chunks(&chunks[..1], &mut indptr, &mut indices, &mut data);
         let prefix_rows = indptr.len();

@@ -1,6 +1,7 @@
 """Marker genes, donor-aware differential expression and differential abundance.
 
-Three jobs. Markers: Wilcoxon between two groups (`find_markers`), one-vs-rest
+Three jobs. Markers: Wilcoxon or Seurat's logistic regression test (`method=`,
+the default on ATAC peaks) between two groups (`find_markers`), one-vs-rest
 for every group of a column (`find_all_markers`), or markers that hold up
 against every rival group separately (`find_specific_markers`). Expression with
 donor structure: pseudobulk edgeR (`get_pseudobulked`, `pseudobulk_dge`,

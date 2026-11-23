@@ -37,8 +37,8 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 /// The normalised counts in `data_2` populate the `data_2` slot of the
 /// returned axis; these drive the SCENIC tree fits. The raw counts are
 /// cast to `u32` and placed in the `data` slot for parity with the
-/// disk path's `CscGeneChunk::to_sparse_axis`, though the fitting code
-/// only reads the normalised layer.
+/// disk path's `CompressedSparseData2::to_sparse_axes`, though the fitting
+/// code only reads the normalised layer.
 ///
 /// ### Params
 ///
@@ -270,7 +270,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
-    let k_means_params = KMeansParamsWrappers::new(50, None, None);
+    let k_means_params = KMeansParamsWrappers::default();
 
     let centroids = train_centroids(
         &gene_loadings,

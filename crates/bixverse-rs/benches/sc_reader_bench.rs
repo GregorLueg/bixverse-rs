@@ -39,11 +39,12 @@ use rand::seq::SliceRandom;
 use rand_distr::{Distribution, LogNormal, Poisson};
 use rayon::prelude::*;
 
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CsrCellChunk, DataLayerReturn, ParallelSparseReader, SingleCellReading,
-    from_cell_chunks, from_gene_chunks,
+use bixverse_rs::single_cell::sc_data::store::gene_file::write_gene_file;
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CsrCellChunk, DataLayerReturn, from_cell_chunks, from_gene_chunks},
+    reader::{ParallelSparseReader, SingleCellReading},
+    writer::CellGeneSparseWriter,
 };
-use bixverse_rs::single_cell::sc_data::gene_file_io::write_gene_file;
 
 /// Default cell count.
 const DEFAULT_CELLS: usize = 20_000;
@@ -255,7 +256,7 @@ fn main() {
                 .read_gene_parallel(batch)
                 .unwrap()
                 .par_iter()
-                .map(|g| g.data_norm.iter().map(|v| v.to_f32()).sum())
+                .map(|g| g.data_norm.iter().sum())
                 .collect();
             black_box(sums);
         }

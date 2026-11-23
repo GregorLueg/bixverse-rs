@@ -21,6 +21,8 @@ Worked through in [Single-cell data I/O in bixverse](../vignettes/single_cell_io
         - load_h5ad_norm
         - stream_h5ad
         - load_tenx_h5
+        - load_atac_fragments
+        - load_atac_tenx
         - load_mtx
         - get_cell_ranger_params
 
@@ -77,6 +79,7 @@ Worked through in [Single-cell data I/O in bixverse](../vignettes/single_cell_io
       heading_level: 3
       members:
         - save_h5ad
+        - save_zarr
         - write_h5ad_sc
         - write_tenx_h5_sc
         - write_cellranger_output
@@ -121,6 +124,7 @@ Worked through in [Single-cell data I/O in bixverse](../vignettes/single_cell_io
         - download_pbmc8k
         - download_pbmc_1k_5p
         - download_pbmc_batches
+        - download_pbmc_multiome
         - download_pbmc_totalseq_data
         - download_kang_pbmc
         - download_demuxlet_pbmc

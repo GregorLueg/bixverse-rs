@@ -15,14 +15,15 @@ use thousands::*;
 
 use crate::prelude::parse_verbosity_level;
 use crate::prelude::*;
-use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
+use bixverse_core::ml::clustering::k_means::{KMeansParamsWrappers, KMeansSpec};
 
-use super::harmony::{BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_infos};
+use super::harmony::{
+    BatchInfo, HarmonyResult, StageTimes, broadcast_param, create_batch_info, create_batch_infos,
+};
 use super::harmony_core::{
-    HARMONY_KMEANS_ITERS, HarmonyKMeansSpec, RidgeSettings, Variant, base_error_and_entropy,
-    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
-    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
-    window_converged,
+    CellOrder, RidgeSettings, Variant, base_error_and_entropy, harmony_kmeans_params,
+    kmeans_centroids, normalise_rows_into, objective, r_to_mat, restart_assignments,
+    ridge_correction, row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -69,6 +70,11 @@ pub struct HarmonyParamsV2 {
 }
 
 impl Default for HarmonyParamsV2 {
+    /// The default [`HarmonyParamsV2`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -85,7 +91,8 @@ impl Default for HarmonyParamsV2 {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
+            kmeans_params: harmony_kmeans_params(KMeansSpec::default())
+                .expect("default k-means keys parse"),
         }
     }
 }
@@ -126,10 +133,15 @@ pub struct HarmonyParamsV2Spec {
     pub use_dynamic_lambda: bool,
     /// The k-means keys
     #[serde(flatten)]
-    pub kmeans: HarmonyKMeansSpec,
+    pub kmeans: KMeansSpec,
 }
 
 impl Default for HarmonyParamsV2Spec {
+    /// The default [`HarmonyParamsV2Spec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParamsV2::default();
         Self {
@@ -147,7 +159,7 @@ impl Default for HarmonyParamsV2Spec {
             tau: d.tau,
             batch_proportion_cutoff: d.batch_proportion_cutoff,
             use_dynamic_lambda: d.use_dynamic_lambda,
-            kmeans: HarmonyKMeansSpec::default(),
+            kmeans: KMeansSpec::default(),
         }
     }
 }
@@ -181,7 +193,7 @@ impl TryFrom<HarmonyParamsV2Spec> for HarmonyParamsV2 {
             tau: s.tau,
             batch_proportion_cutoff: s.batch_proportion_cutoff,
             use_dynamic_lambda: s.use_dynamic_lambda,
-            kmeans_params: s.kmeans.try_into()?,
+            kmeans_params: harmony_kmeans_params(s.kmeans)?,
         })
     }
 }
@@ -279,6 +291,33 @@ pub fn harmony_v2_with_state(
     seed: usize,
     verbose: usize,
 ) -> Result<HarmonyResult, ScErrors> {
+    let (z_corr, r, cells) = run_harmony_v2(pca, batch_labels, params, seed, verbose)?;
+    Ok(HarmonyResult {
+        z_corr: row_major_to_mat(&z_corr, pca.ncols()),
+        r: r_to_mat(&cells.restore(&r, params.k), params.k),
+    })
+}
+
+/// The Harmony v2 loop behind [`harmony_v2`] and [`harmony_v2_with_state`],
+/// on flat buffers, so a caller that wants only the embedding never copies
+/// `R`.
+///
+/// ### Params
+///
+/// See [`harmony_v2_with_state`].
+///
+/// ### Returns
+///
+/// `(z_corr, r, cells)`: the corrected embedding `[n, d]` in input order, the
+/// soft assignments `[n, k]` in run order, both row-major, and the run's
+/// [`CellOrder`] to restore them
+fn run_harmony_v2(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParamsV2,
+    seed: usize,
+    verbose: usize,
+) -> Result<(Vec<f32>, Vec<f32>, CellOrder), ScErrors> {
     let start = Instant::now();
 
     let verbosity = parse_verbosity_level(verbose);
@@ -290,7 +329,12 @@ pub fn harmony_v2_with_state(
 
     assert!(n_vars >= 1, "At least one batch variable required");
 
-    let batch_infos = create_batch_infos(batch_labels, n)?;
+    let cells = CellOrder::new(n, seed as u64);
+    // built in input order first, which checks the label lengths
+    let batch_infos = create_batch_infos(batch_labels, n)?
+        .iter()
+        .map(|info| create_batch_info(&cells.permute(&info.cell_to_level, 1), n))
+        .collect::<Result<Vec<_>, _>>()?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -330,16 +374,16 @@ pub fn harmony_v2_with_state(
 
     let mut times = StageTimes::default();
 
-    let z_orig = to_row_major(pca);
+    let z_in = to_row_major(pca);
     let mut z_cos = vec![0.0f32; n * d];
-    normalise_rows_into(&z_orig, d, &mut z_cos);
-    let mut z_corr = z_orig.clone();
+    normalise_rows_into(&z_in, d, &mut z_cos);
 
     if verbosity.normal_verbosity() {
         println!(" Initial data preparation done in {:.2?}", start.elapsed());
         println!("Running initial k-means...");
     }
 
+    // in input order, so the initial centroids do not depend on the shuffle
     let mut y = times.time("kmeans_init", || {
         kmeans_centroids(
             &z_cos,
@@ -351,13 +395,26 @@ pub fn harmony_v2_with_state(
         )
     })?;
 
+    let (z_orig, mut z_cos) = (cells.permute(&z_in, d), cells.permute(&z_cos, d));
+    drop(z_in);
+    let mut z_corr = z_orig.clone();
+
     let mut log_base = vec![0.0f32; n * k];
     let mut shift = vec![0.0f32; n];
     let mut base = vec![0.0f32; n * k];
-    let (mut r, mut o, mut r_sum) = times.time("init_r", || {
-        distances_and_base(&z_cos, &y, &sigma, d, &mut log_base, &mut base, &mut shift);
-        let (o, r_sum) = observed_counts(&base, &batch_infos, k);
-        (base.clone(), o, r_sum)
+    let mut r = vec![0.0f32; n * k];
+    let (mut o, mut r_sum) = times.time("init_r", || {
+        restart_assignments(
+            &z_cos,
+            &y,
+            &sigma,
+            d,
+            &batch_infos,
+            &mut log_base,
+            &mut base,
+            &mut r,
+            &mut shift,
+        )
     });
 
     let (error, entropy) = base_error_and_entropy(&log_base, &base, &shift, &sigma);
@@ -458,9 +515,17 @@ pub fn harmony_v2_with_state(
         // cold restart of R from the new distances
         times.time("init_r", || {
             normalise_rows_into(&z_corr, d, &mut z_cos);
-            distances_and_base(&z_cos, &y, &sigma, d, &mut log_base, &mut base, &mut shift);
-            r.copy_from_slice(&base);
-            (o, r_sum) = observed_counts(&r, &batch_infos, k);
+            (o, r_sum) = restart_assignments(
+                &z_cos,
+                &y,
+                &sigma,
+                d,
+                &batch_infos,
+                &mut log_base,
+                &mut base,
+                &mut r,
+                &mut shift,
+            );
         });
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
@@ -492,10 +557,7 @@ pub fn harmony_v2_with_state(
         times.print();
     }
 
-    Ok(HarmonyResult {
-        z_corr: row_major_to_mat(&z_corr, d),
-        r: r_to_mat(&r, k),
-    })
+    Ok((cells.restore(&z_corr, d), r, cells))
 }
 
 /// Run Harmony v2 batch correction.
@@ -522,7 +584,8 @@ pub fn harmony_v2(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, ScErrors> {
-    Ok(harmony_v2_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
+    let (z_corr, _, _) = run_harmony_v2(pca, batch_labels, params, seed, verbose)?;
+    Ok(row_major_to_mat(&z_corr, pca.ncols()))
 }
 
 ///////////

@@ -64,8 +64,12 @@ pub struct LigandTargetParams<T: BixverseFloat> {
     pub topology_correction: bool,
 }
 
-/// Defaults based on the R implementation
 impl<T: BixverseFloat> Default for LigandTargetParams<T> {
+    /// Defaults based on the R implementation
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             lr_sig_hub: T::zero(),

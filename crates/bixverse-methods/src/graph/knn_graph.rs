@@ -99,9 +99,13 @@ pub enum KnnSymmetrisation {
     },
 }
 
-/// Defaults to the bluster sNN with Jaccard weights at a prune of
-/// [`SNN_PRUNE_DEFAULT`]
 impl Default for KnnSymmetrisation {
+    /// Defaults to the bluster sNN with Jaccard weights at a prune of
+    /// [`SNN_PRUNE_DEFAULT`]
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         KnnSymmetrisation::Snn {
             similarity: SnnSimilarity::Jaccard,
@@ -151,6 +155,11 @@ pub struct KnnSymmetrisationSpec {
 }
 
 impl Default for KnnSymmetrisationSpec {
+    /// The default [`KnnSymmetrisationSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             knn_sym: "snn".to_string(),

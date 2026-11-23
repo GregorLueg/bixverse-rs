@@ -13,8 +13,10 @@ use std::time::Instant;
 use indexmap::IndexSet;
 use rand::prelude::*;
 
-use bixverse_rs::single_cell::sc_data::data_io::{ParallelSparseReader, SingleCellReading};
-use bixverse_rs::single_cell::sc_data::in_memory_io::{InMemorySparseReader, read_cell_subset_csc};
+use bixverse_rs::single_cell::sc_data::store::in_memory::{
+    InMemorySparseReader, read_cell_subset_csc,
+};
+use bixverse_rs::single_cell::sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use bixverse_rs::single_cell::sc_processing::hvg::get_hvg_vst;
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
@@ -57,7 +59,7 @@ fn timing_subset_paths() {
 
     let genes = ParallelSparseReader::new(dir.join("counts_genes.bin").to_str().unwrap()).unwrap();
     let cells = ParallelSparseReader::new(dir.join("counts_cells.bin").to_str().unwrap()).unwrap();
-    let header = genes.get_header();
+    let header = genes.dims();
     let n_total = header.total_cells;
     let n_genes = header.total_genes;
     println!(

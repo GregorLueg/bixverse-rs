@@ -20,12 +20,13 @@ use bixverse_sc::sc_analysis::fast_clusters::Coarsener;
 
 /// MLX k-means coarsener for fast clustering.
 ///
-/// Full-batch Lloyd's on the default MLX GPU stream; every iteration runs,
-/// there is no convergence check.
+/// k-means on the default MLX GPU stream, e-means or Lloyd's as `params`
+/// picks. `None` takes the ann-search-rs defaults, which is e-means. Lloyd's
+/// runs every iteration, with no convergence check.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MlxKMeans {
-    /// k-means parameters; `iters`, `init` and `balanced` are honoured.
-    /// `None` takes the ann-search-rs defaults
+    /// k-means parameters, `None` for the ann-search-rs defaults. e-means
+    /// reads its epoch budget; Lloyd's reads `iters`, `init` and `balanced`
     pub params: Option<KMeansTrainingParams>,
 }
 
@@ -62,7 +63,7 @@ impl Coarsener for MlxKMeans {
             n_centroids,
             self.params,
             seed,
-            verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity()),
+            nested_verbosity(verbose),
         )?;
         Ok((
             centroids,

@@ -1,7 +1,5 @@
-"""ScType and Symphony without R: records, persistence, gene matching and
+"""ScType and Symphony: records, persistence, gene matching and
 input checks.
-
-Parity with the R functions is in `test_annotate_r.py`.
 """
 
 import dataclasses

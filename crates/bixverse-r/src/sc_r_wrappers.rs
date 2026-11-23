@@ -12,9 +12,7 @@ use crate::r_rust_interface::{
 };
 use crate::{FromRList, FromRMap, ToRList};
 use bixverse_rs::graph::knn_graph::KnnSymmetrisation;
-use bixverse_rs::graph::leiden::parse_community_algorithm;
 use bixverse_rs::ml::clustering::hierarchical::parse_linkage_method;
-use bixverse_rs::ml::clustering::k_means::{KMeansParamsWrappers, KMeansType, parse_k_means};
 use bixverse_rs::ml::gp::LandmarkGpParams;
 use bixverse_rs::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
@@ -24,7 +22,7 @@ use bixverse_rs::single_cell::sc_analysis::{
     cellphonedb::CellPhoneDbParams,
     dge_pathway_scores::{AucellParams, parse_auc_type},
     dialogue::{DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging},
-    fast_clusters::{CentroidGraph, CpuKMeans, CpuKMeansKind, FastClusterParams},
+    fast_clusters::{CpuKMeans, CpuKMeansSpec, FastClusterParams, FastClusterParamsSpec},
     hotspot::{HotSpotGraphParams, HotSpotParams},
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
@@ -54,19 +52,19 @@ use bixverse_rs::single_cell::sc_annotation::{
 };
 use bixverse_rs::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
-    harmony_core::HARMONY_KMEANS_ITERS, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
+    harmony_core::harmony_kmeans_params, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
     seurat_rpca::SeuratRpcaParams,
-};
-use bixverse_rs::single_cell::sc_data::{
-    bin_merge_io::BinMergeTask, data_io::MinCellQuality, mtx_multifile_io::MtxFileTask,
-    sc_synthetic_data::CellTypeConfig,
 };
 #[cfg(feature = "h5")]
 use bixverse_rs::single_cell::sc_data::{
-    h5_10x_io::parse_tenx_version,
-    h5_10x_multifile_io::TenxFileTask,
-    h5ad_io::{RawDataSlot, parse_h5ad_format, parse_raw_slot},
-    h5ad_multifile_io::H5adFileTask,
+    h5::h5ad::{RawDataSlot, parse_h5ad_format, parse_raw_slot},
+    h5::h5ad_multifile::H5adFileTask,
+    h5::tenx::parse_tenx_version,
+    h5::tenx_multifile::TenxFileTask,
+};
+use bixverse_rs::single_cell::sc_data::{
+    mtx::multifile::MtxFileTask, store::merge::BinMergeTask, store::quality::MinCellQuality,
+    synthetic::CellTypeConfig,
 };
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{AprModel, AprParams};
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::stream::AprGroupedFit;
@@ -587,7 +585,7 @@ impl FromRList for BoostParams {
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
-        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "emeans")?;
 
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
@@ -752,7 +750,7 @@ impl FromRList for ScDblFinderParams {
     fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastClusterParams::from_r_list(r_list.clone())?;
-        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "minibatch")?;
+        let fast_cluster_kmeans = cpu_kmeans_from_r_list(r_list.clone(), "emeans")?;
         let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
@@ -892,8 +890,9 @@ impl FromRList for FastClusterParams {
     /// Keys: `n_centroids`, `dist`, `cell_mediated` with `n_anchors`, or the
     /// centroid kNN `centroid_k` with the [KnnSymmetrisation] keys (`knn_sym`,
     /// ...); `algorithm` (`"louvain"` or `"leiden"`), `beta`, `n_iterations`
-    /// (negative: until stable), `min_gain`, `local_moving`, `multi_level` and
-    /// `max_evals`. Missing keys take [FastClusterParams::default].
+    /// (negative: until stable), `min_gain`, `local_moving`, `node_order`,
+    /// `multi_level` and `max_evals`. Missing keys take
+    /// [FastClusterParamsSpec::default]; the rules live in its `TryFrom`.
     ///
     /// ### Params
     ///
@@ -905,65 +904,37 @@ impl FromRList for FastClusterParams {
     /// symmetrisation.
     fn from_r_list(r_list: List) -> Result<Self> {
         let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
-        let defaults = Self::default();
-
-        let cell_mediated = params
-            .get("cell_mediated")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let graph = if cell_mediated {
-            CentroidGraph::CellMediated {
-                n_anchors: r_list_count(&params, "n_anchors")?.unwrap_or(5),
-            }
-        } else {
-            let k_default = match defaults.graph {
-                CentroidGraph::Knn { k, .. } => k,
-                CentroidGraph::CellMediated { .. } => 15,
-            };
-            CentroidGraph::Knn {
-                k: r_list_count(&params, "centroid_k")?.unwrap_or(k_default),
-                sym: KnnSymmetrisation::from_r_map(&params)?,
-            }
+        let d = FastClusterParamsSpec::default();
+        let string = |key: &str| params.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let flag =
+            |key: &str, default: bool| params.get(key).and_then(|v| v.as_bool()).unwrap_or(default);
+        let spec = FastClusterParamsSpec {
+            n_centroids: r_list_count(&params, "n_centroids")?,
+            dist: string("dist").unwrap_or(d.dist),
+            cell_mediated: flag("cell_mediated", d.cell_mediated),
+            n_anchors: r_list_count(&params, "n_anchors")?.unwrap_or(d.n_anchors),
+            centroid_k: r_list_count(&params, "centroid_k")?.unwrap_or(d.centroid_k),
+            sym: KnnSymmetrisation::from_r_map(&params)?,
+            algorithm: string("algorithm"),
+            beta: r_list_real(&params, "beta")?,
+            n_iterations: r_list_real(&params, "n_iterations")?,
+            min_gain: r_list_real(&params, "min_gain")?,
+            local_moving: string("local_moving"),
+            node_order: string("node_order"),
+            multi_level: flag("multi_level", d.multi_level),
+            max_evals: r_list_count(&params, "max_evals")?.unwrap_or(d.max_evals),
         };
-
-        let mut community = defaults.community;
-        if let Some(a) = params.get("algorithm").and_then(|v| v.as_str()) {
-            community.refine = parse_community_algorithm(a).ok_or_else(|| {
-                Error::Other(format!(
-                    "Unknown algorithm '{a}'; expected 'louvain' or 'leiden'"
-                ))
-            })?;
-        }
-        community.beta = r_list_real(&params, "beta")?.unwrap_or(community.beta);
-        community.n_iterations =
-            crate::graph_r_wrapper::r_leiden_iterations(&params)?.unwrap_or(community.n_iterations);
-        community.min_gain = r_list_real(&params, "min_gain")?.unwrap_or(community.min_gain);
-        community.local_moving =
-            crate::graph_r_wrapper::r_local_moving(&params)?.unwrap_or(community.local_moving);
-
-        Ok(Self {
-            n_centroids: r_list_count(&params, "n_centroids")?.unwrap_or(defaults.n_centroids),
-            dist: params
-                .get("dist")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .unwrap_or(defaults.dist),
-            graph,
-            community,
-            multi_level: params
-                .get("multi_level")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(defaults.multi_level),
-            max_evals: r_list_count(&params, "max_evals")?.unwrap_or(defaults.max_evals),
-        })
+        Self::try_from(spec).map_err(Error::Other)
     }
 }
 
 /// Parse a [CpuKMeans] from an R list.
 ///
-/// Keys: `km_type` (`"standard"` or `"minibatch"`), the mini-batch knobs
-/// `batch_size`, `drift_threshold` and `lr_alpha`, and the
-/// [KMeansParamsWrappers] keys.
+/// Keys: `km_type` (`"emeans"`, `"standard"` for Lloyd's, or `"minibatch"`),
+/// the mini-batch knobs `batch_size`, `drift_threshold` and `lr_alpha`, and
+/// the shared k-means keys except `k_means_algorithm`, see
+/// [crate::ml_r_wrappers::kmeans_spec_from_r_map]. `km_type` is the one knob
+/// for the algorithm.
 ///
 /// ### Params
 ///
@@ -972,33 +943,29 @@ impl FromRList for FastClusterParams {
 ///
 /// ### Returns
 ///
-/// The [CpuKMeans], or an error for an unknown `km_type`.
+/// The [CpuKMeans], or an error for an unknown `km_type` or initialisation,
+/// or a `k_means_algorithm` key.
 pub fn cpu_kmeans_from_r_list(r_list: List, default_km_type: &str) -> Result<CpuKMeans> {
-    let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
     let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
-    let km_type = params
-        .get("km_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or(default_km_type);
-    let kind = match parse_k_means(km_type) {
-        Some(KMeansType::StandardKMeans) => CpuKMeansKind::Standard,
-        Some(KMeansType::MiniBatchKMeans) => CpuKMeansKind::MiniBatch {
-            batch_size: r_list_count(&params, "batch_size")?.unwrap_or(4096),
-            drift_threshold: r_list_real(&params, "drift_threshold")?.unwrap_or(1e-4) as f32,
-            lr_alpha: r_list_real(&params, "lr_alpha")?.unwrap_or(1.0) as f32,
-        },
-        None => {
-            return Err(Error::Other(format!(
-                "Unknown km_type '{km_type}'; expected 'standard' or 'minibatch'"
-            )));
-        }
+    let d = CpuKMeansSpec::default();
+    let spec = CpuKMeansSpec {
+        km_type: params
+            .get("km_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(default_km_type)
+            .to_string(),
+        batch_size: r_list_count(&params, "batch_size")?.unwrap_or(d.batch_size),
+        drift_threshold: r_list_real(&params, "drift_threshold")?
+            .map_or(d.drift_threshold, |v| v as f32),
+        lr_alpha: r_list_real(&params, "lr_alpha")?.map_or(d.lr_alpha, |v| v as f32),
+        kmeans: crate::ml_r_wrappers::kmeans_spec_from_r_map(&params)?,
     };
-    Ok(CpuKMeans::new(kind, kmeans_params))
+    CpuKMeans::try_from(spec).map_err(Error::Other)
 }
 
 impl FromRList for CpuKMeans {
-    /// Parse a [CpuKMeans] from an R list, standard k-means unless `km_type`
-    /// says otherwise. See [cpu_kmeans_from_r_list].
+    /// Parse a [CpuKMeans] from an R list, e-means unless `km_type` says
+    /// otherwise. See [cpu_kmeans_from_r_list].
     ///
     /// ### Params
     ///
@@ -1008,7 +975,7 @@ impl FromRList for CpuKMeans {
     ///
     /// The [CpuKMeans]
     fn from_r_list(r_list: List) -> Result<Self> {
-        cpu_kmeans_from_r_list(r_list, "standard")
+        cpu_kmeans_from_r_list(r_list, "emeans")
     }
 }
 
@@ -1676,11 +1643,10 @@ impl FromRList for HarmonyParams {
     /// The `HarmonyParams` with all parameters set.
     fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = crate::ml_r_wrappers::kmeans_params_from_r_list_with_iters(
-            r_list.clone(),
-            HARMONY_KMEANS_ITERS,
-        )?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let kmeans_params =
+            harmony_kmeans_params(crate::ml_r_wrappers::kmeans_spec_from_r_map(&params_list)?)
+                .map_err(Error::Other)?;
 
         let k = params_list
             .get("k")
@@ -1777,11 +1743,10 @@ impl FromRList for HarmonyParamsV2 {
     /// The `HarmonyParams` with all parameters set.
     fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = crate::ml_r_wrappers::kmeans_params_from_r_list_with_iters(
-            r_list.clone(),
-            HARMONY_KMEANS_ITERS,
-        )?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let kmeans_params =
+            harmony_kmeans_params(crate::ml_r_wrappers::kmeans_spec_from_r_map(&params_list)?)
+                .map_err(Error::Other)?;
 
         let k = params_list
             .get("k")
@@ -4980,6 +4945,7 @@ impl FromRList for AprGroupedFit {
 // Bonsai //
 ////////////
 
+/// The extendr conversions of the Sanity and Bonsai parameters and trees.
 #[cfg(feature = "bonsai")]
 mod bonsai_wrappers {
     use bonsai_rs::sanity_sc_rs::config::VarianceRule;

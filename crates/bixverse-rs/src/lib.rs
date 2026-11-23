@@ -15,6 +15,8 @@ pub use bixverse_methods::{enrichment, graph, methods, ontology};
 /// The error enums of every crate compiled in. Each upper enum wraps the ones
 /// below it, so `?` converts upwards.
 pub mod errors {
+    #[cfg(feature = "atac")]
+    pub use bixverse_atac::errors::*;
     pub use bixverse_core::errors::*;
     #[cfg(feature = "gpu")]
     pub use bixverse_gpu::errors::*;
@@ -25,6 +27,8 @@ pub mod errors {
     pub use bixverse_sc::errors::*;
     #[cfg(feature = "single-cell")]
     pub use bixverse_sc_data::errors::*;
+    #[cfg(feature = "export")]
+    pub use bixverse_sc_export::errors::*;
     #[cfg(feature = "sc-gpu")]
     pub use bixverse_sc_gpu::errors::*;
 }
@@ -35,6 +39,8 @@ pub mod errors {
 /// globs are redundant for a given feature set.
 #[allow(unused_imports)]
 pub mod prelude {
+    #[cfg(feature = "atac")]
+    pub use bixverse_atac::prelude::*;
     #[cfg(feature = "gpu")]
     pub use bixverse_gpu::prelude::*;
     pub use bixverse_methods::prelude::*;
@@ -47,9 +53,13 @@ pub mod prelude {
 /// Single cell and metacell analysis.
 #[cfg(feature = "single-cell")]
 pub mod single_cell {
+    #[cfg(feature = "atac")]
+    pub use bixverse_atac as atac;
     pub use bixverse_sc::*;
     pub use bixverse_sc_data as sc_data;
-    pub use bixverse_sc_data::{CELL_BATCH_SIZE, sc_traits};
+    pub use bixverse_sc_data::{sc_traits, store::CELL_BATCH_SIZE};
+    #[cfg(feature = "export")]
+    pub use bixverse_sc_export as sc_export;
 }
 
 /// GPU methods via cubecl.

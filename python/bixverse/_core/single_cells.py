@@ -66,12 +66,15 @@ class ScBase:
         reader: The cell-major store.
         map: Ids and index sets.
         cache: Analysis results held in memory.
+        root_modality: The modality the store and cache hold: `"rna"`, or
+            `"atac"` for an ATAC-only experiment.
     """
 
     dir: Path
     reader: _bixverse.CellReader
     map: ScMap
     cache: ScCache
+    root_modality: str = "rna"
 
     #########
     # Paths #
@@ -86,6 +89,12 @@ class ScBase:
     def genes_path(self) -> Path:
         """The gene-major store."""
         return self.dir / GENES_BIN
+
+    @property
+    def feature_kind(self) -> str:
+        """What the store's features are: `"gene"`, `"gene_activity"`,
+        `"peak"`, `"tile"`, `"snp"` or `"protein"`."""
+        return _bixverse.store_feature_kind(self.cells_path)
 
     ########
     # Dims #
@@ -202,6 +211,50 @@ class ScBase:
         return check_state(self._artefacts(), self.cells_hash(), artefacts)
 
 
+ATAC_FEATURE_KINDS: tuple[str, ...] = ("peak", "tile")
+
+
+def refuse_atac_features(sc: object, method: str) -> None:
+    """Stop a method that assumes genes on a peak or tile store.
+
+    Gene activity passes: it is indexed by gene.
+
+    Raises:
+        ValueError: If the store holds peaks or tiles.
+    """
+    if isinstance(sc, ScBase) and sc.feature_kind in ATAC_FEATURE_KINDS:
+        raise ValueError(
+            f"{method} works on genes; this store holds {sc.feature_kind} "
+            "features. For ATAC use bv.atac.run_tfidf and bv.atac.calculate_lsi."
+        )
+
+
+def check_rna_counts(sc: object, method: str, *, refuse: bool) -> None:
+    """Stop or warn when a method that assumes RNA counts gets other features.
+
+    Peaks, tiles and the like are always refused. Gene activity is refused
+    when `refuse`, else it warns. Meta cells carry no feature kind and pass.
+
+    Raises:
+        ValueError: If the store does not hold RNA counts and the method
+            cannot take it.
+    """
+    if not isinstance(sc, ScBase):
+        return
+    kind = sc.feature_kind
+    if kind == "gene":
+        return
+    if kind == "gene_activity" and not refuse:
+        warnings.warn(
+            f"{method} assumes RNA counts, and this store holds gene activity: "
+            "long genes score high in every cell and neighbouring genes share "
+            "fragments. Read the result with that in mind.",
+            stacklevel=3,
+        )
+        return
+    raise ValueError(f"{method} needs RNA counts; this store holds {kind} features.")
+
+
 ###############
 # SingleCells #
 ###############
@@ -235,12 +288,17 @@ class SingleCells(ScBase):
 
         Raises:
             FileNotFoundError: If either is missing.
-            ValueError: If the obs / var tables disagree with the store.
+            ValueError: If the obs / var tables disagree with the store, or
+                the cell and gene files do not belong to one store.
         """
         self.dir = Path(directory).expanduser()
         for path in (self.db_path, self.cells_path):
             if not path.is_file():
                 raise FileNotFoundError(f"{path} does not exist")
+        # header reads only: an interrupted set_* or a foreign gene file
+        # would otherwise read inconsistent norms
+        if self.genes_path.is_file():
+            _bixverse.check_store_pair(self.cells_path, self.genes_path)
 
         self.reader = _bixverse.CellReader(str(self.cells_path))
         with db.connect(self.db_path, read_only=True) as con:

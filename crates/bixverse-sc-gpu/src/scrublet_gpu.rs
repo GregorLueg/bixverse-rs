@@ -33,6 +33,7 @@ use bixverse_sc::sc_processing::scrublet::{
     FinalScrubletRes, calculate_doublet_scores, call_doublets,
 };
 use bixverse_sc::sc_processing::utils_doublets::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 use serde::Deserialize;
 
 ///////////////
@@ -126,8 +127,12 @@ impl ScrubletKnnBackend {
     }
 }
 
-/// Default implementation for ScrubletKnnBackend
 impl Default for ScrubletKnnBackend {
+    /// The default [`ScrubletKnnBackend`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::Gpu(KnnParamsGpu::new())
     }
@@ -162,8 +167,12 @@ impl ScrubletParamsGpu {
     }
 }
 
-/// Default implementation for ScrubletParamsGpu
 impl Default for ScrubletParamsGpu {
+    /// The default [`ScrubletParamsGpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -217,6 +226,11 @@ pub struct ScrubletGpuSpec {
 }
 
 impl Default for ScrubletGpuSpec {
+    /// The default [`ScrubletGpuSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = ScrubletParamsGpu::new();
         Self {
@@ -770,6 +784,71 @@ where
     Ok((res, pca_out, pair_1_out, pair_2_out))
 }
 
+/// Run [`run_scrublet_gpu`] on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `params` - The [`ScrubletParamsGpu`] for this run
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `streaming` - Stream HVG computation to reduce memory pressure
+/// * `seed` - Seed for reproducibility
+/// * `device` - CubeCL runtime device
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+/// * `return_combined_pca` - Whether to return the combined PCA embedding
+/// * `return_pairs` - Whether to return the parent indices of each doublet
+///
+/// ### Returns
+///
+/// `FinalScrubletRes` as [`run_scrublet_gpu`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_scrublet_gpu_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    params: &ScrubletParamsGpu,
+    cell_indices: &[usize],
+    streaming: bool,
+    seed: usize,
+    device: Device,
+    verbose: usize,
+    return_combined_pca: bool,
+    return_pairs: bool,
+) -> Result<FinalScrubletRes, ScGpuErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => run_scrublet_gpu(
+            &sub.reader()?,
+            &sub.cell_reader()?,
+            params,
+            &sub.local,
+            streaming,
+            seed,
+            device,
+            verbose,
+            return_combined_pca,
+            return_pairs,
+        ),
+        None => run_scrublet_gpu(
+            &gene_reader,
+            &ParallelSparseReader::new(f_path_cell)?,
+            params,
+            cell_indices,
+            streaming,
+            seed,
+            device,
+            verbose,
+            return_combined_pca,
+            return_pairs,
+        ),
+    }
+}
+
 ///////////
 // Tests //
 ///////////
@@ -781,7 +860,7 @@ mod tests {
     use bixverse_sc::sc_processing::knn::KnnParams;
     use bixverse_sc::sc_processing::pca::PcaSolver;
     use bixverse_sc::sc_processing::scrublet::{Scrublet, ScrubletParams};
-    use bixverse_sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+    use bixverse_sc_data::store::{reader::ParallelSparseReader, writer::CellGeneSparseWriter};
     use cubecl::wgpu::WgpuDevice;
 
     const TEST_CELLS: usize = 600;
@@ -874,9 +953,9 @@ mod tests {
                 }
             }
             let sum: f32 = data_raw.iter().map(|&x| x as f32).sum();
-            let data_norm: Vec<F16> = data_raw
+            let data_norm: Vec<f32> = data_raw
                 .iter()
-                .map(|&x| F16::from(half::f16::from_f32((x as f32 / sum * 1e4).ln_1p())))
+                .map(|&x| (x as f32 / sum * 1e4).ln_1p())
                 .collect();
             let chunk = CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&data_raw),
@@ -1026,8 +1105,12 @@ mod tests {
     fn test_run_scrublet_gpu_matches_cpu() {
         let Some(device) = try_device() else { return };
 
-        let gene_path = std::env::temp_dir().join("bixverse_scrublet_gpu_genes.bin");
-        let cell_path = std::env::temp_dir().join("bixverse_scrublet_gpu_cells.bin");
+        let gene_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let cell_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
         let gene_str = gene_path.to_str().expect("utf8 path");
         let cell_str = cell_path.to_str().expect("utf8 path");
 
@@ -1118,9 +1201,6 @@ mod tests {
                 r
             );
         }
-
-        let _ = std::fs::remove_file(&gene_path);
-        let _ = std::fs::remove_file(&cell_path);
     }
 
     /// A zero-variance HVG column must reach the GPU SVD carrying the
@@ -1138,8 +1218,12 @@ mod tests {
     fn test_pca_observed_gpu_survives_zero_variance_gene() {
         let Some(device) = try_device() else { return };
 
-        let gene_path = std::env::temp_dir().join("bixverse_scrublet_gpu_constant.bin");
-        let cell_path = std::env::temp_dir().join("bixverse_scrublet_gpu_constant_cells.bin");
+        let gene_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let cell_path = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
         let gene_str = gene_path.to_str().expect("utf8 path");
         let cell_str = cell_path.to_str().expect("utf8 path");
 
@@ -1185,8 +1269,5 @@ mod tests {
             (0..scores.nrows()).all(|i| (0..scores.ncols()).all(|j| scores[(i, j)].is_finite())),
             "zero-variance gene produced non-finite PC scores"
         );
-
-        let _ = std::fs::remove_file(&gene_path);
-        let _ = std::fs::remove_file(&cell_path);
     }
 }

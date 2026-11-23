@@ -1,7 +1,6 @@
-"""Ingestion, writers, store maintenance and downloads, without R.
+"""Ingestion, writers, store maintenance and downloads.
 
-Parity with the R loaders is in `test_io_r.py`; these cover the Python side
-on its own: round trips through the writers and loaders, the encoding rules,
+Round trips through the writers and loaders, the encoding rules,
 the archive, and the download cache.
 """
 
@@ -177,11 +176,11 @@ def test_archive_restores_on_load_existing(data, tmp_path):
     np.testing.assert_array_equal(_dense(bv.io.load_existing(tmp_path / "sc")), before)
 
 
-def test_upgrade_is_a_no_op_on_v4(data, tmp_path):
+def test_upgrade_is_a_no_op_on_v5(data, tmp_path):
     sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
-    assert bv._bixverse.file_version(sc.cells_path) == 4
+    assert bv._bixverse.file_version(sc.cells_path) == 5
     assert bv.io.upgrade_sc_store(sc) is sc
-    assert not (sc.dir / "counts_cells.bin.v3.bak").exists()
+    assert not (sc.dir / "counts_cells.bin.v4.bak").exists()
 
 
 ###########
@@ -320,12 +319,26 @@ def test_downloads_hit_the_cache(tmp_path, monkeypatch):
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.mark.parametrize("fmt", ["csr", "csc"])
-def test_reads_an_h5ad_anndata_wrote(fmt, tmp_path):
+@pytest.mark.parametrize(
+    "name",
+    [
+        "anndata_csr.h5ad",
+        "anndata_csc.h5ad",
+        "anndata_dense.h5ad",
+        "anndata_csr_v2.zarr",
+        "anndata_csc_v2.zarr",
+        "anndata_dense_v2.zarr",
+        "anndata_csr_v3.zarr",
+        "anndata_csc_v3.zarr",
+        "anndata_dense_v3.zarr",
+        "anndata_csr_v3_sharded.zarr",
+    ],
+)
+def test_reads_an_h5ad_anndata_wrote(name, tmp_path):
     # written by anndata (dev/gen_anndata_fixture.py), not by bixverse, so a
     # convention the reader and writer share cannot pass unnoticed
     truth = np.load(FIXTURES / "anndata_counts.npy")
-    f = FIXTURES / f"anndata_{fmt}.h5ad"
+    f = FIXTURES / name
     meta = bv.io.read_h5ad_metadata(f)
     assert meta["dims"] == truth.shape
     obs = meta["obs"]
@@ -335,6 +348,22 @@ def test_reads_an_h5ad_anndata_wrote(fmt, tmp_path):
     np.testing.assert_array_equal(_dense(sc), truth)
     assert sc.var()["gene_id"].to_list() == [f"gene_{j}" for j in range(12)]
     assert sorted(set(sc.obs()["cell_type"].to_list())) == ["a", "b", "c"]
+
+
+def test_load_records_the_obs_cell_ids(tmp_path):
+    # the hash covers the ids obs ends up with: same cells, same hash whatever
+    # the source format, on both binaries
+    from bixverse import _bixverse
+
+    a = bv.io.load_h5ad(tmp_path / "a", FIXTURES / "anndata_csr.h5ad", qc=QC)
+    b = bv.io.load_h5ad(tmp_path / "b", FIXTURES / "anndata_csc_v3.zarr", qc=QC)
+    h = _bixverse.cell_id_hash(a.cells_path)
+    assert h is not None
+    assert _bixverse.cell_id_hash(a.genes_path) == h
+    assert _bixverse.cell_id_hash(b.cells_path) == h
+    ids = a.obs()["cell_id"].to_list()
+    _bixverse.set_cell_ids(b.cells_path, b.genes_path, ids[::-1])
+    assert _bixverse.cell_id_hash(b.cells_path) != h
 
 
 def test_cell_ranger_params_find_gzipped_files(data, tmp_path):
@@ -361,6 +390,22 @@ def test_cell_ranger_params_find_gzipped_files(data, tmp_path):
     np.testing.assert_array_equal(_dense(sc), _truth(data))
 
 
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_save_round_trips_through_the_loader(data, fmt, tmp_path):
+    sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
+    save = bv.io.save_zarr if fmt == "zarr" else bv.io.save_h5ad
+    out = save(sc, tmp_path / f"out.{fmt}")
+    back = bv.io.load_h5ad(tmp_path / "back", out, qc=QC)
+    np.testing.assert_array_equal(_dense(back), _dense(sc))
+    assert back.obs()["cell_id"].to_list() == sc.obs()["cell_id"].to_list()
+    assert back.var()["gene_id"].to_list() == sc.var()["gene_id"].to_list()
+    if fmt == "zarr":
+        ad = pytest.importorskip("anndata")
+        np.testing.assert_array_equal(
+            np.asarray(ad.read_zarr(out).X.todense()), _dense(sc)
+        )
+
+
 def test_varm_pcs_sit_on_the_genes_the_pca_ran_on(data, tmp_path):
     h5py = pytest.importorskip("h5py")
     sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
@@ -379,3 +424,28 @@ def test_varm_pcs_sit_on_the_genes_the_pca_ran_on(data, tmp_path):
     np.testing.assert_allclose(pcs[genes], loadings, rtol=1e-6)
     others = np.setdiff1d(np.arange(sc.n_genes), genes)
     assert np.all(pcs[others] == 0)
+
+
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_save_writes_a_gene_selection(data, fmt, tmp_path):
+    ad = pytest.importorskip("anndata")
+    sc = bv.io.load_csr(tmp_path / "sc", data.counts, data.obs, data.var, qc=QC)
+    bv.pp.find_hvg(sc, hvg_no=15)
+    bv.pp.calculate_pca(sc, 3)
+    full = bv.io.save_h5ad(sc, tmp_path / "full.h5ad")
+    # out of store order, once as indices and once as ids
+    idx = np.array([30, 2, 17, 5, 11], dtype=np.uint32)
+    ids = sc.var().sort("gene_idx")["gene_id"].to_numpy()[idx].tolist()
+    save = bv.io.save_zarr if fmt == "zarr" else bv.io.save_h5ad
+    read = ad.read_zarr if fmt == "zarr" else ad.read_h5ad
+    ref = ad.read_h5ad(full)
+    for i, genes in enumerate((idx, ids)):
+        got = read(save(sc, tmp_path / f"g{i}.{fmt}", genes=genes))
+        assert got.var_names.tolist() == ids
+        np.testing.assert_array_equal(
+            got.X.toarray(), ref.X.toarray()[:, idx.astype(np.int64)]
+        )
+        np.testing.assert_array_equal(got.varm["PCs"], ref.varm["PCs"][idx])
+        assert got.obs_names.tolist() == ref.obs_names.tolist()
+    with pytest.raises(ValueError, match="repeated"):
+        save(sc, tmp_path / "bad", genes=[1, 1])

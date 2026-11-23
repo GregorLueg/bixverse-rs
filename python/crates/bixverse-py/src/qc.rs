@@ -8,7 +8,7 @@ use bixverse_sc::sc_processing::qc::{
     get_gene_set_perc, get_gene_set_perc_streaming, get_top_genes_perc,
     get_top_genes_perc_streaming,
 };
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use py_common::convert::CSlice;
 use py_common::error::BvErr;

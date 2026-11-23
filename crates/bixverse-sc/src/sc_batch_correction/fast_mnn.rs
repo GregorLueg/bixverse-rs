@@ -57,8 +57,12 @@ pub struct FastMnnParams {
     pub pca_params: SingleCellPcaParams,
 }
 
-/// Defaults, the fallbacks of the R list conversion
 impl Default for FastMnnParams {
+    /// Defaults, the fallbacks of the R list conversion
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             ndist: 3.0,

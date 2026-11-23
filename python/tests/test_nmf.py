@@ -1,7 +1,5 @@
-"""HALS NMF without R: shapes, getters, guards and the meta cell twins on
+"""HALS NMF: shapes, getters, guards and the meta cell twins on
 synthetic data.
-
-Parity with the R package is in `test_nmf_r.py`.
 """
 
 import numpy as np

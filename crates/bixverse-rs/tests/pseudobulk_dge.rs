@@ -14,7 +14,7 @@ use rand::prelude::*;
 use bixverse_rs::methods::dge_bulk::{EdgeRQlParams, run_edger_ql};
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::pseudobulk_dge::pseudobulk_dge;
-use bixverse_rs::single_cell::sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_rs::single_cell::sc_data::store::in_memory::InMemorySparseReader;
 
 ////////////////
 // Dimensions //

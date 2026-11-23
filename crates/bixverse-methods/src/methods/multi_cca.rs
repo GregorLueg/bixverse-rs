@@ -146,6 +146,11 @@ impl<T: BixverseFloat> MultiCcaParams<T> {
 }
 
 impl<T: BixverseFloat> Default for MultiCcaParams<T> {
+    /// The default [`MultiCcaParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_components: 2,
@@ -804,6 +809,11 @@ pub struct MultiCcaPermuteParams<T> {
 }
 
 impl<T: BixverseFloat> Default for MultiCcaPermuteParams<T> {
+    /// The default [`MultiCcaPermuteParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             grid: None,

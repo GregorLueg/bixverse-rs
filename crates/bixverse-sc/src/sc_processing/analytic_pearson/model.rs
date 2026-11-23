@@ -50,6 +50,11 @@ pub struct AprParams {
 }
 
 impl Default for AprParams {
+    /// The default [`AprParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             theta: DEFAULT_THETA,
@@ -113,6 +118,11 @@ pub struct AprParamsSpec {
 }
 
 impl Default for AprParamsSpec {
+    /// The default [`AprParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = AprParams::default();
         Self {

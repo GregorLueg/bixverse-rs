@@ -43,7 +43,10 @@ use indexmap::IndexSet;
 use crate::errors::ScErrors;
 use crate::prelude::*;
 use bixverse_core::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
-use bixverse_sc_data::data_io::{CscGeneChunk, RawCounts, SingleCellReading};
+use bixverse_sc_data::store::{
+    chunk::{CscGeneChunk, RawCounts},
+    reader::SingleCellReading,
+};
 
 use super::sctransform::stream::SctStreamOpts;
 

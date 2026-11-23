@@ -231,8 +231,7 @@ pub fn resolve_target_size(explicit: Option<f32>, hvg_library_sizes: &[usize]) -
 /// Read raw HVG counts and normalise them against the HVG library sizes.
 ///
 /// The normalised layer on disk was scaled against the full library, so the
-/// doublet PCA rebuilds it from raw counts. Done in `f32` on the fused batch,
-/// so no F16 rounding is involved.
+/// doublet PCA rebuilds it from raw counts, in `f32` on the fused batch.
 ///
 /// ### Params
 ///
@@ -339,7 +338,7 @@ pub fn scale_cell_chunks_with_stats(
     for (cell_idx, chunk) in chunks.iter().enumerate() {
         for (i, &gene) in chunk.indices.iter().enumerate() {
             let gene = gene as usize;
-            let mut value = chunk.data_norm[i].to_f32();
+            let mut value = chunk.data_norm[i];
             if mean_center {
                 value -= gene_means[gene];
             }
@@ -460,7 +459,7 @@ pub fn project_cell_chunks_with_stats(
 
             for (i, &gene) in chunk.indices.iter().enumerate() {
                 let gene = gene as usize;
-                let mut value = chunk.data_norm[i].to_f32();
+                let mut value = chunk.data_norm[i];
                 if normalise_variance {
                     value /= gene_stds[gene];
                 }
@@ -1183,7 +1182,7 @@ pub fn select_top_genes_streaming<S: SingleCellReading>(
     n_top: usize,
     verbose: bool,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_total_genes = reader.get_header().total_genes;
+    let n_total_genes = reader.dims().total_genes;
 
     if n_top >= n_total_genes {
         return Ok((0..n_total_genes).collect());
@@ -1433,7 +1432,7 @@ pub fn select_top_genes<S: SingleCellReading>(
     clusters: Option<&[usize]>,
     n_top: usize,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_total_genes = reader.get_header().total_genes;
+    let n_total_genes = reader.dims().total_genes;
 
     if n_top >= n_total_genes {
         return Ok((0..n_total_genes).collect());
@@ -1501,6 +1500,11 @@ pub struct ScDblSimParams {
 }
 
 impl Default for ScDblSimParams {
+    /// The default [`ScDblSimParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             resamp_frac: 0.25,
@@ -1854,6 +1858,11 @@ pub struct UnrecognisableFilterParams {
 }
 
 impl Default for UnrecognisableFilterParams {
+    /// The default [`UnrecognisableFilterParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             min_size: 5,
@@ -1989,7 +1998,6 @@ pub fn mark_sims_from_flagged_origins(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use half::f16;
 
     /////////////////////
     // Doublet scaling //
@@ -2852,7 +2860,7 @@ mod tests {
     /// sign, on a three-cell-type store.
     #[test]
     fn test_pca_observed_covariance_matches_lanczos() {
-        use bixverse_sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+        use bixverse_sc_data::store::{reader::ParallelSparseReader, writer::CellGeneSparseWriter};
 
         let (n_cells, n_genes, no_pcs) = (300, 30, 3);
         let hash = |a: usize, b: usize| ((a * 2654435761 + b * 40503) % 1000) as f32 / 1000.0;
@@ -2871,8 +2879,10 @@ mod tests {
             })
             .collect();
 
-        let path = std::env::temp_dir().join("bixverse_pca_observed_solvers.bin");
-        let path = path.to_str().expect("utf8 path");
+        let temp = tempfile::NamedTempFile::with_suffix(".bin")
+            .unwrap()
+            .into_temp_path();
+        let path = temp.to_str().expect("utf8 path");
         let mut writer =
             CellGeneSparseWriter::new(path, false, n_cells, n_genes, 1e4).expect("writer");
         for gene in 0..n_genes {
@@ -2880,10 +2890,7 @@ mod tests {
                 .filter(|&c| counts[c][gene] > 0)
                 .map(|c| (counts[c][gene], c))
                 .unzip();
-            let norm: Vec<F16> = raw
-                .iter()
-                .map(|&x| F16::from(f16::from_f32(x as f32)))
-                .collect();
+            let norm: Vec<f32> = raw.iter().map(|&x| x as f32).collect();
             let chunk = CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&raw),
                 &norm,

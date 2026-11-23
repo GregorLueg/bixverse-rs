@@ -1,7 +1,5 @@
-"""Pipelines without R: construction, printing, validation, step order and
+"""Pipelines: construction, printing, validation, step order and
 the per group runs.
-
-Parity with the R pipelines is in `test_pipeline_r.py`.
 """
 
 import inspect

@@ -3,6 +3,103 @@
 Versions here track the Python package, not the `bixverse-rs` crate. A wheel
 reports the crate it vendored as `bixverse.__core_version__`.
 
+## 0.4.0
+
+Builds against the `bixverse-rs` workspace at 0.11.0.
+
+**Breaking**
+
+- Loaders write store format v5, which 0.3.x and R builds on crates 0.10.x
+  cannot read. A v4 store opens with a warning; a v3 store no longer opens.
+  `bv.io.upgrade_sc_store` converts either and takes a directory for v3.
+- `FastClusterDefault` and `KmeansDefaults` are gone from `bv.params`, and so
+  is `NmfConsensusParams.kmeans_iters`.
+- The parameter bundles are written in Python now, no longer generated from
+  the R specs. `bixverse.params._generated` is `bixverse.params._specs`.
+- `bv.io.load_tenx_h5(feature_type="Peaks")` raises; peaks load through
+  `bv.atac.add_atac_tenx` or `bv.io.load_atac_tenx`.
+- Opening an experiment checks that its cell and gene files belong together,
+  and raises when they do not.
+
+**Features**
+
+- `bv.atac`, single cell ATAC on `SingleCellsMultiModal`: 10x multiome peaks
+  or fragment files counted into peaks or tiles, fragment QC, AMULET
+  multiplets, peak calling per group (a MACS3 `callpeak` port), TF-IDF, top
+  features, LSI, LSI projection, rLSI integration and gene activity; TSS
+  profiles and fragment length histograms, blacklist removal, closest-gene
+  annotation, fragment file merging, `barcode_map` for barcodes that differ
+  from the cell ids, and peak to gene links (`peak_to_gene`). Fragment
+  passes raise when no cell id is a barcode of the file or the fragments
+  share no chromosome name with the features, and warn on partial mismatches.
+- `bv.SingleCellsAtac`, ATAC without RNA: `bv.io.load_atac_fragments` (cells
+  from a barcode list, Cell Ranger's calls or a fragment count cut-off) and
+  `bv.io.load_atac_tenx`. Every `bv.atac` function, the graph, embedding,
+  marker and plot functions take it; `bv.io.load_existing` opens it.
+- The ATAC state is rebuilt from the store on open; `bv.io.save` keeps only
+  the LSI. `bv.atac.get_gene_activity` reopens the gene activity with the
+  experiment's cell filter, which `set_cells_to_keep` now carries over.
+- Plots: `bv.pl.tss_profile_plot`, `fragment_length_plot`,
+  `lsi_depth_plot`; peaks on a plot with `expr_modality="atac"`;
+  `feature_plot(expr_sc=...)` colours one object's embedding with another's
+  expression; `joint_plot` takes axis labels.
+- `transfer_labels_seurat(weight_owner=...)` checks the weight embedding keeps
+  the query's cells.
+- Methods that assume RNA counts refuse a gene activity store (residuals,
+  doublets, Bonsai, gene set proportions) or warn on it, in both wheels.
+- `modality="atac"` on `bv.graph`, `bv.embed`, `bv.integrate.harmony`, the
+  WNN (`modality_2="atac"`, `embd_to_use_2="lsi"`), the marker functions and
+  pseudobulk DE. Same for the GPU wheel's graph, embeddings and Harmony.
+- The marker functions take `method="lr"`, Seurat's logistic regression test
+  with the library size as covariate. `None`, the new default, picks `"lr"` on
+  ATAC and `"wilcox"` on RNA.
+- Harmony (v1, v2, the GPU twin and the pipeline steps) takes `embd_to_use`,
+  so it corrects the ATAC LSI as well as a PCA.
+- `bv.annotate.transfer_labels_seurat`: Seurat's CCA anchors and
+  `TransferData`, RNA to RNA or RNA to gene activity.
+- The h5ad loaders and readers take anndata Zarr stores (v2 and v3, Blosc
+  included); `bv.io.save_zarr` writes one, `genes=` included.
+- `bv.io.save_h5ad` takes `genes=` (indices or ids, in column order) and
+  streams only those genes out of the store (#129).
+- `bv.io.download_pbmc_multiome` (now with the ENCODE hg38 blacklist), a
+  joint RNA and ATAC vignette and an ATAC-only vignette on it.
+- `node_order` on `find_clusters` and the fast clustering bundles; the
+  Harmony bundles take `k_means_algorithm` and `e_means_epochs`, fast
+  clustering `km_type="emeans"` and `e_means_epochs`.
+
+**Changed results**
+
+- e-means is the k-means default of Harmony v1 and v2, fast clustering (also
+  inside Boost and scDblFinder), SCENIC, DSB and NMF consensus, on CPU and
+  GPU. Results differ at the same seed; `km_type="standard"` or
+  `k_means_algorithm="lloyd"` gives Lloyd's back.
+- Leiden runs 2 iterations by default (was 5) and Louvain coloured local
+  moving, fast clustering included. Results differ at the same seed.
+- Harmony v2 follows harmony2: `HarmonyV2Params.block_size` is 0.05 (was
+  0.2), and the GPU twin estimates lambda per cluster and runs a fixed
+  iteration count under Lloyd's. Results differ at the same seed.
+- Harmony draws its block order once per run. Results differ at the same
+  seed.
+- rPCA and CCA integration search within-batch neighbours at `k + 1` and cap
+  each cell at `k_weight` anchor pairs, as Seurat does. Results differ at the
+  same seed.
+- The normalised layer is read at f32, also from v4 stores, which gave f16
+  before. Values differ slightly.
+- `edge-rs` was updated to `0.4.0`. Results move slightly at the same seed.
+
+**Fixes**
+
+- `csc_mem_gb` also bounds the transpose of a streamed CSC h5ad, which held it
+  whole before.
+- `scrublet`, `boost`, `scdblfinder` and the GPU `scrublet` read a small cell
+  selection, such as one `group_by` group, from the cell-based store instead
+  of sweeping the gene-based one (#134). Same results at the same seed.
+
+**Notes**
+
+- The parity tests against R are gone; `tests/test_r_interop.py` only checks
+  that a store written on one side opens on the other.
+
 ## 0.3.3
 
 Builds against `bixverse-rs` workspace at 0.10.3.

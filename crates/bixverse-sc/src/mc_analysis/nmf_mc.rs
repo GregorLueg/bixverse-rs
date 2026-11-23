@@ -336,7 +336,7 @@ mod tests {
     /// Filter off, so the tests exercise the clustering rather than the density
     /// heuristic, which needs more restarts than a unit test should pay for.
     fn test_consensus_params() -> ConsensusParams<f32> {
-        ConsensusParams::new(ConsensusTarget::HRows, None, None, 100, 3, 42)
+        ConsensusParams::new(ConsensusTarget::HRows, None, None, 3, 42)
     }
 
     fn test_hals_opts() -> HalsOpts<f32> {

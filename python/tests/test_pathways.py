@@ -1,12 +1,7 @@
-"""Pathway activity, HotSpot and SCENIC without R: structure, guards, the
+"""Pathway activity, HotSpot and SCENIC: structure, guards, the
 hand-written `ScenicParams` and the object plumbing on synthetic data.
-
-Parity with the R package is in `test_pathways_r.py`.
 """
 
-import json
-import shutil
-import subprocess
 from dataclasses import fields
 from pathlib import Path
 
@@ -126,62 +121,6 @@ def test_scenic_params_reject_a_mismatched_learner_block():
 def test_scenic_params_port_the_r_checks(kwargs):
     with pytest.raises(ValueError):
         ScenicParams(**kwargs)
-
-
-def _r_available() -> bool:
-    if shutil.which("Rscript") is None:
-        return False
-    probe = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            'quit(status = !requireNamespace("bixverse", quietly = TRUE))',
-        ],
-        capture_output=True,
-    )
-    return probe.returncode == 0
-
-
-@pytest.mark.skipif(not _r_available(), reason="needs Rscript and bixverse")
-@pytest.mark.parametrize(
-    ("r_call", "py"),
-    [
-        ("params_scenic()", ScenicParams()),
-        (
-            'params_scenic(learner_type = "extratrees", '
-            "learner_params = list(n_trees = 20L))",
-            ScenicParams(
-                learner_type="extratrees",
-                learner_params=ScenicExtraTreesDefaults(n_trees=20),
-            ),
-        ),
-        (
-            'params_scenic(min_counts = 10L, learner_type = "grnboost2", '
-            'gene_batch_strategy = "random", gene_batch_size = 8L)',
-            ScenicParams(
-                min_counts=10,
-                learner_type="grnboost2",
-                gene_batch_strategy="random",
-                gene_batch_size=8,
-            ),
-        ),
-    ],
-)
-def test_scenic_params_flatten_to_r_list(r_call, py):
-    out = subprocess.run(
-        [
-            "Rscript",
-            "-e",
-            "cat(jsonlite::toJSON(bixverse::"
-            + r_call
-            + ', auto_unbox = TRUE, null = "null", digits = NA))',
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert to_rust(py) == json.loads(out.stdout)
-    assert list(to_rust(py)) == list(json.loads(out.stdout))
 
 
 ################

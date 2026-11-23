@@ -566,22 +566,19 @@ where
 //////////////////
 
 /// Structure from the fgsea simple algorithm implementing a segment tree data structure
-///
-/// ### Fields
-///
-/// * `t` - Tree array for storing segment values
-/// * `b` - Block array for storing block-level aggregates
-/// * `n` - Total size of the tree (padded to power of 2)
-/// * `k2` - Number of blocks in the structure
-/// * `log_k` - Log base 2 of block size for bit operations
-/// * `block_mask` - Bitmask for extracting block positions
 #[derive(Clone, Debug)]
 pub struct SegmentTree<T> {
+    /// Tree array for storing segment values
     t: Vec<T>,
+    /// Block array for storing block-level aggregates
     b: Vec<T>,
+    /// Total size of the tree (padded to power of 2)
     n: usize,
+    /// Number of blocks in the structure
     k2: usize,
+    /// Log base 2 of block size for bit operations
     log_k: usize,
+    /// Bitmask for extracting block positions
     block_mask: usize,
 }
 
@@ -670,14 +667,11 @@ where
 
 /// Structure for fgsea multi-level
 /// Stores and manages chunked samples for efficient processing
-///
-/// ### Fields
-///
-/// * `chunk_sum` - Sum of rank values in each chunk for fast computation
-/// * `chunks` - Vector of chunks, each containing gene indices for that chunk
 #[derive(Clone, Debug)]
 struct SampleChunks<T> {
+    /// Sum of rank values in each chunk for fast computation
     chunk_sum: Vec<T>,
+    /// Vector of chunks, each containing gene indices for that chunk
     chunks: Vec<Vec<i32>>,
 }
 

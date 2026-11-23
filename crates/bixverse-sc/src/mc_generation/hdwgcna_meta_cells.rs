@@ -33,6 +33,10 @@ pub struct BootstrappedMetaCellParams {
 
 impl Default for BootstrappedMetaCellParams {
     /// The fallbacks of the R list conversion.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             max_shared: 15,

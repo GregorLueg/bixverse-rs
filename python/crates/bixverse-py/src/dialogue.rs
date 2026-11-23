@@ -9,7 +9,7 @@ use bixverse_sc::sc_analysis::dialogue::{
     DialogueParams, DialogueResult, HlmParams, PmdParams, ProgrammeSignature, RefineParams,
     dialogue_run,
 };
-use bixverse_sc_data::data_io::ParallelSparseReader;
+use bixverse_sc_data::store::reader::ParallelSparseReader;
 use faer::MatRef;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use py_common::convert::CSlice;

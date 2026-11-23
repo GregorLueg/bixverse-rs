@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::prelude::*;
-use bixverse_sc_data::data_io::CsrCellChunk;
+use bixverse_sc_data::store::chunk::CsrCellChunk;
 
 /// Cells read per batch by the streaming QC passes.
 ///
@@ -304,7 +304,7 @@ pub fn get_gene_set_perc<S: SingleCellReading>(
 
     let start_calculations = Instant::now();
 
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let results: Vec<Vec<f32>> = gene_indices
         .iter()
         .map(|gene_set| gene_set_fractions(&cell_chunks, &gene_set_mask(gene_set, n_genes)))
@@ -350,7 +350,7 @@ pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
     let start_total = Instant::now();
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let masks: Vec<Vec<bool>> = gene_indices
         .iter()
         .map(|gs| gene_set_mask(gs, n_genes))

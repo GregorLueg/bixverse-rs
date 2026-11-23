@@ -450,6 +450,7 @@ fn gsva_random_walk<T: BixverseFloat>(
     (max_pos, max_neg)
 }
 
+/// Rank marking a gene that is not in the ordering.
 const RANK_ABSENT: u32 = u32::MAX;
 
 /// Inverse of a gene ordering: `out[gene] = rank`, `RANK_ABSENT` for genes not

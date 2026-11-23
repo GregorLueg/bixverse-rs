@@ -20,8 +20,8 @@ use bixverse_sc::sc_processing::residual_fit::{
 };
 use bixverse_sc::sc_processing::sctransform::model::{SctCovariates, SctParams};
 use bixverse_sc::sc_processing::sctransform::stream::SctStreamOpts;
-use bixverse_sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
+use bixverse_sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
 use numpy::{
     IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
@@ -683,7 +683,7 @@ pub fn magic_impute<'py>(
     let res = py
         .detach(|| {
             let reader = ParallelSparseReader::new(f_path_gene)?;
-            let total_cells = reader.get_header().total_cells;
+            let total_cells = reader.dims().total_cells;
             let operator = MagicOperator::from_knn(&indices, &distances, &cells, total_cells)?;
             magic_impute_genes(&reader, &operator, &genes, Some(params), verbose)
         })

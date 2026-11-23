@@ -20,6 +20,7 @@ use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_core::utils::vec_utils::min_max_scale;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::knn_graph::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ////////////////////////
 // Params and results //
@@ -73,7 +74,7 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// The k-means for the fast clustering path, standard or mini-batch
+    /// The k-means for the fast clustering path (e-means by default, Lloyd or mini-batch)
     #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
@@ -126,6 +127,11 @@ pub struct ScDblFinderParams {
 }
 
 impl Default for ScDblFinderParams {
+    /// The default [`ScDblFinderParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: true,
@@ -142,11 +148,7 @@ impl Default for ScDblFinderParams {
             cluster_iters: 10,
             fast_cluster: false,
             fast_cluster_kmeans: CpuKMeans::new(
-                CpuKMeansKind::MiniBatch {
-                    batch_size: 4096,
-                    drift_threshold: 1e-4,
-                    lr_alpha: 1.0,
-                },
+                CpuKMeansKind::Standard,
                 KMeansParamsWrappers::default(),
             ),
             fast_cluster_params: FastClusterParams::default(),
@@ -198,32 +200,15 @@ pub struct ScDblFinderResult {
 
 /// Per-cell kNN-derived intermediate values.
 struct CellKnnFeatures {
+    /// Share of simulated doublets among the neighbours, per k
     k_ratios: Vec<f32>,
+    /// Distance-weighted share of simulated doublets
     weighted: f32,
+    /// Distance to the nearest real neighbour
     dist_real: f32,
+    /// Most likely parent cluster pair; `None` without heterotypic
+    /// simulated neighbours
     origin: Option<(usize, usize)>,
-}
-
-/// Per-cell intermediate scores for diagnostics and comparison
-/// against R's scDblFinder output.
-///
-/// All vectors are length `n_obs` (observed cells only).
-#[derive(Clone, Debug)]
-pub struct ScDblFinderDiagnostics {
-    /// Distance-weighted kNN doublet proportion.
-    pub weighted: Vec<f32>,
-    /// Raw kNN ratio at the largest k value.
-    pub ratio: Vec<f32>,
-    /// Co-expression doublet score.
-    pub cxds_score: Vec<f32>,
-    /// Distance to the nearest real neighbour.
-    pub dist_to_real: Vec<f32>,
-    /// Identification difficulty (1 - mean class-weighted score for this cell's
-    /// most likely doublet origin; 1.0 if no origin assigned).
-    pub difficulty: Vec<f32>,
-    /// Most likely parent cluster pair (canonical ordering); None for cells
-    /// with no heterotypic sim neighbours.
-    pub most_likely_origin: Vec<Option<(usize, usize)>>,
 }
 
 /// Classifier features for the observed samples.
@@ -705,7 +690,7 @@ pub fn pca_combined<S: SingleCellReading>(
         let row = n_obs + si;
         for i in 0..chunk.indices.len() {
             let gene = chunk.indices[i] as usize;
-            let val = chunk.data_norm[i].to_f32() as f64;
+            let val = chunk.data_norm[i] as f64;
             *combined.get_mut(row, gene) = val;
         }
     }
@@ -1807,6 +1792,47 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             detected_doublet_rate,
             features: feature_table,
         })
+    }
+}
+
+/// Run scDblFinder on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `params` - ScDblFinder parameters
+/// * `seed` - Seed for reproducibility
+/// * `streaming` - Stream the gene selection pass
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `ScDblFinderResult` as [`ScDblFinder::run`].
+pub fn run_scdblfinder_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    params: ScDblFinderParams,
+    seed: usize,
+    streaming: bool,
+    verbose: usize,
+) -> Result<ScDblFinderResult, ScErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => ScDblFinder::new(&sub.reader()?, &sub.cell_reader()?, params, &sub.local)
+            .run(seed, streaming, verbose),
+        None => {
+            let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+            ScDblFinder::new(&gene_reader, &cell_reader, params, cell_indices)
+                .run(seed, streaming, verbose)
+        }
     }
 }
 

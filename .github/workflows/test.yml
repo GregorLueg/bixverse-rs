@@ -31,9 +31,12 @@ jobs:
         -p bixverse-core
         -p bixverse-methods --features dge
         -p bixverse-sc-data --features hdf5-static
+        -p bixverse-sc-export --features zarr,hdf5-static
         -p bixverse-sc --features multi-modal
         -p bixverse-rs --features single-cell,multi-modal
         -p bixverse-rs --features single-cell,multi-modal,hdf5-static
+        -p bixverse-atac --features hdf5-static
+        -p bixverse-rs --features atac,hdf5-static
       # extendr links against R, so this lane needs the gnu ABI on Windows and
       # a shared libR on Linux.
       r-runs: |
@@ -50,5 +53,8 @@ jobs:
       # The bixverse R package's own R CMD check links libR on macOS.
       r-macos: false
       check-exclude: bixverse-r
+      # scx-core always links HDF5, so bixverse-sc-export needs it even with
+      # no features on.
+      apt-packages: libhdf5-dev
       gpu-malloc-check: true
     secrets: inherit

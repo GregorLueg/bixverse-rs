@@ -195,8 +195,12 @@ impl KnnParams {
     }
 }
 
-/// Default implementation for KnnParams
 impl Default for KnnParams {
+    /// The default [`KnnParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

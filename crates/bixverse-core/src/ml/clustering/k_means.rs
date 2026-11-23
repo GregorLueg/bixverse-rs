@@ -13,34 +13,47 @@ use std::fmt::Debug;
 use crate::prelude::*;
 
 use ann_search_rs::prelude::KMeansTrainingParams;
+use serde::Deserialize;
+
+///////////
+// Const //
+///////////
+
+/// Lloyd's iterations when a caller sets none. Only read by Lloyd's and the
+/// mini-batch path; e-means runs on its epoch budget.
+pub const KMEANS_DEFAULT_ITERS: usize = 100;
 
 ////////////////////
 // Enums / Params //
 ////////////////////
 
-#[derive(Clone, Debug, Copy, Default)]
-/// Type of K means clustering to run
+/// Which k-means fast clustering runs, the `km_type` key.
+#[derive(Clone, Debug, Copy, Default, PartialEq, Eq)]
 pub enum KMeansType {
-    /// Standard version - will use SIMD acceleration and if dimensionality is
-    /// big enough, GEMM assignment.
+    /// e-means on all cells: mini-batch EMA updates with a fitted batch size
+    /// and step, see [`KMeansAlgorithm::EMeans`]
     #[default]
+    EMeans,
+    /// Lloyd's on all cells, with SIMD and, in high dimensions, GEMM
+    /// assignment
     StandardKMeans,
-    /// Mini-batch version of k-means based on Sculley, 2010
+    /// Mini-batch k-means after Sculley, 2010
     MiniBatchKMeans,
 }
 
-/// Function to parse the type of k-means to use
+/// Parse the `km_type` of fast clustering.
 ///
 /// ### Params
 ///
-/// * `s` - String to parse
+/// * `s` - `"emeans"`, `"standard"` (Lloyd's) or `"minibatch"`, any case
 ///
 /// ### Returns
 ///
-/// Enum of the k-means clustering to use
+/// The [`KMeansType`], `None` for an unknown name.
 pub fn parse_k_means(s: &str) -> Option<KMeansType> {
     match s.to_lowercase().as_str() {
-        "standard" | "kmeans" | "k-means" => Some(KMeansType::StandardKMeans),
+        "emeans" | "e-means" => Some(KMeansType::EMeans),
+        "standard" | "lloyd" | "kmeans" | "k-means" => Some(KMeansType::StandardKMeans),
         "minibatch" | "mini-batch" => Some(KMeansType::MiniBatchKMeans),
         _ => None,
     }
@@ -88,6 +101,21 @@ impl KMeansParamsWrappers {
         Self(self.0.with_balancing(balanced))
     }
 
+    /// Pick the clustering algorithm, see
+    /// [`KMeansTrainingParams::with_algorithm`]. Under e-means, `iters`,
+    /// `init`, `path` and `balanced` are ignored.
+    ///
+    /// ### Params
+    ///
+    /// * `algorithm` - [`KMeansAlgorithm::EMeans`] or [`KMeansAlgorithm::Lloyd`]
+    ///
+    /// ### Returns
+    ///
+    /// `self` with the algorithm set.
+    pub fn with_algorithm(self, algorithm: KMeansAlgorithm) -> Self {
+        Self(self.0.with_algorithm(algorithm))
+    }
+
     /// Returns the parameters and consumes self
     ///
     /// ### Returns
@@ -98,10 +126,34 @@ impl KMeansParamsWrappers {
     }
 }
 
-/// Default implementation for [KMeansParamsWrappers]
 impl Default for KMeansParamsWrappers {
+    /// e-means at its default epoch budget. The Lloyd's fields keep
+    /// [`KMEANS_DEFAULT_ITERS`] iterations with auto init and path, read by the
+    /// mini-batch path and by `with_algorithm(KMeansAlgorithm::Lloyd)`.
+    ///
+    /// ### Returns
+    ///
+    /// The default parameters.
     fn default() -> Self {
-        Self::new(100, None, None)
+        Self::new(KMEANS_DEFAULT_ITERS, None, None).with_algorithm(KMeansAlgorithm::default())
+    }
+}
+
+/// Parse the k-means algorithm
+///
+/// ### Params
+///
+/// * `s` - `"emeans"` / `"e-means"` or `"lloyd"`
+/// * `epochs` - e-means epoch budget, ignored for Lloyd's
+///
+/// ### Returns
+///
+/// The [KMeansAlgorithm], `None` for an unknown name
+pub fn parse_kmeans_algorithm(s: &str, epochs: f64) -> Option<KMeansAlgorithm> {
+    match s.to_lowercase().as_str() {
+        "emeans" | "e-means" => Some(KMeansAlgorithm::EMeans(EMeansParams::new(epochs))),
+        "lloyd" => Some(KMeansAlgorithm::Lloyd),
+        _ => None,
     }
 }
 
@@ -143,6 +195,106 @@ pub fn parse_kmean_path(gemm: bool, hamerly: bool) -> LloydPath {
     }
 }
 
+/// The k-means keys of an R or Python parameter list. Missing keys take the
+/// defaults: e-means at its default epoch budget, automatic initialisation
+/// and path.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct KMeansSpec {
+    /// `"emeans"` or `"lloyd"`, see [`parse_kmeans_algorithm`]; `None` for
+    /// e-means
+    pub k_means_algorithm: Option<String>,
+    /// e-means epoch budget, `None` for the default; ignored by Lloyd's
+    pub e_means_epochs: Option<f64>,
+    /// Lloyd's iterations, `None` for the caller's default, see
+    /// [`KMeansSpec::with_default_iters`]
+    pub k_means_iter: Option<usize>,
+    /// Optional initialisation, see [`parse_kmeans_init`]
+    pub k_means_init: Option<String>,
+    /// Optional GEMM assignment
+    pub gemm: Option<bool>,
+    /// Optional Hamerly bounds
+    pub hamerly: Option<bool>,
+}
+
+impl KMeansSpec {
+    /// Fill a missing `k_means_iter` with the caller's default.
+    ///
+    /// ### Params
+    ///
+    /// * `iters` - Lloyd's iterations when the key is absent
+    ///
+    /// ### Returns
+    ///
+    /// `self` with `k_means_iter` set.
+    pub fn with_default_iters(mut self, iters: usize) -> Self {
+        self.k_means_iter.get_or_insert(iters);
+        self
+    }
+
+    /// The algorithm the keys ask for.
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansAlgorithm`], or an error naming an unknown algorithm.
+    pub fn algorithm(&self) -> Result<KMeansAlgorithm, String> {
+        let epochs = self
+            .e_means_epochs
+            .unwrap_or(EMeansParams::default().epochs);
+        let name = self.k_means_algorithm.as_deref().unwrap_or("emeans");
+        parse_kmeans_algorithm(name, epochs)
+            .ok_or_else(|| format!("Invalid k-means algorithm: {name}"))
+    }
+
+    /// The initialisation the keys ask for.
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansInit`], `None` for the automatic choice, or an error
+    /// naming an unknown initialisation.
+    pub fn init(&self) -> Result<Option<KMeansInit>, String> {
+        self.k_means_init
+            .as_deref()
+            .map(|s| {
+                parse_kmeans_init(s).ok_or_else(|| format!("Invalid k-means initialisation: {s}"))
+            })
+            .transpose()
+    }
+
+    /// The Lloyd's path the keys ask for. No path is set when neither `gemm`
+    /// nor `hamerly` is given; one missing flag of the two counts as `false`.
+    ///
+    /// ### Returns
+    ///
+    /// The [`LloydPath`], `None` for the automatic choice.
+    pub fn path(&self) -> Option<LloydPath> {
+        match (self.gemm, self.hamerly) {
+            (None, None) => None,
+            (g, h) => Some(parse_kmean_path(g.unwrap_or(false), h.unwrap_or(false))),
+        }
+    }
+}
+
+impl TryFrom<KMeansSpec> for KMeansParamsWrappers {
+    type Error = String;
+
+    /// Check the names and assemble the k-means parameters. A missing
+    /// `k_means_iter` takes [`KMEANS_DEFAULT_ITERS`].
+    ///
+    /// ### Params
+    ///
+    /// * `spec` - The keys
+    ///
+    /// ### Returns
+    ///
+    /// The [`KMeansParamsWrappers`], or an error naming an unknown algorithm
+    /// or initialisation.
+    fn try_from(spec: KMeansSpec) -> Result<Self, String> {
+        let iters = spec.k_means_iter.unwrap_or(KMEANS_DEFAULT_ITERS);
+        Ok(Self::new(iters, spec.init()?, spec.path()).with_algorithm(spec.algorithm()?))
+    }
+}
+
 /// Debug implementation
 impl std::fmt::Debug for KMeansParamsWrappers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -151,6 +303,7 @@ impl std::fmt::Debug for KMeansParamsWrappers {
             .field("init", &self.0.init)
             .field("path", &self.0.path)
             .field("balanced", &self.0.balanced)
+            .field("algorithm", &self.0.algorithm)
             .finish()
     }
 }
@@ -654,6 +807,11 @@ mod tests {
     /// Every accepted spelling and casing maps to its variant; anything else is None.
     #[test]
     fn parse_k_means_known_strings() {
+        assert!(matches!(parse_k_means("emeans"), Some(KMeansType::EMeans)));
+        assert!(matches!(
+            parse_k_means("lloyd"),
+            Some(KMeansType::StandardKMeans)
+        ));
         assert!(matches!(
             parse_k_means("standard"),
             Some(KMeansType::StandardKMeans)

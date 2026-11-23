@@ -5,7 +5,7 @@ A single cell suite for Python, with the numerics in the
 `import bixverse as bv` and you get QC, highly variable genes, PCA,
 neighbours, clustering, embeddings, differential expression, doublet
 detection, batch correction, metacells, annotation, ligand-receptor analysis,
-trajectories and multi-modal (WNN) workflows.
+trajectories, multi-modal (WNN) and single cell ATAC workflows.
 
 It's a port of the single cell suite of the
 [bixverse R package](https://github.com/GregorLueg/bixverse).

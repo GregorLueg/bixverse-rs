@@ -3,7 +3,7 @@
 //!
 //! The single-cell driver in [`crate::sc_analysis::vision`] is
 //! generic over [`SingleCellReading`], but VISION is a cell-major algorithm and
-//! [`InMemorySparseReader`](bixverse_sc_data::in_memory_io::InMemorySparseReader)
+//! [`InMemorySparseReader`](bixverse_sc_data::store::in_memory::InMemorySparseReader)
 //! only serves the gene-major view. The metacell path therefore walks the CSR
 //! rows directly, the way
 //! [`calculate_aucell_metacells`](crate::mc_analysis::aucell::calculate_aucell_metacells)

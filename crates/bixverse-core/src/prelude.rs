@@ -49,6 +49,21 @@ pub fn verbosity_from_flag(verbose: bool) -> Verbosity {
     }
 }
 
+/// The [`Verbosity`] of an ann-search-rs call nested inside a step that
+/// takes the usual `0` / `1` / `2` level: it only prints at detailed
+/// verbosity, at its own normal level.
+///
+/// ### Params
+///
+/// * `verbose` - The step's level: `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// [`Verbosity::Normal`] at level 2, [`Verbosity::Quiet`] otherwise.
+pub fn nested_verbosity(verbose: usize) -> Verbosity {
+    verbosity_from_flag(parse_verbosity_level(verbose).detailed_verbosity())
+}
+
 //////////////
 // Progress //
 //////////////

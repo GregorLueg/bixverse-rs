@@ -1,11 +1,13 @@
-"""Cell type annotation with ScType and reference mapping with Symphony.
+"""Cell type annotation with ScType, reference mapping with Symphony and Seurat.
 
 ScType scores every cell against marker gene sets and calls a type per cell,
 optionally per cluster. Symphony builds a Harmony-corrected reference from an
 annotated experiment, maps a query into its embedding and transfers the labels
 by kNN vote. Start with `prepare_cell_markers`, `calc_sc_type_scores` and
 `assign_sc_type` for ScType, `build_symphony_ref`, `map_symphony_query` and
-`transfer_labels_symphony` for Symphony.
+`transfer_labels_symphony` for Symphony. `transfer_labels_seurat` transfers
+labels through Seurat's CCA anchors, RNA to RNA or RNA to the gene activity of
+an ATAC experiment.
 
 **What lands where.** The ScType functions leave the experiment alone and return
 frozen records (`ScTypeResults`, `ScTypeCellResults`); put a call into obs
@@ -82,6 +84,7 @@ from bixverse._core.annotate import (
     prepare_cell_markers,
     save_symphony_ref,
     score_clusters,
+    transfer_labels_seurat,
     transfer_labels_symphony,
 )
 
@@ -104,5 +107,6 @@ __all__ = [
     "prepare_cell_markers",
     "save_symphony_ref",
     "score_clusters",
+    "transfer_labels_seurat",
     "transfer_labels_symphony",
 ]

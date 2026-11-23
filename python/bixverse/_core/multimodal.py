@@ -1,7 +1,8 @@
-"""`SingleCellsMultiModal`: RNA in the store, ADT counts in memory, a WNN slot.
+"""`SingleCellsMultiModal`: RNA in the store, ADT in memory, ATAC in its own
+store, a WNN slot.
 
 The RNA side is a `SingleCells` in every respect, so every RNA method takes
-one unchanged. On top of it sit three things:
+one unchanged. On top of it sit four things:
 
 - `adt`: the ADT counts of the cells kept when they were added, raw and
   normalised (CLR or DSB), keyed by barcode. They are not in the store and
@@ -9,6 +10,11 @@ one unchanged. On top of it sit three things:
   file. Their feature table is the `var_adt` table in the DuckDB and their
   per-cell totals land in obs.
 - `adt_cache`: PCA, embeddings, kNN and graph over the ADT counts.
+- `atac`: peak or tile counts in a second store under `atac/`, written for
+  every cell of the RNA store in the same order, so both share `cell_idx`.
+  Its feature table is `var_atac`, its per-cell metrics `atac_*` obs columns;
+  `atac_cache` holds the LSI and anything built on it. Its state is rebuilt
+  from the store on open.
 - `wnn`: the fused kNN, its graph, the per-cell modality weights and any
   embeddings laid out on it.
 
@@ -33,8 +39,25 @@ import polars as pl
 from beartype import beartype
 
 from bixverse._core import db
+from bixverse._core.atac_exp import (
+    ATAC_DIR,
+    ATAC_KINDS,
+    AtacInfo,
+    atac_info_payload,
+    read_atac_info,
+    restore_lsi,
+    sync_gene_activity_filter,
+)
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import Counts, SingleCells, _check_range
+from bixverse._core.single_cells import (
+    CELLS_BIN,
+    GENES_BIN,
+    Counts,
+    ScBase,
+    Selection,
+    SingleCells,
+    _check_range,
+)
 from bixverse._core.state import (
     CsrMatrix,
     ScCache,
@@ -51,8 +74,8 @@ from bixverse.params import DsbParams
 # Globals #
 ###########
 
-Modality = Literal["rna", "adt", "wnn"]
-CacheModality = Literal["rna", "adt"]
+Modality = Literal["rna", "adt", "atac", "wnn"]
+CacheModality = Literal["rna", "adt", "atac"]
 
 MODALITY_ONLY_MM = "modality = '{}' is only supported for SingleCellsMultiModal."
 
@@ -172,7 +195,7 @@ class WnnSlot:
 
 
 class SingleCellsMultiModal(SingleCells):
-    """A single cell experiment with RNA and ADT.
+    """A single cell experiment with RNA plus ADT and / or ATAC.
 
         >>> import bixverse as bv
         >>> mm = bv.SingleCellsMultiModal("my_experiment")
@@ -187,20 +210,62 @@ class SingleCellsMultiModal(SingleCells):
         cache: The RNA cache.
         adt: The ADT counts, once added.
         adt_cache: The ADT cache.
+        atac: The ATAC store state, once added.
+        atac_cache: The ATAC cache.
         wnn: The WNN integration, once generated.
     """
 
+    atac_var_table = "var_atac"
+    atac_lib_col = "atac_lib_size"
+
     @beartype
     def __init__(self, directory: Path | str) -> None:
-        """Open an experiment directory, with no ADT counts yet.
+        """Open an experiment directory, its ATAC store included when present.
 
         Args:
-            directory: Holds `sc_duckdb.db` and `counts_cells.bin`.
+            directory: Holds `sc_duckdb.db` and `counts_cells.bin`, and an
+                ATAC store under `atac/` when one was added.
+
+        Raises:
+            ValueError: If the root store holds peaks or tiles: that is an
+                ATAC-only experiment, a `SingleCellsAtac`.
         """
         super().__init__(directory)
+        if self.feature_kind in ATAC_KINDS:
+            raise ValueError(
+                f"{self.dir} holds {self.feature_kind} features at its root, an "
+                "ATAC-only experiment. Open it with bv.SingleCellsAtac."
+            )
         self.adt: AdtCounts | None = None
         self.adt_cache = ScCache()
+        self.atac: AtacInfo | None = (
+            read_atac_info(self.atac_dir)
+            if (self.atac_dir / CELLS_BIN).is_file()
+            else None
+        )
+        self.atac_cache = ScCache()
         self.wnn: WnnSlot | None = None
+
+    @property
+    def atac_dir(self) -> Path:
+        """Where the ATAC store lies."""
+        return self.dir / ATAC_DIR
+
+    @beartype
+    def set_cells_to_keep(self, cells: Selection) -> None:
+        """Restrict the experiment to a set of cells, gene activity included.
+
+        Args:
+            cells: 0-based store indices or cell ids.
+        """
+        super().set_cells_to_keep(cells)
+        sync_gene_activity_filter(self)
+
+    @beartype
+    def reset_cells_to_keep(self, *, force: bool = False) -> None:
+        """Restore every cell, gene activity included; see `SingleCells`."""
+        super().reset_cells_to_keep(force=force)
+        sync_gene_activity_filter(self)
 
     ##########
     # Caches #
@@ -218,6 +283,8 @@ class SingleCellsMultiModal(SingleCells):
                 return self.cache
             case "adt":
                 return self.adt_cache
+            case "atac":
+                return self.atac_cache
             case "wnn":
                 if self.wnn is None:
                     raise ValueError(
@@ -230,7 +297,7 @@ class SingleCellsMultiModal(SingleCells):
 
     def _caches(self) -> dict[str, ScCache]:
         """Every cache present, by modality."""
-        out = {"rna": self.cache, "adt": self.adt_cache}
+        out = {"rna": self.cache, "adt": self.adt_cache, "atac": self.atac_cache}
         if self.wnn is not None:
             out["wnn"] = self.wnn.cache
         return out
@@ -247,6 +314,7 @@ class SingleCellsMultiModal(SingleCells):
         """Drop every cache: all modalities share the kept cell set."""
         self.cache = ScCache()
         self.adt_cache = ScCache()
+        self.atac_cache = ScCache()
         self.wnn = None
 
     ##############
@@ -325,16 +393,18 @@ class SingleCellsMultiModal(SingleCells):
         Args:
             indices: Optional 0-based gene or feature indices.
             cols: Optional columns.
-            modality: `"rna"` for `var`, `"adt"` for `var_adt`.
+            modality: `"rna"` for `var`, `"adt"` for `var_adt`, `"atac"` for
+                `var_atac`.
 
         Raises:
-            TableNotFoundError: For `"adt"` before ADT counts were added.
+            TableNotFoundError: Before the modality was added.
         """
         if modality == "rna":
             return super().var(indices=indices, cols=cols)
         idx = None if indices is None else np.asarray(indices, dtype=np.uint32)
+        table = "var_adt" if modality == "adt" else "var_atac"
         with db.connect(self.db_path, read_only=True) as con:
-            return db.get_table(con, "var_adt", indices=idx, cols=cols)
+            return db.get_table(con, table, indices=idx, cols=cols)
 
     def __repr__(self) -> str:
         base = super().__repr__().removeprefix("SingleCells(").rstrip(")\n")
@@ -345,7 +415,9 @@ class SingleCellsMultiModal(SingleCells):
             f"{base}\n"
             f"  adt={adt}, adt_pca={c.pca_factors is not None}, "
             f"adt_knn={c.knn is not None}, adt_graph={c.connectivities is not None},\n"
-            f"  adt_embeddings={sorted(c.embeddings) or 'none'}, "
+            f"  adt_embeddings={sorted(c.embeddings) or 'none'},\n"
+            f"  atac={'none' if self.atac is None else repr(self.atac)}, "
+            f"atac_embeddings={sorted(self.atac_cache.embeddings) or 'none'}, "
             f"wnn={self.wnn is not None}\n"
             ")"
         )
@@ -368,14 +440,63 @@ def _new_id() -> str:
 
 
 @beartype
-def check_modality(sc: object, modality: str) -> None:
-    """Non-RNA modalities need a multi-modal object.
+def resolve_modality(sc: object, modality: str) -> str:
+    """The modality a call means on this object.
+
+    On a `SingleCellsMultiModal` every modality is its own. Anything else
+    has one store and one cache: `"rna"` and the object's own modality
+    (`"atac"` on a `SingleCellsAtac`) both name them, and resolve to the
+    latter.
 
     Raises:
-        ValueError: On a non-RNA modality of anything else.
+        ValueError: On a modality the object does not have.
     """
-    if modality != "rna" and not isinstance(sc, SingleCellsMultiModal):
-        raise ValueError(MODALITY_ONLY_MM.format(modality))
+    if isinstance(sc, SingleCellsMultiModal):
+        return modality
+    root = getattr(sc, "root_modality", "rna")
+    if modality in ("rna", root):
+        return root
+    raise ValueError(MODALITY_ONLY_MM.format(modality))
+
+
+@beartype
+def feature_store(sc: ScBase, modality: str) -> tuple[Path, Path, np.ndarray]:
+    """Cell file, feature-major file and feature ids of a modality's store.
+
+    The RNA store of any object, the ATAC store of a multi-modal one, or the
+    object's own store under its own modality.
+
+    Raises:
+        ValueError: On a modality without a count store (`"adt"`, `"wnn"`),
+            one the object does not have, or ATAC before it was added.
+    """
+    m = resolve_modality(sc, modality)
+    if m == "atac" and isinstance(sc, SingleCellsMultiModal):
+        if sc.atac is None:
+            raise ValueError("No ATAC data in this object. Add it first.")
+        ids = sc.var(modality="atac", cols=["feature_id"])["feature_id"].to_numpy()
+        return sc.atac_dir / CELLS_BIN, sc.atac_dir / GENES_BIN, ids
+    if m in ("adt", "wnn"):
+        raise ValueError(f"modality '{m}' has no count store.")
+    return sc.cells_path, sc.genes_path, sc.gene_ids()
+
+
+@beartype
+def check_modality(sc: object, modality: str) -> None:
+    """Raise unless the object has the modality, see `resolve_modality`.
+
+    Raises:
+        ValueError: On a modality the object does not have.
+    """
+    resolve_modality(sc, modality)
+
+
+@beartype
+def _unqualify(sc: object, label: str) -> str:
+    """A label without the qualifier a single-cache object's own modality
+    adds (`"rna:knn"`, `"atac:lsi"`)."""
+    root = getattr(sc, "root_modality", "rna")
+    return label.removeprefix("rna:").removeprefix(f"{root}:")
 
 
 @beartype
@@ -383,8 +504,8 @@ def modality_cache(sc: ScOrMc, modality: Modality) -> ScCache:
     """The cache a modality reads and writes.
 
     Raises:
-        ValueError: On a non-RNA modality of a single modality object, or
-            `"wnn"` before the integration.
+        ValueError: On a modality the object does not have, or `"wnn"`
+            before the integration.
     """
     check_modality(sc, modality)
     if isinstance(sc, SingleCellsMultiModal):
@@ -402,13 +523,14 @@ def stamp(
 ) -> None:
     """Stamp an artefact in a modality's cache, see `SingleCellsMultiModal.stamp`.
 
-    On a single modality object `"rna:"` qualified parents are unqualified.
+    On a single-cache object parents qualified by its own modality are
+    unqualified.
     """
     if isinstance(sc, SingleCellsMultiModal):
         sc.stamp(label, parents=parents, modality=modality)
         return
     check_modality(sc, modality)
-    sc.stamp(label, parents=[p.removeprefix("rna:") for p in parents])
+    sc.stamp(label, parents=[_unqualify(sc, p) for p in parents])
 
 
 @beartype
@@ -422,7 +544,7 @@ def require_fresh(sc: ScOrMc, labels: Sequence[str], modality: Modality) -> None
         state = sc.check_state(labels, modality=modality)
     else:
         check_modality(sc, modality)
-        state = sc.check_state([x.removeprefix("rna:") for x in labels])
+        state = sc.check_state([_unqualify(sc, x) for x in labels])
     if state is not True:
         raise ValueError(state)
 
@@ -569,9 +691,21 @@ _DSB_ARRAYS: tuple[str, ...] = (
 
 @beartype
 def mm_payload(mm: SingleCellsMultiModal) -> tuple[dict[str, np.ndarray], dict]:
-    """The ADT counts, the ADT cache and the WNN slot as npz arrays and JSON."""
+    """The ADT counts and cache, the ATAC state and cache and the WNN slot as
+    npz arrays and JSON."""
     arrays, adt_meta = cache_payload(mm.adt_cache, "adt_cache")
-    meta: dict = {"adt_cache": adt_meta, "adt": None, "wnn": None}
+    atac_arrays, atac_meta = cache_payload(mm.atac_cache, "atac_cache")
+    arrays |= atac_arrays
+    meta: dict = {
+        "adt_cache": adt_meta,
+        "adt": None,
+        "atac_cache": atac_meta,
+        "atac": None,
+        "wnn": None,
+    }
+    if mm.atac is not None:
+        atac_arrays, meta["atac"] = atac_info_payload(mm.atac)
+        arrays |= atac_arrays
     if mm.adt is not None:
         a = mm.adt
         arrays |= {
@@ -611,6 +745,12 @@ def mm_from_payload(
 ) -> None:
     """Restore what `mm_payload` wrote onto an experiment."""
     mm.adt_cache = cache_from_payload(arrays, meta["adt_cache"], "adt_cache")
+    # files saved before ATAC support carry no ATAC keys
+    if meta.get("atac_cache") is not None:
+        mm.atac_cache = cache_from_payload(arrays, meta["atac_cache"], "atac_cache")
+    # the store's own state stands; the file adds the LSI
+    if meta.get("atac") is not None and mm.atac is not None:
+        restore_lsi(mm.atac, arrays, meta["atac"])
     if meta["adt"] is not None:
         dsb = meta["adt"]["dsb"]
         mm.adt = AdtCounts(

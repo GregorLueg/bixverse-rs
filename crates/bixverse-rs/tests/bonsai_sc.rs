@@ -6,8 +6,6 @@
 
 #![cfg(feature = "bonsai")]
 
-use std::path::PathBuf;
-
 use bonsai_rs::sanity_sc_rs::simulate::{Simulation, SimulationParams, simulate};
 use bonsai_rs::sanity_sc_rs::{SanityOutput, sanity, sanity_select};
 use bonsai_rs::tree::NO_NODE;
@@ -19,10 +17,13 @@ use bixverse_rs::single_cell::sc_analysis::bonsai::{
     BonsaiLayout, BonsaiScParams, SANITY_GENE_CHUNK, bonsai_layout, keep_for_bonsai,
     read_count_chunk, sanity_bonsai_sc, stream_sanity,
 };
-use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+use bixverse_rs::single_cell::sc_data::store::merge::gene_store_to_cell_store;
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CscGeneChunk, RawCounts},
+    reader::ParallelSparseReader,
+    writer::CellGeneSparseWriter,
 };
+use tempfile::{NamedTempFile, TempPath};
 
 ///////////////
 // Constants //
@@ -50,44 +51,13 @@ const N_EMPTY_GENES: usize = 2;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Removes the scratch stores when the test ends, pass or panic.
-struct TempStore(PathBuf);
-
-impl Drop for TempStore {
-    /// Removes the file, ignoring a missing one.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// A store path in the system temp directory.
-    ///
-    /// ### Params
-    ///
-    /// * `name` - Distinguishes this store from the others a test makes
-    ///
-    /// ### Returns
-    ///
-    /// The (not yet created) [TempStore].
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bixverse_bonsai_{name}.bin")))
-    }
-
-    /// The path as a `&str`, which is what the store API takes.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
 
 /// A gene-major store plus its cell-major twin.
 struct Stores {
     /// Gene-major store.
-    gene: TempStore,
+    gene: TempPath,
     /// Cell-major store, transposed from `gene`.
-    cell: TempStore,
+    cell: TempPath,
 }
 
 /// Small simulated dataset: [N_CELLS] cells, up to [N_GENES] genes.
@@ -106,21 +76,20 @@ fn fixture() -> Simulation {
 ///
 /// ### Params
 ///
-/// * `name` - Prefix for the scratch file names
 /// * `sim` - The simulated dataset
 /// * `extra_empty` - All-zero genes to append
 ///
 /// ### Returns
 ///
 /// The two [Stores], removed again on drop.
-fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
+fn build_stores(sim: &Simulation, extra_empty: usize) -> Stores {
     let n_cells = sim.counts.n_cells();
     let n_genes = sim.counts.n_genes();
-    let gene = TempStore::new(&format!("{name}_gene"));
-    let cell = TempStore::new(&format!("{name}_cell"));
+    let gene = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+    let cell = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
 
     let mut writer = CellGeneSparseWriter::new(
-        gene.path(),
+        gene.to_str().unwrap(),
         false,
         n_cells,
         n_genes + extra_empty,
@@ -134,10 +103,7 @@ fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
         } else {
             (Vec::new(), Vec::new())
         };
-        let norms: Vec<F16> = raw
-            .iter()
-            .map(|&v| F16::from_f32((v as f32).ln_1p()))
-            .collect();
+        let norms: Vec<f32> = raw.iter().map(|&v| (v as f32).ln_1p()).collect();
         writer
             .write_gene_chunk(CscGeneChunk::from_conversion(
                 RawCounts::from_u32_auto(&raw),
@@ -150,8 +116,8 @@ fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
     }
     writer.finalise().expect("finalise");
     gene_store_to_cell_store(
-        gene.path(),
-        cell.path(),
+        gene.to_str().unwrap(),
+        cell.to_str().unwrap(),
         TRANSPOSE_CELL_BATCH,
         TRANSPOSE_GENE_BATCH,
         0,
@@ -194,9 +160,11 @@ fn as_metacell_matrix(sim: &Simulation) -> CompressedSparseData2<u32, f32> {
 #[test]
 fn test_chunked_stream_matches_sanity_direct() {
     let sim = fixture();
-    let stores = build_stores("direct", &sim, 0);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&sim, 0);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
@@ -228,8 +196,9 @@ fn test_chunked_stream_matches_sanity_direct() {
 fn test_read_count_chunk_subsets_cells_and_skips_empty_genes() {
     let sim = fixture();
     let n_genes = sim.counts.n_genes();
-    let stores = build_stores("subset", &sim, N_EMPTY_GENES);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let stores = build_stores(&sim, N_EMPTY_GENES);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
 
     let cells: Vec<usize> = (1..sim.counts.n_cells()).step_by(2).collect();
     let cell_set: IndexSet<u32> = cells.iter().map(|&c| c as u32).collect();
@@ -263,9 +232,11 @@ fn test_read_count_chunk_subsets_cells_and_skips_empty_genes() {
 #[test]
 fn test_filtered_stream_does_not_depend_on_the_chunk_size() {
     let sim = fixture();
-    let stores = build_stores("filtered", &sim, N_EMPTY_GENES);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&sim, N_EMPTY_GENES);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes() + N_EMPTY_GENES).collect();
@@ -301,9 +272,11 @@ fn test_filtered_stream_does_not_depend_on_the_chunk_size() {
 #[test]
 fn test_sanity_bonsai_sc_returns_a_single_rooted_tree() {
     let sim = fixture();
-    let stores = build_stores("tree", &sim, 0);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&sim, 0);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
@@ -361,9 +334,11 @@ fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
     use cubecl::wgpu::WgpuDevice;
 
     let sim = fixture();
-    let stores = build_stores("tree_gpu", &sim, 0);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&sim, 0);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
@@ -388,9 +363,11 @@ fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
 #[test]
 fn test_metacell_path_matches_the_disk_path() {
     let sim = fixture();
-    let stores = build_stores("mc", &sim, 0);
-    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let stores = build_stores(&sim, 0);
+    let gene_reader =
+        ParallelSparseReader::new(stores.gene.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(stores.cell.to_str().unwrap()).expect("cell reader");
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
     let params = BonsaiScParams::default();

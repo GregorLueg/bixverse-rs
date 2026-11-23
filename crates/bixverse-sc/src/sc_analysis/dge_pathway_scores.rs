@@ -132,7 +132,7 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>
             || (vec![0.0f64; num_genes], vec![0usize; num_genes]),
             |(mut sum, mut count), cell| {
                 for (&gene_idx, &norm_val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-                    sum[gene_idx as usize] += norm_val.to_f32() as f64;
+                    sum[gene_idx as usize] += norm_val as f64;
                     count[gene_idx as usize] += 1;
                 }
                 (sum, count)
@@ -172,9 +172,9 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>
 ///
 /// The variance carries the standard tie correction
 /// `var = (n1 n2 / 12) * ((n + 1) - S / (n (n - 1)))` with `S = sum(t^3 - t)`.
-/// This matters a great deal here: the data is f16 normalised counts, so the
+/// This matters a great deal here: the data is log-normalised counts, so the
 /// implicit-zero block alone drops the variance by an order of magnitude on a
-/// sparsely detected gene, and f16 spacing collapses plenty of the non-zero
+/// sparsely detected gene, and small integer counts collapse plenty of the non-zero
 /// values into ties on top of that.
 ///
 /// One consequence worth knowing: with the correction in place, AUROC and the
@@ -262,7 +262,7 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
 
     let start_read = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
 
     let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices)?;
     let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices)?;
@@ -304,7 +304,7 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
 
     let mut indptr = vec![0_usize];
     let mut indices: Vec<u32> = Vec::new();
-    let mut data: Vec<F16> = Vec::new();
+    let mut data: Vec<f32> = Vec::new();
 
     append_cell_chunks(&cell_chunks_1, &mut indptr, &mut indices, &mut data);
     append_cell_chunks(&cell_chunks_2, &mut indptr, &mut indices, &mut data);
@@ -487,7 +487,7 @@ fn competition_ranks_desc(values: &[f32]) -> Vec<usize> {
 /// The combined p-value. The `k = m` term is `max(p)`, so the result can never
 /// exceed 1 on valid input; the clamp is defence against a caller passing
 /// something that is not a p-value.
-fn simes_combine(p_vals: &mut [f64]) -> f64 {
+pub(crate) fn simes_combine(p_vals: &mut [f64]) -> f64 {
     let m = p_vals.len();
     if m == 0 {
         return f64::NAN;
@@ -676,14 +676,14 @@ fn empty_auroc_multi_res(n_comparisons: usize, genes_to_keep: Vec<bool>) -> DgeA
 /// Bounds the decoded chunks held at once; the per-gene work runs in parallel
 /// within a block. A whole 20k gene x 20k cell store decodes in ~25 ms, so the
 /// block size is not where the time goes.
-const GENE_CHUNK_SIZE: usize = 1_000;
+pub(crate) const GENE_CHUNK_SIZE: usize = 1_000;
 
 /// Cell-to-group assignment for the gene-wise scans
-struct GroupLayout {
+pub(crate) struct GroupLayout {
     /// Group label per cell of the store, [NO_GROUP] outside every group
-    lookup: Vec<u16>,
+    pub(crate) lookup: Vec<u16>,
     /// Number of cells per group
-    sizes: Vec<usize>,
+    pub(crate) sizes: Vec<usize>,
 }
 
 /// Validate the cell groups and build the cell-to-group lookup
@@ -700,7 +700,10 @@ struct GroupLayout {
 /// ### Returns
 ///
 /// The [GroupLayout].
-fn build_group_layout(groups: &[Vec<usize>], n_cells: usize) -> Result<GroupLayout, ScErrors> {
+pub(crate) fn build_group_layout(
+    groups: &[Vec<usize>],
+    n_cells: usize,
+) -> Result<GroupLayout, ScErrors> {
     let n_groups = groups.len();
     if n_groups < 2 {
         return Err(ScErrors::DgeTooFewGroups { n_groups });
@@ -774,7 +777,7 @@ where
     F: Fn(&GeneGroupStats) -> T + Sync,
     C: FnMut(usize, T),
 {
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let n_groups = layout.sizes.len();
     let all_genes: Vec<usize> = (0..n_genes).collect();
     let mut genes_to_keep = Vec::with_capacity(n_genes);
@@ -860,7 +863,7 @@ pub fn calculate_dge_one_vs_rest_mann_whitney<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Vec<DgeMannWhitneyRes>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let header = reader.get_header();
+    let header = reader.dims();
     let layout = build_group_layout(groups, header.total_cells)?;
     let n_groups = groups.len();
     let sizes = &layout.sizes;
@@ -1002,7 +1005,7 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Vec<DgeAurocMultiRes>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let layout = build_group_layout(groups, reader.get_header().total_cells)?;
+    let layout = build_group_layout(groups, reader.dims().total_cells)?;
     let n_groups = groups.len();
     let sizes = &layout.sizes;
 
@@ -1552,7 +1555,7 @@ fn score_cells_fused(
             || {
                 (
                     Vec::<f32>::new(),
-                    Vec::<(u16, usize)>::new(),
+                    Vec::<(u32, usize)>::new(),
                     Vec::<f32>::new(),
                 )
             },
@@ -1604,7 +1607,7 @@ pub fn calculate_aucell<S: SingleCellReading>(
     let params = params.unwrap_or_default();
 
     let start_read = Instant::now();
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let total_cells = cell_chunks.len();
     let end_read = start_read.elapsed();
@@ -1674,7 +1677,7 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
 
     const CHUNK_SIZE: usize = 50000;
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let max_rank = resolve_max_rank(params.max_rank, no_genes);
     let mut all_results: Vec<Vec<f32>> =
@@ -1721,41 +1724,9 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
-    use bixverse_sc_data::gene_file_io::write_gene_file;
-
-    /// Scratch store that removes itself on drop.
-    struct TempStore(std::path::PathBuf);
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        /// Reserve a uniquely named scratch store in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix
-        ///
-        /// ### Returns
-        ///
-        /// The guard; the path is available via [`Self::path`].
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_dge_{name}.bin")))
-        }
-
-        /// Path of the guarded store as a `&str`.
-        ///
-        /// ### Returns
-        ///
-        /// The path.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use bixverse_sc_data::store::gene_file::write_gene_file;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
+    use tempfile::{NamedTempFile, TempPath};
 
     /// Open a reader over a freshly written cell-based store.
     ///
@@ -1767,11 +1738,12 @@ mod tests {
     /// ### Returns
     ///
     /// The reader.
-    fn reader_for(temp: &TempStore, dense: &[Vec<u32>]) -> ParallelSparseReader {
+    fn reader_for(temp: &TempPath, dense: &[Vec<u32>]) -> ParallelSparseReader {
         let n_cells = dense.len();
         let n_genes = dense[0].len();
-        let mut writer = CellGeneSparseWriter::new(temp.path(), true, n_cells, n_genes, 1e4)
-            .expect("writer opens");
+        let mut writer =
+            CellGeneSparseWriter::new(temp.to_str().unwrap(), true, n_cells, n_genes, 1e4)
+                .expect("writer opens");
 
         for (cell_idx, cell) in dense.iter().enumerate() {
             let mut raw = Vec::new();
@@ -1789,7 +1761,7 @@ mod tests {
         }
 
         writer.finalise().expect("finalise");
-        ParallelSparseReader::new(temp.path()).expect("reader opens")
+        ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens")
     }
 
     /// Identity ascending ranks: gene index `i` has ascending rank `i + 1`,
@@ -2076,7 +2048,7 @@ mod tests {
     /// Twelve cells over six genes: cells 0-3 are the reference, 4-7 rival A,
     /// 8-11 rival B. Gene 5 is filler that pins every library size to 100, so
     /// a normalised value depends only on the raw count and the intended ties
-    /// survive the f16 quantisation exactly.
+    /// survive exactly.
     ///
     /// * gene 0 - reference only, so a perfect marker against both rivals
     /// * gene 1 - shared with rival A, so it only separates the reference from B
@@ -2111,8 +2083,8 @@ mod tests {
     /// by construction.
     #[test]
     fn test_one_vs_many_auroc_end_to_end() {
-        let cells = TempStore::new("one_vs_many_cells");
-        let genes = TempStore::new("one_vs_many_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         let res =
@@ -2171,13 +2143,19 @@ mod tests {
     ///
     /// `(cell reader, gene reader)`.
     fn readers_for(
-        cells: &TempStore,
-        genes: &TempStore,
+        cells: &TempPath,
+        genes: &TempPath,
         dense: &[Vec<u32>],
     ) -> (ParallelSparseReader, ParallelSparseReader) {
         let cell_reader = reader_for(cells, dense);
-        write_gene_file(cells.path(), genes.path(), None, false).expect("gene file");
-        let gene_reader = ParallelSparseReader::new(genes.path()).expect("reader opens");
+        write_gene_file(
+            cells.to_str().unwrap(),
+            genes.to_str().unwrap(),
+            None,
+            false,
+        )
+        .expect("gene file");
+        let gene_reader = ParallelSparseReader::new(genes.to_str().unwrap()).expect("reader opens");
         (cell_reader, gene_reader)
     }
 
@@ -2186,8 +2164,8 @@ mod tests {
     /// kernel.
     #[test]
     fn test_one_vs_many_matches_pairwise() {
-        let cells = TempStore::new("vs_pairwise_cells");
-        let genes = TempStore::new("vs_pairwise_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
         let groups = three_groups();
 
@@ -2219,8 +2197,8 @@ mod tests {
     /// swapping the roles mirrors the AUROC.
     #[test]
     fn test_one_vs_many_all_references() {
-        let cells = TempStore::new("all_refs_cells");
-        let genes = TempStore::new("all_refs_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
         let groups = three_groups();
 
@@ -2260,8 +2238,8 @@ mod tests {
     /// panic.
     #[test]
     fn test_one_vs_many_all_genes_filtered() {
-        let cells = TempStore::new("all_filtered_cells");
-        let genes = TempStore::new("all_filtered_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         // Nothing clears a proportion above 1.0
@@ -2279,8 +2257,8 @@ mod tests {
     /// An out-of-range reference arm is an error, not a panic.
     #[test]
     fn test_one_vs_many_reference_out_of_range() {
-        let cells = TempStore::new("bad_ref_cells");
-        let genes = TempStore::new("bad_ref_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         assert!(matches!(
@@ -2297,8 +2275,8 @@ mod tests {
     /// group are ignored on both sides.
     #[test]
     fn test_one_vs_rest_matches_pairwise() {
-        let cells = TempStore::new("vs_rest_cells");
-        let genes = TempStore::new("vs_rest_genes");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let genes = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         // cell 3 and cell 11 sit in no group
@@ -2335,7 +2313,7 @@ mod tests {
     /// The scans need the gene store, so a cell store is a mode error.
     #[test]
     fn test_one_vs_rest_rejects_cell_store() {
-        let cells = TempStore::new("wrong_mode_cells");
+        let cells = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&cells, &one_vs_many_counts());
 
         assert!(matches!(

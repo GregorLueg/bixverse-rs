@@ -36,7 +36,7 @@ A condition effect is an inference about donors. Cells within a donor are not
 independent, so use pseudobulk edgeR or NEBULA for it. `bv.de` takes
 `SingleCells` or `SingleCellsSubset` and writes nothing to the object.
 
-**Markers (Wilcoxon / Mann-Whitney).**
+**Markers (Wilcoxon or logistic regression).**
 
 ```python
 markers = bv.de.find_all_markers(sc, "leiden_clustering")  # one-vs-rest
@@ -53,6 +53,10 @@ bv.de.get_marker_summary(spec).sort("min_auroc", descending=True)
 - `alternative` defaults to `"greater"` for `find_all_markers` and
   `find_specific_markers`, `"twosided"` for `find_markers`.
 - `min_prop=0.05`: share of either group that must express a gene to test it.
+- `method="lr"` runs Seurat's logistic regression test with the library size
+  as covariate; `z_scores` are then signed roots of the likelihood ratio.
+  `modality="atac"` tests the peaks of a `SingleCellsMultiModal` and defaults
+  to `"lr"`; RNA defaults to `"wilcox"`.
 - `find_specific_markers` tests each group against every rival separately.
   Its summary has `min_auroc`, `worst_rival`, `simes_fdr`, `max_p_fdr`; the
   per-rival table comes from `get_marker_comparisons()`. It returns `None` if
@@ -76,7 +80,8 @@ res = bv.de.pseudobulk_dge(sc, cell_list, design, coef="conditiontreated")
 
 - `cell_list` maps sample name to cell ids or 0-based indices; an empty match
   raises.
-- `pseudobulk_dge` sums **raw** counts. Output: `feature_id`, `log_fc`
+- `pseudobulk_dge` sums **raw** counts; `modality="atac"` sums peaks.
+  Output: `feature_id`, `log_fc`
   (**log2**), `log_cpm`, `f_stat`, `p_value`, `fdr`.
 - `coef` is a 0-based design column or its name. With neither `coef` nor
   `contrast`, the **last** column is tested. Name it.
@@ -233,6 +238,11 @@ pred = bv.annotate.transfer_labels_symphony(ref, query_sc, "cell_type")
   current `"symphony"` embedding.
 - A reference is immutable. `add_symphony_labels()` returns a new one and
   needs the cell set it was built on.
+
+**Seurat label transfer.** `bv.annotate.transfer_labels_seurat(reference,
+query, "cell_type", query_embedding)` runs CCA transfer anchors and
+`TransferData`. RNA to RNA weights on the query PCA; RNA to ATAC labels a
+gene activity store and weights on the ATAC LSI, see Single cell ATAC.
 
 ## Ligand-receptor
 
@@ -539,9 +549,163 @@ bv.graph.find_clusters(mm, modality="wnn")
   added: dropping cells later works, restoring dropped cells does not.
 - CLR (default) or DSB normalisation runs inside `add_adt_counts`. DSB defaults
   to `use_isotype_controls=True`, so pass `isotype_names`.
-- `generate_wnn_graph` needs both PCAs, rebuilds per-modality kNNs at
-  `knn_range=200` and replaces any earlier WNN result.
+- `generate_wnn_graph` needs an embedding of both modalities (the PCAs;
+  for ATAC `modality_2="atac"`, `embd_to_use_2="lsi"`), rebuilds
+  per-modality kNNs at `knn_range=200` and replaces any earlier WNN result.
 - Getters: `get_adt_counts(mm, layer=...)`, `get_adt_names`, `get_wnn_weights`.
+
+## Single cell ATAC
+
+`bv.atac` works on two kinds of experiment, and every function takes either:
+
+- a `SingleCellsMultiModal` with RNA: the ATAC counts sit in a second store
+  under `atac/`, one row per cell of the RNA store in the same order, so the
+  RNA cell filter applies to both. The ATAC cache is `mm.atac_cache`, its var
+  `mm.var(modality="atac")`. From the LSI on, the regular functions take
+  `modality="atac"`.
+- a `SingleCellsAtac`, ATAC only: the peaks or tiles are its own store, loaded
+  with `bv.io.load_atac_fragments` or `bv.io.load_atac_tenx`. `modality="atac"`
+  and the default both name its store, so multi-modal code runs unchanged;
+  `x.atac_cache` is its cache.
+
+The ATAC state (`x.atac`: kind, count mode, TF-IDF) is rebuilt from the store
+on open; only the LSI needs `bv.io.save`.
+
+```python
+d = bv.io.download_pbmc_multiome()  # 10x 3k multiome, cached
+h5 = d / "pbmc_unsorted_3k_filtered_feature_bc_matrix.h5"
+frags = d / "pbmc_unsorted_3k_atac_fragments.tsv.gz"  # .tbi next to it
+gtf = d / "gencode.v32.primary_assembly.annotation.gtf.gz"
+black = d / "hg38-blacklist.v2.bed.gz"
+
+bv.io.load_tenx_h5("exp/multiome", h5)  # RNA
+mm = bv.SingleCellsMultiModal("exp/multiome")
+bv.atac.add_atac_tenx(mm, h5)  # Cell Ranger's peaks
+bv.atac.fragment_qc(mm, frags, gtf)  # atac_* obs columns
+bv.atac.amulet(mm, frags, restrict_beds=[black])  # amulet_* obs columns
+# ... RNA and ATAC QC, then mm.set_cells_to_keep(...) ...
+bv.pp.find_hvg(mm, hvg_no=2000)
+bv.pp.calculate_pca(mm, no_pcs=50)
+bv.graph.find_neighbours(mm)
+bv.graph.find_clusters(mm)
+
+peaks = bv.atac.call_peaks(mm, frags, group_by="leiden_clustering")
+peaks = bv.atac.remove_blacklisted(peaks, black)
+bv.atac.add_atac_fragments(mm, frags, peaks=peaks, overwrite=True)
+bv.atac.annotate_peaks(mm, gtf)  # closest_gene, distance_to_tss in var
+bv.atac.run_tfidf(mm)
+bv.atac.find_top_features(mm, min_cutoff="q25")
+bv.atac.calculate_lsi(mm, n_comp=50)  # embeddings["lsi"], component 1 dropped
+bv.graph.find_neighbours(mm, embd_to_use="lsi", modality="atac")
+bv.embed.umap(mm, embd_to_use="lsi", modality="atac")
+
+bv.mm.generate_wnn_graph(mm, modality_2="atac", embd_to_use_2="lsi")
+bv.graph.find_clusters(mm, modality="wnn", name="wnn_clusters")
+da = bv.de.find_all_markers(mm, "wnn_clusters", modality="atac")  # LR test
+```
+
+ATAC only:
+
+```python
+counts = bv.atac.barcode_fragment_counts(frags)  # knee plot input
+x = bv.io.load_atac_fragments(
+    "exp/atac",
+    frags,
+    peaks=d / "pbmc_unsorted_3k_atac_peaks.bed",
+    min_fragments=3000,  # or barcodes=..., or cellranger="singlecell.csv"
+)
+bv.atac.fragment_qc(x, frags, gtf)
+bv.atac.run_tfidf(x)
+bv.atac.calculate_lsi(x)
+bv.graph.find_neighbours(x, embd_to_use="lsi")  # modality defaults to its store
+```
+
+- `add_atac_tenx` reads the `Peaks` rows of a Cell Ranger ARC h5.
+  `add_atac_fragments` counts a fragment file into `peaks` (a BED path or a
+  frame with `chrom`, `start`, `end`, 0-based half-open) or into tiles
+  (`tile_width` plus `chrom_sizes`). `mode="insertion"` (default) counts
+  each Tn5 insertion as Cell Ranger does; `"paired-insertion"` is
+  SnapATAC2's, `"fragment"` Signac's. A second call needs `overwrite=True`
+  and resets the ATAC var and cache.
+- Fragment barcodes are the cell ids. Where they differ (a `-1` suffix, a
+  sample prefix), pass `barcode_map` (a dict or a function from cell id to
+  fragment barcode) to any fragment pass. Every pass raises when no cell id
+  is a barcode of the file or no fragment lies on a chromosome of the
+  features or TSSs (`chr1` against `1`), and warns on partial mismatches.
+- Per-sample fragment files: `bv.atac.merge_fragments(files, out,
+  prefixes=["s1_", "s2_"])` writes one indexed file with prefixed barcodes.
+- `fragment_qc` writes `atac_n_fragments`, `atac_nucleosome_signal`,
+  `atac_tss_enrichment` (Signac's fast mode), `atac_mito_fraction` and, on a
+  peak store, `atac_frip`. Filter with `bv.qc.run_cell_qc_fixed`, e.g.
+  nucleosome signal below 2, TSS enrichment above 2.
+  `fragment_profiles(x, frags, gtf, group_by=...)` returns the TSS profile and
+  the fragment length histogram for `bv.pl.tss_profile_plot` and
+  `bv.pl.fragment_length_plot`.
+- `amulet` calls multiplets from loci with more than two overlapping
+  fragments, without clustering or RNA. Pass repeat and blacklist BEDs as
+  `restrict_beds`.
+- `call_peaks` is a native MACS3 `callpeak --nomodel` per `group_by` group,
+  merged by default. Filter to the chromosomes you want and
+  `remove_blacklisted` before counting.
+- `run_tfidf` computes the IDF over the kept cells and only rewrites
+  metadata, and clears the ATAC cache. Run it again, then the LSI, after the
+  cells to keep change.
+- `calculate_lsi` returns the correlation of each component with depth, not
+  the embedding. `drop_first=True` follows the Signac vignettes;
+  `bv.pl.lsi_depth_plot(bv.atac.get_lsi_depth_cor(x))` shows whether
+  component 1 is depth.
+- Batches: `bv.integrate.harmony(mm, "batch", embd_to_use="lsi",
+  modality="atac")` writes `"harmony"` to the ATAC cache; `run_rlsi(mm,
+  "batch")` integrates through reciprocal LSI anchors into `"rlsi"`.
+  `project_lsi(reference, query)` maps a query onto a reference LSI
+  (`"lsi_projected"`), either side multi-modal or ATAC only.
+- Differential accessibility: the marker functions default to `method="lr"`
+  on ATAC, with the library size as covariate; the id column is
+  `feature_id`. For a condition effect over donors, `bv.de.pseudobulk_dge(mm,
+  cell_list, design, modality="atac")` runs edgeR on summed peak counts.
+- Peaks on a plot: `bv.pl.feature_plot(mm, [peak_id], "umap",
+  expr_modality="atac", embd_modality="wnn")`.
+- Peak to gene links: `bv.atac.peak_to_gene(mm, gtf, "fine_clusters")`
+  correlates each peak with genes within 250 kb over groups of cells (ArchR's
+  links; no GC background, unlike Signac's `LinkPeaks`).
+
+**Gene activity and label transfer.**
+
+```python
+ga = bv.atac.gene_activity(x, frags, gtf)  # a new SingleCells
+ga = bv.atac.get_gene_activity(x)  # later: reopened with x's cell filter
+pred = bv.annotate.transfer_labels_seurat(
+    rna_reference, ga, "cell_type", x.atac_cache.embeddings["lsi"], weight_owner=x
+)
+bv.pl.feature_plot(mm, genes, "umap", embd_modality="wnn", expr_sc=ga)
+```
+
+- `gene_activity` counts fragments over gene body plus 2 kb upstream
+  (Signac's `GeneActivity`) into its own `SingleCells`, keyed by the
+  unversioned Ensembl id the 10x RNA uses. Written to the default
+  `<dir>/gene_activity`, later cell filters on `x` reach it.
+- It is not RNA. Methods that assume an mRNA count model refuse it
+  (residuals, doublets, Bonsai, gene set proportions); AUCell, ScType,
+  `lm_activity`, NMF, Hotspot gene correlations, SCENIC and CellPhoneDB warn.
+  Peak and tile stores are refused by every gene method (HVGs, PCA, MAGIC,
+  doublets).
+- `transfer_labels_seurat` writes `predicted_<col>` and `confidence_<col>` to
+  the query obs and returns them plus one `score_<label>` per label. The
+  weights come from the query embedding you pass, matched by row; pass
+  `weight_owner` to check it keeps the query's cells.
+
+### Traps
+
+- `add_atac_*` need a `SingleCellsMultiModal`; ATAC only goes through
+  `bv.io.load_atac_*`. `bv.io.load_existing` opens a peak or tile store as a
+  `SingleCellsAtac` by itself.
+- With a tabix index (`.tbi`) next to the fragment file, `call_peaks` and
+  `amulet` read one chromosome at a time; without one they hold every
+  fragment in memory. A `.tbi` older than its fragment file warns.
+- The 10x h5 holds both RNA and peaks. `load_tenx_h5` loads only the
+  `"Gene Expression"` rows and refuses `feature_type="Peaks"`; the peaks come
+  in through `add_atac_tenx` or `load_atac_tenx`.
+- Not in bixverse yet: motifs and chromVAR, coverage tracks, footprinting.
 
 ## Pipelines
 
@@ -580,8 +744,8 @@ for batch in loader:
 - `indices` and `genes` are 0-based store indices. `indices=None` iterates
   every cell in the store, filtered ones included.
 - `layer` is `"raw"`, `"norm"` or `"both"`; the other layer is `None`.
-- `norm` is `log1p(count / library_size * target_size)` stored at float16,
-  accurate to about three decimals.
+- `norm` is `log1p(count / library_size * target_size)`, recomputed from the
+  raw counts in float32.
 - Sparse is the default; `sparse=False` costs a zero-fill over
   `batch_size * n_genes`. Cell-major stores only.
 

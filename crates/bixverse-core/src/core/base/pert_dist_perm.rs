@@ -48,8 +48,12 @@ pub enum PermutationPath {
     },
 }
 
-/// Default implementation for [PermutationPath]
 impl Default for PermutationPath {
+    /// The default [`PermutationPath`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         PermutationPath::Subsample {
             max_per_group: N_SUB_SAMPLE,

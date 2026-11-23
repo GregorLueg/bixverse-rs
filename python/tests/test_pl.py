@@ -1,9 +1,8 @@
-"""Plot data extractors and the matplotlib plots without R: guards, shapes
+"""Plot data extractors and the matplotlib plots: guards, shapes
 and what each plot draws (points, collections, labels, colours, order), on
 the Agg backend. No image comparison.
 
-Extractor parity with the R package is in `test_pl_r.py`. The plot tests skip
-without matplotlib.
+The plot tests skip without matplotlib.
 """
 
 import dataclasses

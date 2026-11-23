@@ -175,6 +175,10 @@ pub struct EdgeRQlParams {
 
 impl Default for EdgeRQlParams {
     /// edgeR's defaults, filtering on.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             norm_method: NormMethod::Tmm,
@@ -421,6 +425,10 @@ pub struct LimmaParams {
 
 impl Default for LimmaParams {
     /// limma's own defaults, filtering and TMM on.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             route: LimmaRoute::Voom,

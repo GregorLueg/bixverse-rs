@@ -17,7 +17,7 @@
 use crate::mc_analysis::as_csc;
 use crate::prelude::*;
 use crate::sc_analysis::hotspot::{HotSpotGeneRes, HotSpotPairRes, HotSpotParams, Hotspot};
-use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
 /////////////
 // Helpers //
@@ -139,39 +139,18 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use faer::Mat;
-    use half::f16;
+    use tempfile::{NamedTempFile, TempPath};
 
     use crate::sc_analysis::hotspot::{HotSpotGraphParams, hotspot_gene_clusters};
-    use bixverse_sc_data::data_io::{
-        CellGeneSparseWriter, CscGeneChunk, CsrCellChunk, ParallelSparseReader, RawCounts,
+    use bixverse_sc_data::store::{
+        chunk::{CscGeneChunk, CsrCellChunk, RawCounts},
+        reader::ParallelSparseReader,
+        writer::CellGeneSparseWriter,
     };
-    use bixverse_sc_data::sc_traits::F16;
 
     const N_CELLS: usize = 24;
     const N_GENES: usize = 12;
     const SIZE_FACTOR: f32 = 1e4;
-
-    /// Removes the scratch stores on drop. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    struct TempStore(std::path::PathBuf);
-
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        /// Reserve a uniquely named scratch store in the system temp directory.
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_hotspot_mc_{name}.bin")))
-        }
-
-        /// Path of the guarded store.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
 
     /// Deterministic `dense[gene][cell]` counts in the hundreds, so the metacell
     /// regime rather than the single-cell one gets exercised.
@@ -198,7 +177,7 @@ mod tests {
     }
 
     /// The same counts as a (cells, genes) CSC matrix with both layers. The
-    /// normalised layer is quantised through `f16` exactly as the writer does,
+    /// normalised layer is computed exactly as the writer does,
     /// so the on-disk and in-memory paths see identical inputs.
     fn to_csc(dense: &[Vec<u32>], lib_sizes: &[f32]) -> CompressedSparseData2<u32, f32> {
         let mut data: Vec<u32> = Vec::new();
@@ -211,7 +190,7 @@ mod tests {
                 if value > 0 {
                     data.push(value);
                     let norm = (value as f32 / lib_sizes[cell] * SIZE_FACTOR).ln_1p();
-                    data_2.push(f16::from_f32(norm).to_f32());
+                    data_2.push(norm);
                     indices.push(cell as u32);
                 }
             }
@@ -222,10 +201,15 @@ mod tests {
     }
 
     /// Write the gene-major and cell-major stores the disk-backed reference needs.
-    fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
-        let mut gene_writer =
-            CellGeneSparseWriter::new(genes.path(), false, N_CELLS, N_GENES, SIZE_FACTOR)
-                .expect("gene writer opens");
+    fn write_stores(dense: &[Vec<u32>], genes: &TempPath, cells: &TempPath) {
+        let mut gene_writer = CellGeneSparseWriter::new(
+            genes.to_str().unwrap(),
+            false,
+            N_CELLS,
+            N_GENES,
+            SIZE_FACTOR,
+        )
+        .expect("gene writer opens");
 
         let lib_sizes = library_sizes(dense);
 
@@ -238,7 +222,7 @@ mod tests {
                     raw.push(value);
                     idx.push(cell);
                     let norm = (value as f32 / lib_sizes[cell] * SIZE_FACTOR).ln_1p();
-                    norms.push(F16::from(f16::from_f32(norm)));
+                    norms.push(norm);
                 }
             }
 
@@ -255,7 +239,7 @@ mod tests {
         gene_writer.finalise().expect("finalise genes");
 
         let mut cell_writer =
-            CellGeneSparseWriter::new(cells.path(), true, N_CELLS, N_GENES, SIZE_FACTOR)
+            CellGeneSparseWriter::new(cells.to_str().unwrap(), true, N_CELLS, N_GENES, SIZE_FACTOR)
                 .expect("cell writer opens");
 
         for cell in 0..N_CELLS {
@@ -313,12 +297,14 @@ mod tests {
         let lib_sizes = library_sizes(&dense);
         let matrix = to_csc(&dense, &lib_sizes);
 
-        let gene_store = TempStore::new("autocor_genes");
-        let cell_store = TempStore::new("autocor_cells");
+        let gene_store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cell_store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         write_stores(&dense, &gene_store, &cell_store);
 
-        let gene_reader = ParallelSparseReader::new(gene_store.path()).expect("gene reader opens");
-        let cell_reader = ParallelSparseReader::new(cell_store.path()).expect("cell reader opens");
+        let gene_reader =
+            ParallelSparseReader::new(gene_store.to_str().unwrap()).expect("gene reader opens");
+        let cell_reader =
+            ParallelSparseReader::new(cell_store.to_str().unwrap()).expect("cell reader opens");
 
         let cells: Vec<usize> = (0..N_CELLS).collect();
         let genes: Vec<usize> = (0..N_GENES).collect();
@@ -379,12 +365,14 @@ mod tests {
         let lib_sizes = library_sizes(&dense);
         let matrix = to_csc(&dense, &lib_sizes);
 
-        let gene_store = TempStore::new("genecor_genes");
-        let cell_store = TempStore::new("genecor_cells");
+        let gene_store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let cell_store = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         write_stores(&dense, &gene_store, &cell_store);
 
-        let gene_reader = ParallelSparseReader::new(gene_store.path()).expect("gene reader opens");
-        let cell_reader = ParallelSparseReader::new(cell_store.path()).expect("cell reader opens");
+        let gene_reader =
+            ParallelSparseReader::new(gene_store.to_str().unwrap()).expect("gene reader opens");
+        let cell_reader =
+            ParallelSparseReader::new(cell_store.to_str().unwrap()).expect("cell reader opens");
 
         let cells: Vec<usize> = (0..N_CELLS).collect();
         let genes: Vec<usize> = (0..N_GENES).collect();

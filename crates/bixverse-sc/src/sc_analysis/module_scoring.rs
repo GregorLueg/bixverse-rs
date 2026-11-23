@@ -16,13 +16,10 @@ use crate::prelude::*;
 /////////////
 
 /// Structure holding gene binning information
-///
-/// ### Fields
-///
-/// * `gene_to_bin` - HashMap that contains gene to bin mapping
-/// * `bins` - Bin to gene lookup
 struct GeneBins {
+    /// HashMap that contains gene to bin mapping
     gene_to_bin: FxHashMap<usize, usize>,
+    /// Bin to gene lookup
     bins: Vec<Vec<usize>>,
 }
 
@@ -43,7 +40,7 @@ fn get_average_expression<S: SingleCellReading>(
     cell_set: &IndexSet<u32>,
     streaming: bool,
 ) -> Result<Vec<(usize, f32)>, ScErrors> {
-    let total_genes = gene_reader.get_header().total_genes;
+    let total_genes = gene_reader.dims().total_genes;
 
     if streaming {
         const CHUNK_SIZE: usize = 500;
@@ -222,7 +219,7 @@ fn calculate_cell_module_scores(
     scratch: &mut [f32],
 ) -> Vec<f32> {
     for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
-        scratch[idx as usize] = value.to_f32();
+        scratch[idx as usize] = *value;
     }
 
     let scores: Vec<f32> = gene_sets
@@ -388,8 +385,8 @@ pub fn calculate_module_scores_main<S: SingleCellReading>(
 ) -> Result<Vec<Vec<f32>>, ScErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let n_genes = cell_reader.get_header().total_genes;
-    let n_genes_gene_store = gene_reader.get_header().total_genes;
+    let n_genes = cell_reader.dims().total_genes;
+    let n_genes_gene_store = gene_reader.dims().total_genes;
     if n_genes != n_genes_gene_store {
         return Err(ScErrors::GeneAxisMismatch {
             gene_store: n_genes_gene_store,
@@ -485,7 +482,7 @@ mod tests {
     fn densify(cell: &CsrCellChunk, n_genes: usize) -> Vec<f32> {
         let mut dense = vec![0.0_f32; n_genes];
         for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
-            dense[idx as usize] = value.to_f32();
+            dense[idx as usize] = *value;
         }
         dense
     }

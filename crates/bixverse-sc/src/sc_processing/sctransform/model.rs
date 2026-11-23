@@ -86,6 +86,11 @@ pub struct SctParams {
 }
 
 impl Default for SctParams {
+    /// The default [`SctParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_genes: 2000,
@@ -144,6 +149,11 @@ pub struct SctParamsSpec {
 }
 
 impl Default for SctParamsSpec {
+    /// The default [`SctParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = SctParams::default();
         Self {

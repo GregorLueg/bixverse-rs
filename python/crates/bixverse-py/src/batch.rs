@@ -14,7 +14,10 @@
 //! decompression across rayon workers; wrapping this pass in another rayon
 //! call would oversubscribe the pool with no throughput win.
 
-use bixverse_sc_data::data_io::{CsrBatch, CsrCellChunk, DataLayerReturn};
+use bixverse_sc_data::store::{
+    chunk::{CsrCellChunk, DataLayerReturn, INDEX_DROPPED, gene_subset_map},
+    reader::CsrBatch,
+};
 
 //////////////////
 // Layer select //
@@ -116,15 +119,12 @@ pub struct PreparedBatch {
 // GeneRemap //
 ///////////////
 
-/// Marks a store gene that the subset drops.
-pub const DROPPED: u32 = u32::MAX;
-
 /// Store gene index to output column, for loading a gene subset.
 pub struct GeneRemap {
-    /// One entry per store gene: its output column, or [`DROPPED`].
+    /// One entry per store gene: its output column, or [`INDEX_DROPPED`].
     pub map: Vec<u32>,
-    /// Number of kept genes, i.e. the output width.
-    pub n_out: usize,
+    /// The kept store genes, in output column order.
+    pub genes: Vec<usize>,
 }
 
 /// Build the remap for a gene subset.
@@ -139,72 +139,9 @@ pub struct GeneRemap {
 /// The [`GeneRemap`], or an `Err` naming the first out-of-range or repeated
 /// gene index.
 pub fn gene_remap(genes: &[u32], n_genes: usize) -> Result<GeneRemap, String> {
-    let mut map = vec![DROPPED; n_genes];
-    for (out, &g) in genes.iter().enumerate() {
-        let slot = map.get_mut(g as usize).ok_or_else(|| {
-            format!("gene index {g} is out of range for a store of {n_genes} genes")
-        })?;
-        if *slot != DROPPED {
-            return Err(format!("gene index {g} is repeated"));
-        }
-        *slot = out as u32;
-    }
-    Ok(GeneRemap {
-        map,
-        n_out: genes.len(),
-    })
-}
-
-/// Drop the unkept genes from a sparse batch and renumber the rest.
-///
-/// One sequential pass over the non-zeros. Within a row the kept entries stay
-/// in store gene order, so the column indices are only sorted when `genes`
-/// was ascending; CSR does not require sorted indices.
-///
-/// ### Params
-///
-/// * `batch` - A sparse batch over every store gene.
-/// * `remap` - The subset to keep.
-///
-/// ### Returns
-///
-/// The batch restricted to the kept genes, `n_cols` set to their count.
-pub fn subset_csr(batch: PreparedBatch, remap: &GeneRemap) -> PreparedBatch {
-    let indptr = batch.indptr.expect("subset_csr takes a sparse batch");
-    let indices = batch.indices.expect("subset_csr takes a sparse batch");
-
-    let mut new_indptr = Vec::with_capacity(indptr.len());
-    let mut new_indices = Vec::new();
-    let mut raw = batch.raw.as_ref().map(|_| Vec::new());
-    let mut norm = batch.norm.as_ref().map(|_| Vec::new());
-    new_indptr.push(0u32);
-
-    for w in indptr.windows(2) {
-        for k in w[0] as usize..w[1] as usize {
-            let out = remap.map[indices[k] as usize];
-            if out == DROPPED {
-                continue;
-            }
-            new_indices.push(out);
-            if let (Some(dst), Some(src)) = (raw.as_mut(), batch.raw.as_ref()) {
-                dst.push(src[k]);
-            }
-            if let (Some(dst), Some(src)) = (norm.as_mut(), batch.norm.as_ref()) {
-                dst.push(src[k]);
-            }
-        }
-        new_indptr.push(new_indices.len() as u32);
-    }
-
-    PreparedBatch {
-        cell_ids: batch.cell_ids,
-        raw,
-        norm,
-        indices: Some(new_indices),
-        indptr: Some(new_indptr),
-        n_rows: batch.n_rows,
-        n_cols: remap.n_out,
-    }
+    let genes: Vec<usize> = genes.iter().map(|&g| g as usize).collect();
+    let map = gene_subset_map(&genes, n_genes).map_err(|e| e.to_string())?;
+    Ok(GeneRemap { map, genes })
 }
 
 //////////////////
@@ -256,7 +193,7 @@ pub fn prepare_dense(
     layer: Layer,
 ) -> PreparedBatch {
     let n_rows = chunks.len();
-    let n_cols = remap.map_or(n_genes, |r| r.n_out);
+    let n_cols = remap.map_or(n_genes, |r| r.genes.len());
     let total = n_rows.saturating_mul(n_cols);
     // Identity map when no subset was asked for, so the scatter has one shape.
     let identity: Vec<u32>;
@@ -276,7 +213,7 @@ pub fn prepare_dense(
         if let Some(buf) = raw.as_mut() {
             for (value, &col) in chunk.data_raw.iter().zip(chunk.indices.iter()) {
                 let out = map[col as usize];
-                if out != DROPPED {
+                if out != INDEX_DROPPED {
                     buf[row_start + out as usize] = value as f32;
                 }
             }
@@ -284,8 +221,8 @@ pub fn prepare_dense(
         if let Some(buf) = norm.as_mut() {
             for (value, &col) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
                 let out = map[col as usize];
-                if out != DROPPED {
-                    buf[row_start + out as usize] = value.to_f32();
+                if out != INDEX_DROPPED {
+                    buf[row_start + out as usize] = *value;
                 }
             }
         }

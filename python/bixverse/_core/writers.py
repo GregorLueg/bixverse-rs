@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,7 +21,7 @@ from beartype import beartype
 
 from bixverse import _bixverse
 from bixverse._core.ingest import CsrLike, csr_buffers
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import Selection, SingleCells
 from bixverse._core.state import CsrMatrix
 from bixverse._validate import Verbose
 
@@ -50,7 +51,16 @@ def _check_output(path: Path, *, overwrite: bool) -> None:
     if path.exists():
         if not overwrite:
             raise FileExistsError(f"{path} already exists and overwrite = False.")
-        path.unlink()
+        _remove(path)
+
+
+@beartype
+def _remove(path: Path) -> None:
+    """Remove a file, or a directory such as a Zarr store."""
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 @beartype
@@ -172,7 +182,7 @@ def _fresh(sc: SingleCells, label: str, n_rows: int, n_cells: int) -> bool:
 
 @beartype
 def _export_cache(
-    sc: SingleCells, order: np.ndarray
+    sc: SingleCells, order: np.ndarray, gene_idx: np.ndarray | None
 ) -> tuple[
     dict[str, np.ndarray],
     dict[str, np.ndarray],
@@ -187,12 +197,13 @@ def _export_cache(
     `obsm/X_<name>`, the neighbour graph to `obsp/connectivities` with the
     `uns/neighbors` block ScanPy looks for. Cached rows follow
     `cells_to_keep`; they are reordered to the ascending cell order of the
-    file.
+    file. Loading rows follow the written genes.
 
     Args:
         sc: The experiment.
         order: Positions in `cells_to_keep` of the written cells, in file
             order.
+        gene_idx: The written genes, `None` for every gene.
 
     Returns:
         `obsm`, `varm`, `obsp` and the `uns` JSON.
@@ -217,7 +228,7 @@ def _export_cache(
         if genes is not None and len(genes) == c.pca_loadings.shape[0]:
             padded = np.zeros((n_genes, c.pca_loadings.shape[1]), dtype=np.float64)
             padded[genes] = c.pca_loadings
-            varm["PCs"] = padded
+            varm["PCs"] = padded if gene_idx is None else padded[gene_idx]
         else:
             warnings.warn(
                 "The cached PCA loadings do not record the genes they cover. "
@@ -240,44 +251,20 @@ def _export_cache(
 
 
 @beartype
-def save_h5ad(
+def _save_ad(
     sc: SingleCells,
-    h5_path: Path | str,
+    path: Path,
     *,
-    assay: Literal["raw", "norm"] = "raw",
-    chunk_size: int = 10_000,
-    overwrite: bool = True,
-    verbose: Verbose = True,
+    zarr: bool,
+    assay: Literal["raw", "norm"],
+    genes: Selection | None,
+    chunk_size: int,
+    overwrite: bool,
+    verbose: Verbose,
 ) -> Path:
-    """Write an experiment to a spec compliant h5ad file.
-
-    Writes the kept cells in ascending store order, the obs / var tables
-    without the bookkeeping columns, and whatever cached embeddings and
-    graph still match the cells. Counts are streamed from the store in
-    batches and stored as `float32`. A failed write leaves no file behind.
-
-    Args:
-        sc: The experiment.
-        h5_path: File to write.
-        assay: Which counts go into `X`.
-        chunk_size: Cells per streaming batch.
-        overwrite: Replace an existing file.
-        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
-            method has it.
-
-    Returns:
-        The written path.
-
-    Raises:
-        FileExistsError: If the file exists and `overwrite` is false.
-        ValueError: If `chunk_size` is not positive.
-
-    Examples:
-        >>> bv.io.save_h5ad(sc, "path/to/out.h5ad", assay="norm")
-    """
+    """The shared body of `save_h5ad` and `save_zarr`."""
     if chunk_size < 1:
         raise ValueError("chunk_size must be positive")
-    path = Path(h5_path).expanduser()
     _check_output(path, overwrite=overwrite)
 
     keep = sc.cells_to_keep
@@ -293,10 +280,21 @@ def save_h5ad(
     var = var.select("gene_id", *[c for c in var.columns if c != "gene_id"])
     if obs.height != len(cells) or var.height != sc.n_genes:
         raise ValueError("The obs / var tables do not match the cells being written.")
+    gene_idx = None
+    if genes is not None:
+        gene_idx = np.ascontiguousarray(sc._resolve_genes(genes), dtype=np.uint32)
+        if np.unique(gene_idx).size != gene_idx.size:
+            raise ValueError("genes holds repeated entries")
+        var = var[gene_idx.astype(np.int64)]
 
-    obsm, varm, obsp, uns_json = _export_cache(sc, order)
+    obsm, varm, obsp, uns_json = _export_cache(sc, order, gene_idx)
     if verbose:
-        logger.info("Writing %i cells x %i genes to h5ad.", obs.height, var.height)
+        logger.info(
+            "Writing %i cells x %i genes to %s.",
+            obs.height,
+            var.height,
+            "Zarr" if zarr else "h5ad",
+        )
     try:
         _bixverse.save_h5ad(
             sc.cells_path,
@@ -312,11 +310,113 @@ def save_h5ad(
             obsp,
             uns_json,
             chunk_size,
+            zarr=zarr,
+            gene_indices=gene_idx,
         )
     except BaseException:
-        path.unlink(missing_ok=True)
+        _remove(path)
         raise
     return path
+
+
+@beartype
+def save_h5ad(
+    sc: SingleCells,
+    h5_path: Path | str,
+    *,
+    assay: Literal["raw", "norm"] = "raw",
+    genes: Selection | None = None,
+    chunk_size: int = 10_000,
+    overwrite: bool = True,
+    verbose: Verbose = True,
+) -> Path:
+    """Write an experiment to a spec compliant h5ad file.
+
+    Writes the kept cells in ascending store order, the obs / var tables
+    without the bookkeeping columns, and whatever cached embeddings and
+    graph still match the cells. Counts are streamed from the store in
+    batches and stored as `float32`. A failed write leaves no file behind.
+
+    Args:
+        sc: The experiment.
+        h5_path: File to write.
+        assay: Which counts go into `X`.
+        genes: 0-based store indices or ids of the genes to write, in the
+            column order wanted. `None` writes every gene.
+        chunk_size: Cells per streaming batch.
+        overwrite: Replace an existing file.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+
+    Returns:
+        The written path.
+
+    Raises:
+        FileExistsError: If the file exists and `overwrite` is false.
+        ValueError: If `chunk_size` is not positive or `genes` repeats one.
+
+    Examples:
+        >>> bv.io.save_h5ad(sc, "path/to/out.h5ad", assay="norm")
+    """
+    return _save_ad(
+        sc,
+        Path(h5_path).expanduser(),
+        zarr=False,
+        assay=assay,
+        genes=genes,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        verbose=verbose,
+    )
+
+
+@beartype
+def save_zarr(
+    sc: SingleCells,
+    zarr_path: Path | str,
+    *,
+    assay: Literal["raw", "norm"] = "raw",
+    genes: Selection | None = None,
+    chunk_size: int = 10_000,
+    overwrite: bool = True,
+    verbose: Verbose = True,
+) -> Path:
+    """Write an experiment to an AnnData Zarr (v3) store.
+
+    Writes what `save_h5ad` writes, as a Zarr directory that
+    `anndata.read_zarr` opens. A failed write leaves no store behind.
+
+    Args:
+        sc: The experiment.
+        zarr_path: Directory to write.
+        assay: Which counts go into `X`.
+        genes: 0-based store indices or ids of the genes to write, in the
+            column order wanted. `None` writes every gene.
+        chunk_size: Cells per streaming batch.
+        overwrite: Replace an existing store.
+        verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
+            method has it.
+
+    Returns:
+        The written path.
+
+    Raises:
+        FileExistsError: If the store exists and `overwrite` is false.
+        ValueError: If `chunk_size` is not positive or `genes` repeats one.
+
+    Examples:
+        >>> bv.io.save_zarr(sc, "path/to/out.zarr")
+    """
+    return _save_ad(
+        sc,
+        Path(zarr_path).expanduser(),
+        zarr=True,
+        assay=assay,
+        genes=genes,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        verbose=verbose,
+    )
 
 
 @beartype

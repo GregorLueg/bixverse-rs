@@ -1,7 +1,7 @@
-"""Cross-field rules for the generated param bundles.
+"""Cross-field rules for the param bundles in `_specs`.
 
-The generator cannot express these, so they are written here by hand and keyed
-by class name. Each takes the bundle after its per-field checks have passed.
+Keyed by class name. Each takes the bundle after its per-field checks have
+passed.
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def run(p: object) -> None:
     """Apply the cross-field rule for this bundle's class, if it has one.
 
     Args:
-        p: A generated param bundle.
+        p: A param bundle.
 
     Raises:
         ValueError: If a rule fails.

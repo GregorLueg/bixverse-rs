@@ -68,8 +68,12 @@ pub struct SymphonyMapParams {
     pub lambda: f32,
 }
 
-/// Default implementation for [SymphonyMapParams].
 impl Default for SymphonyMapParams {
+    /// The default [`SymphonyMapParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             sigma: 0.1,
@@ -218,7 +222,7 @@ fn build_scaled_query_matrix<S: SingleCellReading>(
 
             col.fill(baseline);
             for (i, &pos) in chunk.indices.iter().enumerate() {
-                let val = chunk.data_norm[i].to_f32();
+                let val = chunk.data_norm[i];
                 col[pos as usize] = clamp_sym((val - mean) * inv_sd, SCALE_CLIP);
             }
         });

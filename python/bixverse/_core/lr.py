@@ -35,7 +35,7 @@ from bixverse import _bixverse
 from bixverse._core.doublets import _as_character
 from bixverse._core.download import _cache, _download
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import SingleCells
+from bixverse._core.single_cells import SingleCells, check_rna_counts
 from bixverse._validate import Verbose
 from bixverse.params import CellphonedbParams, LigandTargetParams, to_rust
 
@@ -1183,6 +1183,7 @@ def cellphonedb(
         Efremova, et al., Nat. Protoc., 2020; Troulé, et al., Nat. Protoc.,
         2025.
     """
+    check_rna_counts(sc, "cellphonedb", refuse=False)
     params = params or CellphonedbParams()
     _check_lr_db(lr_db)
     if method == "degs":

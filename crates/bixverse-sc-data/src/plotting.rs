@@ -1,5 +1,5 @@
 //! Helpers to extract genes for plotting. Can densify raw and normalised
-//! counts, do Z-score normalisation for groups and caclulate proportion
+//! counts, do Z-score normalisation for groups and calculate proportion
 //! of cells.
 
 use indexmap::IndexSet;
@@ -58,6 +58,8 @@ fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
 
 /// Extract raw counts for a single gene as a dense vector over the given cells.
 ///
+/// The R package calls this; there is no caller in the workspace.
+///
 /// ### Params
 ///
 /// * `reader` - Reader over the gene-based count store.
@@ -91,6 +93,8 @@ pub fn extract_raw_counts<S: SingleCellReading>(
 }
 
 /// Extract normalised (log1p) counts for a single gene, dense, over given cells.
+///
+/// The R package calls this; there is no caller in the workspace.
 ///
 /// If `scale` is true, z-scores across all selected cells (including zeros).
 /// If `clip` is provided, scaled values are clamped to `[-clip, clip]`.
@@ -126,7 +130,7 @@ pub fn extract_norm_counts<S: SingleCellReading>(
     let n = cell_indices.len();
     let mut dense = vec![0.0f32; n];
     for (i, &cell_idx) in chunk.indices.iter().enumerate() {
-        dense[cell_idx as usize] = chunk.data_norm[i].to_f32();
+        dense[cell_idx as usize] = chunk.data_norm[i];
     }
 
     if scale {
@@ -175,7 +179,7 @@ pub fn extract_norm_counts_multi<S: SingleCellReading>(
         .map(|chunk| {
             let mut dense = vec![0.0f32; n];
             for (i, &cell_idx) in chunk.indices.iter().enumerate() {
-                dense[cell_idx as usize] = chunk.data_norm[i].to_f32();
+                dense[cell_idx as usize] = chunk.data_norm[i];
             }
             if scale {
                 scale_and_clip(&mut dense, clip);
@@ -255,7 +259,7 @@ pub fn extract_grouped_gene_stats<S: SingleCellReading>(
 
         for (i, &new_cell_idx) in chunk.indices.iter().enumerate() {
             let grp = group_ids[new_cell_idx as usize];
-            sums[grp] += chunk.data_norm[i].to_f32();
+            sums[grp] += chunk.data_norm[i];
             counts[grp] += 1;
         }
 

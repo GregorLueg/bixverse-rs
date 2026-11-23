@@ -37,7 +37,13 @@ from bixverse._core.metacells import MetaCells, csr_args
 from bixverse._core.multimodal import Modality, modality_cache, require_fresh, stamp
 from bixverse._core.qc import _auto_streaming
 from bixverse._core.repr import compact_repr
-from bixverse._core.single_cells import CELLS_BIN, GENES_BIN, SingleCells
+from bixverse._core.single_cells import (
+    CELLS_BIN,
+    GENES_BIN,
+    SingleCells,
+    check_rna_counts,
+    refuse_atac_features,
+)
 from bixverse._core.state import MagicLayer
 from bixverse._core.subset import ScOrMc, ScOrScSubset
 from bixverse._validate import Verbose
@@ -429,6 +435,7 @@ def find_hvg(
         >>> bv.pp.find_hvg(sc, hvg_no=2000)
         >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="meanvarbin"))
     """
+    refuse_atac_features(sc, "find_hvg")
     params = hvg_params or HvgParams()
     if isinstance(sc, MetaCells):
         _find_hvg_mc(sc, hvg_no, params, verbose)
@@ -579,6 +586,7 @@ def find_hvg_batch_aware(
         >>> batch_hvg = bv.pp.find_hvg_batch_aware(sc, "batch_index", hvg_no=500)
         >>> bv.pp.calculate_pca(sc, 20, hvg=batch_hvg.hvg_gene_idx)
     """
+    refuse_atac_features(sc, "find_hvg_batch_aware")
     params = hvg_params or HvgParams()
     _check_not_residual(
         params,
@@ -811,6 +819,7 @@ def calculate_pca(
         >>> bv.pp.calculate_pca(sc, no_pcs=30)
         >>> bv.pp.calculate_pca(sc, no_pcs=30, sparse_svd=False, seed=1)
     """
+    refuse_atac_features(sc, "calculate_pca")
     params = pca_params or PcaParams()
     if isinstance(sc, MetaCells):
         if sc.hvg is None and hvg is None:
@@ -1012,6 +1021,7 @@ def fit_residuals(
         >>> bv.pp.find_hvg(sc, hvg_params=bv.params.HvgParams(method="residual"))
         >>> bv.pp.fit_residuals(sc, group_column="batch_index")
     """
+    check_rna_counts(sc, "fit_residuals", refuse=True)
     if isinstance(sc, MetaCells):
         if gene_batch_size is not None:
             warnings.warn(
@@ -1137,6 +1147,7 @@ def sct_corrected_counts(
         >>> bv.pp.fit_residuals(sc)
         >>> corrected = bv.pp.sct_corrected_counts(sc, dir_out="corrected")
     """
+    check_rna_counts(sc, "sct_corrected_counts", refuse=True)
     fit = _fit_usable(sc)
     if fit.method != "sctransform":
         raise ValueError(
@@ -1207,7 +1218,7 @@ def run_magic(
     Args:
         sc: The experiment, with a kNN graph over the kept cells.
         features: Gene ids to impute. Unknown ids warn and drop.
-        modality: The kNN graph: `"rna"`, or `"adt"` / `"wnn"` on a
+        modality: The kNN graph: `"rna"`, or `"adt"` / `"atac"` / `"wnn"` on a
             `SingleCellsMultiModal`.
         magic_params: The MAGIC parameters. `None` uses the defaults.
         verbose: `0` (`False`) silent, `1` (`True`) progress, `2` extra detail where the
@@ -1225,6 +1236,7 @@ def run_magic(
         >>> magic = bv.params.MagicParams(n_steps=2)
         >>> bv.pp.run_magic(sc, ["gene_0001", "gene_0002"], magic_params=magic)
     """
+    refuse_atac_features(sc, "run_magic")
     params = magic_params or MagicParams()
     require_fresh(sc, ["knn"], modality)
     knn = modality_cache(sc, modality).knn

@@ -44,8 +44,8 @@ use bixverse_rs::single_cell::sc_analysis::dge_pathway_scores::{
     calculate_dge_grps_mann_whitney, calculate_dge_one_vs_many_auroc,
     calculate_dge_one_vs_rest_mann_whitney,
 };
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
-use bixverse_rs::single_cell::sc_data::gene_file_io::write_gene_file;
+use bixverse_rs::single_cell::sc_data::store::gene_file::write_gene_file;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 
 ////////////
 // Shapes //

@@ -11,9 +11,13 @@ use crate::prelude::BixverseFloat;
 
 /// Reusable count tables for the pairwise mutual information kernels
 pub(crate) struct MiScratch {
+    /// Joint counts, `n_bins x n_bins` row-major
     joint: Vec<usize>,
+    /// Counts of the first variable per bin
     marginal_i: Vec<usize>,
+    /// Counts of the second variable per bin
     marginal_j: Vec<usize>,
+    /// Number of bins per variable
     n_bins: usize,
 }
 
@@ -37,6 +41,11 @@ impl MiScratch {
     }
 
     /// Tabulate the joint and marginal counts of two binned columns
+    ///
+    /// ### Params
+    ///
+    /// * `col_i` - Bin of every row for the first variable
+    /// * `col_j` - Bin of every row for the second variable
     fn count(&mut self, col_i: ColRef<usize>, col_j: ColRef<usize>) {
         self.joint.fill(0);
         self.marginal_i.fill(0);
@@ -49,6 +58,14 @@ impl MiScratch {
     }
 
     /// Mutual information from the current tables
+    ///
+    /// ### Params
+    ///
+    /// * `n_rows` - Number of rows the tables were counted over
+    ///
+    /// ### Returns
+    ///
+    /// The mutual information in nats.
     fn mutual_information<T: BixverseFloat>(&self, n_rows: usize) -> T {
         let n = T::from_usize(n_rows).unwrap();
         let prob_i: Vec<T> = self

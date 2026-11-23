@@ -8,8 +8,10 @@ copyright: MIT licensed
 
 theme:
   name: material
+  font: false
   features:
-    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.top
     - navigation.tracking
     - content.code.copy
@@ -18,18 +20,21 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Light mode
+
+extra_css:
+  - stylesheets/pkgdown.css
 
 nav:
   - Home: index.md
@@ -53,6 +58,8 @@ nav:
           - Subsets and per-group pipelines: vignettes/single_cell_subsets.ipynb
           - Meta cells: vignettes/meta_cells.ipynb
           - Multi-modal analysis: vignettes/multi_modal_single_cells.ipynb
+          - Joint RNA and ATAC: vignettes/atac_multiome.ipynb
+          - ATAC without RNA: vignettes/atac_only.ipynb
       - Methods:
           - Differential expression: vignettes/differential_expression.ipynb
           - Differential abundance: vignettes/differential_abundance.ipynb
@@ -75,6 +82,7 @@ nav:
           - Batch correction: api/integrate.md
           - Annotation: api/annotate.md
           - Multi-modal: api/mm.md
+          - ATAC: api/atac.md
       - Differential testing:
           - Differential expression and abundance: api/de.md
       - Methods:

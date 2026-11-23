@@ -225,13 +225,16 @@ bv.graph.find_clusters(
 # %% [markdown]
 # A few knobs on `find_clusters()`:
 #
-# - `n_iterations`: defaults to `2` for Louvain and `5` for Leiden. A negative
-#   value iterates until the partition is stable.
+# - `n_iterations`: defaults to `2` for both. A negative value iterates until
+#   the partition is stable.
 # - `min_gain`: with a negative `n_iterations`, also stop once an iteration gains
 #   no more than this in modularity.
 # - `local_moving`: `"queue"` is Traag's sequential queue, `"coloured"` moves the
 #   nodes of one colour class in parallel. The latter only kicks in on the
-#   larger levels of the graph, so on 6k cells don't expect much.
+#   larger levels of the graph, so on 6k cells don't expect much. Leiden
+#   defaults to the queue, Louvain to colour classes.
+# - `node_order`: the visit order of the queue, `"bfs"` (Leiden's default) or
+#   `"shuffle"` (Louvain's).
 
 # %%
 bv.graph.find_clusters(
@@ -303,7 +306,7 @@ plt.show()
 plot_overlap(
     clusters_df["leiden_clusters"],
     clusters_df["leiden_stable"],
-    "Leiden (5 iterations)",
+    "Leiden (2 iterations)",
     "Leiden (until stable)",
     "Fixed iterations vs iterating until stable",
 )

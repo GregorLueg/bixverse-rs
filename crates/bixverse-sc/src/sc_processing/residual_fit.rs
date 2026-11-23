@@ -24,7 +24,7 @@ use crate::sc_processing::sctransform::residuals::SctResiduals;
 use crate::sc_processing::sctransform::stream::{
     SctGroupedFit, SctStreamOpts, fit_sctransform, fit_sctransform_grouped, sct_corrected_counts,
 };
-use bixverse_sc_data::in_memory_io::{CellSubset, InMemorySparseReader};
+use bixverse_sc_data::store::in_memory::{CellSubset, InMemorySparseReader};
 
 ///////////
 // Types //
@@ -308,7 +308,7 @@ pub fn fit_residuals_on_store(
 ) -> Result<ResidualFit, ScErrors> {
     let gene_reader = ParallelSparseReader::new(f_path_gene)?;
     let cell_reader = ParallelSparseReader::new(f_path_cell)?;
-    let n_total = gene_reader.get_header().total_cells;
+    let n_total = gene_reader.dims().total_cells;
     let subset = CellSubset::load(f_path_cell, cell_set, n_total, opts.verbose > 0)?;
 
     // the drivers see the renumbered subset; the fit keeps the original
@@ -417,7 +417,7 @@ pub fn residual_variance_on_store(
 ) -> Result<ResidualVarianceRes, ScErrors> {
     fit.check_cells(cell_set)?;
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     let subset = CellSubset::load(f_path_cell, cell_set, n_total, opts.verbose > 0)?;
     let in_memory = subset.as_ref().map(CellSubset::reader).transpose()?;
 
@@ -467,7 +467,7 @@ pub fn pca_residuals_on_store(
 ) -> SingleCellPcaRes {
     fit.check_cells(cell_set)?;
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     let subset = CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)?;
     let in_memory = subset.as_ref().map(CellSubset::reader).transpose()?;
 

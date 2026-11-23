@@ -20,6 +20,7 @@ use bixverse_core::core::math::stats::*;
 use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_methods::graph::community_detections::*;
 use bixverse_methods::graph::knn_graph::*;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ////////////////////////
 // Params and results //
@@ -92,7 +93,7 @@ pub struct BoostParams {
     // -- fast cluster --
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
-    /// The k-means for the fast clustering path, standard or mini-batch
+    /// The k-means for the fast clustering path (e-means by default, Lloyd or mini-batch)
     #[serde(flatten)]
     pub fast_cluster_kmeans: CpuKMeans,
     /// [FastClusterParams] for the fast clustering path. The centroid graph,
@@ -101,9 +102,13 @@ pub struct BoostParams {
     pub fast_cluster_params: FastClusterParams,
 }
 
-/// The fallbacks of the R list conversion. `params_boost()` always sends
-/// every key, and its defaults differ from these.
 impl Default for BoostParams {
+    /// The fallbacks of the R list conversion. `params_boost()` always sends
+    /// every key, and its defaults differ from these.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             log_transform: false,
@@ -128,11 +133,7 @@ impl Default for BoostParams {
             knn_params: KnnParams::default(),
             fast_cluster: false,
             fast_cluster_kmeans: CpuKMeans::new(
-                CpuKMeansKind::MiniBatch {
-                    batch_size: 4096,
-                    drift_threshold: 1e-4,
-                    lr_alpha: 1.0,
-                },
+                CpuKMeansKind::Standard,
                 KMeansParamsWrappers::default(),
             ),
             fast_cluster_params: FastClusterParams::default(),
@@ -684,6 +685,47 @@ impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
                     }
                 })
                 .collect()
+        }
+    }
+}
+
+/// Run the Boost classifier on a cell selection of an on-disk experiment.
+///
+/// A small selection is read from the cell-major store into memory first (see
+/// [`CellSubset`]), so a per-group run costs the group's cells rather than a
+/// sweep of the whole gene-major store.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the `counts_genes.bin` file
+/// * `f_path_cell` - Path to the `counts_cells.bin` file
+/// * `cell_indices` - The selected cells, 0-based, unique and within the store
+/// * `params` - Boost parameters
+/// * `streaming` - Stream HVG computation to reduce memory pressure
+/// * `seed` - Seed for reproducibility
+/// * `verbose` - `0` quiet, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `BoostResult` as [`BoostClassifier::run_boost`].
+pub fn run_boost_on_store(
+    f_path_gene: &str,
+    f_path_cell: &str,
+    cell_indices: &[usize],
+    params: BoostParams,
+    streaming: bool,
+    seed: usize,
+    verbose: usize,
+) -> Result<BoostResult, ScErrors> {
+    let gene_reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total = gene_reader.dims().total_cells;
+    match CellSubset::load(f_path_cell, cell_indices, n_total, verbose > 0)? {
+        Some(sub) => BoostClassifier::new(&sub.reader()?, &sub.cell_reader()?, params, &sub.local)
+            .run_boost(streaming, seed, verbose),
+        None => {
+            let cell_reader = ParallelSparseReader::new(f_path_cell)?;
+            BoostClassifier::new(&gene_reader, &cell_reader, params, cell_indices)
+                .run_boost(streaming, seed, verbose)
         }
     }
 }

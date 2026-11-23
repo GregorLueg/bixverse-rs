@@ -87,6 +87,7 @@ def h5ad_to_file(
     slot: str = ...,
     streaming: bool = ...,
     verbose: int = ...,
+    max_mem_gb: float | None = ...,
 ) -> dict[str, Any]: ...
 def norm_h5ad_to_file(
     f_path_cells: Path,
@@ -167,13 +168,23 @@ def restore_cells_archive(
     verbose: int = ...,
 ) -> None: ...
 def file_version(path: Path) -> int: ...
-def upgrade_to_v4(
+def store_feature_kind(path: Path) -> str: ...
+def store_norm_kind(path: Path) -> str: ...
+def store_metadata(path: Path) -> dict[str, str]: ...
+def set_store_metadata(
+    f_path_cells: Path, f_path_genes: Path, entries: list[tuple[str, str]]
+) -> None: ...
+def verify_store(path: Path) -> bool: ...
+def check_store_pair(f_path_cells: Path, f_path_genes: Path) -> None: ...
+def upgrade_to_v5(
     f_path_cells: Path,
     f_path_genes: Path,
     codec: str = ...,
     keep_backup: bool = ...,
     verbose: int = ...,
 ) -> None: ...
+def set_cell_ids(f_path_cells: Path, f_path_genes: Path, ids: list[str]) -> None: ...
+def cell_id_hash(path: Path) -> str | None: ...
 
 # obs / var and scans
 
@@ -227,6 +238,8 @@ def save_h5ad(
     obsp: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     uns_json: str,
     chunk_size: int = ...,
+    zarr: bool = ...,
+    gene_indices: np.ndarray | None = ...,
 ) -> None: ...
 def write_h5ad(
     h5_path: Path,
@@ -555,6 +568,32 @@ def dge_one_vs_many(
     alternative: str,
     verbose: int = 1,
 ) -> list[dict[str, Any]]: ...
+def dge_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cells_1: np.ndarray,
+    cells_2: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> dict[str, Any]: ...
+def dge_one_vs_rest_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> list[dict[str, Any]]: ...
+def dge_one_vs_many_lr(
+    f_path_cell: str,
+    f_path_gene: str,
+    cell_groups: list[np.ndarray],
+    references: np.ndarray,
+    min_prop: float,
+    alternative: str,
+    verbose: int = 1,
+) -> list[dict[str, Any]]: ...
 def pseudobulk(
     f_path_cell: str,
     cell_groups: list[np.ndarray],
@@ -654,6 +693,27 @@ def transfer_labels_symphony(
     seed: int = 42,
     verbose: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+def transfer_labels_seurat(
+    ref_genes: str,
+    ref_cells: np.ndarray,
+    ref_features: np.ndarray,
+    query_genes: str,
+    query_cells: np.ndarray,
+    query_features: np.ndarray,
+    ref_labels: np.ndarray,
+    n_labels: int,
+    weight_embedding: np.ndarray,
+    n_cc: int,
+    k_anchor: int,
+    k_score: int,
+    scale_max: float,
+    l2_norm: bool,
+    k_weight: int,
+    sd: float,
+    knn_params: dict[str, Any],
+    seed: int = ...,
+    verbose: int = ...,
+) -> np.ndarray: ...
 def bootstrapped_metacells(
     f_path_cell: str,
     knn: np.ndarray | None,
@@ -1209,3 +1269,164 @@ def grouped_gene_stats(
     group_ids: np.ndarray,
     n_groups: int,
 ) -> tuple[np.ndarray, np.ndarray]: ...
+
+# ATAC
+
+def atac_read_bed(path: Path) -> dict[str, Any]: ...
+def atac_genome_tiles(
+    chroms: list[str], sizes: list[int], width: int
+) -> dict[str, Any]: ...
+def atac_reduce_regions(
+    chrom: list[str], start: list[int], end: list[int]
+) -> dict[str, Any]: ...
+def atac_tss_positions(path: Path, biotypes: list[str]) -> dict[str, Any]: ...
+def atac_fragment_profiles(
+    fragments: Path,
+    barcodes: list[str],
+    groups: list[int],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    tss_strand: list[int],
+    half_width: int,
+    max_len: int,
+) -> dict[str, Any]: ...
+def atac_barcode_fragment_counts(
+    fragments: Path, exclude_chroms: list[str]
+) -> dict[str, Any]: ...
+def atac_merge_fragments(
+    paths: list[Path], prefixes: list[str], suffixes: list[str], out: Path
+) -> dict[str, Any]: ...
+def atac_closest_genes(
+    gtf: Path,
+    biotypes: list[str],
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+) -> dict[str, Any]: ...
+def atac_overlaps_any(
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    other_chrom: list[str],
+    other_start: list[int],
+    other_end: list[int],
+) -> np.ndarray: ...
+def atac_peak_to_gene(
+    peak_counts: np.ndarray,
+    gene_counts: np.ndarray,
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    max_distance: int,
+    scale: float,
+) -> dict[str, Any]: ...
+def atac_project_lsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    loadings: np.ndarray,
+    singular_values: np.ndarray,
+) -> np.ndarray: ...
+def atac_rlsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    batch: np.ndarray,
+    embedding: np.ndarray,
+    dims: np.ndarray,
+    n_comp: int,
+    solver: str,
+    k_anchor: int,
+    k_score: int,
+    k_weight: int,
+    sd: float,
+    l2_norm: bool,
+    knn_params: dict[str, Any],
+    seed: int = ...,
+    verbose: int = ...,
+) -> np.ndarray: ...
+def atac_gene_activity_regions(
+    path: Path, upstream: int, downstream: int, max_width: int, biotypes: list[str]
+) -> dict[str, Any]: ...
+def atac_tenx_peaks_to_store(
+    h5_path: Path,
+    f_path_cells: Path,
+    f_path_genes: Path,
+    barcodes: list[str],
+    max_mem_gb: float | None = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...
+def atac_fragments_to_store(
+    fragments: Path,
+    f_path_cells: Path,
+    f_path_genes: Path,
+    barcodes: list[str],
+    chrom: list[str],
+    start: list[int],
+    end: list[int],
+    mode: str,
+    kind: str,
+    target_size: float,
+    max_mem_gb: float | None = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...
+def atac_fragment_qc(
+    fragments: Path,
+    barcodes: list[str],
+    tss_chrom: list[str],
+    tss_pos: list[int],
+    mito_chroms: list[str],
+) -> dict[str, np.ndarray]: ...
+def atac_call_peaks(
+    fragments: Path,
+    barcodes: list[str],
+    groups: list[int],
+    tag_source: str,
+    keep_dup: int | None,
+    shift: int,
+    extsize: int,
+    genome_size: float,
+    llocal: int,
+    q_value: float,
+    min_length: int | None,
+    max_gap: int | None,
+    max_mem_gb: float | None,
+    tmp_dir: Path | None,
+) -> dict[str, Any]: ...
+def atac_amulet(
+    fragments: Path,
+    barcodes: list[str],
+    restrict_beds: list[Path],
+    max_overlap: int,
+    max_fragment_len: int,
+    repeat_q: float,
+    multiplet_q: float,
+    chroms: list[str] | None,
+    max_mem_gb: float | None,
+    count_trailing_loci: bool,
+) -> dict[str, Any]: ...
+def atac_set_tf_idf(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray | None,
+    scale: float,
+) -> np.ndarray: ...
+def atac_feature_totals(
+    f_path_genes: Path, cells: np.ndarray | None, min_cutoff: str | None = ...
+) -> dict[str, np.ndarray]: ...
+def atac_lsi(
+    f_path_cells: Path,
+    f_path_genes: Path,
+    cells: np.ndarray,
+    features: np.ndarray,
+    n_comp: int,
+    solver: str = ...,
+    scale_embeddings: bool = ...,
+    scale_max: float | None = ...,
+    seed: int = ...,
+    verbose: int = ...,
+) -> dict[str, Any]: ...

@@ -45,6 +45,7 @@ MODULES: tuple[str, ...] = (
     "trees",
     "metacells",
     "mm",
+    "atac",
     "pipeline",
     "pl",
     "loader",

@@ -1,7 +1,5 @@
-"""Multi-modal without R: ADT handling, modality routing, provenance across
+"""Multi-modal: ADT handling, modality routing, provenance across
 caches and persistence.
-
-Parity with the R methods is in `test_mm_r.py`.
 """
 
 import numpy as np

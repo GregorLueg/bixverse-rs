@@ -41,7 +41,7 @@ use crate::prelude::*;
 use crate::sc_utils::simd::ln_dot_simd;
 use bixverse_core::core::math::vector_helpers::quantile_sorted;
 use bixverse_core::utils::simd::sum_simd_f64;
-use bixverse_sc_data::data_io::CellGeneSparseWriter;
+use bixverse_sc_data::store::writer::CellGeneSparseWriter;
 
 ////////////
 // Consts //
@@ -62,7 +62,7 @@ const ALPHA_CAP_SLACK: f64 = 1e-6;
 /// Quantile of the per-cell `|delta f|` used for the convergence check.
 const F_CONVERGENCE_QUANTILE: f64 = 0.9;
 
-pub use bixverse_sc_data::sc_synthetic_data::MIN_EMPTY_DROPLETS;
+pub use bixverse_sc_data::synthetic::MIN_EMPTY_DROPLETS;
 
 /// Empty droplets below which a frozen ambient profile is worth a warning.
 pub const RECOMMENDED_MIN_EMPTY_DROPLETS: usize = 10_000;
@@ -249,8 +249,12 @@ pub struct CellSweepParams {
     pub seed: u64,
 }
 
-/// Default implementation for [`CellSweepParams`].
 impl Default for CellSweepParams {
+    /// The default [`CellSweepParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             freeze_empties: true,
@@ -1935,15 +1939,14 @@ fn build_denoised_chunk(
     };
     let norm_total: f32 = norm_source.iter().sum();
 
-    let data_norm: Vec<F16> = norm_source
+    let data_norm: Vec<f32> = norm_source
         .iter()
         .map(|&value| {
-            let scaled = if norm_total > 0.0 {
+            if norm_total > 0.0 {
                 (value / norm_total * target_size).ln_1p()
             } else {
                 0.0
-            };
-            F16::from_f32(scaled)
+            }
         })
         .collect();
 
@@ -2007,7 +2010,7 @@ where
     }
 
     let verbosity = parse_verbosity_level(verbose);
-    let header = reader.get_header();
+    let header = reader.dims();
     let n_genes = header.total_genes;
     let total_cells: usize = samples.iter().map(|s| s.real_cells.len()).sum();
 
@@ -2098,37 +2101,7 @@ where
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-
-    /// RAII guard that removes a test's temp file even if an assert fails.
-    struct TempBin(std::path::PathBuf);
-
-    /// Drop implementation for [`TempBin`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempBin {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempBin {
-        /// Reserve a uniquely named scratch file in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix.
-        ///
-        /// ### Returns
-        ///
-        /// The guard; the path is available via [`Self::path`].
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_cellsweep_{name}.bin")))
-        }
-
-        /// Path of the guarded file as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
+    use tempfile::NamedTempFile;
 
     /// Genes in the two-type fixture.
     const FIXTURE_GENES: usize = 8;
@@ -2832,8 +2805,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         let chunk = build_denoised_chunk(&[0, 1], &[3.0, 1.0], 0, 1e4, false, &mut rng);
 
-        // ln1p(0.75 * 1e4) and ln1p(0.25 * 1e4), within f16 resolution.
-        let values: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+        // ln1p(0.75 * 1e4) and ln1p(0.25 * 1e4)
+        let values: Vec<f32> = chunk.data_norm.clone();
         assert_relative_eq!(values[0], (0.75_f32 * 1e4).ln_1p(), epsilon = 1e-2);
         assert_relative_eq!(values[1], (0.25_f32 * 1e4).ln_1p(), epsilon = 1e-2);
     }
@@ -2846,7 +2819,7 @@ mod tests {
         let chunk = build_denoised_chunk(&[0, 1], &[0.4, 8.0], 0, 1e4, true, &mut rng);
 
         let raw: Vec<u32> = chunk.data_raw.iter().collect();
-        let norm: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+        let norm: Vec<f32> = chunk.data_norm.clone();
         for (&count, &value) in raw.iter().zip(&norm) {
             assert_eq!(count == 0, value == 0.0);
         }
@@ -2896,9 +2869,9 @@ mod tests {
 
     #[test]
     fn test_run_cellsweep_round_trips_through_the_store() {
-        let raw = TempBin::new("run_raw");
-        let out = TempBin::new("run_out");
-        let (reader, labels) = write_fixture_store(raw.path(), 25, 50);
+        let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (reader, labels) = write_fixture_store(raw.to_str().unwrap(), 25, 50);
 
         let sample = CellSweepSample {
             sample_id: "s1".to_string(),
@@ -2912,14 +2885,15 @@ mod tests {
             max_iter: 100,
             ..Default::default()
         };
-        let run = run_cellsweep(&reader, &[sample], params, out.path(), 1e4, 0).unwrap();
+        let run = run_cellsweep(&reader, &[sample], params, out.to_str().unwrap(), 1e4, 0).unwrap();
 
         assert_eq!(run.fits.len(), 1);
         assert_eq!(run.cell_order, (0..50).collect::<Vec<usize>>());
         assert_eq!(run.library_size.len(), 50);
 
-        let denoised_reader = ParallelSparseReader::new(out.path()).expect("output opens");
-        let header = denoised_reader.get_header();
+        let denoised_reader =
+            ParallelSparseReader::new(out.to_str().unwrap()).expect("output opens");
+        let header = denoised_reader.dims();
         assert_eq!(header.total_cells, 50);
         assert_eq!(header.total_genes, FIXTURE_GENES);
         assert!(denoised_reader.is_cell_based());
@@ -2958,9 +2932,9 @@ mod tests {
 
     #[test]
     fn test_run_cellsweep_writes_samples_back_to_back() {
-        let raw = TempBin::new("multi_raw");
-        let out = TempBin::new("multi_out");
-        let (reader, labels) = write_fixture_store(raw.path(), 25, 80);
+        let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (reader, labels) = write_fixture_store(raw.to_str().unwrap(), 25, 80);
 
         // Split the 50 real barcodes across two samples, each with its own
         // 40 empty droplets.
@@ -2985,7 +2959,7 @@ mod tests {
             max_iter: 100,
             ..Default::default()
         };
-        let run = run_cellsweep(&reader, &samples, params, out.path(), 1e4, 0).unwrap();
+        let run = run_cellsweep(&reader, &samples, params, out.to_str().unwrap(), 1e4, 0).unwrap();
 
         assert_eq!(run.fits.len(), 2);
         assert_eq!(run.cell_order, (0..50).collect::<Vec<usize>>());
@@ -2996,8 +2970,9 @@ mod tests {
         assert_eq!(run.fits[0].alpha.len(), 25);
         assert_eq!(run.fits[1].alpha.len(), 25);
 
-        let denoised_reader = ParallelSparseReader::new(out.path()).expect("output opens");
-        assert_eq!(denoised_reader.get_header().total_cells, 50);
+        let denoised_reader =
+            ParallelSparseReader::new(out.to_str().unwrap()).expect("output opens");
+        assert_eq!(denoised_reader.dims().total_cells, 50);
         // Output indices are the new store's row numbers, not the parent's.
         for (i, chunk) in denoised_reader.get_all_cells().unwrap().iter().enumerate() {
             assert_eq!(chunk.original_index, i);
@@ -3008,9 +2983,9 @@ mod tests {
 
     #[test]
     fn test_run_cellsweep_rejects_unfreezing_the_empties() {
-        let raw = TempBin::new("guard_freeze");
-        let out = TempBin::new("guard_freeze_out");
-        let (reader, labels) = write_fixture_store(raw.path(), 5, 40);
+        let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let out = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (reader, labels) = write_fixture_store(raw.to_str().unwrap(), 5, 40);
 
         let sample = CellSweepSample {
             sample_id: "s1".to_string(),
@@ -3025,15 +3000,15 @@ mod tests {
         };
 
         assert!(matches!(
-            run_cellsweep(&reader, &[sample], params, out.path(), 1e4, 0),
+            run_cellsweep(&reader, &[sample], params, out.to_str().unwrap(), 1e4, 0),
             Err(ScErrors::CellSweepFreezeEmptiesUnsupported)
         ));
     }
 
     #[test]
     fn test_build_sample_csr_rejects_too_few_empty_droplets() {
-        let raw = TempBin::new("guard_empties");
-        let (reader, labels) = write_fixture_store(raw.path(), 5, 40);
+        let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (reader, labels) = write_fixture_store(raw.to_str().unwrap(), 5, 40);
 
         let sample = CellSweepSample {
             sample_id: "s1".to_string(),
@@ -3051,8 +3026,8 @@ mod tests {
 
     #[test]
     fn test_build_sample_csr_rejects_bad_labels() {
-        let raw = TempBin::new("guard_labels");
-        let (reader, _) = write_fixture_store(raw.path(), 5, 40);
+        let raw = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
+        let (reader, _) = write_fixture_store(raw.to_str().unwrap(), 5, 40);
         let params = CellSweepParams::default();
 
         let out_of_range = CellSweepSample {

@@ -79,7 +79,7 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
     let moments: Vec<SparseColMoments> = gene_chunks
         .par_iter()
         .map(|chunk| {
-            let values: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+            let values: Vec<f32> = chunk.data_norm.clone();
             sparse_col_moments(&chunk.indices, &values, n_cells, spearman)
         })
         .collect();
@@ -136,8 +136,7 @@ mod pairwise_cor_tests {
     use super::*;
     use approx::assert_relative_eq;
     use bixverse_core::core::math::vector_helpers::{pearson_correlation, rank_vector};
-    use bixverse_sc_data::in_memory_io::InMemorySparseReader;
-    use bixverse_sc_data::sc_traits::F16;
+    use bixverse_sc_data::store::in_memory::InMemorySparseReader;
     use rand::prelude::*;
 
     /// Build a CSC `cells x genes` matrix from dense gene columns.
@@ -188,26 +187,6 @@ mod pairwise_cor_tests {
             .collect()
     }
 
-    /// The reader narrows the normalised layer to f16 on the way out, so the
-    /// reference has to be built from the same quantised values or the
-    /// comparison measures storage precision rather than the calculation.
-    fn quantise(columns: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        columns
-            .iter()
-            .map(|col| {
-                col.iter()
-                    .map(|&v| {
-                        if v == 0.0 {
-                            0.0
-                        } else {
-                            F16::from_f32(v).to_f32()
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
     fn reference_cor(a: &[f32], b: &[f32], spearman: bool) -> f64 {
         if spearman {
             pearson_correlation(&rank_vector(a), &rank_vector(b)).unwrap()
@@ -224,7 +203,6 @@ mod pairwise_cor_tests {
         let columns = synthetic_columns(n_genes, n_cells, 0.15, 42);
         let matrix = csc_from_columns(&columns);
         let reader = InMemorySparseReader::new(&matrix, None).unwrap();
-        let quantised = quantise(&columns);
         let cells: Vec<usize> = (0..n_cells).collect();
 
         let mut g1: Vec<usize> = Vec::new();
@@ -239,7 +217,7 @@ mod pairwise_cor_tests {
         for spearman in [false, true] {
             let got = pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, 0).unwrap();
             for (k, (&a, &b)) in g1.iter().zip(g2.iter()).enumerate() {
-                let want = reference_cor(&quantised[a], &quantised[b], spearman);
+                let want = reference_cor(&columns[a], &columns[b], spearman);
                 assert_relative_eq!(got[k] as f64, want, epsilon = 1e-5);
             }
         }
@@ -291,7 +269,6 @@ mod pairwise_cor_tests {
         let columns = synthetic_columns(4, n_cells, 0.25, 99);
         let matrix = csc_from_columns(&columns);
         let reader = InMemorySparseReader::new(&matrix, None).unwrap();
-        let quantised = quantise(&columns);
 
         let mut cells: Vec<usize> = (0..n_cells).step_by(2).collect();
         let mut rng = StdRng::seed_from_u64(5);
@@ -303,8 +280,8 @@ mod pairwise_cor_tests {
         for spearman in [false, true] {
             let got = pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, 0).unwrap();
             for (k, (&a, &b)) in g1.iter().zip(g2.iter()).enumerate() {
-                let sub_a: Vec<f32> = cells.iter().map(|&i| quantised[a][i]).collect();
-                let sub_b: Vec<f32> = cells.iter().map(|&i| quantised[b][i]).collect();
+                let sub_a: Vec<f32> = cells.iter().map(|&i| columns[a][i]).collect();
+                let sub_b: Vec<f32> = cells.iter().map(|&i| columns[b][i]).collect();
                 let want = reference_cor(&sub_a, &sub_b, spearman);
                 assert_relative_eq!(got[k] as f64, want, epsilon = 1e-5);
             }

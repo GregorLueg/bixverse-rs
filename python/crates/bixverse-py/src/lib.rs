@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 mod annotate;
+mod atac;
 mod batch;
 mod de;
 mod dialogue;
@@ -76,7 +77,15 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(io::archive_cells, m)?,
         wrap_pyfunction!(io::restore_cells_archive, m)?,
         wrap_pyfunction!(io::file_version, m)?,
-        wrap_pyfunction!(io::upgrade_to_v4, m)?,
+        wrap_pyfunction!(io::store_feature_kind, m)?,
+        wrap_pyfunction!(io::store_norm_kind, m)?,
+        wrap_pyfunction!(io::store_metadata, m)?,
+        wrap_pyfunction!(io::set_store_metadata, m)?,
+        wrap_pyfunction!(io::verify_store, m)?,
+        wrap_pyfunction!(io::check_store_pair, m)?,
+        wrap_pyfunction!(io::upgrade_to_v5, m)?,
+        wrap_pyfunction!(io::set_cell_ids, m)?,
+        wrap_pyfunction!(io::cell_id_hash, m)?,
         wrap_pyfunction!(io::h5ad_obs_var_to_parquet, m)?,
         wrap_pyfunction!(io::tenx_obs_var_to_parquet, m)?,
         wrap_pyfunction!(io::snake_case, m)?,
@@ -128,6 +137,9 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(de::dge_mann_whitney, m)?,
         wrap_pyfunction!(de::dge_one_vs_rest, m)?,
         wrap_pyfunction!(de::dge_one_vs_many, m)?,
+        wrap_pyfunction!(de::dge_lr, m)?,
+        wrap_pyfunction!(de::dge_one_vs_rest_lr, m)?,
+        wrap_pyfunction!(de::dge_one_vs_many_lr, m)?,
         wrap_pyfunction!(de::pseudobulk, m)?,
         wrap_pyfunction!(de::edger_ql, m)?,
         wrap_pyfunction!(de::nebula, m)?,
@@ -140,6 +152,7 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(annotate::build_symphony_ref, m)?,
         wrap_pyfunction!(annotate::symphony_map_query, m)?,
         wrap_pyfunction!(annotate::transfer_labels_symphony, m)?,
+        wrap_pyfunction!(annotate::transfer_labels_seurat, m)?,
         wrap_pyfunction!(metacells::bootstrapped_metacells, m)?,
         wrap_pyfunction!(metacells::seacells, m)?,
         wrap_pyfunction!(metacells::supercells, m)?,
@@ -201,6 +214,27 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(dialogue::mc_dialogue, m)?,
         wrap_pyfunction!(plot::extract_genes_dense, m)?,
         wrap_pyfunction!(plot::grouped_gene_stats, m)?,
+        wrap_pyfunction!(atac::atac_read_bed, m)?,
+        wrap_pyfunction!(atac::atac_genome_tiles, m)?,
+        wrap_pyfunction!(atac::atac_reduce_regions, m)?,
+        wrap_pyfunction!(atac::atac_tss_positions, m)?,
+        wrap_pyfunction!(atac::atac_gene_activity_regions, m)?,
+        wrap_pyfunction!(atac::atac_tenx_peaks_to_store, m)?,
+        wrap_pyfunction!(atac::atac_fragments_to_store, m)?,
+        wrap_pyfunction!(atac::atac_fragment_qc, m)?,
+        wrap_pyfunction!(atac::atac_call_peaks, m)?,
+        wrap_pyfunction!(atac::atac_amulet, m)?,
+        wrap_pyfunction!(atac::atac_set_tf_idf, m)?,
+        wrap_pyfunction!(atac::atac_feature_totals, m)?,
+        wrap_pyfunction!(atac::atac_lsi, m)?,
+        wrap_pyfunction!(atac::atac_project_lsi, m)?,
+        wrap_pyfunction!(atac::atac_rlsi, m)?,
+        wrap_pyfunction!(atac::atac_fragment_profiles, m)?,
+        wrap_pyfunction!(atac::atac_barcode_fragment_counts, m)?,
+        wrap_pyfunction!(atac::atac_merge_fragments, m)?,
+        wrap_pyfunction!(atac::atac_closest_genes, m)?,
+        wrap_pyfunction!(atac::atac_overlaps_any, m)?,
+        wrap_pyfunction!(atac::atac_peak_to_gene, m)?,
     ] {
         m.add_function(f)?;
     }

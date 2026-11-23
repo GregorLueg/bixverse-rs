@@ -23,7 +23,6 @@ pub fn mlx_available() -> bool {
 #[cfg(feature = "mlx")]
 pub(crate) mod twins {
     use ann_search_rs::prelude::KMeansTrainingParams;
-    use bixverse_core::ml::clustering::k_means::parse_kmeans_init;
     use bixverse_mlx::errors::MlxErrors;
     use bixverse_mlx::sc::fast_clusters::MlxKMeans;
     use bixverse_mlx::sc::harmony as mlx_harmony;
@@ -36,8 +35,8 @@ pub(crate) mod twins {
     use bixverse_sc::sc_batch_correction::harmony_v2::HarmonyParamsV2;
     use bixverse_sc::sc_processing::knn::pad_knn_rows;
     use bixverse_sc::sc_processing::pca::SingleCellPcaParams;
-    use bixverse_sc_data::data_io::{ParallelSparseReader, SingleCellReading};
-    use bixverse_sc_gpu::fast_clusters_gpu::KMeansGpuSpec;
+    use bixverse_sc_data::store::reader::{ParallelSparseReader, SingleCellReading};
+    use bixverse_sc_gpu::fast_clusters_gpu::{GPU_KMEANS_ITERS, KMeansGpuSpec};
     use bixverse_sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
     use bixverse_sc_gpu::knn_gpu::KnnParamsGpu;
     use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
@@ -235,16 +234,12 @@ pub(crate) mod twins {
     ) -> PyResult<FastClusterOut<'py>> {
         let fc: FastClusterParams = from_py(params, "fast cluster params")?;
         let km: KMeansGpuSpec = from_py(params, "GPU k-means params")?;
-        let init = km
-            .k_means_init
-            .as_deref()
-            .map(|s| {
-                parse_kmeans_init(s).ok_or_else(|| {
-                    PyValueError::new_err(format!("Invalid k-means initialisation: {s}"))
-                })
-            })
-            .transpose()?;
-        let km = KMeansTrainingParams::new(km.k_means_iter, init, None);
+        let km = KMeansTrainingParams::new(
+            km.kmeans.k_means_iter.unwrap_or(GPU_KMEANS_ITERS),
+            km.kmeans.init().map_err(PyValueError::new_err)?,
+            None,
+        )
+        .with_algorithm(km.kmeans.algorithm().map_err(PyValueError::new_err)?);
         let view = mat_view(&embd)?;
         let n = view.nrows();
         let res = py

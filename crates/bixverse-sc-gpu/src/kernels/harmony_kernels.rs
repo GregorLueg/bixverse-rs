@@ -258,13 +258,15 @@ fn run_sums<F: Float>(
 }
 
 /// Per-run weighted sums for the ridge right-hand side:
-/// `partial[run, k, :] = sum_{cells of run} R[cell, k] * z[cell, :]`.
+/// `partial[run, k, :] = sum_{cells of run} R[cell, k] * z[cell, :]`, i.e.
+/// `R_run^T Z_run`.
 ///
-/// One workgroup per `(run, cluster)`; threads stride over the feature
-/// dimension. `R[cell, k]` is a broadcast read, `z[cell, :]` is coalesced
-/// across the threads. Runs are contiguous (cells sorted by level), so there
-/// is no index gather, and every workgroup does at most `HARMONY_RUN_CELLS`
-/// iterations however unbalanced the levels are.
+/// One thread per output `(run, cluster, feature)`; a workgroup covers a
+/// contiguous slice of one run's `k x d` outputs, so its threads read a few
+/// neighbouring `R` columns and all of `z` per cell, cache-resident across the
+/// workgroup. Runs are contiguous (cells sorted by level), so there is no
+/// index gather, and every thread loops over at most `HARMONY_RUN_CELLS`
+/// cells however unbalanced the levels are.
 ///
 /// ### Params
 ///
@@ -275,12 +277,11 @@ fn run_sums<F: Float>(
 /// * `n_runs` - Number of runs
 /// * `k` - Cluster count
 /// * `d` - Feature dimension (comptime)
-/// * `wg_size` - Workgroup size (comptime)
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> `run * k + cluster`
-/// * `UNIT_POS_X` -> feature stride offset
+/// * `CUBE_POS_Y` -> run
+/// * `CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X` -> output `cluster * d + feature`
 #[cube(launch_unchecked)]
 fn run_weighted_sums<F: Float>(
     r: &Tensor<F>,
@@ -290,29 +291,25 @@ fn run_weighted_sums<F: Float>(
     n_runs: u32,
     k: u32,
     #[comptime] d: usize,
-    #[comptime] wg_size: u32,
 ) {
-    let wid = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if wid >= n_runs * k {
+    let run = CUBE_POS_Y;
+    let o = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
+    let ku = k as usize;
+    if run >= n_runs || o >= ku * d {
         terminate!();
     }
-    let run = wid / k;
-    let cluster = (wid % k) as usize;
+    let cluster = o / d;
+    let f = o % d;
     let start = run_bounds[run as usize] as usize;
     let end = run_bounds[(run + 1u32) as usize] as usize;
-    let ku = k as usize;
 
-    let mut f = UNIT_POS_X as usize;
-    while f < d {
-        let mut acc = F::new(0.0_f32);
-        let mut c = start;
-        while c < end {
-            acc += r[c * ku + cluster] * z[c * d + f];
-            c += 1;
-        }
-        partial[wid as usize * d + f] = acc;
-        f += wg_size as usize;
+    let mut acc = F::new(0.0_f32);
+    let mut c = start;
+    while c < end {
+        acc += r[c * ku + cluster] * z[c * d + f];
+        c += 1;
     }
+    partial[run as usize * ku * d + o] = acc;
 }
 
 /// Fold per-run partials into per-level totals:
@@ -360,6 +357,65 @@ fn reduce_runs<F: Float>(
     out[idx as usize] = acc;
 }
 
+/// Per-cluster tables of one sweep's statistics (single covariate).
+///
+/// One thread per cluster. `r_sum[k] = sum_b O[b, k]`, the column sum of R
+/// without another pass over it. With `E = r_sum[k] * pr_b[b]` it writes the
+/// diversity penalty `pen[b, k] = ((2E + 1) / (O + E + 1))^theta_b` and the
+/// objective's cross-entropy weight `cross[b, k] = sigma_k theta_b
+/// ln((O + E + 1) / (2E + 1))`. Both depend only on `(level, cluster)`, so the
+/// per-cell kernels read them instead of a `powf` or `ln` per element.
+///
+/// ### Params
+///
+/// * `o` - Observed counts `[b, k]` row-major
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `theta` - Per-level theta for the single covariate `[b]`
+/// * `pr_b` - Level frequencies `[b]`
+/// * `r_sum` - Output per-cluster totals `[k]`
+/// * `pen` - Output penalties `[b, k]` row-major
+/// * `cross` - Output cross-entropy weights `[b, k]` row-major
+/// * `b` - Number of levels
+/// * `k` - Cluster count
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X` -> cluster index
+#[allow(clippy::too_many_arguments)]
+#[cube(launch_unchecked)]
+fn level_tables<F: Float>(
+    o: &Tensor<F>,
+    sigma: &Tensor<F>,
+    theta: &Tensor<F>,
+    pr_b: &Tensor<F>,
+    r_sum: &mut Tensor<F>,
+    pen: &mut Tensor<F>,
+    cross: &mut Tensor<F>,
+    b: u32,
+    k: u32,
+) {
+    let cl = CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X;
+    if cl >= k {
+        terminate!();
+    }
+
+    let mut total = F::new(0.0_f32);
+    for l in 0..b {
+        total += o[(l * k + cl) as usize];
+    }
+    r_sum[cl as usize] = total;
+
+    let sg = sigma[cl as usize];
+    for l in 0..b {
+        let at = (l * k + cl) as usize;
+        let e_val = total * pr_b[l as usize];
+        let ratio = (F::new(2.0_f32) * e_val + F::new(1.0_f32)) / (o[at] + e_val + F::new(1.0_f32));
+        let theta_l = theta[l as usize];
+        pen[at] = F::powf(ratio, theta_l);
+        cross[at] = F::new(0.0_f32) - sg * theta_l * F::ln(ratio);
+    }
+}
+
 /// Per-workgroup partial sums of the Harmony v2 objective (single covariate).
 ///
 /// Objective = `(kmeans_error + entropy + cross_entropy) * 2000 / N`. This
@@ -367,22 +423,16 @@ fn reduce_runs<F: Float>(
 /// cells; the host sums them and applies `2000 / N`. A fixed grid of
 /// `OBJ_BLOCKS` workgroups grid-strides over cells, accumulating
 ///
-/// `sum_k [ r * dist + (r > 0) r ln(r) sigma_k + r sigma_k theta_l ln_ratio ]`
+/// `sum_k [ r * dist + (r > 0) r ln(r) sigma_k + r cross[level, k] ]`
 ///
-/// per cell, where `ln_ratio = ln((O + E + 1) / (2E + 1))` and
-/// `E = r_sum[k] * pr_b[level]` is derived inline. `log_ratio` is recomputed
-/// per cell rather than tabulated; the objective is a convergence check, not
-/// hot-path.
+/// per cell, with the cross-entropy weights from [`fn@level_tables`].
 ///
 /// ### Params
 ///
 /// * `r` - Soft assignments `[n, k]` row-major
 /// * `dist` - Distance matrix `[n, k]` row-major
-/// * `o` - Observed counts `[b, k]` row-major
-/// * `r_sum` - Per-cluster totals `[k]` (column sums of R)
+/// * `cross` - Cross-entropy weights `[b, k]` row-major
 /// * `sigma` - Per-cluster weights `[k]`
-/// * `theta` - Per-level theta for the single covariate `[b]`
-/// * `pr_b` - Level frequencies `[b]`
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `partials` - Output partial sums `[OBJ_BLOCKS]`, one per workgroup
 /// * `n` - Cell count
@@ -398,11 +448,8 @@ fn reduce_runs<F: Float>(
 fn objective_partials<F: Float>(
     r: &Tensor<F>,
     dist: &Tensor<F>,
-    o: &Tensor<F>,
-    r_sum: &Tensor<F>,
+    cross: &Tensor<F>,
     sigma: &Tensor<F>,
-    theta: &Tensor<F>,
-    pr_b: &Tensor<F>,
     cell_to_level: &Tensor<u32>,
     partials: &mut Tensor<F>,
     n: u32,
@@ -417,23 +464,15 @@ fn objective_partials<F: Float>(
     let mut cell = wid * wg_size + tx;
     while cell < n {
         let level = cell_to_level[cell as usize] as usize;
-        let theta_l = theta[level];
-        let pr = pr_b[level];
         let r_base = cell as usize * k;
         let o_base = level * k;
 
         for cl in 0..k {
             let r_val = r[r_base + cl];
-            acc += r_val * dist[r_base + cl];
+            acc += r_val * (dist[r_base + cl] + cross[o_base + cl]);
             if r_val > F::new(0.0_f32) {
                 acc += r_val * F::ln(r_val) * sigma[cl];
             }
-            let e_val = r_sum[cl] * pr;
-            let ln_ratio = F::ln(
-                (o[o_base + cl] + e_val + F::new(1.0_f32))
-                    / (F::new(2.0_f32) * e_val + F::new(1.0_f32)),
-            );
-            acc += r_val * sigma[cl] * theta_l * ln_ratio;
         }
 
         cell += stride;
@@ -487,25 +526,21 @@ fn objective_partials<F: Float>(
 /// Damped full-batch Jacobi R-update (single covariate).
 ///
 /// One workgroup per cell; threads stride over the K clusters. Pass 1
-/// accumulates `sum_k scale_dist[n,k] * penalty` via a workgroup tree
-/// reduction, where `penalty = ((2E + 1) / (O[k,level] + E + 1))^theta_l` and
-/// `E = r_sum[k] * pr_b[level]`. Pass 2 recomputes, normalises and blends
-/// with the previous R by [`R_UPDATE_DAMPING`]. O and `r_sum` are read from
-/// the previous sweep (no block removal), unlike the CPU block update; the
-/// damping is what keeps that stable. Each thread reads its own R entries
-/// before overwriting them, so the in-place write is safe. The penalty is
-/// recomputed in pass 2 to avoid a
-/// cross-thread global read-after-write (`sync_cube` orders shared, not
-/// necessarily storage); this costs a second `powf` per element.
+/// accumulates `sum_k scale_dist[n,k] * pen[level,k]` via a workgroup tree
+/// reduction, with the penalties from [`fn@level_tables`]. Pass 2 recomputes,
+/// normalises and blends with the previous R by [`R_UPDATE_DAMPING`]. The
+/// penalties come from the previous sweep's O (no block removal), unlike the
+/// CPU block update; the damping is what keeps that stable. Each thread reads
+/// its own R entries before overwriting them, so the in-place write is safe.
+/// Pass 2 rereads the product rather than keeping it in global memory, to
+/// avoid a cross-thread read-after-write (`sync_cube` orders shared, not
+/// necessarily storage).
 ///
 /// ### Params
 ///
 /// * `scale_dist` - Column-normalised base assignments `[n, k]`, fixed per
 ///   round
-/// * `o` - Observed counts `[b, k]` from the previous sweep
-/// * `r_sum` - Per-cluster totals `[k]` from the previous sweep
-/// * `theta` - Per-level theta for the single covariate `[b]`
-/// * `pr_b` - Level frequencies `[b]`
+/// * `pen` - Penalties `[b, k]` from the previous sweep
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `r_out` - R `[n, k]`, the previous sweep's on entry, updated in place
 /// * `n` - Cell count
@@ -520,10 +555,7 @@ fn objective_partials<F: Float>(
 #[cube(launch_unchecked)]
 fn jacobi_r_update<F: Float>(
     scale_dist: &Tensor<F>,
-    o: &Tensor<F>,
-    r_sum: &Tensor<F>,
-    theta: &Tensor<F>,
-    pr_b: &Tensor<F>,
+    pen: &Tensor<F>,
     cell_to_level: &Tensor<u32>,
     r_out: &mut Tensor<F>,
     n: u32,
@@ -537,8 +569,6 @@ fn jacobi_r_update<F: Float>(
 
     let tx = UNIT_POS_X;
     let level = cell_to_level[cell as usize] as usize;
-    let theta_l = theta[level];
-    let pr = pr_b[level];
     let cell_base = cell as usize * k as usize;
     let o_base = level * k as usize;
 
@@ -546,11 +576,7 @@ fn jacobi_r_update<F: Float>(
     let mut acc = F::new(0.0_f32);
     let mut kk = tx;
     while kk < k {
-        let e_val = r_sum[kk as usize] * pr;
-        let ratio = (F::new(2.0_f32) * e_val + F::new(1.0_f32))
-            / (o[o_base + kk as usize] + e_val + F::new(1.0_f32));
-        let penalty = F::powf(ratio, theta_l);
-        acc += scale_dist[cell_base + kk as usize] * penalty;
+        acc += scale_dist[cell_base + kk as usize] * pen[o_base + kk as usize];
         kk += wg_size;
     }
 
@@ -600,11 +626,7 @@ fn jacobi_r_update<F: Float>(
     let mut kk2 = tx;
     if total > F::new(0.0_f32) {
         while kk2 < k {
-            let e_val = r_sum[kk2 as usize] * pr;
-            let ratio = (F::new(2.0_f32) * e_val + F::new(1.0_f32))
-                / (o[o_base + kk2 as usize] + e_val + F::new(1.0_f32));
-            let penalty = F::powf(ratio, theta_l);
-            let val = scale_dist[cell_base + kk2 as usize] * penalty;
+            let val = scale_dist[cell_base + kk2 as usize] * pen[o_base + kk2 as usize];
             let old = r_out[cell_base + kk2 as usize];
             r_out[cell_base + kk2 as usize] =
                 F::new(R_UPDATE_DAMPING) * (val / total) + F::new(1.0_f32 - R_UPDATE_DAMPING) * old;
@@ -621,7 +643,7 @@ fn jacobi_r_update<F: Float>(
 /// Ridge correction subtract: `z_corr[cell, :] = z[cell, :] - sum_k R[cell, k]
 /// * C[level, k, :]`.
 ///
-/// One workgroup per cell; threads stride over the feature dimension `d`. `C`
+/// One thread per `(cell, feature)`, looping over the clusters. `C`
 /// is the per-`(level, cluster)` correction `[b, k, d]` row-major, the layout
 /// `harmony_core::solve_ridge` produces (intercept excluded; pruned entries
 /// are zero). The intercept is never subtracted because it is not stored in
@@ -640,8 +662,8 @@ fn jacobi_r_update<F: Float>(
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> cell index
-/// * `UNIT_POS_X` -> feature stride offset
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   `cell * d + feature`
 #[allow(clippy::too_many_arguments)]
 #[cube(launch_unchecked)]
 fn ridge_subtract<F: Float>(
@@ -654,29 +676,24 @@ fn ridge_subtract<F: Float>(
     k: u32,
     #[comptime] d: usize,
 ) {
-    let cell = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if cell >= n {
+    let idx = ((CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X) as usize;
+    if idx >= n as usize * d {
         terminate!();
     }
+    let cell = idx / d;
+    let feat = idx % d;
 
-    let level = cell_to_level[cell as usize] as usize;
-    let z_base = cell as usize * d;
-    let r_base = cell as usize * k as usize;
-    let c_base = level * k as usize * d;
+    let level = cell_to_level[cell] as usize;
+    let r_base = cell * k as usize;
+    let c_base = level * k as usize * d + feat;
 
-    let mut feat = UNIT_POS_X as usize;
-    let wg = WORKGROUP_128 as usize;
-    while feat < d {
-        let mut acc = z[z_base + feat];
-        let mut cluster = 0u32;
-        while cluster < k {
-            let r_val = r[r_base + cluster as usize];
-            acc -= r_val * c[c_base + cluster as usize * d + feat];
-            cluster += 1u32;
-        }
-        z_corr[z_base + feat] = acc;
-        feat += wg;
+    let mut acc = z[idx];
+    let mut cluster = 0u32;
+    while cluster < k {
+        acc -= r[r_base + cluster as usize] * c[c_base + cluster as usize * d];
+        cluster += 1u32;
     }
+    z_corr[idx] = acc;
 }
 
 ///////////////
@@ -872,7 +889,7 @@ where
     Ok(())
 }
 
-/// Dispatch [`fn@run_weighted_sums`]. One workgroup per `(run, cluster)`.
+/// Dispatch [`fn@run_weighted_sums`]. One workgroup per run.
 ///
 /// ### Params
 ///
@@ -904,13 +921,14 @@ where
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
-    let (gx, gy) = grid_2d((n_runs * k) as u32, &limits)?;
+    let gx = (k * d).div_ceil(WORKGROUP_256 as usize) as u32;
+    let count = checked_cube_count("run_weighted_sums", gx, n_runs as u32, 1, &limits)?;
 
     unsafe {
         run_weighted_sums::launch_unchecked::<F>(
             client,
-            CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_64),
+            count,
+            CubeDim::new_1d(WORKGROUP_256),
             r.clone().into_tensor_arg(),
             z.clone().into_tensor_arg(),
             run_bounds.clone().into_tensor_arg(),
@@ -918,7 +936,6 @@ where
             n_runs as u32,
             k as u32,
             d,
-            WORKGROUP_64,
         );
     }
 
@@ -971,6 +988,65 @@ where
     Ok(())
 }
 
+/// Dispatch [`fn@level_tables`]. One thread per cluster.
+///
+/// ### Params
+///
+/// * `o` - Observed counts `[b, k]` row-major
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `theta` - Per-level diversity penalties `[b]`
+/// * `pr_b` - Level proportions `[b]`
+/// * `r_sum` - Output per-cluster totals `[k]`
+/// * `pen` - Output penalties `[b, k]` row-major
+/// * `cross` - Output cross-entropy weights `[b, k]` row-major
+/// * `b` - Number of levels
+/// * `k` - Cluster count
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; the outputs are written in place. `CubeclUtils` if the grid is
+/// over the device's cube-count limit.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_level_tables<F>(
+    o: &GpuTensor<F>,
+    sigma: &GpuTensor<F>,
+    theta: &GpuTensor<F>,
+    pr_b: &GpuTensor<F>,
+    r_sum: &GpuTensor<F>,
+    pen: &GpuTensor<F>,
+    cross: &GpuTensor<F>,
+    b: usize,
+    k: usize,
+    client: &Client,
+) -> Result<(), ScGpuErrors>
+where
+    F: Float + cubecl::CubeElement,
+{
+    let limits = GpuLimits::from_client(client);
+    let cubes = k.div_ceil(WORKGROUP_64 as usize);
+    let count = checked_cube_count("level_tables", cubes as u32, 1, 1, &limits)?;
+
+    unsafe {
+        level_tables::launch_unchecked::<F>(
+            client,
+            count,
+            CubeDim::new_1d(WORKGROUP_64),
+            o.clone().into_tensor_arg(),
+            sigma.clone().into_tensor_arg(),
+            theta.clone().into_tensor_arg(),
+            pr_b.clone().into_tensor_arg(),
+            r_sum.clone().into_tensor_arg(),
+            pen.clone().into_tensor_arg(),
+            cross.clone().into_tensor_arg(),
+            b as u32,
+            k as u32,
+        );
+    }
+
+    Ok(())
+}
+
 /// Dispatch `objective_partials`.
 ///
 /// The only launcher here with a fixed grid (`WORKGROUP_512` cubes), so it has
@@ -980,11 +1056,8 @@ where
 ///
 /// * `r` - Assignment matrix `[n, k]` row-major
 /// * `dist` - Distance matrix `[n, k]` row-major
-/// * `o` - Observed counts `[b, k]` row-major
-/// * `r_sum` - Per-cluster totals `[k]`
+/// * `cross` - Cross-entropy weights `[b, k]` row-major
 /// * `sigma` - Per-cluster weights `[k]`
-/// * `theta` - Per-level diversity penalties `[b]`
-/// * `pr_b` - Level proportions `[b]`
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `partials` - Output per-workgroup partial sums `[WORKGROUP_512]`
 /// * `n` - Cell count
@@ -998,11 +1071,8 @@ where
 pub fn launch_objective_partials<F>(
     r: &GpuTensor<F>,
     dist: &GpuTensor<F>,
-    o: &GpuTensor<F>,
-    r_sum: &GpuTensor<F>,
+    cross: &GpuTensor<F>,
     sigma: &GpuTensor<F>,
-    theta: &GpuTensor<F>,
-    pr_b: &GpuTensor<F>,
     cell_to_level: &GpuTensor<u32>,
     partials: &GpuTensor<F>,
     n: usize,
@@ -1018,11 +1088,8 @@ pub fn launch_objective_partials<F>(
             CubeDim::new_1d(WORKGROUP_128),
             r.clone().into_tensor_arg(),
             dist.clone().into_tensor_arg(),
-            o.clone().into_tensor_arg(),
-            r_sum.clone().into_tensor_arg(),
+            cross.clone().into_tensor_arg(),
             sigma.clone().into_tensor_arg(),
-            theta.clone().into_tensor_arg(),
-            pr_b.clone().into_tensor_arg(),
             cell_to_level.clone().into_tensor_arg(),
             partials.clone().into_tensor_arg(),
             n as u32,
@@ -1037,10 +1104,7 @@ pub fn launch_objective_partials<F>(
 /// ### Params
 ///
 /// * `scale_dist` - Scaled distances `[n, k]` row-major, fixed across the sweep
-/// * `o` - Observed counts `[b, k]` row-major, from the previous sweep
-/// * `r_sum` - Per-cluster totals `[k]`, from the previous sweep
-/// * `theta` - Per-level diversity penalties `[b]`
-/// * `pr_b` - Level proportions `[b]`
+/// * `pen` - Penalties `[b, k]` row-major, from the previous sweep
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `r_out` - Output assignments `[n, k]` row-major
 /// * `n` - Cell count
@@ -1054,10 +1118,7 @@ pub fn launch_objective_partials<F>(
 #[allow(clippy::too_many_arguments)]
 pub fn launch_jacobi_r_update<F>(
     scale_dist: &GpuTensor<F>,
-    o: &GpuTensor<F>,
-    r_sum: &GpuTensor<F>,
-    theta: &GpuTensor<F>,
-    pr_b: &GpuTensor<F>,
+    pen: &GpuTensor<F>,
     cell_to_level: &GpuTensor<u32>,
     r_out: &GpuTensor<F>,
     n: usize,
@@ -1076,10 +1137,7 @@ where
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_128),
             scale_dist.clone().into_tensor_arg(),
-            o.clone().into_tensor_arg(),
-            r_sum.clone().into_tensor_arg(),
-            theta.clone().into_tensor_arg(),
-            pr_b.clone().into_tensor_arg(),
+            pen.clone().into_tensor_arg(),
             cell_to_level.clone().into_tensor_arg(),
             r_out.clone().into_tensor_arg(),
             n as u32,
@@ -1091,7 +1149,7 @@ where
     Ok(())
 }
 
-/// Dispatch `ridge_subtract`. One workgroup per cell.
+/// Dispatch `ridge_subtract`. One thread per `(cell, feature)`.
 ///
 /// ### Params
 ///
@@ -1125,13 +1183,14 @@ where
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
-    let (gx, gy) = grid_2d(n as u32, &limits)?;
+    let cubes = (n * d).div_ceil(WORKGROUP_256 as usize);
+    let (gx, gy) = grid_2d(cubes as u32, &limits)?;
 
     unsafe {
         ridge_subtract::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_128),
+            CubeDim::new_1d(WORKGROUP_256),
             z.clone().into_tensor_arg(),
             r.clone().into_tensor_arg(),
             c.clone().into_tensor_arg(),
@@ -1215,6 +1274,45 @@ mod tests_harmony_kernels {
             }
         }
         out
+    }
+
+    /// Penalty tables on the device from `o`, as the driver builds them.
+    fn gpu_pen(
+        o: &[f32],
+        theta: &[f32],
+        pr_b: &[f32],
+        b: usize,
+        k: usize,
+        client: &Client,
+    ) -> GpuTensor<f32> {
+        let up =
+            |x: &[f32], shape: Vec<usize>| GpuTensor::<f32>::from_slice(x, shape, client).unwrap();
+        let pen = GpuTensor::<f32>::empty(vec![b, k], client).unwrap();
+        launch_level_tables(
+            &up(o, vec![b, k]),
+            &up(&vec![0.1f32; k], vec![k]),
+            &up(theta, vec![b]),
+            &up(pr_b, vec![b]),
+            &GpuTensor::<f32>::empty(vec![k], client).unwrap(),
+            &pen,
+            &GpuTensor::<f32>::empty(vec![b, k], client).unwrap(),
+            b,
+            k,
+            client,
+        )
+        .unwrap();
+        pen
+    }
+
+    /// Column sums of `o` `[b, k]`, the `r_sum` the penalty tables derive.
+    fn col_sums(o: &[f32], k: usize) -> Vec<f32> {
+        let mut s = vec![0.0f32; k];
+        for row in o.chunks_exact(k) {
+            for (a, v) in s.iter_mut().zip(row) {
+                *a += v;
+            }
+        }
+        s
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1405,25 +1503,18 @@ mod tests_harmony_kernels {
         let o: Vec<f32> = (0..b * k)
             .map(|i| ((i * 5 + 3) % 11) as f32 * 0.1 + 0.05)
             .collect();
-        let r_sum: Vec<f32> = (0..k).map(|i| 1.0 + i as f32 * 0.5).collect();
+        let r_sum = col_sums(&o, k);
         let theta: Vec<f32> = (0..b).map(|i| 1.0 + i as f32 * 0.3).collect();
         let pr_b: Vec<f32> = (0..b).map(|i| 0.2 + i as f32 * 0.1).collect();
 
         let scale_gpu = GpuTensor::<f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
-        let o_gpu = GpuTensor::<f32>::from_slice(&o, vec![b, k], &client).unwrap();
-        let r_sum_gpu = GpuTensor::<f32>::from_slice(&r_sum, vec![k], &client).unwrap();
-        let theta_gpu = GpuTensor::<f32>::from_slice(&theta, vec![b], &client).unwrap();
-        let pr_b_gpu = GpuTensor::<f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let pen_gpu = gpu_pen(&o, &theta, &pr_b, b, k, &client);
         let ctl_gpu = GpuTensor::<u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
         // previous sweep's R, which the damped update blends with
         let prior = vec![1.0 / k as f32; n * k];
         let r_out_gpu = GpuTensor::<f32>::from_slice(&prior, vec![n, k], &client).unwrap();
 
-        launch_jacobi_r_update(
-            &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
-            &client,
-        )
-        .unwrap();
+        launch_jacobi_r_update(&scale_gpu, &pen_gpu, &ctl_gpu, &r_out_gpu, n, k, &client).unwrap();
 
         let got = r_out_gpu.read(&client).unwrap();
         let want: Vec<f32> =
@@ -1458,23 +1549,15 @@ mod tests_harmony_kernels {
         }
         let cell_to_level: Vec<u32> = vec![0, 1, 0];
         let o = vec![0.5f32; b * k];
-        let r_sum = vec![1.0f32; k];
         let theta = vec![1.0f32; b];
         let pr_b = vec![0.5f32; b];
 
         let scale_gpu = GpuTensor::<f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
-        let o_gpu = GpuTensor::<f32>::from_slice(&o, vec![b, k], &client).unwrap();
-        let r_sum_gpu = GpuTensor::<f32>::from_slice(&r_sum, vec![k], &client).unwrap();
-        let theta_gpu = GpuTensor::<f32>::from_slice(&theta, vec![b], &client).unwrap();
-        let pr_b_gpu = GpuTensor::<f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let pen_gpu = gpu_pen(&o, &theta, &pr_b, b, k, &client);
         let ctl_gpu = GpuTensor::<u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
         let r_out_gpu = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
 
-        launch_jacobi_r_update(
-            &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
-            &client,
-        )
-        .unwrap();
+        launch_jacobi_r_update(&scale_gpu, &pen_gpu, &ctl_gpu, &r_out_gpu, n, k, &client).unwrap();
 
         let got = r_out_gpu.read(&client).unwrap();
         for cluster in 0..k {

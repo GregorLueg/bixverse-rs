@@ -189,8 +189,12 @@ impl KnnParamsGpu {
     }
 }
 
-/// Default implementation for KnnParamsGpu
 impl Default for KnnParamsGpu {
+    /// The default [`KnnParamsGpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

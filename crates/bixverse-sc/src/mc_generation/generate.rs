@@ -187,7 +187,7 @@ fn aggregate(
     let refs: Vec<&[usize]> = metacells.iter().map(Vec::as_slice).collect();
     let metacells = remap_metacells_to_original(&refs, &mapping.subset_to_orig);
     let refs: Vec<&[usize]> = metacells.iter().map(Vec::as_slice).collect();
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let aggregated = aggregate_meta_cells(reader, &refs, target_size, n_genes)?;
     Ok(MetaCellsRes {
         metacells,
@@ -286,7 +286,7 @@ pub fn bootstrapped_metacells_on_store(
         cells_to_keep,
         cells_to_use,
         n_rows,
-        reader.get_header().total_cells,
+        reader.dims().total_cells,
     )?;
 
     let rebuilt;
@@ -436,7 +436,7 @@ where
         cells_to_keep,
         cells_to_use,
         embd.nrows(),
-        reader.get_header().total_cells,
+        reader.dims().total_cells,
     )?;
 
     let subset;
@@ -607,7 +607,7 @@ pub fn supercells_on_store(
         cells_to_keep,
         cells_to_use,
         n_rows,
-        reader.get_header().total_cells,
+        reader.dims().total_cells,
     )?;
 
     let rebuilt;
@@ -689,7 +689,7 @@ pub fn metacells2_on_store(
     verbose: bool,
 ) -> Result<Metacells2Res, ScErrors> {
     let reader = ParallelSparseReader::new(f_path_cell)?;
-    let header = reader.get_header();
+    let header = reader.dims();
     let res = compute_dac_metacells(&reader, cell_indices, None, params, dac, seed, verbose)?;
 
     let mut metacells: Vec<Vec<usize>> = vec![Vec::new(); res.n_metacells];

@@ -17,7 +17,7 @@
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_analysis::nebula_mc::nebula_metacells;
 use bixverse_rs::single_cell::sc_analysis::nebula::{NebulaScParams, NebulaScRes, run_nebula};
-use bixverse_rs::single_cell::sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_rs::single_cell::sc_data::store::in_memory::InMemorySparseReader;
 
 use edge_rs::sc::nebula::{NebulaFit, nebula};
 use edge_rs::sc::test::ScTested;

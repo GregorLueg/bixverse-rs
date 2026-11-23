@@ -51,8 +51,12 @@ impl FastMnnParamsGpu {
     }
 }
 
-/// Default implementation for FastMnnParamsGpu
 impl Default for FastMnnParamsGpu {
+    /// The default [`FastMnnParamsGpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

@@ -151,8 +151,12 @@ impl SEACellsParams {
     }
 }
 
-/// Default implementation for SEACellsParams
 impl Default for SEACellsParams {
+    /// The default [`SEACellsParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }
@@ -196,6 +200,11 @@ pub struct SEACellsParamsSpec {
 }
 
 impl Default for SEACellsParamsSpec {
+    /// The default [`SEACellsParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = SEACellsParams::default();
         Self {

@@ -31,8 +31,7 @@ use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
     SparseYBatch, fit_multi_trees_sparse,
 };
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
-use bixverse_rs::single_cell::sc_traits::F16;
+use bixverse_rs::single_cell::sc_data::store::writer::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 #[cfg(feature = "large-test")]
 use bixverse_rs::{
@@ -1314,7 +1313,7 @@ fn write_synthetic_scenic_file(path: &str) {
 /// * `vals` - Expression per cell; non-positive or round-to-zero values are dropped
 fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize, vals: &[f32]) {
     let mut data_raw: Vec<u16> = Vec::new();
-    let mut data_norm: Vec<F16> = Vec::new();
+    let mut data_norm: Vec<f32> = Vec::new();
     let mut indices: Vec<usize> = Vec::new();
     for (cell_idx, &v) in vals.iter().enumerate() {
         if v <= 0.0 {
@@ -1325,7 +1324,7 @@ fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize
             continue;
         }
         data_raw.push(raw);
-        data_norm.push(F16::from(half::f16::from_f32(v.ln_1p())));
+        data_norm.push(v.ln_1p());
         indices.push(cell_idx);
     }
     let raw = RawCounts::U16(data_raw);
@@ -1386,7 +1385,9 @@ fn scenic_params_for_roundtrip() -> ScenicParams {
 fn test_run_scenic_grn_gpu_roundtrip() {
     let Some(device) = try_device() else { return };
 
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_roundtrip.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1428,8 +1429,6 @@ fn test_run_scenic_grn_gpu_roundtrip() {
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Same gate for the streaming path, which chunks genes off disk.
@@ -1439,7 +1438,9 @@ fn test_run_scenic_grn_gpu_roundtrip() {
 fn test_run_scenic_grn_streaming_gpu_roundtrip() {
     let Some(device) = try_device() else { return };
 
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_streaming_roundtrip.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1481,8 +1482,6 @@ fn test_run_scenic_grn_streaming_gpu_roundtrip() {
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Small in-memory CSC for the metacell round trip. Same design as the disk
@@ -1614,7 +1613,9 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
 
     // The file has to exist: the learner check happens inside
     // `run_scenic_grn_gpu`, so a real reader has to be built first.
-    let path = std::env::temp_dir().join("bixverse_scenic_gpu_gbm_reject.bin");
+    let path = tempfile::NamedTempFile::with_suffix(".bin")
+        .unwrap()
+        .into_temp_path();
     let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
@@ -1647,6 +1648,4 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
-
-    let _ = std::fs::remove_file(&path);
 }

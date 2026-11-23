@@ -1,4 +1,4 @@
-"""Value checks the generated param bundles call from `__post_init__`."""
+"""Value checks the param bundles call from `__post_init__`."""
 
 from __future__ import annotations
 

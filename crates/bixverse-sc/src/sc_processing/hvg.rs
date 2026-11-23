@@ -24,7 +24,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use bixverse_core::core::base::info::{BinningStrategy, parse_bin_strategy_type};
 use bixverse_core::core::base::loess::*;
-use bixverse_sc_data::in_memory_io::CellSubset;
+use bixverse_sc_data::store::in_memory::CellSubset;
 
 ////////////
 // Consts //
@@ -232,6 +232,11 @@ impl ScranTrendParams {
 }
 
 impl Default for ScranTrendParams {
+    /// The default [`ScranTrendParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             mean_filter: true,
@@ -274,6 +279,11 @@ pub struct HvgParams {
 }
 
 impl Default for HvgParams {
+    /// The default [`HvgParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             method: HvgMethod::default(),
@@ -332,7 +342,7 @@ impl CellBatchIndex {
     ///
     /// ### Params
     ///
-    /// * `total_cells` - `SparseDataHeader::total_cells` of the store
+    /// * `total_cells` - `StoreDims::total_cells` of the store
     /// * `cell_indices` - Global ids of the cells to include
     /// * `batch_labels` - Batch id per entry of `cell_indices`. `None` puts
     ///   every selected cell into a single batch `0`.
@@ -498,6 +508,10 @@ struct RawAccumulator {
 
 impl Default for RawAccumulator {
     /// Empty accumulator. `min` starts at the maximum so the first value wins.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             sum: 0.0,
@@ -872,7 +886,7 @@ pub fn accumulate_disp_stats(gene: &CscGeneChunk, index: &CellBatchIndex, out: &
         if slot == 0 {
             continue;
         }
-        let value = (gene.data_norm[i].to_f32() as f64).exp_m1();
+        let value = (gene.data_norm[i] as f64).exp_m1();
         out[slot].0 += value;
         out[slot].1 += value * value;
     }
@@ -923,7 +937,7 @@ pub fn disp_stats_from_sums(sum: f64, sum_sq: f64, no_cells: usize) -> (f32, f32
 /// * `out` - Per-slot `(sum, sum_sq)` accumulators, length `index.n_slots()`
 pub fn accumulate_log_stats(gene: &CscGeneChunk, index: &CellBatchIndex, out: &mut [(f64, f64)]) {
     for (&cell_id, value) in gene.indices.iter().zip(&gene.data_norm) {
-        let value = value.to_f32() as f64;
+        let value = *value as f64;
         let slot = &mut out[index.slot(cell_id)];
         slot.0 += value;
         slot.1 += value * value;
@@ -1328,7 +1342,7 @@ pub fn run_hvg_vst<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1528,7 +1542,7 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1646,7 +1660,7 @@ pub fn run_hvg_scran<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(opts.verbose);
     let start_total = Instant::now();
 
-    let no_genes = reader.get_header().total_genes;
+    let no_genes = reader.dims().total_genes;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
@@ -1777,7 +1791,7 @@ pub fn get_hvg_vst<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<HvgRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1810,7 +1824,7 @@ pub fn get_hvg_vst_streaming<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<HvgRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -1845,7 +1859,7 @@ pub fn get_hvg_dispersion<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1877,7 +1891,7 @@ pub fn get_hvg_dispersion_streaming<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -1964,7 +1978,7 @@ pub fn get_hvg_scran<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<HvgScranRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -1997,7 +2011,7 @@ pub fn get_hvg_scran_streaming<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<HvgScranRes, ScErrors> {
-    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, None)?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2046,11 +2060,7 @@ pub fn get_hvg_vst_batch_aware<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<Vec<HvgRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2086,11 +2096,7 @@ pub fn get_hvg_vst_batch_aware_streaming<S: SingleCellReading>(
     clip_max: Option<f32>,
     verbose: usize,
 ) -> Result<Vec<HvgRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2128,11 +2134,7 @@ pub fn get_hvg_dispersion_batch_aware<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2167,11 +2169,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming<S: SingleCellReading>(
     n_bins: usize,
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2272,11 +2270,7 @@ pub fn get_hvg_scran_batch_aware<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<Vec<HvgScranRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: None,
         verbose,
@@ -2309,11 +2303,7 @@ pub fn get_hvg_scran_batch_aware_streaming<S: SingleCellReading>(
     params: Option<ScranTrendParams>,
     verbose: usize,
 ) -> Result<Vec<HvgScranRes>, ScErrors> {
-    let index = CellBatchIndex::new(
-        reader.get_header().total_cells,
-        cell_indices,
-        Some(batch_labels),
-    )?;
+    let index = CellBatchIndex::new(reader.dims().total_cells, cell_indices, Some(batch_labels))?;
     let opts = HvgRunOpts {
         gene_batch_size: Some(GENE_BATCH_SIZE),
         verbose,
@@ -2467,7 +2457,7 @@ pub fn hvg_on_store(
     verbose: usize,
 ) -> Result<HvgStats, ScErrors> {
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
         Some(sub) => hvg_on_reader(&sub.reader()?, &sub.local, params, streaming, verbose),
         None => hvg_on_reader(&reader, cell_set, params, streaming, verbose),
@@ -2503,7 +2493,7 @@ pub fn hvg_batch_aware_on_store(
     verbose: usize,
 ) -> Result<Vec<HvgStats>, ScErrors> {
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let n_total = reader.get_header().total_cells;
+    let n_total = reader.dims().total_cells;
     match CellSubset::load(f_path_cell, cell_set, n_total, verbose > 0)? {
         Some(sub) => hvg_batch_aware_on_reader(
             &sub.reader()?,
@@ -2615,36 +2605,14 @@ pub fn select_residual_hvg(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use bixverse_sc_data::data_io::CellGeneSparseWriter;
+    use bixverse_sc_data::store::writer::CellGeneSparseWriter;
+    use tempfile::{NamedTempFile, TempPath};
 
-    /// RAII guard that removes a test's temp store even if an assert fails.
-    struct TempStore(std::path::PathBuf);
-
-    /// Drop implementation for [`TempStore`]. Errors are ignored: the file may
-    /// already be gone, and this runs during unwind.
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    impl TempStore {
-        /// Reserve a uniquely named scratch store in the system temp directory.
-        fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("bixverse_hvg_{name}.bin")))
-        }
-
-        /// Path of the guarded store as a `&str`.
-        fn path(&self) -> &str {
-            self.0.to_str().expect("temp path is valid UTF-8")
-        }
-    }
-
-    /// The stored `data_norm` value for a raw count, quantised through `f16`
+    /// The stored `data_norm` value for a raw count, computed
     /// exactly as the writer does so the dense reference and the driver see
     /// identical inputs.
-    fn norm_of(count: u32) -> F16 {
-        F16::from_f32((count as f32).ln_1p())
+    fn norm_of(count: u32) -> f32 {
+        (count as f32).ln_1p()
     }
 
     /// Write a `dense[gene][cell]` count matrix out as a gene-based store.
@@ -2661,7 +2629,7 @@ mod tests {
                     indices.push(cell);
                 }
             }
-            let norms: Vec<F16> = raw.iter().map(|&v| norm_of(v)).collect();
+            let norms: Vec<f32> = raw.iter().map(|&v| norm_of(v)).collect();
 
             writer
                 .write_gene_chunk(CscGeneChunk::from_conversion(
@@ -2763,7 +2731,7 @@ mod tests {
                 if gene[cell] == 0 {
                     continue;
                 }
-                let value = (norm_of(gene[cell]).to_f32() as f64).exp_m1();
+                let value = (norm_of(gene[cell]) as f64).exp_m1();
                 sum += value;
                 sum_sq += value * value;
             }
@@ -2790,9 +2758,9 @@ mod tests {
     }
 
     /// Open a reader over a freshly written synthetic store.
-    fn reader_for(temp: &TempStore, dense: &[Vec<u32>], n_cells: usize) -> ParallelSparseReader {
-        write_store(temp.path(), dense, n_cells);
-        ParallelSparseReader::new(temp.path()).expect("reader opens")
+    fn reader_for(temp: &TempPath, dense: &[Vec<u32>], n_cells: usize) -> ParallelSparseReader {
+        write_store(temp.to_str().unwrap(), dense, n_cells);
+        ParallelSparseReader::new(temp.to_str().unwrap()).expect("reader opens")
     }
 
     /// The summary-based VST kernels must match a dense pass over every selected cell.
@@ -2800,7 +2768,7 @@ mod tests {
     fn test_vst_matches_dense_reference() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("vst_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         // deliberately a non-contiguous, descending subset
@@ -2822,7 +2790,7 @@ mod tests {
     fn test_dispersion_matches_dense_reference() {
         let (n_genes, n_cells) = (30, 90);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("disp_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).filter(|c| c % 2 == 0).collect();
@@ -2847,7 +2815,7 @@ mod tests {
     fn test_batch_aware_single_batch_matches_plain() {
         let (n_genes, n_cells) = (25, 80);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("single_batch");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2870,7 +2838,7 @@ mod tests {
     fn test_batch_aware_matches_per_batch_runs() {
         let (n_genes, n_cells) = (25, 90);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("batch_split");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2899,7 +2867,7 @@ mod tests {
     fn test_gene_batch_size_invariant() {
         let (n_genes, n_cells) = (37, 60);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("batch_size");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2940,7 +2908,7 @@ mod tests {
     fn test_gene_without_selected_counts_gives_zero_var_std() {
         // gene 1 is only expressed in cells that are not selected
         let dense = vec![vec![3, 1, 4, 2], vec![0, 5, 0, 7], vec![2, 2, 2, 2]];
-        let temp = TempStore::new("empty_gene");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, 4);
 
         let cells = vec![0usize, 2];
@@ -2966,7 +2934,7 @@ mod tests {
             (1..=n_cells as u32).collect::<Vec<u32>>(),
         ];
 
-        let temp = TempStore::new("wide_range");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -2989,7 +2957,7 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6, 7, 8],
         ];
 
-        let temp = TempStore::new("u32_counts");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3013,7 +2981,7 @@ mod tests {
         gene[0] = 50_000;
         let dense = vec![gene, vec![2u32; n_cells]];
 
-        let temp = TempStore::new("clip_max");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3143,7 +3111,7 @@ mod tests {
     fn test_drivers_reject_bad_parameters() {
         let n_cells = 8;
         let dense = synthetic_counts(4, n_cells);
-        let temp = TempStore::new("bad_params");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3178,7 +3146,7 @@ mod tests {
     fn diagnostic_hvg_scaling_sweep() {
         let (n_genes, n_cells) = (3_000, 6_000);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scaling_sweep");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3476,7 +3444,7 @@ mod tests {
                         if gene[c] == 0 {
                             0.0
                         } else {
-                            norm_of(gene[c]).to_f32() as f64 / LN_2
+                            norm_of(gene[c]) as f64 / LN_2
                         }
                     })
                     .collect();
@@ -3493,7 +3461,7 @@ mod tests {
     fn test_scran_matches_dense_reference() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_reference");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).rev().filter(|c| c % 3 != 0).collect();
@@ -3515,7 +3483,7 @@ mod tests {
     fn test_scran_streaming_matches_non_streaming() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_streaming");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();
@@ -3531,7 +3499,7 @@ mod tests {
     fn test_scran_batch_aware_matches_per_batch_runs() {
         let (n_genes, n_cells) = (40, 120);
         let dense = synthetic_counts(n_genes, n_cells);
-        let temp = TempStore::new("scran_batches");
+        let temp = NamedTempFile::with_suffix(".bin").unwrap().into_temp_path();
         let reader = reader_for(&temp, &dense, n_cells);
 
         let cells: Vec<usize> = (0..n_cells).collect();

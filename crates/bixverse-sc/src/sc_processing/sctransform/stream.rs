@@ -11,7 +11,6 @@
 //! The one stage that is not linear in the data is the step-1 fit, and it is
 //! bounded by construction: 2000 genes by 2000 cells regardless of the input.
 
-use half::f16;
 use indexmap::IndexSet;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -25,7 +24,11 @@ use crate::errors::ScErrors;
 use crate::prelude::*;
 use bixverse_core::core::base::kernel_smooth::bw_nrd;
 use bixverse_core::core::math::vector_helpers::{interp_linear_at, median};
-use bixverse_sc_data::data_io::{CellGeneSparseWriter, CscGeneChunk, RawCounts, SingleCellReading};
+use bixverse_sc_data::store::{
+    chunk::{CscGeneChunk, RawCounts},
+    reader::SingleCellReading,
+    writer::CellGeneSparseWriter,
+};
 
 use crate::sc_processing::residuals::{
     ResidualSource, distinct_cell_set, intersect_gene_sets, residual_variance, validate_groups,
@@ -81,6 +84,11 @@ pub struct SctStreamOpts {
 }
 
 impl Default for SctStreamOpts {
+    /// The default [`SctStreamOpts`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             gene_batch_size: Some(SCT_GENE_BATCH_SIZE),
@@ -186,7 +194,7 @@ fn correct_one_gene(
             let value = corrected as u32;
             raw.push(value);
             indices.push(c);
-            norms.push(F16::from(f16::from_f32((value as f32).ln_1p())));
+            norms.push((value as f32).ln_1p());
         }
     }
 
@@ -287,7 +295,7 @@ fn count_detected<S: SingleCellReading>(
     cell_set: &IndexSet<u32>,
     opts: SctStreamOpts,
 ) -> Result<Vec<usize>, ScErrors> {
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let mut out = vec![0_usize; n_genes];
     let step = opts.gene_batch_size.unwrap_or(genes.len()).max(1);
 
@@ -454,11 +462,18 @@ fn sweep_gene(gene: &CscGeneChunk, n_cells: usize, gmean_eps: f64, ln_table: &[f
 
 /// Histogram of raw count values, dense for small counts.
 struct CountHistogram {
+    /// Frequency of every count below `COUNT_TABLE_LEN`
     dense: Vec<u64>,
+    /// Frequency of the larger counts
     overflow: FxHashMap<u32, u64>,
 }
 
 impl CountHistogram {
+    /// An empty histogram.
+    ///
+    /// ### Returns
+    ///
+    /// The histogram.
     fn new() -> Self {
         Self {
             dense: vec![0; COUNT_TABLE_LEN],
@@ -466,6 +481,11 @@ impl CountHistogram {
         }
     }
 
+    /// Count one value.
+    ///
+    /// ### Params
+    ///
+    /// * `x` - The count
     #[inline]
     fn add(&mut self, x: u32) {
         match self.dense.get_mut(x as usize) {
@@ -474,6 +494,11 @@ impl CountHistogram {
         }
     }
 
+    /// Count every stored raw value of a gene.
+    ///
+    /// ### Params
+    ///
+    /// * `gene` - The gene
     fn add_gene(&mut self, gene: &CscGeneChunk) {
         match &gene.data_raw {
             RawCounts::U16(v) => v.iter().for_each(|&x| self.add(x as u32)),
@@ -481,6 +506,15 @@ impl CountHistogram {
         }
     }
 
+    /// Add another histogram.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - The other histogram
+    ///
+    /// ### Returns
+    ///
+    /// The sum.
     fn merge(mut self, other: Self) -> Self {
         self.dense
             .iter_mut()
@@ -492,6 +526,11 @@ impl CountHistogram {
         self
     }
 
+    /// Add the frequencies to a map.
+    ///
+    /// ### Params
+    ///
+    /// * `target` - Value to frequency
     fn drain_into(self, target: &mut FxHashMap<u32, u64>) {
         for (value, freq) in self.dense.into_iter().enumerate() {
             if freq > 0 {
@@ -548,7 +587,7 @@ pub fn sct_gene_pass<S: SingleCellReading>(
     let start = Instant::now();
 
     let n_cells = cell_indices.len();
-    let n_genes = reader.get_header().total_genes;
+    let n_genes = reader.dims().total_genes;
     let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 

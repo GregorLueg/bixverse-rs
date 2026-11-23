@@ -72,6 +72,11 @@ impl RandSvdMlxParams {
 }
 
 impl Default for RandSvdMlxParams {
+    /// The default [`RandSvdMlxParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             n_power_iters: DEFAULT_N_POWER_ITERS_RAND_SVD,

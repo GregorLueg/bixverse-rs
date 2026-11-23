@@ -109,6 +109,10 @@ pub struct MiloRParams {
 
 impl Default for MiloRParams {
     /// The R `params_sc_miloR()` defaults.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             prop: 0.2,

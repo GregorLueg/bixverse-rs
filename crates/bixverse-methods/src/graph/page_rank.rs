@@ -17,14 +17,11 @@ const DEFAULT_TOLERANCE: f64 = 1e-12;
 /// Structure for Page Rank Memory
 ///
 /// Allows for faster, better usage of memory
-///
-/// ### Fields
-///
-/// * `ranks` - The old ranks
-/// * `new_ranks` - The new ranks
 #[derive(Debug)]
 pub struct PageRankWorkingMemory<T> {
+    /// The old ranks
     ranks: Vec<T>,
+    /// The new ranks
     new_ranks: Vec<T>,
 }
 
@@ -61,6 +58,11 @@ impl<T> Default for PageRankWorkingMemory<T>
 where
     T: BixverseFloat,
 {
+    /// The default [`PageRankWorkingMemory`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             ranks: Vec::new(),
@@ -864,6 +866,11 @@ impl<T> Default for ConstrainedPageRankWorkingMemory<T>
 where
     T: BixverseFloat,
 {
+    /// The default [`ConstrainedPageRankWorkingMemory`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

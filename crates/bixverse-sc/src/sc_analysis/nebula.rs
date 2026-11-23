@@ -104,6 +104,10 @@ impl Default for NebulaScParams {
     ///
     /// `tested` cannot be resolved without knowing the design width, so it
     /// starts on the intercept and the caller is expected to set it.
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             nebula: NebulaParams::default(),
@@ -155,6 +159,11 @@ pub struct NebulaScParamsSpec {
 }
 
 impl Default for NebulaScParamsSpec {
+    /// The default [`NebulaScParamsSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = NebulaScParams::default();
         Self {
@@ -441,7 +450,7 @@ where
     let start_all = Instant::now();
 
     let n_cells = cells_to_keep.len();
-    let header = gene_reader.get_header();
+    let header = gene_reader.dims();
 
     if n_coef == 0 {
         return Err(CoreErrors::MustBePositive("n_coef".to_string()).into());

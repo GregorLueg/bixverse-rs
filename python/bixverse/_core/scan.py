@@ -164,14 +164,14 @@ def _mapping(genes: list[str], lookup: dict[str, int]) -> list[int | None]:
 
 @beartype
 def get_h5ad_dimensions(f_path: Path | str) -> H5adDims:
-    """Dimensions and storage layout of an h5ad file.
+    """Dimensions and storage layout of an h5ad file or anndata Zarr store.
 
     Sparse `X` is `CSR` or `CSC` by its encoding attribute (or the length of
     `indptr`). Dense `X` is `DENSE_ROW` (cells x genes on disk) or
     `DENSE_COL`, with ties going to `DENSE_ROW`.
 
     Args:
-        f_path: The h5ad file.
+        f_path: The h5ad file or anndata Zarr store.
 
     Returns:
         The dimensions and layout.
@@ -181,7 +181,7 @@ def get_h5ad_dimensions(f_path: Path | str) -> H5adDims:
         BixverseError: If `X` is missing or its shape fits neither ordering.
     """
     path = Path(f_path).expanduser()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
     n_obs, n_var, kind = _bixverse.h5ad_dimensions(path)
     return H5adDims(n_obs=n_obs, n_var=n_var, type=kind)
@@ -195,13 +195,13 @@ def detect_raw_count_slot(
     n_sample: int = 10_000,
     threshold: float = 0.99,
 ) -> RawSlot | None:
-    """Detect which slot of an h5ad file holds raw integer counts.
+    """Detect which slot of an h5ad file or Zarr store holds raw integer counts.
 
     Samples the non-zero values of each candidate in order and returns the
     first that is integer valued, so dedicated count slots win over `X`.
 
     Args:
-        f_path: The h5ad file.
+        f_path: The h5ad file or anndata Zarr store.
         candidates: Slots to test, in priority order.
         n_sample: Values to sample per slot.
         threshold: Minimum fraction of non-zeros that must be whole numbers.
@@ -213,7 +213,7 @@ def detect_raw_count_slot(
         >>> slot = bv.io.detect_raw_count_slot("path/to/file.h5ad")
     """
     path = Path(f_path).expanduser()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
     found = _bixverse.raw_count_slot(path, list(candidates), n_sample, threshold)
     match found:
@@ -246,13 +246,13 @@ def warn_skipped(skipped: Sequence[str], group: str) -> None:
 
 @beartype
 def read_h5ad_metadata(f_path: Path | str) -> dict[str, object]:
-    """Read the obs and var tables and the layout of an h5ad file.
+    """Read the obs and var tables and the layout of an h5ad file or Zarr store.
 
     The tables come through the same reader the loaders use, so column
     names are snake_cased and the index is `cell_id` / `gene_id`.
 
     Args:
-        f_path: The h5ad file.
+        f_path: The h5ad file or anndata Zarr store.
 
     Returns:
         `obs` and `var` (polars), `dims` (`(n_obs, n_var)`) and `type`.

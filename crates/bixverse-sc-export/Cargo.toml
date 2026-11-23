@@ -1,0 +1,29 @@
+[package]
+name = "bixverse-sc-export"
+description = "Export of bixverse single cell stores to h5ad and AnnData Zarr through scx-core."
+keywords = ["bioinformatics", "single-cell", "anndata", "h5ad", "zarr"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+
+[features]
+## AnnData Zarr export. scx-core switches on zarrs' blosc with it, which builds
+## C++ (snappy), so the R build leaves it off.
+zarr = ["scx-core/zarr"]
+## Link HDF5 statically.
+hdf5-static = ["bixverse-sc-data/hdf5-static"]
+
+[dependencies]
+bixverse-sc-data.workspace = true
+document-features.workspace = true
+scx-core.workspace = true
+sprs.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bixverse-sc-data = { workspace = true, features = ["zarr"] }
+tempfile.workspace = true

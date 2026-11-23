@@ -26,7 +26,8 @@ lives in memory: the cell filter, the HVG set and the cache, as `memory_py.npz`
 and `memory_py.json`. It does not write a fitted residual model, and warns.
 `load_existing` brings it all back, and restores the stores from `counts.bxa`
 if only the archive is left (`archive_sc_exp`). `save_h5ad` exports kept cells,
-obs, var and the embeddings and graph that still match to an h5ad file;
+obs, var and the embeddings and graph that still match to an h5ad file,
+`save_zarr` the same to an AnnData Zarr store;
 `write_h5ad_sc`, `write_tenx_h5_sc` and `write_cellranger_output` write
 in-memory counts as files other tools read.
 
@@ -50,10 +51,12 @@ sc = bv.io.load_existing("experiments/demo")
 set `raw_count_slot` if it picks wrong, and use `load_h5ad_norm` for files that
 only hold log-normalised values. `load_mtx` takes genes as rows, the 10x
 convention, unless `cells_as_rows` says otherwise; `get_cell_ranger_params`
-finds the three files for you. Nothing here needs h5py. A store in the old v3
-format still opens with a warning, and `upgrade_sc_store` converts it.
+finds the three files for you. The h5ad readers take an anndata Zarr store
+(v2 or v3) as well. Nothing here needs h5py. A v4 store still opens
+with a warning; a v3 store no longer opens. `upgrade_sc_store` converts both.
 """
 
+from bixverse._core.atac import load_atac_fragments, load_atac_tenx
 from bixverse._core.download import (
     download_cd34_data,
     download_demuxlet_pbmc,
@@ -64,6 +67,7 @@ from bixverse._core.download import (
     download_pbmc8k,
     download_pbmc_1k_5p,
     download_pbmc_batches,
+    download_pbmc_multiome,
     download_pbmc_totalseq_data,
     download_thymus_ageing,
 )
@@ -108,6 +112,7 @@ from bixverse._core.synthetic import (
 )
 from bixverse._core.writers import (
     save_h5ad,
+    save_zarr,
     write_cellranger_output,
     write_h5ad_sc,
     write_tenx_h5_sc,
@@ -132,6 +137,7 @@ __all__ = [
     "download_pbmc8k",
     "download_pbmc_1k_5p",
     "download_pbmc_batches",
+    "download_pbmc_multiome",
     "download_pbmc_totalseq_data",
     "download_thymus_ageing",
     "generate_cellsweep_test_data",
@@ -141,6 +147,8 @@ __all__ = [
     "get_cell_ranger_params",
     "get_h5ad_dimensions",
     "get_tenx_h5_metadata",
+    "load_atac_fragments",
+    "load_atac_tenx",
     "load_csr",
     "load_existing",
     "load_h5ad",
@@ -158,6 +166,7 @@ __all__ = [
     "read_tenx_h5_metadata",
     "save",
     "save_h5ad",
+    "save_zarr",
     "stream_h5ad",
     "upgrade_sc_store",
     "write_cellranger_output",

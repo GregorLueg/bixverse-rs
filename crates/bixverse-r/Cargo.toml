@@ -29,7 +29,17 @@ hdf5-filters = ["h5", "bixverse-rs/hdf5-filters"]
 ## See `bixverse-rs`.
 parquet = ["h5", "bixverse-rs/parquet"]
 ## See `bixverse-rs`.
+zarr = ["h5", "bixverse-rs/zarr"]
+## See `bixverse-rs`.
+zarr-blosc = ["zarr", "bixverse-rs/zarr-blosc"]
+## See `bixverse-rs`.
+export = ["h5", "bixverse-rs/export"]
+## See `bixverse-rs`.
+export-zarr = ["export", "zarr", "bixverse-rs/export-zarr"]
+## See `bixverse-rs`.
 multi-modal = ["single-cell", "bixverse-rs/multi-modal"]
+## Single cell ATAC-seq, see `bixverse-rs`.
+atac = ["single-cell", "bixverse-rs/atac"]
 ## See `bixverse-rs`.
 bonsai = ["single-cell", "bixverse-rs/bonsai", "dep:bonsai-rs"]
 ## See `bixverse-rs`.

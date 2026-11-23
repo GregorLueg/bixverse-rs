@@ -72,11 +72,12 @@ use rand_distr::{Distribution, LogNormal, Uniform};
 use rayon::prelude::*;
 
 use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CellPayload, CscGeneChunk, CsrCellChunk, DataLayerReturn,
-    ParallelSparseReader, RawCounts, SingleCellReading,
+use bixverse_rs::single_cell::sc_data::store::gene_file::write_gene_file;
+use bixverse_rs::single_cell::sc_data::store::{
+    chunk::{CscGeneChunk, CsrCellChunk, DataLayerReturn, RawCounts},
+    reader::{ParallelSparseReader, SingleCellReading},
+    writer::{CellGeneSparseWriter, CellPayload},
 };
-use bixverse_rs::single_cell::sc_data::gene_file_io::write_gene_file;
 use bixverse_rs::single_cell::sc_processing::hvg::{
     CellBatchIndex, GeneStats, HistogramScratch, gene_stats,
 };
@@ -115,10 +116,10 @@ const TARGET_SIZE: f32 = 1e4;
 /// Cells generated and encoded per write batch.
 const GEN_BATCH: usize = 8_192;
 
-/// Mirrors `GENE_FILE_READ_BATCH` in `gene_file_io.rs`.
+/// Mirrors `GENE_FILE_READ_BATCH` in `store/gene_file.rs`.
 const READ_BATCH: usize = 2_048;
 
-/// Mirrors `GENE_FILE_WRITE_BATCH` in `gene_file_io.rs`.
+/// Mirrors `GENE_FILE_WRITE_BATCH` in `store/gene_file.rs`.
 const WRITE_BATCH: usize = 1_024;
 
 /// Mirrors `GENE_BATCH_SIZE` in `hvg.rs`.
@@ -284,23 +285,23 @@ fn ensure_cell_store(path: &Path, n_cells: usize, n_genes: usize, library: f64) 
 /// * `slot` - Raw count slot, as the R `slot` argument
 #[cfg(feature = "h5")]
 fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
-    use bixverse_rs::single_cell::sc_data::data_io::MinCellQuality;
-    use bixverse_rs::single_cell::sc_data::h5ad_io::{parse_raw_slot, stream_h5_counts};
+    use bixverse_rs::single_cell::sc_data::h5::h5ad::{parse_raw_slot, stream_h5_counts};
+    use bixverse_rs::single_cell::sc_data::store::quality::MinCellQuality;
 
     if cell_path.exists() && std::env::var("GENE_FILE_BENCH_REGEN").is_err() {
         return;
     }
     let raw_slot =
         parse_raw_slot(slot).expect("GENE_FILE_BENCH_H5AD_SLOT: X, raw.X or layers.counts");
+    // through AnnFile, so an anndata Zarr store works too (feature `zarr`)
     let (no_cells, no_genes, indptr_len) = {
-        let file = hdf5::File::open(h5ad).expect("open h5ad");
-        let shape: Vec<i64> = file
-            .group(raw_slot.get_dense_path())
-            .and_then(|g| g.attr("shape"))
-            .and_then(|a| a.read_raw::<i64>())
-            .expect("sparse count group with a shape attribute (dense X is not supported here)");
-        let indptr_len = file.dataset(raw_slot.get_indptr()).expect("indptr").size();
-        (shape[0] as usize, shape[1] as usize, indptr_len)
+        use bixverse_rs::single_cell::sc_data::h5::ann_store::AnnFile;
+        use bixverse_rs::single_cell::sc_data::h5::scan::get_h5ad_dimensions;
+        let dims = get_h5ad_dimensions(h5ad).expect("h5ad or Zarr dimensions");
+        let indptr_len = AnnFile::open(h5ad)
+            .and_then(|f| f.shape(raw_slot.get_indptr()))
+            .expect("indptr")[0];
+        (dims.n_obs, dims.n_var, indptr_len)
     };
     let format = if no_cells == no_genes {
         panic!("square matrix, cannot tell CSR from CSC by indptr length");
@@ -322,7 +323,7 @@ fn ensure_h5ad_store(h5ad: &Path, cell_path: &Path, slot: &str) {
     };
     let (res, t) = timed(|| {
         stream_h5_counts(
-            h5ad, cell_path, format, no_cells, no_genes, qc, raw_slot, true,
+            h5ad, cell_path, format, no_cells, no_genes, qc, raw_slot, None, true,
         )
     });
     let (kept_cells, kept_genes, _) = res.expect("stream_h5_counts");
@@ -375,7 +376,7 @@ fn norm_stored(reader: &ParallelSparseReader) -> String {
 /// * `cell_path` - Cell store
 fn describe_store(cell_path: &str) {
     let reader = ParallelSparseReader::new(cell_path).expect("cell reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let raw_layer = DataLayerReturn::Raw;
 
@@ -523,7 +524,7 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, Duration) {
     (r, t.elapsed())
 }
 
-/// Phase ranges, the same cut as `plan_phases` in `gene_file_io.rs`.
+/// Phase ranges, the same cut as `plan_phases` in `store/gene_file.rs`.
 ///
 /// ### Params
 ///
@@ -606,7 +607,7 @@ fn phase_cursors(
 fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
     let total = Instant::now();
     let reader = ParallelSparseReader::new(cell_path).expect("cell reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let chunks = thread_chunks(n_cells);
     let raw_layer = DataLayerReturn::Raw;
@@ -696,7 +697,7 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
     let format = writer.format();
 
     let mut raw = vec![0u32; max_phase_nnz];
-    let mut norm = vec![F16::default(); max_phase_nnz];
+    let mut norm = vec![0.0f32; max_phase_nnz];
     let mut cell_idx = vec![0u32; max_phase_nnz];
 
     for (pi, &(g0, g1)) in phases.iter().enumerate() {
@@ -828,13 +829,9 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
                     .into_par_iter()
                     .map(|g| {
                         let (a, b) = (gene_start[g - g0], gene_start[g - g0 + 1]);
-                        let data_norm = norm[a..b].to_vec();
-                        let avg_exp =
-                            F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
                         let chunk = CscGeneChunk {
                             data_raw: RawCounts::from_u32_auto(&raw[a..b]),
-                            data_norm,
-                            avg_exp,
+                            data_norm: norm[a..b].to_vec(),
                             nnz: b - a,
                             indices: cell_idx[a..b].to_vec(),
                             original_index: g,
@@ -873,7 +870,7 @@ fn bench_convert(cell_path: &str, gene_path: &str, max_nnz: Option<usize>) {
 /// * `gene_path` - Gene store
 fn bench_hvg(gene_path: &str) {
     let reader = ParallelSparseReader::new(gene_path).expect("gene reader");
-    let header = reader.get_header();
+    let header = reader.dims();
     let (n_cells, n_genes) = (header.total_cells, header.total_genes);
     let cells: Vec<usize> = (0..n_cells).collect();
     let index = CellBatchIndex::new(n_cells, &cells, None).expect("index");
@@ -1075,7 +1072,7 @@ fn main() {
             "  gene store {:.2} GB, gene chunks with stored norm {} of {}",
             std::fs::metadata(&gene_path).expect("stat").len() as f64 / 1e9,
             norm_stored(&genes),
-            genes.get_header().total_genes
+            genes.dims().total_genes
         );
     }
 

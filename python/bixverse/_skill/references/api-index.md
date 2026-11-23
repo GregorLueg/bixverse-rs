@@ -6,7 +6,7 @@ Every public entry point, grouped by module. Generated from each module's
 Grep this file to check whether a function exists before calling it, then
 `help(bv.<module>.<name>)` or `inspect.signature()` for how to call it.
 
-Version: 0.3.3.
+Version: 0.4.0.
 
 ## bv
 
@@ -24,7 +24,8 @@ Single-cell streaming for Python, in Rust.
 - `ScCache`: Analysis results held in memory.
 - `ScMap`: Ids and index sets of an experiment.
 - `SingleCells`: A single cell experiment on disk.
-- `SingleCellsMultiModal`: A single cell experiment with RNA and ADT.
+- `SingleCellsAtac`: A single cell ATAC experiment on disk: peaks or tiles, no RNA.
+- `SingleCellsMultiModal`: A single cell experiment with RNA plus ADT and / or ATAC.
 - `SingleCellsSubset`: The cells of one level of an obs column.
 - `SparseFileError`: A sparse store is missing, truncated, corrupt, or of the wrong format version or layout.
 - `Stamp`: Provenance of one cached artefact.
@@ -47,7 +48,7 @@ Getting counts into an experiment directory, and back out.
 - `SyntheticDialogueData`: Synthetic counts with a planted multicellular programme.
 - `TenxH5Meta`: Layout and dimensions of a 10x h5 file, as `get_tenx_h5_metadata()`.
 - `archive_sc_exp`: Archive the counts for cold storage.
-- `detect_raw_count_slot`: Detect which slot of an h5ad file holds raw integer counts.
+- `detect_raw_count_slot`: Detect which slot of an h5ad file or Zarr store holds raw integer counts.
 - `download_cd34_data`: The CD34 data set of the SEACells paper.
 - `download_demuxlet_pbmc`: PBMCs with demuxlet doublet calls, for doublet detection.
 - `download_dialogue_uc`: The ulcerative colitis subset of the DIALOGUE paper.
@@ -57,6 +58,7 @@ Getting counts into an experiment directory, and back out.
 - `download_pbmc8k`: The 10x PBMC 8k data.
 - `download_pbmc_1k_5p`: The unfiltered 10x PBMC 1k 5' matrix.
 - `download_pbmc_batches`: Two PBMC h5ad files, for batch correction.
+- `download_pbmc_multiome`: The 10x PBMC unsorted 3k multiome (Cell Ranger ARC 2.0).
 - `download_pbmc_totalseq_data`: The 10k PBMC TotalSeq-B data, with ADT counts.
 - `download_thymus_ageing`: The Baran-Gale et al. ageing thymus data (Development, 2020).
 - `generate_cellsweep_test_data`: Synthetic counts with a planted ambient profile, for CellSweep.
@@ -64,11 +66,13 @@ Getting counts into an experiment directory, and back out.
 - `generate_single_cell_test_data`: Synthetic RNA counts with planted cell types.
 - `generate_single_cell_test_data_adt`: Synthetic ADT counts, cell for cell with `generate_single_cell_test_data`.
 - `get_cell_ranger_params`: The mtx parameters for a Cell Ranger output directory.
-- `get_h5ad_dimensions`: Dimensions and storage layout of an h5ad file.
+- `get_h5ad_dimensions`: Dimensions and storage layout of an h5ad file or anndata Zarr store.
 - `get_tenx_h5_metadata`: Detect the layout of a 10x h5 file and read its dimensions.
+- `load_atac_fragments`: Load an ATAC-only experiment from a fragment file.
+- `load_atac_tenx`: Load an ATAC-only experiment from a 10x peak matrix h5.
 - `load_csr`: Load an in-memory cells x genes count matrix.
 - `load_existing`: Open an experiment directory and restore any state Python saved.
-- `load_h5ad`: Load an h5ad file.
+- `load_h5ad`: Load an h5ad file or anndata Zarr store.
 - `load_h5ad_norm`: Load an h5ad file holding only normalised counts.
 - `load_mtx`: Load an mtx file with its barcodes and features.
 - `load_multi_h5ad`: Load several h5ad files into one experiment.
@@ -79,12 +83,13 @@ Getting counts into an experiment directory, and back out.
 - `prescan_h5ad_files`: Prescan several h5ad files for a multi-file load.
 - `prescan_mtx_dirs`: Prescan several CellRanger style mtx directories for a multi-file load.
 - `prescan_tenx_h5_files`: Prescan several 10x h5 files for a multi-file load.
-- `read_h5ad_metadata`: Read the obs and var tables and the layout of an h5ad file.
+- `read_h5ad_metadata`: Read the obs and var tables and the layout of an h5ad file or Zarr store.
 - `read_tenx_h5_metadata`: Read the barcode and feature tables and the layout of a 10x h5 file.
 - `save`: Write the map's index sets and the cache next to the stores.
 - `save_h5ad`: Write an experiment to a spec compliant h5ad file.
+- `save_zarr`: Write an experiment to an AnnData Zarr (v3) store.
 - `stream_h5ad`: `load_h5ad` with `h5ad_streaming=True`.
-- `upgrade_sc_store`: Convert a v3 store to the v4 format in place.
+- `upgrade_sc_store`: Convert a v3 or v4 store to the v5 format in place.
 - `write_cellranger_output`: Write counts as a CellRanger style trio.
 - `write_h5ad_sc`: Write in-memory counts to a sparse h5ad file.
 - `write_tenx_h5_sc`: Write in-memory counts to a 10x h5 file.
@@ -187,8 +192,8 @@ Batch correction and integration metrics.
 - `calculate_lisi`: LISI on the cached kNN.
 - `calculate_pcr`: Principal component regression on batch.
 - `fast_mnn`: fastMNN on a PCA of the batch-aware HVGs.
-- `harmony`: Harmony (v2) on the PCA.
-- `harmony_v1`: The original Harmony (v1) on the PCA.
+- `harmony`: Harmony (v2) on the PCA or another embedding.
+- `harmony_v1`: The original Harmony (v1) on the PCA or another embedding.
 - `seurat_cca`: Seurat CCA anchor integration.
 - `seurat_rpca`: Seurat reciprocal PCA anchor integration.
 
@@ -203,8 +208,8 @@ Marker genes, donor-aware differential expression and differential abundance.
 - `ScNebula`: NEBULA fits.
 - `ScSpecificMarkers`: One-vs-many specific markers.
 - `add_nhoods_info`: The majority cell type of each neighbourhood.
-- `find_all_markers`: One-vs-rest Wilcoxon DGE for every group of a column.
-- `find_markers`: Wilcoxon DGE between two groups of cells.
+- `find_all_markers`: One-vs-rest Wilcoxon or logistic regression DGE for every group.
+- `find_markers`: Wilcoxon or logistic regression DGE between two groups of cells.
 - `find_specific_markers`: Markers that hold up against every rival group separately.
 - `get_differential_abundance_res`: The differential abundance table; warns and returns `None` if untested.
 - `get_index_cells`: The neighbourhood index cells, 0-based positions among the kept cells.
@@ -221,7 +226,7 @@ Marker genes, donor-aware differential expression and differential abundance.
 
 ## bv.annotate
 
-Cell type annotation with ScType and reference mapping with Symphony.
+Cell type annotation with ScType, reference mapping with Symphony and Seurat.
 
 - `CellMarkers`: The marker genes of one cell type, one entry of the
 - `ScTypeCellResults`: Per-cell ScType calls.
@@ -241,6 +246,7 @@ Cell type annotation with ScType and reference mapping with Symphony.
 - `prepare_cell_markers`: Marker genes per cell type.
 - `save_symphony_ref`: Write a reference to one `.npz`, readable without pickling.
 - `score_clusters`: One ScType call per cluster.
+- `transfer_labels_seurat`: Seurat label transfer: CCA anchors, then `TransferData`.
 - `transfer_labels_symphony`: kNN majority vote of reference labels onto a mapped query.
 
 ## bv.pathways
@@ -379,6 +385,32 @@ Multi-modal single cell: ADT counts, their PCA and the WNN graph.
 - `new_adt_counts_clr`: CLR-normalised ADT counts.
 - `new_adt_counts_dsb`: DSB-normalised ADT counts.
 
+## bv.atac
+
+Single cell ATAC: peak or tile counts, QC, TF-IDF, LSI, links to genes.
+
+- `AtacInfo`: What the ATAC store holds and how far it was processed.
+- `add_atac_fragments`: Count a fragment file into peaks or genome tiles as the ATAC store.
+- `add_atac_tenx`: Add the `Peaks` of a 10x multiome h5 as the ATAC store.
+- `amulet`: Flag multiplets from fragment overlaps (AMULET), written to obs.
+- `annotate_peaks`: The closest gene of every ATAC feature (Signac `ClosestFeature`).
+- `barcode_fragment_counts`: Fragments per barcode, every barcode in the file, for cell calling.
+- `calculate_lsi`: LSI over the TF-IDF of the kept cells (Signac `RunSVD`).
+- `call_peaks`: Call peaks on the kept cells, pooled or per group (MACS3 `callpeak`).
+- `find_top_features`: The most accessible features (Signac `FindTopFeatures`).
+- `fragment_profiles`: TSS insertion profile and fragment length histogram of the kept cells.
+- `fragment_qc`: Per-cell QC from the fragment file, written to obs.
+- `gene_activity`: Count fragments over gene body plus promoter into a gene activity store.
+- `get_gene_activity`: Open an experiment's gene activity store, its cell filter brought in line.
+- `get_lsi_depth_cor`: Correlation of each LSI component with the library size.
+- `merge_fragments`: Merge per-sample fragment files into one, as `cellranger-arc aggr` does.
+- `peak_to_gene`: Link peaks to nearby genes by correlation over groups of cells.
+- `project_lsi`: Project the query's kept cells onto the reference LSI.
+- `read_cellranger_barcodes`: The cell barcodes Cell Ranger ATAC called.
+- `remove_blacklisted`: Drop the peaks that overlap a blacklist region.
+- `run_rlsi`: rLSI integration, Signac's `FindIntegrationAnchors(reduction = "rlsi")`.
+- `run_tfidf`: Switch the ATAC store to TF-IDF over the kept cells (Signac method 1).
+
 ## bv.pipeline
 
 Pipelines: the preprocessing calls you repeat on every subset, written once.
@@ -418,11 +450,14 @@ Plot data extractors and matplotlib plots for single cell results.
 - `extract_paga_plot_data`: The PAGA graph with every cluster at the centroid of its cells.
 - `feature_plot`: Feature expression over an embedding, one panel per feature.
 - `feature_scatter_plot`: Two features against each other, coloured by point density or binned
+- `fragment_length_plot`: Fragment length distribution, one line per group (Signac
 - `heatmap_plot`: Genes x cells, cells blocked by group with a colour strip per group.
 - `joint_plot`: Genes per cell against UMIs per cell, hexbinned with marginal
+- `lsi_depth_plot`: Correlation of each LSI component with the library size (Signac
 - `milo_nhood_plot`: The Milo neighbourhood graph over an embedding.
 - `paga_plot`: The PAGA graph over an embedding, every cluster at the centroid of
 - `stacked_violin_plot`: Expression across groups, one row of violins per feature.
+- `tss_profile_plot`: Tn5 insertions around the TSSs, one line per group (Signac `TSSPlot`).
 - `violin_plot`: QC violins.
 
 ## bv.loader
@@ -463,7 +498,6 @@ Parameter bundles for the single cell suite.
 - `DsbParams`: Default parameters for DSB ADT normalisation
 - `EdgerQlParams`: Wrapper function for parameters for the edgeR quasi-likelihood workflow
 - `EmptyDropletsParams`: Parameters for identifying empty droplets
-- `FastClusterDefault`: Helper function to generate default parameters for the fast clustering for the doublet detection methods
 - `FastClusterParams`: Fast single cell clustering parameters
 - `FastmnnParams`: Wrapper function for the fastMNN parameters
 - `GeneTrendsParams`: Wrapper function for gene trend parameters
@@ -473,7 +507,6 @@ Parameter bundles for the single cell suite.
 - `HvgDefaults`: Helper function to generate HVG defaults
 - `HvgParams`: Wrapper function for HVG detection parameters.
 - `HvgScranDefaults`: Helper function to generate the scran HVG trend defaults
-- `KmeansDefaults`: K-mean parameter defaults.
 - `KnnDefaults`: Helper function to generate kNN defaults
 - `KnnGraphDefaults`: Helper function to generate the kNN graph defaults
 - `KnnParams`: Parameters for single cell kNN searches

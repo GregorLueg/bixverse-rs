@@ -5,6 +5,7 @@
 #![allow(missing_docs)]
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
+use ann_search_rs::prelude::KMeansAlgorithm;
 use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
@@ -14,8 +15,7 @@ use std::time::Instant;
 use crate::fast_clusters_gpu::KMeansGpuSpec;
 use crate::kernels::harmony_kernels::*;
 use crate::prelude::*;
-use bixverse_core::ml::clustering::k_means::KMeansParamsWrappers;
-use bixverse_gpu::linalg::spmm::launch_dense_column_sum;
+use bixverse_core::ml::clustering::k_means::{KMeansParamsWrappers, KMeansSpec};
 use bixverse_gpu::{WORKGROUP_64, WORKGROUP_512};
 use bixverse_sc::sc_batch_correction::harmony::{BatchInfo, broadcast_param, create_batch_infos};
 use bixverse_sc::sc_batch_correction::harmony_core::{
@@ -123,13 +123,18 @@ pub struct HarmonyParamsV2Gpu {
     pub batch_proportion_cutoff: f32,
     /// Whether to estimate lambda dynamically per cluster
     pub use_dynamic_lambda: bool,
-    /// GPU k-means parameters; `None` uses the k-means defaults rather than
-    /// the Harmony default of `HARMONY_KMEANS_ITERS` iterations
+    /// GPU k-means parameters; `None` takes [`KMeansGpuParams::default`]
+    /// (e-means). Its 30 iterations, rather than `HARMONY_KMEANS_ITERS`, only
+    /// matter under Lloyd's
     pub kmeans_params: Option<KMeansGpuParams>,
 }
 
-/// Default implementation
 impl Default for HarmonyParamsV2Gpu {
+    /// The default [`HarmonyParamsV2Gpu`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self {
             k: 100,
@@ -145,12 +150,10 @@ impl Default for HarmonyParamsV2Gpu {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: Some(KMeansGpuParams::new(
-                HARMONY_KMEANS_ITERS,
-                None,
-                true,
-                false,
-            )),
+            kmeans_params: Some(
+                KMeansGpuParams::new(HARMONY_KMEANS_ITERS, None, true, false)
+                    .with_algorithm(KMeansAlgorithm::default()),
+            ),
         }
     }
 }
@@ -159,15 +162,16 @@ impl Default for HarmonyParamsV2Gpu {
 /// MLX port (`mlx::sc::harmony::harmony_v2_mlx`) takes.
 ///
 /// `block_size` has no GPU counterpart and takes the CPU default; the MLX
-/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`
-/// and `balanced`. `fixed` and `quantise_to_f16` have no CPU counterpart and
+/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`,
+/// `balanced` and `algorithm`. `fixed` and `quantise_to_f16` have no CPU counterpart and
 /// are dropped. A `None` k-means block maps to [`KMeansGpuParams::default`],
 /// matching what the GPU path does with `None`.
 impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
     fn from(p: &HarmonyParamsV2Gpu) -> Self {
         let km = p.kmeans_params.unwrap_or_default();
-        let kmeans_params =
-            KMeansParamsWrappers::new(km.iters, km.init, None).with_balancing(km.balanced);
+        let kmeans_params = KMeansParamsWrappers::new(km.iters, km.init, None)
+            .with_balancing(km.balanced)
+            .with_algorithm(km.algorithm);
         Self {
             k: p.k,
             sigma: p.sigma.clone(),
@@ -190,7 +194,9 @@ impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
 
 /// The keys a [`HarmonyParamsV2Gpu`] deserialises from, as its R list
 /// conversion reads them: the Harmony fields plus the flat k-means keys, which
-/// default to `HARMONY_KMEANS_ITERS` iterations, not fixed, not quantised.
+/// default to e-means, not quantised. Under Lloyd's they default to
+/// `HARMONY_KMEANS_ITERS` fixed iterations, as harmony2's `kmeans_centers`
+/// runs its initial k-means.
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct HarmonyParamsV2GpuSpec {
@@ -220,17 +226,23 @@ pub struct HarmonyParamsV2GpuSpec {
     pub batch_proportion_cutoff: f32,
     /// Estimate lambda dynamically per cluster
     pub use_dynamic_lambda: bool,
-    /// Lloyd's iterations of the initial k-means
-    pub k_means_iter: usize,
-    /// Optional initialisation, see `parse_kmeans_init`
-    pub k_means_init: Option<String>,
-    /// Run every k-means iteration without a convergence check
+    /// The shared k-means keys; Lloyd's runs `HARMONY_KMEANS_ITERS`
+    /// iterations unless `k_means_iter` says otherwise
+    #[serde(flatten)]
+    pub kmeans: KMeansSpec,
+    /// Run every k-means iteration without a convergence check. Lloyd's only;
+    /// e-means ignores it
     pub fixed: bool,
     /// Hold the k-means data buffer at fp16
     pub quantise: bool,
 }
 
 impl Default for HarmonyParamsV2GpuSpec {
+    /// The default [`HarmonyParamsV2GpuSpec`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         let d = HarmonyParamsV2Gpu::default();
         Self {
@@ -247,9 +259,8 @@ impl Default for HarmonyParamsV2GpuSpec {
             tau: d.tau,
             batch_proportion_cutoff: d.batch_proportion_cutoff,
             use_dynamic_lambda: d.use_dynamic_lambda,
-            k_means_iter: HARMONY_KMEANS_ITERS,
-            k_means_init: None,
-            fixed: false,
+            kmeans: KMeansSpec::default(),
+            fixed: true,
             quantise: false,
         }
     }
@@ -266,12 +277,11 @@ impl TryFrom<HarmonyParamsV2GpuSpec> for HarmonyParamsV2Gpu {
     ///
     /// ### Returns
     ///
-    /// The [`HarmonyParamsV2Gpu`], or an error naming an unknown
-    /// initialisation.
+    /// The [`HarmonyParamsV2Gpu`], or an error naming an unknown algorithm
+    /// or initialisation.
     fn try_from(s: HarmonyParamsV2GpuSpec) -> Result<Self, String> {
         let kmeans_params = KMeansGpuSpec {
-            k_means_iter: s.k_means_iter,
-            k_means_init: s.k_means_init,
+            kmeans: s.kmeans.with_default_iters(HARMONY_KMEANS_ITERS),
             fixed: s.fixed,
             quantise: s.quantise,
         }
@@ -312,11 +322,8 @@ impl TryFrom<HarmonyParamsV2GpuSpec> for HarmonyParamsV2Gpu {
 /// * `client` - CubeCL compute client
 /// * `r` - Soft assignments `[n, k]`
 /// * `dist` - Distance matrix `[n, k]`
-/// * `o` - Observed counts `[b, k]`
-/// * `r_sum` - Per-cluster totals `[k]`
+/// * `cross` - Cross-entropy weights `[b, k]`, see `launch_level_tables`
 /// * `sigma` - Per-cluster weights `[k]`
-/// * `theta` - Per-level theta for the single covariate `[b]`
-/// * `pr_b` - Level frequencies `[b]`
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `n` - Cell count
 /// * `k` - Cluster count
@@ -330,11 +337,8 @@ pub fn compute_objective_gpu(
     client: &Client,
     r: &GpuTensor<f32>,
     dist: &GpuTensor<f32>,
-    o: &GpuTensor<f32>,
-    r_sum: &GpuTensor<f32>,
+    cross: &GpuTensor<f32>,
     sigma: &GpuTensor<f32>,
-    theta: &GpuTensor<f32>,
-    pr_b: &GpuTensor<f32>,
     cell_to_level: &GpuTensor<u32>,
     n: usize,
     k: usize,
@@ -344,11 +348,8 @@ pub fn compute_objective_gpu(
     launch_objective_partials(
         r,
         dist,
-        o,
-        r_sum,
+        cross,
         sigma,
-        theta,
-        pr_b,
         cell_to_level,
         &partials,
         n,
@@ -461,8 +462,22 @@ where
 // Main //
 //////////
 
-/// Per-level observed counts `O` `[b, k]` and per-cluster totals `r_sum` of
-/// the current assignments.
+/// Device buffers of one sweep's statistics: observed counts and what is
+/// derived from them.
+struct SweepStats {
+    /// Observed counts `[b, k]`
+    o: GpuTensor<f32>,
+    /// Per-cluster totals `[k]`
+    r_sum: GpuTensor<f32>,
+    /// Diversity penalties `[b, k]`
+    pen: GpuTensor<f32>,
+    /// Cross-entropy weights of the objective `[b, k]`
+    cross: GpuTensor<f32>,
+}
+
+/// Per-level observed counts `O` `[b, k]` of the current assignments, and
+/// from them `r_sum`, the penalty table and the objective's cross-entropy
+/// weights.
 ///
 /// ### Params
 ///
@@ -471,9 +486,10 @@ where
 /// * `run_bounds` - Run cell offsets `[n_runs + 1]`
 /// * `level_runs` - Run offsets per level `[b + 1]`
 /// * `partial` - Scratch `[n_runs, k]`
-/// * `o` - Output observed counts `[b, k]`
-/// * `r_sum` - Output per-cluster totals `[k]`
-/// * `n` - Cell count
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `theta` - Per-level theta `[b]`
+/// * `pr_b` - Level frequencies `[b]`
+/// * `out` - Output buffers
 /// * `n_runs` - Number of runs
 /// * `b` - Number of levels
 /// * `k` - Cluster count
@@ -482,22 +498,25 @@ where
 ///
 /// * `CubeclUtils` if a dispatch grid is over the device limit.
 #[allow(clippy::too_many_arguments)]
-fn observed_counts_gpu(
+fn sweep_stats_gpu(
     client: &Client,
     r: &GpuTensor<f32>,
     run_bounds: &GpuTensor<u32>,
     level_runs: &GpuTensor<u32>,
     partial: &GpuTensor<f32>,
-    o: &GpuTensor<f32>,
-    r_sum: &GpuTensor<f32>,
-    n: usize,
+    sigma: &GpuTensor<f32>,
+    theta: &GpuTensor<f32>,
+    pr_b: &GpuTensor<f32>,
+    out: &SweepStats,
     n_runs: usize,
     b: usize,
     k: usize,
 ) -> Result<(), ScGpuErrors> {
     launch_run_sums(r, run_bounds, partial, n_runs, k, client)?;
-    launch_reduce_runs(partial, level_runs, o, b, k, client)?;
-    launch_dense_column_sum(r, r_sum, n, k, client)?;
+    launch_reduce_runs(partial, level_runs, &out.o, b, k, client)?;
+    launch_level_tables(
+        &out.o, sigma, theta, pr_b, &out.r_sum, &out.pen, &out.cross, b, k, client,
+    )?;
     Ok(())
 }
 
@@ -622,23 +641,28 @@ where
     let dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
     let scale_dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
     let r_gpu = GpuTensor::<f32>::empty(vec![n, k], &client)?;
-    let o_gpu = GpuTensor::<f32>::empty(vec![b, k], &client)?;
-    let r_sum_gpu = GpuTensor::<f32>::empty(vec![k], &client)?;
+    let sweep = SweepStats {
+        o: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+        r_sum: GpuTensor::<f32>::empty(vec![k], &client)?,
+        pen: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+        cross: GpuTensor::<f32>::empty(vec![b, k], &client)?,
+    };
     let z_corr_gpu = GpuTensor::<f32>::empty(vec![n, d], &client)?;
     let partial_o_gpu = GpuTensor::<f32>::empty(vec![n_runs, k], &client)?;
     let partial_s_gpu = GpuTensor::<f32>::empty(vec![n_runs * k * d], &client)?;
     let s_gpu = GpuTensor::<f32>::empty(vec![b * k * d], &client)?;
 
     let stats = |r: &GpuTensor<f32>| {
-        observed_counts_gpu(
+        sweep_stats_gpu(
             &client,
             r,
             &run_bounds_gpu,
             &level_runs_gpu,
             &partial_o_gpu,
-            &o_gpu,
-            &r_sum_gpu,
-            n,
+            &sigma_gpu,
+            &theta_gpu,
+            &pr_b_gpu,
+            &sweep,
             n_runs,
             b,
             k,
@@ -649,16 +673,16 @@ where
             &client,
             &r_gpu,
             &dist_gpu,
-            &o_gpu,
-            &r_sum_gpu,
+            &sweep.cross,
             &sigma_gpu,
-            &theta_gpu,
-            &pr_b_gpu,
             &cell_to_level_gpu,
             n,
             k,
         )
     };
+    // the windowed check cannot fire within max_iter_kmeans sweeps, so only
+    // the last sweep's objective is ever read
+    let objective_every_sweep = params.max_iter_kmeans > params.window_size + 1;
 
     // initial distances, R, and statistics
     launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client)?;
@@ -688,10 +712,7 @@ where
             // Jacobi sweep: reads O/r_sum from the previous sweep, writes R in place
             launch_jacobi_r_update(
                 &scale_dist_gpu,
-                &o_gpu,
-                &r_sum_gpu,
-                &theta_gpu,
-                &pr_b_gpu,
+                &sweep.pen,
                 &cell_to_level_gpu,
                 &r_gpu,
                 n,
@@ -700,6 +721,9 @@ where
             )?;
             stats(&r_gpu)?;
 
+            if !objective_every_sweep && kmeans_iter + 1 < params.max_iter_kmeans {
+                continue;
+            }
             objectives_kmeans.push(objective()?);
 
             if kmeans_iter > params.window_size
@@ -730,7 +754,7 @@ where
         )?;
         launch_reduce_runs(&partial_s_gpu, &level_runs_gpu, &s_gpu, b, k * d, &client)?;
         let s_host = s_gpu.clone().read(&client)?;
-        let o_host = o_gpu.clone().read(&client)?;
+        let o_host = sweep.o.clone().read(&client)?;
         let sums = [(
             s_host.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
             o_host.iter().map(|&x| x as f64).collect::<Vec<f64>>(),
@@ -946,15 +970,36 @@ mod tests_harmony_gpu {
             |x: &[f32], shape: Vec<usize>| GpuTensor::<f32>::from_slice(x, shape, &client).unwrap();
         let ctl: Vec<u32> = info.cell_to_level.iter().map(|&l| l as u32).collect();
         let ctl_gpu = GpuTensor::<u32>::from_slice(&ctl, vec![n], &client).unwrap();
+        let sigma_gpu = up(&sigma, vec![k]);
+        let sweep = SweepStats {
+            o: up(&o, vec![b, k]),
+            r_sum: GpuTensor::<f32>::empty(vec![k], &client).unwrap(),
+            pen: GpuTensor::<f32>::empty(vec![b, k], &client).unwrap(),
+            cross: GpuTensor::<f32>::empty(vec![b, k], &client).unwrap(),
+        };
+        launch_level_tables(
+            &sweep.o,
+            &sigma_gpu,
+            &up(&theta_levels[0], vec![b]),
+            &up(&info.pr_b, vec![b]),
+            &sweep.r_sum,
+            &sweep.pen,
+            &sweep.cross,
+            b,
+            k,
+            &client,
+        )
+        .unwrap();
+        let r_sum_gpu = sweep.r_sum.clone().read(&client).unwrap();
+        for (g, c) in r_sum_gpu.iter().zip(&r_sum) {
+            assert_relative_eq!(*g, *c, epsilon = 1e-4);
+        }
         let gpu_obj = compute_objective_gpu(
             &client,
             &up(&r, vec![n, k]),
             &up(&dist, vec![n, k]),
-            &up(&o, vec![b, k]),
-            &up(&r_sum, vec![k]),
-            &up(&sigma, vec![k]),
-            &up(&theta_levels[0], vec![b]),
-            &up(&info.pr_b, vec![b]),
+            &sweep.cross,
+            &sigma_gpu,
             &ctl_gpu,
             n,
             k,

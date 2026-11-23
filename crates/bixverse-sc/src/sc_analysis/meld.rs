@@ -181,6 +181,11 @@ impl MeldParams {
 }
 
 impl Default for MeldParams {
+    /// The default [`MeldParams`].
+    ///
+    /// ### Returns
+    ///
+    /// The defaults.
     fn default() -> Self {
         Self::new()
     }

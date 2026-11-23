@@ -82,8 +82,8 @@ use rand_distr::{Distribution, LogNormal, Uniform};
 use rayon::prelude::*;
 use rustc_hash::FxHasher;
 
-use bixverse_rs::single_cell::sc_data::data_io::MinCellQuality;
-use bixverse_rs::single_cell::sc_data::mtx_io::MtxReader;
+use bixverse_rs::single_cell::sc_data::mtx::MtxReader;
+use bixverse_rs::single_cell::sc_data::store::quality::MinCellQuality;
 
 ////////////
 // Shapes //
@@ -116,14 +116,14 @@ const GEN_BATCH: usize = 8_192;
 /// Default memory for the gene-major generator's per-block transpose.
 const DEFAULT_GEN_MEM_GB: f64 = 4.0;
 
-/// Mirrors `MTX_PARSE_CHUNK_BYTES` in `mtx_io.rs`: the parallel stages cut
+/// Mirrors `MTX_PARSE_CHUNK_BYTES` in `mtx/mod.rs`: the parallel stages cut
 /// the file at the same granularity as the loader.
 const CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Buffer of the sequential read stage.
 const SEQ_READ_BYTES: usize = 8 * 1024 * 1024;
 
-/// Mirrors the per-task `BufReader` capacity in `mtx_io.rs`.
+/// Mirrors the per-task `BufReader` capacity in `mtx/mod.rs`.
 const LOADER_BUF_BYTES: usize = 256 * 1024;
 
 /// Seed for the generator.

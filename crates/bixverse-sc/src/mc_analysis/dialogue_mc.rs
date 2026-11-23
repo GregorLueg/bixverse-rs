@@ -16,7 +16,7 @@ use faer::MatRef;
 use crate::mc_analysis::as_csc;
 use crate::prelude::*;
 use crate::sc_analysis::dialogue::{DialogueParams, DialogueResult, dialogue_run};
-use bixverse_sc_data::in_memory_io::InMemorySparseReader;
+use bixverse_sc_data::store::in_memory::InMemorySparseReader;
 
 /// Runs DIALOGUE on metacells held in memory.
 ///
