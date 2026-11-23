@@ -25,6 +25,10 @@ use bixverse_sc_data::store::v5::{NormKind, set_tf_idf, tf_idf_weights};
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// TF-IDF scale factor of Signac and muon.
 pub const TF_IDF_SCALE: f32 = 1e4;
 

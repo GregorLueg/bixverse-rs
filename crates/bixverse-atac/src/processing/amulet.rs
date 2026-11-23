@@ -28,6 +28,10 @@ use crate::io::fragments::{
 use crate::peaks::regions::{ChromRegions, RegionIndex};
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Memory per compressed fragment file byte in flight: 12 bytes per fragment
 /// kept and roughly 10 compressed bytes per fragment line, plus vector
 /// growth and the per-worker buffers of the parallel read. Not tuned.

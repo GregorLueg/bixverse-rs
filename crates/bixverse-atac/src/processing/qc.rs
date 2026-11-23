@@ -27,6 +27,10 @@ use rustc_hash::FxHashMap;
 use crate::io::fragments::{BarcodeIndex, Coverage, Fragment, fold_fragments_checked};
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Chromosome names treated as the mitochondrial genome by default.
 pub const MITO_CHROMS: [&str; 4] = ["chrM", "MT", "chrMT", "M"];
 

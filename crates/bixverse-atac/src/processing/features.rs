@@ -9,6 +9,10 @@ use indexmap::IndexSet;
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Features read per batch when summing totals.
 const TOTALS_FEATURE_BATCH: usize = 1_024;
 
