@@ -66,6 +66,8 @@ jobs:
       before-script-linux: |
         if command -v python3 >/dev/null; then python3 -m pip install -q 'cmake>=3.26,<4'; fi
         hash -r
+      # blosc's snappy wants C++14; manylinux2014's aarch64 cross gcc is 4.8.
+      linux-arm64-manylinux: '2_28'
 
   # The `bixverse-gpu` wheel. Same workspace version as `bixverse`, so the same
   # `py-v` tag: the call above owns it and this one only builds. Its ref is the
