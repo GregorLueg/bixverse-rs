@@ -738,6 +738,163 @@ pub fn run_wnn(
     )
 }
 
+////////////////
+// Query mode //
+////////////////
+
+/// One modality of a query-to-reference WNN with a fixed modality weight.
+///
+/// Rows of `query` and `reference` should be L2-normalised, as the bandwidths
+/// were computed on them.
+pub struct QueryModality<'a> {
+    /// Query embedding, `n_query x d`
+    pub query: MatRef<'a, f32>,
+    /// Reference embedding, `n_ref x d`
+    pub reference: MatRef<'a, f32>,
+    /// Candidate reference rows per query row, nearest first
+    pub candidates: &'a [Vec<usize>],
+    /// Per query row: distance to its nearest neighbour in this modality's
+    /// self kNN, subtracted from every distance before the kernel
+    pub nearest: &'a [f32],
+    /// Per query row: kernel bandwidth of this modality
+    pub sigma: &'a [f32],
+    /// Fixed weight of this modality
+    pub weight: f32,
+}
+
+/// Query-to-reference WNN with fixed modality weights.
+///
+/// The union of the candidates of every modality, in modality order, is scored
+/// with `sum_r w_r exp(-((d_r - nearest_r)_+ / sigma_r)^power)` and the
+/// `k_nn` best kept, ties in candidate order. This is Seurat's `MultiModalNN`
+/// with a query and preset weights, which is what scSLIDE builds between all
+/// cells and the landmarks; unlike the self-graph there is no self to drop.
+///
+/// ### Params
+///
+/// * `modalities` - One [QueryModality] per modality, same query rows
+/// * `k_nn` - Neighbours to keep per query row
+/// * `kernel_power` - Exponent of the scaled distance
+///
+/// ### Returns
+///
+/// Per query row the kept reference indices and their scores, best first.
+///
+/// ### References
+///
+/// Hao et al., Cell, 2021; Jiang et al., Cell, 2026
+pub fn compute_wnn_query(
+    modalities: &[QueryModality<'_>],
+    k_nn: usize,
+    kernel_power: f32,
+) -> Result<KnnRows, ScErrors> {
+    let Some(first) = modalities.first() else {
+        return Err(CoreErrors::InvalidArgument("WNN query needs a modality.".into()).into());
+    };
+    let n_query = first.query.nrows();
+    for (r, m) in modalities.iter().enumerate() {
+        let lens = [
+            m.query.nrows(),
+            m.candidates.len(),
+            m.nearest.len(),
+            m.sigma.len(),
+        ];
+        if lens.iter().any(|&l| l != n_query) {
+            return Err(CoreErrors::InvalidArgument(format!(
+                "WNN query modality {r}: query rows, candidates, nearest and sigma must all have {n_query} entries, got {lens:?}."
+            ))
+            .into());
+        }
+        if m.query.ncols() != m.reference.ncols() {
+            return Err(CoreErrors::InvalidArgument(format!(
+                "WNN query modality {r}: query has {} dimensions, reference {}.",
+                m.query.ncols(),
+                m.reference.ncols()
+            ))
+            .into());
+        }
+        if let Some(&bad) = m
+            .candidates
+            .iter()
+            .flatten()
+            .find(|&&c| c >= m.reference.nrows())
+        {
+            return Err(CoreErrors::InvalidArgument(format!(
+                "WNN query modality {r}: candidate {bad} is outside the {} reference rows.",
+                m.reference.nrows()
+            ))
+            .into());
+        }
+    }
+
+    let query_rm: Vec<Vec<f32>> = modalities
+        .iter()
+        .map(|m| to_row_major_vec(m.query))
+        .collect();
+    let ref_rm: Vec<Vec<f32>> = modalities
+        .iter()
+        .map(|m| to_row_major_vec(m.reference))
+        .collect();
+    let dims: Vec<usize> = modalities.iter().map(|m| m.query.ncols()).collect();
+
+    let rows: Vec<(Vec<usize>, Vec<f32>)> = (0..n_query)
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    FxHashSet::<usize>::default(),
+                    Vec::<usize>::new(),
+                    Vec::<f32>::new(),
+                )
+            },
+            |(seen, cands, scores), i| {
+                seen.clear();
+                cands.clear();
+                for m in modalities {
+                    for &c in &m.candidates[i] {
+                        if seen.insert(c) {
+                            cands.push(c);
+                        }
+                    }
+                }
+
+                scores.clear();
+                scores.extend(cands.iter().map(|&c| {
+                    modalities
+                        .iter()
+                        .enumerate()
+                        .map(|(r, m)| {
+                            let d = (euclid(
+                                row_of(&query_rm[r], dims[r], i),
+                                row_of(&ref_rm[r], dims[r], c),
+                            ) - m.nearest[i])
+                                .max(0.0);
+                            let scaled = d / m.sigma[i];
+                            let scaled = if kernel_power == 1.0 {
+                                scaled
+                            } else {
+                                scaled.powf(kernel_power)
+                            };
+                            m.weight * (-scaled).exp()
+                        })
+                        .sum::<f32>()
+                }));
+
+                // stable, so ties keep candidate order as R's `order` does
+                let mut order: Vec<usize> = (0..cands.len()).collect();
+                order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+                order.truncate(k_nn);
+                (
+                    order.iter().map(|&o| cands[o]).collect(),
+                    order.iter().map(|&o| scores[o]).collect(),
+                )
+            },
+        )
+        .collect();
+
+    Ok(rows.into_iter().unzip())
+}
+
 ///////////
 // Tests //
 ///////////
@@ -1028,5 +1185,73 @@ mod tests {
 
         let res = compute_wnn([mod_a, mod_b], &params, 0);
         assert!(matches!(res, Err(ScErrors::WNNKnnLargerThanKnnRange)));
+    }
+
+    #[test]
+    fn compute_wnn_query_known_scores() {
+        let q = Mat::<f32>::zeros(1, 1);
+        let ref_a = Mat::<f32>::from_fn(3, 1, |i, _| [0.1, 0.5, 1.0][i]);
+        let ref_b = Mat::<f32>::from_fn(3, 1, |i, _| [1.0, 0.2, 0.0][i]);
+        let (cand_a, cand_b) = (vec![vec![0, 1]], vec![vec![2, 1]]);
+        let mods = [
+            QueryModality {
+                query: q.as_ref(),
+                reference: ref_a.as_ref(),
+                candidates: &cand_a,
+                nearest: &[0.1],
+                sigma: &[0.4],
+                weight: 0.5,
+            },
+            QueryModality {
+                query: q.as_ref(),
+                reference: ref_b.as_ref(),
+                candidates: &cand_b,
+                nearest: &[0.0],
+                sigma: &[0.5],
+                weight: 0.5,
+            },
+        ];
+        let (idx, scores) = compute_wnn_query(&mods, 2, 1.0).unwrap();
+        // c0: 0.5 (1 + e^-2), c1: 0.5 (e^-1 + e^-0.4), c2: 0.5 (e^-2.25 + 1)
+        assert_eq!(idx[0], vec![0, 2]);
+        assert!(approx_eq(scores[0][0], 0.5 * (1.0 + (-2.0f32).exp()), 1e-5));
+        assert!(approx_eq(
+            scores[0][1],
+            0.5 * ((-2.25f32).exp() + 1.0),
+            1e-5
+        ));
+    }
+
+    #[test]
+    fn compute_wnn_query_ties_keep_candidate_order() {
+        let q = Mat::<f32>::zeros(1, 2);
+        let r = Mat::<f32>::from_fn(3, 2, |_, j| if j == 0 { 1.0 } else { 0.0 });
+        let cands = vec![vec![2, 0, 1]];
+        let mods = [QueryModality {
+            query: q.as_ref(),
+            reference: r.as_ref(),
+            candidates: &cands,
+            nearest: &[0.0],
+            sigma: &[1.0],
+            weight: 1.0,
+        }];
+        let (idx, _) = compute_wnn_query(&mods, 3, 1.0).unwrap();
+        assert_eq!(idx[0], vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn compute_wnn_query_rejects_out_of_range_candidate() {
+        let q = Mat::<f32>::zeros(1, 1);
+        let r = Mat::<f32>::zeros(2, 1);
+        let cands = vec![vec![5]];
+        let mods = [QueryModality {
+            query: q.as_ref(),
+            reference: r.as_ref(),
+            candidates: &cands,
+            nearest: &[0.0],
+            sigma: &[1.0],
+            weight: 1.0,
+        }];
+        assert!(compute_wnn_query(&mods, 1, 1.0).is_err());
     }
 }
