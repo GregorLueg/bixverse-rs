@@ -7,6 +7,7 @@ pub mod mixed_model;
 pub mod optimise;
 pub mod pca_missing;
 pub mod pca_svd;
+pub mod pls;
 pub mod rbf;
 pub mod sparse;
 pub mod special;
