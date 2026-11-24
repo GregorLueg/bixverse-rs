@@ -27,6 +27,7 @@ mod plot;
 mod pp;
 mod qc;
 mod reader;
+mod slide;
 mod synthetic;
 mod testing;
 mod traj;
@@ -168,6 +169,9 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(traj::palantir, m)?,
         wrap_pyfunction!(traj::paga, m)?,
         wrap_pyfunction!(traj::gene_trends, m)?,
+        wrap_pyfunction!(slide::scslide, m)?,
+        wrap_pyfunction!(slide::scslide_landmark_counts, m)?,
+        wrap_pyfunction!(slide::scslide_diffusion_map, m)?,
         wrap_pyfunction!(trees::sc_bonsai, m)?,
         wrap_pyfunction!(trees::mc_bonsai, m)?,
         wrap_pyfunction!(trees::bonsai_layout, m)?,

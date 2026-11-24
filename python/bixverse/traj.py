@@ -1,4 +1,4 @@
-"""Palantir pseudotime, PAGA graph abstraction and gene trends.
+"""Palantir pseudotime, PAGA, gene trends and scSLIDE sample trajectories.
 
 Palantir orders cells along differentiation and gives each cell a fate
 probability per terminal state, PAGA abstracts the kNN graph into a cluster
@@ -6,6 +6,14 @@ graph, and `run_gene_trends` fits a curve per gene along each Palantir branch.
 Start with `run_paga` to see the topology, then `run_palantir` with a start
 cell (and terminal states, if you know them), then `run_gene_trends` on its
 result. Trees over every cell live in `bv.trees`.
+
+scSLIDE works one level up: `run_scslide` turns a multi-sample experiment into
+landmark x sample densities, `sample_diffusion_map` into sample coordinates
+whose components can go into `bv.de` as covariates. It wants a sample-level
+phenotype, HVGs and a PCA, and twenty or more samples to be worth running. The
+PLS is fitted against the phenotype, so set `ScSlideParams(n_folds=5)` to
+cross-fit it before reading anything into a component that tracks the
+phenotype itself. Both return frozen results and write nothing.
 
 **What lands where.** Nothing. All three take a `SingleCells`,
 `SingleCellsSubset` or `MetaCells`, read the cached kNN graph (and obs, for
@@ -43,6 +51,14 @@ or `use_magic=True` after `bv.pp.run_magic` on a `SingleCells` or subset (not on
 row and column per cluster.
 """
 
+from bixverse._core.scslide import (
+    SampleDiffusionRes,
+    SampleDmParams,
+    ScSlideParams,
+    ScSlideRes,
+    run_scslide,
+    sample_diffusion_map,
+)
 from bixverse._core.traj import (
     GeneTrendsRes,
     PagaRes,
@@ -56,7 +72,13 @@ __all__ = [
     "GeneTrendsRes",
     "PagaRes",
     "PalantirRes",
+    "SampleDiffusionRes",
+    "SampleDmParams",
+    "ScSlideParams",
+    "ScSlideRes",
     "run_gene_trends",
     "run_paga",
     "run_palantir",
+    "run_scslide",
+    "sample_diffusion_map",
 ]

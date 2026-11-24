@@ -328,14 +328,20 @@ DIALOGUE: multicellular programmes, genes that are cell type specific but whose
 
 ## bv.traj
 
-Palantir pseudotime, PAGA graph abstraction and gene trends.
+Palantir pseudotime, PAGA, gene trends and scSLIDE sample trajectories.
 
 - `GeneTrendsRes`: Gene trends along the Palantir branches.
 - `PagaRes`: A PAGA graph abstraction.
 - `PalantirRes`: A Palantir run.
+- `SampleDiffusionRes`: Sample coordinates from scSLIDE's landmark densities.
+- `SampleDmParams`: Parameters for `sample_diffusion_map`.
+- `ScSlideParams`: Parameters for `run_scslide`.
+- `ScSlideRes`: Landmark densities of scSLIDE.
 - `run_gene_trends`: Gene trends over the Palantir pseudotime.
 - `run_paga`: PAGA graph abstraction of the cached kNN graph.
 - `run_palantir`: Palantir trajectory inference over the cached kNN graph.
+- `run_scslide`: Landmark x sample densities, scSLIDE's first half.
+- `sample_diffusion_map`: Sample coordinates from the landmark densities, scSLIDE's second half.
 
 ## bv.trees
 

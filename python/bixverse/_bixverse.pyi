@@ -630,6 +630,33 @@ def milor_nhoods(
     verbose: int = 1,
 ) -> dict[str, Any]: ...
 def spatial_fdr(p_values: np.ndarray, connectivity: np.ndarray) -> np.ndarray: ...
+def scslide(
+    f_path_cells: str,
+    cells_to_keep: np.ndarray,
+    donors: np.ndarray,
+    y_donor: np.ndarray,
+    cell_types: np.ndarray | None,
+    hvg: np.ndarray,
+    pca: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: bool = True,
+) -> dict[str, Any]: ...
+def scslide_landmark_counts(
+    emb_one: np.ndarray,
+    emb_two: np.ndarray,
+    landmarks: np.ndarray,
+    donors: np.ndarray,
+    n_donors: int,
+    params: dict[str, object],
+    seed: int = 42,
+) -> dict[str, Any]: ...
+def scslide_diffusion_map(
+    counts: np.ndarray,
+    params: dict[str, object],
+    seed: int = 42,
+    verbose: int = 0,
+) -> dict[str, Any]: ...
 def meld(
     knn_indices: np.ndarray,
     knn_dist: np.ndarray,
