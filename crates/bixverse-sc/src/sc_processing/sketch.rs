@@ -259,9 +259,10 @@ where
 ///
 /// With fewer than `1.5 * n_sketch` cells, or too few cells for a sketch taller
 /// than the feature count, the score is the exact leverage over the top 50
-/// singular directions. Otherwise `S X` (CountSketch) is QR-decomposed and the
-/// score is `||x R^-1 G||^2`, with `G` a sparse JL matrix: leverage up to the
-/// JL distortion, at the cost of one pass over `X`. Scores are only defined up
+/// singular directions. Otherwise `S X` (CountSketch) gets a column-pivoted QR
+/// and the score is `||x R^-1 G||^2` over the numerically independent features,
+/// with `G` a sparse JL matrix: leverage up to the JL distortion, at the cost of
+/// one pass over `X`. Scores are only defined up
 /// to scale, which is all sampling needs.
 ///
 /// ### Params
@@ -314,25 +315,37 @@ where
 
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let sa = count_sketch(x, n_sketch, &mut rng);
-    let qr = sa.qr();
+
+    // Column-pivoted so collinear features (rare genes sharing their few cells)
+    // surface as negligible trailing pivots. Dropping them keeps the column
+    // space, so the leverage of the kept span is the leverage of `X`.
+    let qr = sa.col_piv_qr();
     let r = qr.thin_R();
+    let (pivots, _) = qr.P().arrays();
+    let tol = r[(0, 0)].abs() * (n_sketch.max(p) as f64) * f64::EPSILON;
+    let rank = (0..p).take_while(|&k| r[(k, k)].abs() > tol).count();
+    if rank == 0 {
+        return Err(CoreErrors::InvalidArgument(
+            "The sketched matrix is numerically zero; no leverage to compute.".into(),
+        )
+        .into());
+    }
 
     let eps = params.eps;
     let width = (4.0 * (n as f64).ln() / (eps * eps / 2.0 - eps.powi(3) / 3.0)).floor() as usize;
-    let mut proj = jl_matrix(p, width.max(1), &mut rng);
-    // R^-1 G; a zero pivot (a feature that is zero in every sketched cell)
-    // would turn the solve into infinities, so such features drop out
-    let dead: Vec<usize> = (0..p).filter(|&j| r[(j, j)] == 0.0).collect();
-    if !dead.is_empty() {
-        return Err(CoreErrors::InvalidArgument(format!(
-            "{} features are zero in every cell; drop them before computing leverage scores.",
-            dead.len()
-        ))
-        .into());
+    let mut proj = jl_matrix(rank, width.max(1), &mut rng);
+    solve_upper_triangular_in_place(
+        r.submatrix(0, 0, rank, rank),
+        proj.as_mut(),
+        faer_parallelism(),
+    );
+    // back to feature order; dropped features get zero rows
+    let mut full = Mat::<f64>::zeros(p, proj.ncols());
+    for k in 0..rank {
+        full.row_mut(pivots[k]).copy_from(proj.row(k));
     }
-    solve_upper_triangular_in_place(r, proj.as_mut(), faer_parallelism());
 
-    Ok(row_norms_sq_of_product(x, proj.as_ref()))
+    Ok(row_norms_sq_of_product(x, full.as_ref()))
 }
 
 /// Weighted sampling without replacement (Efraimidis and Spirakis).
@@ -465,6 +478,61 @@ mod tests {
         let sw: f64 = want.iter().map(|w| (w - mw).powi(2)).sum::<f64>().sqrt();
         assert!(cov / (sg * sw) > 0.9, "correlation {}", cov / (sg * sw));
 
+        let mut order: Vec<usize> = (0..got.len()).collect();
+        order.sort_by(|&a, &b| got[b].total_cmp(&got[a]));
+        for o in outliers {
+            assert!(order[..10].contains(&o), "outlier {o} not in the top ten");
+        }
+    }
+
+    #[test]
+    fn test_leverage_sketch_survives_collinear_features() {
+        let (x, outliers) = planted(3000, 20);
+        // column 19 becomes twice column 0: rank 19, as rare genes sharing
+        // their cells make it
+        let mut data = x.data.clone();
+        let mut indices = x.indices.clone();
+        let mut indptr = vec![0u32];
+        let (mut d2, mut i2) = (Vec::new(), Vec::new());
+        for i in 0..x.shape.0 {
+            let (s, e) = (x.indptr[i] as usize, x.indptr[i + 1] as usize);
+            let mut row: Vec<(u32, f64)> = (s..e)
+                .filter(|&q| x.indices[q] != 19)
+                .map(|q| (x.indices[q], x.data[q]))
+                .collect();
+            if let Some(&(_, v)) = row.iter().find(|e| e.0 == 0) {
+                row.push((19, 2.0 * v));
+            }
+            for (c, v) in row {
+                i2.push(c);
+                d2.push(v);
+            }
+            indptr.push(i2.len() as u32);
+        }
+        std::mem::swap(&mut data, &mut d2);
+        std::mem::swap(&mut indices, &mut i2);
+        let x = CompressedSparseData2::from_parts(
+            data,
+            indices,
+            indptr,
+            None,
+            CompressedSparseFormat::Csr,
+            x.shape,
+        );
+
+        let got = leverage_scores(&x, &LeverageParams::new(200, 0.5), 7).unwrap();
+        assert!(got.iter().all(|v| v.is_finite()));
+        let want = reference_leverage(&x, 19);
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let (mg, mw) = (mean(&got), mean(&want));
+        let cov: f64 = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (g - mg) * (w - mw))
+            .sum();
+        let sg: f64 = got.iter().map(|g| (g - mg).powi(2)).sum::<f64>().sqrt();
+        let sw: f64 = want.iter().map(|w| (w - mw).powi(2)).sum::<f64>().sqrt();
+        assert!(cov / (sg * sw) > 0.9, "correlation {}", cov / (sg * sw));
         let mut order: Vec<usize> = (0..got.len()).collect();
         order.sort_by(|&a, &b| got[b].total_cmp(&got[a]));
         for o in outliers {
