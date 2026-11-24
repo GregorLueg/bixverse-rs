@@ -16,6 +16,10 @@ pub enum ScErrors {
     #[error("Error from the edge-rs crate: {0}")]
     EdgeRsError(#[from] edge_rs::errors::EdgeErrors),
 
+    /// Propagates an error from `manifolds-rs`.
+    #[error("Error from the manifolds-rs crate: {0}")]
+    ManifoldsRsError(#[from] manifolds_rs::errors::ManifoldsError),
+
     // -- lower crates --
     /// Propagates an error from `bixverse-core`.
     #[error(transparent)]

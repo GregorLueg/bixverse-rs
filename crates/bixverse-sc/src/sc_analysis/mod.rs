@@ -22,4 +22,6 @@ pub mod nmf_sc;
 pub mod pseudobulk_dge;
 pub mod regulon_binarise;
 pub mod scenic;
+#[cfg(feature = "multi-modal")]
+pub mod scslide;
 pub mod vision;
