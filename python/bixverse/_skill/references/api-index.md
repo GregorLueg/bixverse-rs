@@ -49,6 +49,7 @@ Getting counts into an experiment directory, and back out.
 - `TenxH5Meta`: Layout and dimensions of a 10x h5 file, as `get_tenx_h5_metadata()`.
 - `archive_sc_exp`: Archive the counts for cold storage.
 - `detect_raw_count_slot`: Detect which slot of an h5ad file or Zarr store holds raw integer counts.
+- `download_ahern_covid`: The 104k cell PBMC subset of Ahern et al. (Cell, 2022) used by scSLIDE.
 - `download_cd34_data`: The CD34 data set of the SEACells paper.
 - `download_demuxlet_pbmc`: PBMCs with demuxlet doublet calls, for doublet detection.
 - `download_dialogue_uc`: The ulcerative colitis subset of the DIALOGUE paper.

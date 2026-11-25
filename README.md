@@ -52,13 +52,13 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 
 | Domain | Methods |
 | --- | --- |
-| `core` | Correlations and pairwise similarity, PCA/SVD, randomised SVD, LOESS, RBF kernels, mutual information and entropy, scalar optimisation (R's `optimize`), linear mixed models (REML with Satterthwaite), E-distance and perturbation distances, sparse structures, synthetic data generators |
+| `core` | Correlations and pairwise similarity, PCA/SVD, randomised SVD, kernel PLS regression, LOESS, RBF kernels, mutual information and entropy, scalar optimisation (R's `optimize`), linear mixed models (REML with Satterthwaite), E-distance and perturbation distances, sparse structures, synthetic data generators |
 | `enrichment` | GSEA (fgsea multi-level), blitzGSEA (gamma-approximated null), GSVA, ssGSEA, singscore, mitch, over-representation, ULM and MLM activity scores (decoupler) |
 | `graph` | Leiden, Louvain, WalkTrap, spectral clustering, label propagation, personalised and constrained PageRank, connected components, Dijkstra (single and multi-source), Kruskal spanning forests, PAGA-style graph abstraction, graph metrics |
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad, anndata Zarr and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN (KmKnn, exhaustive, Annoy, HNSW, IVF, NN-Descent, and the NN-Descent graph built without an index), SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony, Seurat label transfer); DGE (Mann-Whitney with AUROC, logistic regression, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `single_cell` | I/O for h5ad, anndata Zarr and 10x h5 (parallel gzip chunk reads), mtx (plain or gzipped, one pass), R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN (KmKnn, exhaustive, Annoy, HNSW, IVF, NN-Descent, and the NN-Descent graph built without an index), SNN, MAGIC, leverage score sketching; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony, Seurat label transfer); DGE (Mann-Whitney with AUROC, logistic regression, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, ULM and MLM activity scores, DIALOGUE, MELD, miloR, scSLIDE sample embeddings, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, ULM and MLM activity scores, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
 | `atac` | Fragment and 10x peak ingest, fragment file merging, fragment QC (TSS enrichment, nucleosome signal; FRiP is computed in the Python wrapper), TSS profiles and fragment length histograms, AMULET multiplets, MACS3 `callpeak` port, peak or tile counting, closest-gene annotation, gene activity, TF-IDF, top features, LSI and LSI projection, rLSI integration, peak to gene links (feature `atac`) |
 | `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, NMF and consensus NMF; with `sc-gpu` also PCA, kNN (exhaustive, IVF, CAGRA, and the NN-Descent graph built without an index), Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
@@ -193,7 +193,7 @@ uv pip install "bixverse[torch]"         # scVI on torch; also [mlx], [jax]
 
 What's in each module is in the
 [Python README](https://github.com/GregorLueg/bixverse-rs/blob/main/python/README.md),
-with docs and 23 vignettes
+with docs and 25 vignettes
 [here](https://gregorlueg.github.io/bixverse-rs/). The Python package is
 versioned on its own line, see its
 [changelog](https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md).
@@ -207,6 +207,9 @@ versioned on its own line, see its
   [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
 - [x] Palantir for single-cell trajectories, see
   [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4).
+- [x] scSLIDE for sample-level trajectories, see
+  [Jiang, et al.](https://doi.org/10.1016/j.cell.2026.10.018), with optional
+  cross-fitting of the PLS by sample.
 - [ ] Slingshot for single-cell trajectories, see
   [Street, et al.](https://link.springer.com/article/10.1186/s12864-018-4772-0).
 

@@ -443,6 +443,43 @@ sc.add_obs(
 - `run_magic` requires `features`. Do not feed the MAGIC layer to correlation
   methods; smoothing inflates gene-gene correlation.
 
+## Sample-level trajectories (scSLIDE)
+
+One vector per sample: counts of each sample's cells around leverage-sampled
+landmark cells, under a WNN over the PCA and a PLS fitted against a
+sample-level phenotype; then a diffusion map over the samples. Takes
+`SingleCells` or `SingleCellsSubset` (not `MetaCells`); needs HVGs and a PCA,
+not the kNN.
+
+```python
+bv.pp.find_hvg(sc, hvg_no=2000)
+bv.pp.calculate_pca(sc, no_pcs=50)
+res = bv.traj.run_scslide(
+    sc,
+    "donor",
+    "disease",
+    cell_type_col="cell_type",
+    scslide_params=bv.traj.ScSlideParams(n_folds=5),
+)
+dm = bv.traj.sample_diffusion_map(res, dm_params=bv.traj.SampleDmParams(k=10))
+dm.dcs  # sample, phenotype columns, DC_1 ... DC_10
+```
+
+- The phenotype must be constant within a sample. Numeric columns enter as
+  they are, anything else one-hot over all levels. Several columns are fine.
+- The PLS sees the phenotype, so in-sample (`n_folds=1`, Seurat's behaviour) a
+  component that tracks the phenotype is partly by construction. `n_folds > 1`
+  embeds each fold of samples with a model fitted without it.
+- Worth it with roughly 20+ samples. For a test of the phenotype itself use
+  pseudobulk DE or Milo.
+- `res.counts` is landmarks x samples; `res.landmark_labels` names each
+  landmark's cell type when `cell_type_col` is given.
+- `SampleDmParams.k` must stay below the number of samples; it is lowered with
+  a warning. Components agree with Seurat's destiny run up to sign and scale,
+  not exactly (cosine distance, adaptive `k`-neighbour kernel).
+- Trajectory DE: join `dm.dcs` onto the pseudobulk design and test the DC as a
+  numeric covariate with `bv.de` (edgeR QL, not glmGamPoi).
+
 ## Bonsai trees
 
 A tree with every cell as a leaf, on Sanity posterior log fold changes of the

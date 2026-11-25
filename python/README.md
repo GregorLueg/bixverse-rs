@@ -11,7 +11,7 @@ It works on the store, not in memory, so it scales past what fits in RAM. On top
 sit a minibatch loader and a barebone scVI that train straight off that store,
 and a separate wheel with GPU twins of the expensive methods.
 
-Docs, API reference and 23 vignettes: <https://gregorlueg.github.io/bixverse-rs/>
+Docs, API reference and 25 vignettes: <https://gregorlueg.github.io/bixverse-rs/>
 
 ## Install
 
@@ -79,7 +79,7 @@ lines but not what Rust prints.
 | `bv.de` | markers (Wilcoxon or logistic regression), pseudobulk with edgeR QL, NEBULA, Milo, MELD |
 | `bv.annotate` | scType, Symphony reference mapping, Seurat label transfer |
 | `bv.metacells` | SEACells, SuperCells, hdWGCNA-style and MetaCells2 meta cells |
-| `bv.traj`, `bv.trees` | Palantir, PAGA, gene trends; Bonsai cell trees |
+| `bv.traj`, `bv.trees` | Palantir, PAGA, gene trends, scSLIDE sample trajectories; Bonsai cell trees |
 | `bv.pathways`, `bv.nmf` | module scores, AUCell, VISION, Hotspot, SCENIC, decoupler-style activities; consensus NMF |
 | `bv.mm` | ADT counts, DSB and CLR, WNN |
 | `bv.atac` | ATAC peaks or tiles from 10x h5 or fragments, fragment QC, AMULET, peak calling, TF-IDF, LSI, rLSI, gene activity |
@@ -192,7 +192,7 @@ copy is outdated; `--force` updates it.
 
 ## Vignettes
 
-23 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
+25 notebooks. Start with "Thinking the bixverse way" and "Analysing PBMCs". Each is a jupytext `.py` in
 `docs/vignettes/` with its executed `.ipynb` next to it, and the data sets download
 themselves on first use.
 
