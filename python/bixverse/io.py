@@ -58,6 +58,7 @@ with a warning; a v3 store no longer opens. `upgrade_sc_store` converts both.
 
 from bixverse._core.atac import load_atac_fragments, load_atac_tenx
 from bixverse._core.download import (
+    download_ahern_covid,
     download_cd34_data,
     download_demuxlet_pbmc,
     download_dialogue_uc,
@@ -128,6 +129,7 @@ __all__ = [
     "TenxH5Meta",
     "archive_sc_exp",
     "detect_raw_count_slot",
+    "download_ahern_covid",
     "download_cd34_data",
     "download_demuxlet_pbmc",
     "download_dialogue_uc",

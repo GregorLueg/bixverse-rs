@@ -67,6 +67,7 @@ nav:
           - Ligand-receptor analysis: vignettes/ligand_receptor.ipynb
           - DIALOGUE: vignettes/dialogue.ipynb
           - Trajectory inference: vignettes/trajectory_inference.ipynb
+          - Sample-level trajectories: vignettes/sample_trajectories.ipynb
           - Cell trees with Bonsai: vignettes/bonsai.ipynb
   - API reference:
       - Core: api/core.md

@@ -388,6 +388,26 @@ def download_kang_pbmc(
 
 
 @beartype
+def download_ahern_covid(
+    cache_dir: Path | str | None = None, *, quiet: bool = False
+) -> Path:
+    """The 104k cell PBMC subset of Ahern et al. (Cell, 2022) used by scSLIDE.
+
+    Raw counts of 40 donors: ten healthy and ten each with mild, severe and
+    critical COVID-19, with donor-level obs (disease, age, sex, time since
+    onset), as h5ad.
+
+    Args:
+        cache_dir: Where to cache the data. Defaults to `~/.cache/bixverse`.
+        quiet: Suppress progress logging.
+
+    Returns:
+        The h5ad file.
+    """
+    return _fetch_gz("ahern_covid.h5ad.gz", None, cache_dir, quiet)
+
+
+@beartype
 def download_thymus_ageing(
     cache_dir: Path | str | None = None, *, quiet: bool = False
 ) -> Path:
